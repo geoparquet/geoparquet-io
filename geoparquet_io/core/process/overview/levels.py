@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import InvalidParameterError
 
 # Estimated compressed bytes a single cell contributes to an MVT tile,
@@ -171,22 +172,27 @@ def probe_worst_tile_counts(con, cells_sql: str, max_zoom: int = MAX_PROBE_ZOOM)
 
     ``cells_sql`` must select one row per cell with ``lon``/``lat`` columns.
     The connection must have the ``lat_lon_to_quadkey`` UDF registered (see
-    :func:`geoparquet_io.core.partition.auto_resolution._register_quadkey_udf`).
-    A quadkey prefix of length ``z`` identifies the WebMercator tile at zoom
-    ``z``, so one quadkey per cell at ``max_zoom`` covers every zoom via
-    ``substr``. Latitudes are clamped to the WebMercator domain.
+    :func:`geoparquet_io.core.add.quadkey.register_quadkey_udf`, which holds a
+    latitude past the WebMercator domain to its edge row). A quadkey prefix of
+    length ``z`` identifies the WebMercator tile at zoom ``z``, so one quadkey
+    per cell at ``max_zoom`` covers every zoom via ``substr``.
     """
+    from geoparquet_io.core.index_ops import get_index_spec
+
+    key = get_index_spec("quadkey").expression("lon", "lat", max_zoom)
     con.execute(
         "CREATE OR REPLACE TEMP TABLE __overview_qk AS "
-        f"SELECT lat_lon_to_quadkey(LEAST(GREATEST(lat, -85.05), 85.05), lon, {max_zoom}) AS qk "
+        f"SELECT {key} AS qk "
         f"FROM ({cells_sql}) WHERE lon IS NOT NULL AND lat IS NOT NULL"
     )
     counts: dict[int, int] = {}
     for z in range(max_zoom + 1):
-        row = con.execute(
-            "SELECT COALESCE(MAX(cnt), 0) FROM "
-            f"(SELECT COUNT(*) AS cnt FROM __overview_qk GROUP BY substr(qk, 1, {z}))"
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                "SELECT COALESCE(MAX(cnt), 0) FROM "
+                f"(SELECT COUNT(*) AS cnt FROM __overview_qk GROUP BY substr(qk, 1, {z}))"
+            )
+        )
         counts[z] = int(row[0]) if row else 0
     return counts
 

@@ -18,6 +18,7 @@ import pytest
 from geoparquet_io.core import duckdb_utils
 from geoparquet_io.core.duckdb_utils import (
     _s3_secret_sql,
+    fetch_one,
     get_active_s3_config,
     s3_config_scope,
     uses_aws_profile,
@@ -100,6 +101,20 @@ def test_uses_aws_profile_without_profile_keeps_outer_scope():
         assert probe("s3://b/k") == {"profile": "outer", "s3_region": "eu-west-1"}
         inner = probe("s3://b/k", profile="inner")
         assert inner == {"profile": "inner", "profile_from_env": False, "s3_region": "eu-west-1"}
+
+
+def test_uses_aws_profile_reads_the_profile_off_the_write_options():
+    """A driver that takes ``write: WriteOptions`` is scoped by ``write.profile`` (#1367)."""
+    from geoparquet_io.core.parquet_writer import WriteOptions
+
+    @uses_aws_profile
+    def probe(path, write):
+        return get_active_s3_config().get("profile")
+
+    assert probe("s3://b/k", WriteOptions(profile="opts")) == "opts"
+    assert probe("s3://b/k", write=WriteOptions(profile="kw")) == "kw"
+    assert probe("s3://b/k", WriteOptions()) is None
+    assert get_active_s3_config().get("profile") is None
 
 
 def test_uses_aws_profile_rejects_function_without_profile_parameter():
@@ -269,8 +284,14 @@ def fake_s3_endpoint():
 
 
 def _secret_string(con) -> str:
-    """The one secret on ``con``, as DuckDB prints it (the secret key is redacted)."""
-    rows = con.execute("SELECT secret_string FROM duckdb_secrets()").fetchall()
+    """The one secret gpio made on ``con``, as DuckDB prints it (key redacted).
+
+    DuckDB 2.0's aws extension also registers ``lazy`` default secrets when it
+    loads; they are DuckDB's, not gpio's, so they are left out of the count.
+    """
+    rows = con.execute(
+        "SELECT secret_string FROM duckdb_secrets() WHERE provider <> 'lazy'"
+    ).fetchall()
     assert len(rows) == 1, f"expected one secret, found {len(rows)}"
     return rows[0][0]
 
@@ -409,7 +430,7 @@ def test_anonymous_read_builds_no_secret_and_sends_no_signature(fake_s3_endpoint
     with s3_config_scope({"s3_endpoint": endpoint, "s3_use_ssl": False}):
         con = duckdb_utils.get_duckdb_connection(load_spatial=False, load_httpfs=True)
     try:
-        assert con.execute("SELECT count(*) FROM duckdb_secrets()").fetchone()[0] == 0
+        assert fetch_one(con.execute("SELECT count(*) FROM duckdb_secrets()"))[0] == 0
         _read_s3(con)
     finally:
         con.close()
@@ -448,7 +469,7 @@ class TestProfileOnlyAppliesToS3:
         with s3_config_scope({"profile": "prod"}):
             con = duckdb_utils.get_duckdb_connection(load_spatial=False, load_httpfs=True)
         try:
-            assert con.execute("SELECT count(*) FROM duckdb_secrets()").fetchone()[0] == 0
+            assert fetch_one(con.execute("SELECT count(*) FROM duckdb_secrets()"))[0] == 0
         finally:
             con.close()
 
@@ -541,7 +562,7 @@ class TestExportedProfileFollowsSdkPrecedence:
         with s3_config_scope(resolve_s3_config()):
             con = duckdb_utils.get_duckdb_connection(load_spatial=False, load_httpfs=True)
         try:
-            assert con.execute("SELECT count(*) FROM duckdb_secrets()").fetchone()[0] == 0
+            assert fetch_one(con.execute("SELECT count(*) FROM duckdb_secrets()"))[0] == 0
         finally:
             con.close()
 

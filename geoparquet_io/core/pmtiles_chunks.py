@@ -40,26 +40,37 @@ import glob
 import json
 import os
 import shutil
-import tempfile
 from pathlib import Path
 from typing import Any
 
-from geoparquet_io.core.common import get_dataset_bounds, get_parquet_metadata
+from geoparquet_io.core.bbox_structure import dataset_bounds
+from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
+    query_schema,
     quote_identifier,
     spill_directory,
     sql_path,
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import (
+    atomic_write,
+    handle_output_overwrite,
+    resolve_file_url,
+    unlink_released_file,
+)
 from geoparquet_io.core.geo_metadata import is_levelled_overview, sanitized_carried_geo
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    require_geometry_column,
+)
 from geoparquet_io.core.logging_config import debug, success, warn
-from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.partition.staging import (
     PartitionWriteOptions,
+    create_staging_dir,
     finalize_partition_file,
     iter_staging_partitions,
     make_partition_aliases,
@@ -143,7 +154,7 @@ def _dataset_bounds(
     bounds = _footer_bounds(sanitized_carried_geo(metadata), geometry_column)
     if bounds is not None:
         return bounds
-    found = get_dataset_bounds(input_path, geometry_column=geometry_column, verbose=verbose)
+    found = dataset_bounds(input_path, geometry_column=geometry_column, verbose=verbose)
     if found is None:
         raise RuntimeError(f"Could not determine bounds of {input_path} to chunk it")
     minx, miny, maxx, maxy = (float(v) for v in found)
@@ -255,12 +266,10 @@ def _split_input(
     con = get_duckdb_connection(
         load_httpfs=needs_httpfs(input_path), temp_directory=spill_directory(scratch)
     )
-    staging = tempfile.mkdtemp(prefix=".staging_", dir=parts_dir)
+    staging = create_staging_dir(parts_dir)
     try:
-        describe = con.execute(
-            f"SELECT {projection} FROM {sql_path(input_url)} LIMIT 0"
-        ).description
-        alias = make_partition_aliases(1, [d[0] for d in describe])[0]
+        input_cols = query_schema(con, f"SELECT {projection} FROM {sql_path(input_url)}").names
+        alias = make_partition_aliases(1, input_cols)[0]
         select_sql = f"SELECT {projection}, {key_sql} AS {alias} FROM {sql_path(input_url)} WHERE {predicate}"
         run_partitioned_copy(con, select_sql, [alias], staging, verbose)
 
@@ -269,7 +278,9 @@ def _split_input(
                 None, input_file=input_path, verbose=verbose
             ),
             input_file=input_path,
-            compression_level=3,  # read once by tippecanoe; not worth level 15
+            write=WriteOptions(
+                compression_level=resolve_codec(None, None, context="pmtiles-chunk").level
+            ),
         )
         for values, partition_dir in iter_staging_partitions(staging):
             chunk_file = os.path.join(parts_dir, f"{values[0]}.parquet")
@@ -291,9 +302,10 @@ def _tile_chunks(
 ) -> list[str]:
     """Tile each chunk file to its archive, reusing the complete ones.
 
-    The archive is built under a temporary name and renamed on success, so a
-    part with the final name is one tippecanoe finished. ``.pmtiles`` stays
-    the suffix because tippecanoe picks the output format from it.
+    The archive is staged by ``file_utils.atomic_write`` and published on
+    success, so a part with the final name is one tippecanoe finished.
+    ``.pmtiles`` stays the suffix because tippecanoe picks the output format
+    from it.
     """
     parts: list[str] = []
     for n, chunk in enumerate(chunk_files, start=1):
@@ -302,12 +314,11 @@ def _tile_chunks(
             debug(f"chunk {n}/{len(chunk_files)}: reusing {part}")
             parts.append(part)
             continue
-        building = chunk[: -len(".parquet")] + ".building.pmtiles"
         debug(f"chunk {n}/{len(chunk_files)}: tiling {part}")
-        create_pmtiles_from_geoparquet(
-            chunk, building, layer=layer, force=True, verbose=verbose, **tiling
-        )
-        os.replace(building, part)
+        with atomic_write(part, suffix=".pmtiles") as building:
+            create_pmtiles_from_geoparquet(
+                chunk, building, layer=layer, force=True, verbose=verbose, **tiling
+            )
         parts.append(part)
     return parts
 
@@ -349,10 +360,7 @@ def create_pmtiles_chunked(
             "--chunks needs --max-zoom: tippecanoe would guess a zoom per chunk and the "
             "sparse chunks would have no tiles above their own guess",
         )
-    if os.path.exists(output_path) and not force:
-        raise InvalidParameterError(
-            "output_path", f"output file already exists: {output_path}. Use --force to overwrite."
-        )
+    handle_output_overwrite(output_path, force, flag="--force", remove=False)
     if not _check_tile_join():
         raise TileJoinNotFoundError()
     scratch = resolve_scratch_directory(tiling.get("temporary_directory"))
@@ -366,7 +374,9 @@ def create_pmtiles_chunked(
             "level into the same tiles. Tile it with `tylertoo export-pmtiles`, or chunk "
             "the single-level source instead.",
         )
-    geometry_column = find_primary_geometry_column(input_path, verbose)
+    geometry_column = require_geometry_column(
+        primary_geometry_column(input_path, verbose=verbose), input_path
+    )
     bounds = _dataset_bounds(input_path, metadata, geometry_column, verbose)
     debug(f"Dataset bounds: {bounds}; chunking {nx}x{ny}")
 
@@ -374,7 +384,7 @@ def create_pmtiles_chunked(
     parts_dir = f"{output_path}.parts"
     if not _prepare_parts_dir(parts_dir, manifest):
         for stale in glob.glob(os.path.join(parts_dir, f"{_CHUNK_PREFIX}*")):
-            os.remove(stale)
+            unlink_released_file(stale)
         _split_input(
             input_path,
             parts_dir,
@@ -400,14 +410,13 @@ def create_pmtiles_chunked(
         verbose=verbose,
     )
 
-    # Joined under the parts directory and moved into place, so a failed join
-    # leaves no partial archive at the output path and the next run resumes.
-    joined = os.path.join(parts_dir, "joined.pmtiles")
-    _run_tile_join(
-        _build_tile_join_command(joined, parts, name=stem, attribution=attribution, force=True),
-        verbose,
-    )
-    os.replace(joined, output_path)
+    # Staged and published by the owner, so a failed join leaves no partial
+    # archive at the output path and the next run resumes.
+    with atomic_write(output_path, suffix=".pmtiles") as joined:
+        _run_tile_join(
+            _build_tile_join_command(joined, parts, name=stem, attribution=attribution, force=True),
+            verbose,
+        )
     shutil.rmtree(parts_dir, ignore_errors=True)
     if os.path.exists(parts_dir):
         warn(f"Could not remove {parts_dir}; it is safe to delete")

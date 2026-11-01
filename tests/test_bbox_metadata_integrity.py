@@ -23,7 +23,11 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata, add_bbox_metadata_table
-from geoparquet_io.core.duckdb_utils import _wrap_query_with_blob_conversion, get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import (
+    _wrap_query_with_blob_conversion,
+    fetch_one,
+    get_duckdb_connection,
+)
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.validate import validate_geoparquet
 
@@ -68,9 +72,11 @@ def _geometry_logical_type(path):
     """The Parquet *logical* type of the geometry column: None for plain WKB."""
     con = get_duckdb_connection(load_spatial=False)
     try:
-        row = con.execute(
-            f"SELECT logical_type FROM parquet_schema('{path}') WHERE name = 'geometry'"
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                f"SELECT logical_type FROM parquet_schema('{path}') WHERE name = 'geometry'"
+            )
+        )
     finally:
         con.close()
     return str(row[0]) if row and row[0] else None
@@ -140,9 +146,11 @@ def _logical_type(path, column):
     """The Parquet *logical* type of one column: None for plain WKB."""
     con = get_duckdb_connection(load_spatial=False)
     try:
-        row = con.execute(
-            f"SELECT logical_type FROM parquet_schema('{path}') WHERE name = '{column}'"
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                f"SELECT logical_type FROM parquet_schema('{path}') WHERE name = '{column}'"
+            )
+        )
     finally:
         con.close()
     return str(row[0]) if row and row[0] else None
@@ -531,7 +539,9 @@ class TestTableEntryPointDefensivePaths:
         """Detection returns None rather than guessing a column."""
         table = _arrow_table(json.dumps(_GEO_11).encode(), with_geometry=False)
 
-        with pytest.raises(ValueError, match="no geometry column detected"):
+        from geoparquet_io.core.geometry_detection import GeometryColumnNotFoundError
+
+        with pytest.raises(GeometryColumnNotFoundError, match="No geometry column found"):
             add_bbox_metadata_table(table)
 
     def test_an_unparsable_geo_key_is_treated_as_absent(self):
@@ -583,3 +593,72 @@ class TestBlobConversionWrapperDefensivePaths:
         )
 
         assert query.count('ST_AsWKB("geometry")') == 1
+
+
+def test_the_patched_block_is_a_written_block_not_a_description(tmp_path):
+    """``add bbox-metadata`` writes the block, so it takes the repair-policy version.
+
+    A file declaring ``1.1`` with a projected CRS and spherical edges: the
+    patched footer must be exactly what the composer writes for that file at
+    ``resolve_output_geoparquet_version(None, original_metadata=…,
+    preserve_input=True)`` -- the version in its metadata form, the CRS and
+    edges kept -- not a description that keeps the declared spelling (T3e
+    audit pass 3, finding 1).
+    """
+    import json
+    import struct
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+    from geoparquet_io.core.geo_metadata import (
+        GeoBlockOptions,
+        SchemaSource,
+        compose_geo_block,
+    )
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+
+    crs = {"id": {"authority": "EPSG", "code": 3857}}
+    geo = {
+        "version": "1.1",
+        "primary_column": "geometry",
+        "columns": {
+            "geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Point"],
+                "crs": crs,
+                "edges": "spherical",
+            }
+        },
+    }
+    bbox_type = pa.struct([(k, pa.float64()) for k in ("xmin", "ymin", "xmax", "ymax")])
+    table = pa.table(
+        {
+            "geometry": pa.array([struct.pack("<BIdd", 1, 1, 1.0, 2.0)], pa.binary()),
+            "bbox": pa.array([{"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}], bbox_type),
+        }
+    )
+    path = tmp_path / "in.parquet"
+    pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), path)
+    carried = pq.read_schema(path).metadata
+
+    result = CliRunner().invoke(cli, ["add", "bbox-metadata", str(path)])
+    assert result.exit_code == 0, result.output
+
+    written = json.loads(pq.read_schema(path).metadata[b"geo"])
+    expected = compose_geo_block(
+        SchemaSource(table.schema, carried),
+        GeoBlockOptions(
+            geometry_column="geometry",
+            covering="bbox",
+            version=resolve_output_geoparquet_version(
+                None, original_metadata=carried, preserve_input=True
+            ),
+        ),
+    )
+    assert written == expected
+    assert written["version"] == "1.1.0"
+    assert written["columns"]["geometry"]["crs"] == crs
+    assert written["columns"]["geometry"]["edges"] == "spherical"

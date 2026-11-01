@@ -39,6 +39,12 @@ algorithm, and each of its chunks either has the bounding box in its
 edges (``geography_bbox``, #1272) or loses it (DuckDB measured vertices on a
 plane, which does not bound a geodesic edge; the type codes stay either way,
 since they do not depend on the edges). See :func:`_geography_splices`.
+
+:func:`patch_or_rewrite` is the module's one entry point and the one place
+that decides what a refusal means (#1367 concept 2): a footer that cannot be
+patched goes to the write funnel's rewrite (``write_funnels.rewrite_footer_kv``,
+passed in because this module sits below the funnel), and a race is never
+answered with one. The patch itself, :func:`_patch_footer_file`, is private.
 """
 
 from __future__ import annotations
@@ -46,19 +52,20 @@ from __future__ import annotations
 import base64
 import json
 import os
-import stat
 import struct
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import BinaryIO, TypeAlias
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.edges import GEOGRAPHY_EDGE_ALGORITHMS, set_edges
 from geoparquet_io.core.exceptions import GeoParquetError
-from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
-from geoparquet_io.core.logging_config import debug
-from geoparquet_io.core.write_strategies import atomic_write
+from geoparquet_io.core.file_utils import atomic_write
+from geoparquet_io.core.logging_config import debug, warn
+from geoparquet_io.core.remote import is_remote_url
+from geoparquet_io.core.sizing import BYTES_PER_MIB
 
 #: Keys to set or, with a ``None`` value, to remove. A caller spells them as
 #: text; everything below the ``_normalized`` boundary works in the encoded
@@ -71,7 +78,7 @@ ENCRYPTED_MAGIC = b"PARE"
 
 # The trailer: a 4-byte little-endian footer length, then the magic.
 _TRAILER_SIZE = 8
-_COPY_CHUNK = 8 * 1024 * 1024
+_COPY_CHUNK = 8 * BYTES_PER_MIB
 
 # Thrift compact protocol type ids.
 _BOOL_TRUE, _BOOL_FALSE, _BYTE, _I16, _I32, _I64 = 1, 2, 3, 4, 5, 6
@@ -474,7 +481,7 @@ def _with_geography_fields(schema: pa.Schema, geography: Mapping[str, str]) -> p
             raise FooterPatchUnsupported(
                 f"the ARROW:schema extension metadata of {name!r} is not JSON: {exc}"
             ) from exc
-        extension["edges"] = edges
+        set_edges(extension, edges)
         metadata[b"ARROW:extension:metadata"] = json.dumps(extension).encode("utf-8")
         schema = schema.set(index, pa.field(name, storage, field.nullable, metadata))
     return schema
@@ -867,18 +874,6 @@ def _copy_below_footer(source: BinaryIO, sink: BinaryIO, footer_start: int) -> N
         remaining -= len(chunk)
 
 
-def _inherit_mode(staged: str, parquet_file: str, destination: str) -> None:
-    """Give the staged file the mode it is about to replace.
-
-    `atomic_write` stages through `mkstemp`, which creates 0600. Replacing a
-    published file with one nobody else can read is not a metadata edit, so the
-    destination's own mode wins, falling back to the input's when the
-    destination is new.
-    """
-    source = destination if os.path.exists(destination) else parquet_file
-    os.chmod(staged, stat.S_IMODE(os.stat(source).st_mode))
-
-
 def _file_stamp(parquet_file: str) -> tuple[int, int, int]:
     """What identifies this version of the file: inode, size, modification time."""
     info = os.stat(parquet_file)
@@ -998,21 +993,89 @@ def read_footer_kv(parquet_file: str) -> list[_Entry]:
     return []
 
 
-def patch_footer_kv(
+#: The rewrite a caller falls back to: ``(source, destination, updates)``.
+#: ``write_funnels`` supplies it -- this module sits below the funnel in the
+#: import graph, so the fallback is passed in rather than imported.
+_Rewrite: TypeAlias = Callable[[str, str, Mapping[str, str | None]], None]
+
+
+def patch_or_rewrite(
     parquet_file: str,
-    updates: dict[str, str | bytes | None],
+    updates: Mapping[str, str | None],
     *,
+    rewrite: _Rewrite,
     output_file: str | None = None,
+    geography: Mapping[str, str] | None = None,
+    geography_bbox: Mapping[str, list] | None = None,
+    arrow_edges: Mapping[str, str] | None = None,
     verbose: bool = False,
-) -> None:
-    """Add, replace or remove footer key-value metadata, keeping the data bytes.
+) -> list[str]:
+    """Write footer metadata by patch if the footer allows it, else by ``rewrite``.
 
-    :func:`patch_footer` with no column retyped; see it for the guarantees.
+    The one patch-else-rewrite decision (#1367 concept 2). Six callers used to
+    hand-write it and answered the same refusal their own ways: one rewrote
+    after a race, one refused where the others re-encoded, and each chose its
+    own fallback codec and its own keys to carry. Here:
+
+    * A local file whose footer can be read is patched: every page is copied
+      verbatim, so codec, level, encodings, row groups and every footer key the
+      call does not name survive by construction.
+    * A footer that cannot be patched (:class:`FooterPatchUnsupported`), or a
+      remote path the patcher cannot read, is handed to ``rewrite`` -- the
+      funnel's one re-encode (``write_funnels.rewrite_footer_kv``), which
+      decides which keys survive -- after a warning (a remote path needs
+      none). ``rewrite`` is skipped when ``updates`` is empty: there is no key
+      to carry.
+    * A race (:class:`FooterPatchRaced`) always propagates. The file changed
+      while it was being copied and nothing was written; a rewrite now would
+      read the bytes that arrived and stamp them with metadata derived from the
+      bytes that left.
+
+    Args:
+        parquet_file: The file to read.
+        updates: Keys to set; a ``None`` value removes a key.
+        rewrite: The fallback, called as ``rewrite(parquet_file, destination,
+            updates)``.
+        output_file: Where to write; defaults to ``parquet_file``.
+        geography, geography_bbox, arrow_edges: The column retypes to patch
+            (#999, #1272). A rewrite cannot retype a column, so they are dropped
+            on the fallback, and the warning says the edge columns stay planar.
+        verbose: Report the footer sizes.
+
+    Returns:
+        The columns retyped GEOGRAPHY; none after a rewrite.
     """
-    patch_footer(parquet_file, updates, output_file=output_file, verbose=verbose)
+    destination = output_file or parquet_file
+    if is_remote_url(parquet_file) or is_remote_url(destination):
+        if updates:
+            rewrite(parquet_file, destination, updates)
+        return []
+    try:
+        return _patch_footer_file(
+            parquet_file,
+            dict(updates),
+            geography=geography,
+            geography_bbox=geography_bbox,
+            arrow_edges=arrow_edges,
+            output_file=output_file,
+            verbose=verbose,
+        )
+    except FooterPatchRaced:
+        raise
+    except FooterPatchUnsupported as refusal:
+        retypes = geography or arrow_edges
+        note = (
+            "Edge columns stay planar in the Parquet schema."
+            if retypes
+            else "Falling back to a rewrite, which re-encodes the data."
+        )
+        warn(f"{refusal}. {note}")
+        if updates:
+            rewrite(parquet_file, destination, updates)
+        return []
 
 
-def patch_footer(
+def _patch_footer_file(
     parquet_file: str,
     updates: dict[str, str | bytes | None] | None = None,
     *,
@@ -1109,7 +1172,9 @@ def patch_footer(
             f"{footer_start:,} bytes of data copied unchanged"
         )
 
-    with atomic_write(destination) as staged:
+    # The published file keeps the destination's mode, else the input's: a
+    # metadata edit is not a permission change.
+    with atomic_write(destination, mode_from=parquet_file) as staged:
         # The input is opened for the copy and closed again before the staged
         # file is moved over it: Windows refuses to replace an open file.
         with open(parquet_file, "rb") as source, open(staged, "wb") as sink:
@@ -1119,7 +1184,6 @@ def patch_footer(
             sink.write(MAGIC)
             _refuse_if_the_pages_changed(parquet_file, source, footer_start, original)
         _verify_data_untouched(before, staged)
-        _inherit_mode(staged, parquet_file, destination)
         # Last, so that the gap between deciding the input is still the one
         # that was read and `atomic_write` replacing it is a single syscall.
         _refuse_if_the_file_changed(parquet_file, stamp)

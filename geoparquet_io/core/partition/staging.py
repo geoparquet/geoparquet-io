@@ -20,13 +20,17 @@ from __future__ import annotations
 
 import os
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import unquote
 
+from geoparquet_io.core.column_selection import unique_name
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.exceptions import PartitionError
+from geoparquet_io.core.file_utils import output_is_kept
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
@@ -91,27 +95,20 @@ class PartitionWriteOptions:
     GEOGRAPHY edges, until the witness can be read once per run.
     """
 
+    #: The resolved output version; it replaces ``write.geoparquet_version``
+    #: (the request) in every partition write.
     geoparquet_version: str | None = None
     input_file: str | None = None
-    compression: str = "ZSTD"
-    compression_level: int = 15
-    row_group_size_mb: int | None = None
-    row_group_rows: int | None = None
-    memory_limit: str | None = None
-    profile: str | None = None
+    #: The run's write options; ``None`` fields take the owners' defaults.
+    write: WriteOptions = field(default_factory=WriteOptions)
     extra_kv_metadata: dict[str, str] | None = None
 
     def as_write_kwargs(self) -> dict:
         """Return the kwargs accepted by ``write_parquet_with_metadata``."""
         return {
+            **self.write.funnel_kwargs(),
             "geoparquet_version": self.geoparquet_version,
             "input_file": None if is_remote_url(self.input_file) else self.input_file,
-            "compression": self.compression,
-            "compression_level": self.compression_level,
-            "row_group_size_mb": self.row_group_size_mb,
-            "row_group_rows": self.row_group_rows,
-            "memory_limit": self.memory_limit,
-            "profile": self.profile,
             "extra_kv_metadata": self.extra_kv_metadata,
         }
 
@@ -126,12 +123,8 @@ def make_partition_aliases(count: int, existing_columns) -> list[str]:
     existing = set(existing_columns)
     aliases: list[str] = []
     for i in range(count):
-        candidate = PARTITION_ALIAS if count == 1 else f"{PARTITION_ALIAS}{i}"
-        suffix = 0
-        while candidate in existing or candidate in aliases:
-            suffix += 1
-            candidate = f"{PARTITION_ALIAS}_{suffix}_{i}"
-        aliases.append(candidate)
+        base = PARTITION_ALIAS if count == 1 else f"{PARTITION_ALIAS}{i}"
+        aliases.append(unique_name(base, [*existing, *aliases]))
     return aliases
 
 
@@ -183,10 +176,12 @@ def run_partitioned_copy(con, select_sql, partition_cols, staging_dir, verbose, 
     partition on it, so all three settings are restored afterwards.
     """
     part_cols = ", ".join(partition_cols)
+    # Staging files are rewritten by finalize, so a fast codec is enough here.
+    staging_codec = ", ".join(resolve_codec("SNAPPY", None, context="write").duckdb_copy_options())
     copy_sql = (
         f"COPY ({select_sql}) TO {sql_path(staging_dir)} "
         f"(FORMAT PARQUET, PARTITION_BY ({part_cols}), "
-        f"COMPRESSION SNAPPY, GEOPARQUET_VERSION 'NONE', OVERWRITE_OR_IGNORE)"
+        f"{staging_codec}, GEOPARQUET_VERSION 'NONE', OVERWRITE_OR_IGNORE)"
     )
     # threads=1: one file per partition (and bounded memory); insertion order
     # is not needed for the split.
@@ -251,7 +246,7 @@ def finalize_partition_file(
     column that loses ``geometry_types`` without one lands in the output missing
     a key GeoParquet 1.1 requires (#934).
     """
-    if os.path.exists(output_filename) and not overwrite:
+    if output_is_kept(output_filename, overwrite):
         if verbose:
             debug(f"Output file {output_filename} already exists, skipping...")
         return False

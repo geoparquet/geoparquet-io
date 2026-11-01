@@ -13,6 +13,11 @@ These tests pin both halves of the contract:
 
 - a bbox column in a 2.0 output is always described by a ``covering`` entry
 - a 2.0 output always carries native geospatial statistics
+
+Which column may be declared is the composer's (``compose_geo_block`` and the
+exact ``SELF_EVIDENT_BBOX_COLUMN`` name); a family here runs one representative
+per branch of that rule and each write command or strategy that once dropped
+the covering on its own.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import shapely
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import fetch_one
 from tests.conftest import get_geo_metadata
 
 BBOX_COVERING = {
@@ -142,12 +148,13 @@ def test_every_write_strategy_declares_the_bbox_column_at_v2(tmp_path, strategy)
 # ---------------------------------------------------------------------------
 
 
+# ``sort hilbert`` carries the block through the same composer; its #1225
+# cells below run it on a v2 input with a covering.
 @pytest.mark.parametrize(
     "command",
     [
-        ["sort", "hilbert"],
-        ["sort", "quadkey"],
-        ["extract", "geoparquet"],
+        pytest.param(["sort", "quadkey"], id="command1"),
+        pytest.param(["extract", "geoparquet"], id="command2"),
     ],
 )
 def test_existing_covering_survives_v2_roundtrip(tmp_path, command):
@@ -409,7 +416,9 @@ def test_non_struct_column_named_bbox_never_becomes_a_covering(tmp_path):
     assert "covering" not in _geometry_column_meta(out)
 
 
-@pytest.mark.parametrize("bbox_name", ["tile_bounds", "parcel_extent", "mybbox"])
+# Only the exact name ``bbox`` (``SELF_EVIDENT_BBOX_COLUMN``) is self-evident, so
+# every other name takes one branch; ``tile_bounds`` is the issue's own column.
+@pytest.mark.parametrize("bbox_name", ["tile_bounds"])
 def test_bbox_shaped_columns_gpio_did_not_compute_stay_undeclared(tmp_path, bbox_name):
     """Names that merely end in bbox/bounds/extent are not evidence of anything.
 
@@ -434,62 +443,28 @@ def test_bbox_shaped_columns_gpio_did_not_compute_stay_undeclared(tmp_path, bbox
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_output_version_is_silent_for_stdin():
+def test_advised_output_version_is_silent_for_stdin():
     """A stdin stream's version is not knowable here, so nothing is claimed.
 
     Returning the default instead made `sort hilbert -` advise "consider
     --geoparquet-version 2.0" while it was already writing 2.0 (#738).
     """
-    from geoparquet_io.core.hilbert_order import _resolve_output_version
+    from geoparquet_io.core.hilbert_order import _advised_output_version
 
-    assert _resolve_output_version("-", None, verbose=False) is None
+    assert _advised_output_version("-", None, verbose=False) is None
 
 
-def test_resolve_output_version_is_silent_for_an_unreadable_input(tmp_path):
+def test_advised_output_version_is_silent_for_an_unreadable_input(tmp_path):
     """A failed read is not evidence of a 1.1 input."""
-    from geoparquet_io.core.hilbert_order import _resolve_output_version
+    from geoparquet_io.core.hilbert_order import _advised_output_version
 
-    assert _resolve_output_version(str(tmp_path / "nope.parquet"), None, verbose=False) is None
-
-
-def test_resolve_output_version_honours_an_explicit_version():
-    from geoparquet_io.core.hilbert_order import _resolve_output_version
-
-    assert _resolve_output_version("-", "2.0", verbose=False) == "2.0"
+    assert _advised_output_version(str(tmp_path / "nope.parquet"), None, verbose=False) is None
 
 
-def test_fast_path_carry_declines_a_geo_block_too_thin_to_stand_in(tmp_path):
-    """Carrying a block that lacks the fields DuckDB would have written is worse
-    than letting DuckDB write it, so the carry declines and the write falls back."""
-    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
+def test_advised_output_version_honours_an_explicit_version():
+    from geoparquet_io.core.hilbert_order import _advised_output_version
 
-    thin = {
-        "geo": json.dumps(
-            {
-                "version": "2.0.0",
-                "primary_column": "geometry",
-                # covering present, but no encoding/geometry_types
-                "columns": {"geometry": {"covering": {"bbox": BBOX_COVERING}}},
-            }
-        )
-    }
-    assert _geo_block_to_carry_on_fast_path(thin, "geometry", "2.0") is None
-
-
-def test_fast_path_carry_declines_a_block_duckdb_would_write_itself():
-    """No covering, no epoch, no orientation: DuckDB's own generated block stands."""
-    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
-
-    plain = {
-        "geo": json.dumps(
-            {
-                "version": "2.0.0",
-                "primary_column": "geometry",
-                "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
-            }
-        )
-    }
-    assert _geo_block_to_carry_on_fast_path(plain, "geometry", "2.0") is None
+    assert _advised_output_version("-", "2.0", verbose=False) == "2.0"
 
 
 def test_a_non_bbox_covering_survives_a_write_that_adds_a_bbox_covering(tmp_path):
@@ -556,7 +531,8 @@ def test_convert_to_1_1_leaves_a_carried_undeclared_bbox_column_undeclared(tmp_p
     assert _geometry_column_meta(out)["covering"]["bbox"] == BBOX_COVERING
 
 
-@pytest.mark.parametrize("bbox_name", ["tile_bounds", "parcel_extent", "mybbox", "geom_bbox"])
+# One branch for every name but ``bbox``: the issue's column and a ``*_bbox`` one.
+@pytest.mark.parametrize("bbox_name", ["tile_bounds", "geom_bbox"])
 def test_only_a_column_named_bbox_is_self_evident_at_1_1(tmp_path, bbox_name):
     """The 1.0 -> 1.1 upgrade declares a carried `bbox`, and nothing else.
 
@@ -614,9 +590,11 @@ def _geo_kv_entries(path) -> list[dict]:
 def _geometry_logical_type(path, column: str = "geometry") -> str | None:
     con = duckdb.connect()
     try:
-        row = con.execute(
-            "SELECT logical_type FROM parquet_schema(?) WHERE name = ?", [str(path), column]
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                "SELECT logical_type FROM parquet_schema(?) WHERE name = ?", [str(path), column]
+            )
+        )
     finally:
         con.close()
     return row[0] if row else None
@@ -637,14 +615,26 @@ def _write_native_v2(path, srid: str) -> str:
     return str(path)
 
 
-@pytest.mark.parametrize("command", ["str", "hilbert"])
-@pytest.mark.parametrize("version_args", [["--geoparquet-version", "2.0"], []], ids=["2.0", "auto"])
+# Two cells cover each axis once: both sort commands, the explicit and the auto
+# version (the owner answers 2.0 for both on this input), and both CRS spellings
+# (the default signalled by omitting ``crs``, #815, and an explicit one).
 @pytest.mark.parametrize(
-    "srid, expected_crs_id",
+    "srid, expected_crs_id, version_args, command",
     [
-        # The default CRS is signalled by omitting `crs` (#815).
-        ("EPSG:4326", None),
-        ("EPSG:3857", {"authority": "EPSG", "code": 3857}),
+        pytest.param(
+            "EPSG:4326",
+            None,
+            ["--geoparquet-version", "2.0"],
+            "hilbert",
+            id="EPSG:4326-None-2.0-hilbert",
+        ),
+        pytest.param(
+            "EPSG:3857",
+            {"authority": "EPSG", "code": 3857},
+            [],
+            "str",
+            id="EPSG:3857-expected_crs_id1-auto-str",
+        ),
     ],
 )
 def test_sort_add_bbox_at_v2_writes_one_geo_entry(

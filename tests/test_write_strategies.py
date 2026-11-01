@@ -21,13 +21,13 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
+from geoparquet_io.core.file_utils import atomic_write
 from geoparquet_io.core.validate import validate_geoparquet
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 from geoparquet_io.core.write_strategies import (
     WriteStrategy,
     WriteStrategyFactory,
-    atomic_write,
     needs_metadata_rewrite,
 )
 
@@ -78,18 +78,11 @@ class TestWriteStrategyFactory:
         assert strategy.name == "disk-rewrite"
         assert strategy.supports_streaming is False
 
-    def test_list_strategies(self):
-        """List all available strategies."""
-        strategies = WriteStrategyFactory.list_strategies()
-        assert "in-memory" in strategies
-        assert "streaming" in strategies
-        assert "duckdb-kv" in strategies
-        assert "disk-rewrite" in strategies
-
     def test_cache_clear(self):
         """Cache can be cleared."""
         WriteStrategyFactory.get_strategy(WriteStrategy.ARROW_MEMORY)
         WriteStrategyFactory.clear_cache()
+        assert WriteStrategyFactory.get_strategy.cache_info().currsize == 0
 
 
 class TestAtomicWrite:
@@ -245,7 +238,7 @@ class TestStripTrailingOrderByLeavesUnscannableQueriesAlone:
 
     @pytest.mark.parametrize("query", UNSCANNABLE_QUERIES)
     def test_query_is_returned_unchanged(self, query):
-        from geoparquet_io.core.write_strategies.row_group_sizing import _strip_trailing_order_by
+        from geoparquet_io.core.duckdb_utils import _strip_trailing_order_by
 
         assert _strip_trailing_order_by(query) == query, (
             "the scanner cannot track this construct, so it must leave the query alone"
@@ -256,14 +249,14 @@ class TestStripTrailingOrderByLeavesUnscannableQueriesAlone:
         """Whatever comes back must be runnable — that is the point of bailing."""
         import duckdb
 
-        from geoparquet_io.core.write_strategies.row_group_sizing import _strip_trailing_order_by
+        from geoparquet_io.core.duckdb_utils import _strip_trailing_order_by
 
         result = _strip_trailing_order_by(query)
         duckdb.extract_statements(result)  # raises if the strip broke the SQL
 
     def test_ordinary_generated_queries_are_still_optimized(self):
         """The guard must not disable the speed-up for the queries gpio emits."""
-        from geoparquet_io.core.write_strategies.row_group_sizing import _strip_trailing_order_by
+        from geoparquet_io.core.duckdb_utils import _strip_trailing_order_by
 
         query = (
             "SELECT * FROM read_parquet('in.parquet') WHERE code = 'abc' "
@@ -279,7 +272,7 @@ class TestStripTrailingOrderBy:
     """Sampling for --row-group-size-mb must not re-run the ordered query."""
 
     def test_strips_top_level_hilbert_order_by(self):
-        from geoparquet_io.core.write_strategies.row_group_sizing import _strip_trailing_order_by
+        from geoparquet_io.core.duckdb_utils import _strip_trailing_order_by
 
         query = "SELECT * FROM t\n        ORDER BY ST_Hilbert(geometry, ST_Extent(x))\n    "
         stripped = _strip_trailing_order_by(query)
@@ -287,35 +280,33 @@ class TestStripTrailingOrderBy:
         assert stripped.strip() == "SELECT * FROM t"
 
     def test_leaves_query_without_order_by(self):
-        from geoparquet_io.core.write_strategies.row_group_sizing import _strip_trailing_order_by
+        from geoparquet_io.core.duckdb_utils import _strip_trailing_order_by
 
         query = "SELECT * FROM t WHERE id > 5"
         assert _strip_trailing_order_by(query) == query
 
     def test_ignores_order_by_inside_subquery(self):
-        from geoparquet_io.core.write_strategies.row_group_sizing import _strip_trailing_order_by
+        from geoparquet_io.core.duckdb_utils import _strip_trailing_order_by
 
         query = "SELECT * FROM (SELECT a FROM t ORDER BY a) sub"
         assert _strip_trailing_order_by(query) == query
 
     def test_keeps_order_by_when_limit_follows(self):
-        from geoparquet_io.core.write_strategies.row_group_sizing import _strip_trailing_order_by
+        from geoparquet_io.core.duckdb_utils import _strip_trailing_order_by
 
         query = "SELECT * FROM t ORDER BY a LIMIT 10"
         assert _strip_trailing_order_by(query) == query
 
     def test_stripped_sample_matches_ordered_row_size(self):
         """The estimate must be unaffected by dropping the ordering."""
-        from geoparquet_io.core.write_strategies.row_group_sizing import (
-            _resolve_row_group_rows,
-            _strip_trailing_order_by,
-        )
+        from geoparquet_io.core.duckdb_utils import _strip_trailing_order_by
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_query
 
         con = duckdb.connect()
         base = "SELECT i AS id, i * 2 AS v FROM range(1000) t(i)"
         ordered = f"{base}\n            ORDER BY id"
 
-        rows = _resolve_row_group_rows(con, ordered, 0.001, None, verbose=False)
+        rows = resolve_row_group_rows_for_query(con, ordered, None, 0.001, verbose=False)
         con.close()
         assert rows is not None and rows > 0
         assert _strip_trailing_order_by(ordered).strip() == base
@@ -983,8 +974,13 @@ class TestDiskRewriteRowGroupSizing:
         assert self._row_group_sizes(output_file) == [40]
 
     def test_row_group_size_mb_splits_row_groups(self, duckdb_connection, tmp_path, output_file):
-        """A small MB target produces more, smaller row groups than the default."""
-        src = _write_points_geoparquet(tmp_path / "src.parquet", 2000)
+        """A small MB target produces more, smaller row groups than the default.
+
+        Never below one writer vector: the facade floors an MB-derived count at
+        2,048 rows on every strategy (#1215), where this one used to write
+        200-row groups and duckdb-kv 2,048 for the same target.
+        """
+        src = _write_points_geoparquet(tmp_path / "src.parquet", 10_000)
         strategy = WriteStrategyFactory.get_strategy(WriteStrategy.DISK_REWRITE)
 
         strategy.write_from_query(
@@ -1003,9 +999,9 @@ class TestDiskRewriteRowGroupSizing:
         )
 
         sizes = self._row_group_sizes(output_file)
-        assert sum(sizes) == 2000
+        assert sum(sizes) == 10_000
         assert len(sizes) > 1, f"MB target should split row groups, got {sizes}"
-        assert max(sizes) < 2000
+        assert sizes[:-1] == [2048] * (len(sizes) - 1), sizes
 
     def test_write_from_table_honors_row_group_rows(self, tmp_path, output_file):
         """write_from_table forwards sizing through to the written file."""
@@ -1169,7 +1165,7 @@ class TestDuckDBKVWriteConfiguration:
 
         def snapshot():
             return {
-                key: con.execute(f"SELECT current_setting('{key}')").fetchone()[0]
+                key: fetch_one(con.execute(f"SELECT current_setting('{key}')"))[0]
                 for key in managed
             }
 
@@ -1184,21 +1180,24 @@ class TestDuckDBKVWriteConfiguration:
 class TestCompressionLevelValidation:
     """`COMPRESSION_LEVEL` is formatted into SQL, so the value must be checked."""
 
-    @pytest.mark.parametrize("bad", ["1; DROP TABLE t", 3.5, True, 0, 23, -1, "15", None, object()])
+    @pytest.mark.parametrize("bad", ["1; DROP TABLE t", 3.5, True, 0, 23, -1, "15", object()])
     def test_rejects_values_that_are_not_a_duckdb_level(self, bad):
-        from geoparquet_io.core.duckdb_utils import validate_compression_level
+        from geoparquet_io.core.compression import resolve_codec
+        from geoparquet_io.core.exceptions import InvalidParameterError
 
-        with pytest.raises(ValueError):
-            validate_compression_level(bad)
+        with pytest.raises(InvalidParameterError):
+            resolve_codec("ZSTD", bad, context="write")
 
     @pytest.mark.parametrize("level", [1, 15, 22])
     def test_accepts_the_documented_range(self, level):
-        from geoparquet_io.core.duckdb_utils import validate_compression_level
+        from geoparquet_io.core.compression import resolve_codec
 
-        assert validate_compression_level(level) == level
+        assert resolve_codec("ZSTD", level, context="write").duckdb_copy_options()[-1] == (
+            f"COMPRESSION_LEVEL {level}"
+        )
 
     def test_library_callers_are_checked_not_just_the_cli(self, tmp_path):
-        """The CLI has IntRange(1, 22); a Python caller reaches the writer directly."""
+        """The CLI checks the pair first; a Python caller reaches the writer directly."""
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
         from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
@@ -1210,7 +1209,9 @@ class TestCompressionLevelValidation:
                 TO '{src}' (FORMAT PARQUET)"""
         )
 
-        with pytest.raises(ValueError, match="compression_level"):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with pytest.raises(InvalidParameterError, match="compression_level"):
             write_parquet_with_metadata(
                 con,
                 f"SELECT * FROM read_parquet('{src}')",
@@ -1502,7 +1503,7 @@ class TestNativeGeometryTypeAcrossStrategies:
         # "Geoparquet metadata does not have a version".
         con = duckdb.connect()
         try:
-            count = con.execute(f"SELECT count(*) FROM read_parquet({sql_path(out)})").fetchone()
+            count = fetch_one(con.execute(f"SELECT count(*) FROM read_parquet({sql_path(out)})"))
         finally:
             con.close()
         assert count[0] == 3
@@ -1725,19 +1726,9 @@ class TestNativeGeometryCrsAcrossStrategies:
     catches it.
     """
 
-    @pytest.mark.parametrize("strategy", ALL_STRATEGIES)
-    @pytest.mark.parametrize("version", NATIVE_VERSIONS)
-    def test_primary_crs_reaches_the_logical_type(self, strategy, version, tmp_path):
-        """The issue's reproducer: one projected geometry column, no ``input_crs``."""
-        source = _projected_source(tmp_path, secondary=False)
-        out = str(tmp_path / f"{strategy}_{version}.parquet")
-
-        _write_via_query(source, out, version, strategy)
-
-        assert _type_crs(out) == {"geometry": ("EPSG", 3857)}
-        if version == "2.0":
-            assert _block_crs(out) == {"geometry": ("EPSG", 3857)}
-        assert _failed_checks(out) == []
+    # The one-column reproducer is ``test_each_column_takes_its_own_crs``'s
+    # primary: the same projected column, the same assertions on it, beside a
+    # secondary with a CRS of its own.
 
     @pytest.mark.parametrize("strategy", ALL_STRATEGIES)
     @pytest.mark.parametrize("version", NATIVE_VERSIONS)
@@ -1907,28 +1898,35 @@ class TestNativeGeometryCrsAcrossStrategies:
 
 
 class TestMergeSecondaryGeometryMetadata:
-    """The one definition of "give every secondary column a ``geo`` entry"."""
+    """The one definition of "give every secondary column a ``geo`` entry": the composer's."""
+
+    @staticmethod
+    def _compose(geometry_info):
+        import pyarrow as pa
+
+        from geoparquet_io.core.geo_metadata import (
+            GeoBlockOptions,
+            SchemaSource,
+            compose_geo_block,
+        )
+
+        schema = pa.schema([("geometry", pa.binary()), ("geom2", pa.binary())])
+        return compose_geo_block(
+            SchemaSource(schema),
+            GeoBlockOptions("geometry", version="1.1", covering=None, geometry_info=geometry_info),
+        )
 
     def test_an_undeclared_secondary_still_gets_the_required_encoding(self):
         """``encoding`` is required by the spec, so a column the input left bare gets WKB."""
-        from geoparquet_io.core.write_strategies.base import merge_secondary_geometry_metadata
-
-        geo_meta = {"columns": {"geometry": {"encoding": "WKB"}}}
-
-        merge_secondary_geometry_metadata(geo_meta, {"secondary": ["geom2"], "metadata": {}})
+        geo_meta = self._compose({"secondary": ["geom2"], "metadata": {}})
 
         assert geo_meta["columns"]["geom2"] == {"encoding": "WKB"}
 
     def test_the_input_metadata_wins_over_the_default(self):
         """A declared secondary keeps its own crs and encoding -- what the native type reads."""
-        from geoparquet_io.core.write_strategies.base import merge_secondary_geometry_metadata
-
         crs = {"id": {"authority": "EPSG", "code": 27700}}
-        geo_meta = {"columns": {"geometry": {"encoding": "WKB"}}}
-
-        merge_secondary_geometry_metadata(
-            geo_meta,
-            {"secondary": ["geom2"], "metadata": {"geom2": {"encoding": "point", "crs": crs}}},
+        geo_meta = self._compose(
+            {"secondary": ["geom2"], "metadata": {"geom2": {"encoding": "point", "crs": crs}}}
         )
 
         assert geo_meta["columns"]["geom2"] == {"encoding": "point", "crs": crs}

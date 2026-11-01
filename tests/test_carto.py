@@ -25,11 +25,11 @@ from geoparquet_io.core.carto import (
     _fatal_status_error,
     _fetch_with_retry,
     _geometry_column_from_fields,
-    _status_from_duckdb_error,
     _validate_carto_url,
     _validate_table_name,
     carto_to_table,
 )
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import InvalidParameterError
 
 
@@ -380,7 +380,7 @@ class TestEmptyGeoparquetTable:
 
     def test_empty_table_respects_version(self):
         """Empty table uses specified GeoParquet version."""
-        table = _create_empty_geoparquet_table(geoparquet_version="1.0.0")
+        table = _create_empty_geoparquet_table(geoparquet_version="1.0")
         geo_meta = json.loads(table.schema.metadata[b"geo"])
         assert geo_meta["version"] == "1.0.0"
 
@@ -401,7 +401,7 @@ class TestWhereClauseValidation:
         def _fail_urlopen(*_args, **_kwargs):
             raise AssertionError("network request attempted before where-clause validation")
 
-        monkeypatch.setattr(carto_module.urllib.request, "urlopen", _fail_urlopen)
+        monkeypatch.setattr(carto_module, "make_request_with_retry", _fail_urlopen)
 
         with pytest.raises(ValidationError, match="not a single filtering expression"):
             carto_to_table(
@@ -610,7 +610,7 @@ class TestCartoToTable:
             "https://phl.carto.com/api/v2/sql",
             "opa_properties_public",
         )
-        assert geom_col is not None
+        assert geom_col == "the_geom"
 
     def test_table_has_geometry_true_for_spatial(self):
         """A populated spatial table is detected as geometry."""
@@ -722,6 +722,9 @@ class TestCartoCli:
                 ],
             )
             assert result.exit_code == 0, result.output
+            import pyarrow.parquet as pq
+
+            assert 0 < pq.ParquetFile(output_file).metadata.num_rows <= 5
 
     def test_cli_no_geometry_writes_plain_parquet(self):
         """--no-geometry writes plain Parquet with no 'geo' metadata key."""
@@ -792,7 +795,7 @@ class TestCartoCli:
                 ],
             )
             assert result.exit_code != 0
-            assert "Invalid bbox format" in result.output
+            assert "Invalid value for bbox" in result.output
 
     def test_cli_timeout_option(self):
         """CLI accepts --timeout option."""
@@ -816,6 +819,9 @@ class TestCartoCli:
                 ],
             )
             assert result.exit_code == 0, result.output
+            import pyarrow.parquet as pq
+
+            assert 0 < pq.ParquetFile(output_file).metadata.num_rows <= 5
 
     def test_cli_help(self):
         """CLI help shows all options."""
@@ -886,6 +892,8 @@ class TestCartoReadExpressionEscaping:
                     raise RuntimeError("the read failed; only the SQL matters here")
                 return self
 
+            sql = execute
+
         monkeypatch.setattr(
             carto_module, "get_duckdb_connection", lambda *a, **k: _RecordingConnection()
         )
@@ -923,7 +931,7 @@ class TestCartoReadExpressionEscaping:
         con = duckdb.connect()
         try:
             # json_serialize_sql parses without binding or opening anything.
-            (payload,) = con.execute("SELECT json_serialize_sql(?)", [sql]).fetchone()
+            (payload,) = fetch_one(con.execute("SELECT json_serialize_sql(?)", [sql]))
         finally:
             con.close()
         assert '"error":true' not in payload.replace(" ", ""), payload
@@ -950,6 +958,9 @@ class _AttemptCountingConnection:
             self.attempts += 1
             raise self.error
         return self
+
+    # The read goes through con.sql(...) since the DuckDB 2.0 migration.
+    sql = execute
 
 
 @pytest.fixture
@@ -983,7 +994,9 @@ def status_http_server():
             pass
 
     httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     try:
         yield f"http://127.0.0.1:{httpd.server_address[1]}/api/v2/sql", state
@@ -991,29 +1004,6 @@ def status_http_server():
         httpd.shutdown()
         httpd.server_close()
         thread.join(timeout=5)
-
-
-class TestStatusFromDuckdbError:
-    """``duckdb.HTTPException.status_code`` is used only when it is a real status."""
-
-    def test_a_plain_exception_carries_no_status(self):
-        assert _status_from_duckdb_error(RuntimeError("IO Error: 404 not found")) is None
-
-    def test_a_real_status_is_read(self):
-        exc = RuntimeError("boom")
-        exc.status_code = 503
-        assert _status_from_duckdb_error(exc) == 503
-
-    def test_zero_is_not_a_status(self):
-        """DuckDB reports status_code 0 when the request produced no status."""
-        exc = RuntimeError("boom")
-        exc.status_code = 0
-        assert _status_from_duckdb_error(exc) is None
-
-    def test_a_non_integer_status_is_ignored(self):
-        exc = RuntimeError("boom")
-        exc.status_code = "404"
-        assert _status_from_duckdb_error(exc) is None
 
 
 class TestFatalStatusError:
@@ -1029,10 +1019,10 @@ class TestFatalStatusError:
         ("status", "expected"),
         [
             (404, "not found"),
-            (401, "Unauthorized"),
-            (403, "forbidden"),
-            (400, "HTTP 400"),
-            (418, "HTTP 418"),
+            (401, "Authentication required"),
+            (403, "Access denied"),
+            (400, "HTTP error 400"),
+            (418, "HTTP error 418"),
         ],
     )
     def test_client_errors_are_fatal(self, status, expected):
@@ -1068,7 +1058,7 @@ class TestFatalStatusError:
             self._status(400, detail=detail), "my_table", "GeoJSON", self._EXC
         )
         assert error is not None
-        assert "HTTP 400" in str(error)
+        assert "HTTP error 400" in str(error)
         assert detail in str(error)
 
     def test_a_local_failure_is_fatal_and_says_it_is_local(self):
@@ -1138,8 +1128,8 @@ class TestFailureClassificationIgnoresTheUsersSql:
         assert conn.attempts == 3, f"{note}: retries were lost"
         assert "Failed to fetch data from Carto after 3 attempts" in message, note
         assert "not found" not in message, note
-        assert "Unauthorized" not in message, note
-        assert "forbidden" not in message, note
+        assert "Authentication required" not in message, note
+        assert "Access denied" not in message, note
 
     def test_a_real_dead_port_fetch_retries_end_to_end(self, monkeypatch):
         """The issue's reproduction, with DuckDB and GDAL actually in the loop.
@@ -1147,7 +1137,20 @@ class TestFailureClassificationIgnoresTheUsersSql:
         ``--limit 404`` used to cost every retry and report "Table 't' not
         found" for what was only a connection failure.
         """
+        real_run_with_retry = carto_module.run_with_retry
+
+        def immediate_retry(*args, **kwargs):
+            kwargs["retry_delay"] = 0
+            return real_run_with_retry(*args, **kwargs)
+
+        monkeypatch.setattr(carto_module, "run_with_retry", immediate_retry)
         real_get_conn = carto_module.get_duckdb_connection
+
+        def immediate_connection():
+            conn = real_get_conn()
+            conn.execute("SET http_retry_wait_ms = 0")
+            return conn
+
         seen = {"attempts": 0}
 
         class _Counting:
@@ -1159,8 +1162,13 @@ class TestFailureClassificationIgnoresTheUsersSql:
                     seen["attempts"] += 1
                 return self._inner.execute(sql_text, *args, **kwargs)
 
+            def sql(self, sql_text, *args, **kwargs):
+                if sql_text.lstrip().upper().startswith("SELECT"):
+                    seen["attempts"] += 1
+                return self._inner.sql(sql_text, *args, **kwargs)
+
         monkeypatch.setattr(
-            carto_module, "get_duckdb_connection", lambda *a, **k: _Counting(real_get_conn())
+            carto_module, "get_duckdb_connection", lambda *a, **k: _Counting(immediate_connection())
         )
 
         # A refused loopback connection fails in milliseconds; the generous
@@ -1186,7 +1194,7 @@ class TestFailureClassificationUsesTheHttpStatus:
 
     @pytest.mark.parametrize(
         ("status", "expected"),
-        [(404, "not found"), (401, "Unauthorized"), (403, "forbidden")],
+        [(404, "not found"), (401, "Authentication required"), (403, "Access denied")],
     )
     def test_a_real_client_error_fails_fast_with_the_right_message(
         self, monkeypatch, status_http_server, status, expected
@@ -1327,7 +1335,7 @@ class TestFailureClassificationUsesTheHttpStatus:
             )
 
         assert conn.attempts == 1
-        assert "HTTP 400" in str(excinfo.value)
+        assert "HTTP error 400" in str(excinfo.value)
         assert 'column "foo" does not exist' in str(excinfo.value)
 
     def test_a_200_from_the_probe_is_fatal_not_retried(self, monkeypatch, status_http_server):
@@ -1391,6 +1399,8 @@ class TestFailureClassificationUsesTheHttpStatus:
                 if sql.lstrip().upper().startswith("SELECT"):
                     time.sleep(0.05)
                 return super().execute(sql, *args, **kwargs)
+
+            sql = execute
 
         conn = _SlowConnection(RuntimeError("IO Error: Connection timeout: HTTP GET took too long"))
         monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
@@ -1670,3 +1680,53 @@ class TestTableCrs:
         table, _ = self._extract([{"srid": 2272}], empty, None)
         assert table.num_rows == 0
         assert _geo_crs(table)["id"]["code"] == 2272
+
+
+class TestCartoRetriesThroughTheSharedOwner:
+    """`carto_to_table` rides out a 503 via ``http_retry.run_with_retry``."""
+
+    def test_a_503_then_a_good_read(self, monkeypatch):
+        import pyarrow as pa
+
+        from geoparquet_io.core import http_retry
+
+        class _Flaky:
+            reads = 0
+
+            def execute(self, sql, *args, **kwargs):
+                return self
+
+            def sql(self, query, *args, **kwargs):
+                if "SELECT * FROM" not in query:
+                    raise AssertionError(query)
+                type(self).reads += 1
+                if self.reads == 1:
+                    err = RuntimeError("HTTP GET error: 503")
+                    err.status_code = 503
+                    raise err
+                return self
+
+            def arrow(self):
+                return self
+
+            def read_all(self):
+                return pa.table({"cartodb_id": [1, 2]})
+
+        slept: list[float] = []
+        monkeypatch.setattr(http_retry.time, "sleep", slept.append)
+        monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: _Flaky())
+        seen = []
+        real = http_retry.run_with_retry
+
+        def recording(*args, **kwargs):
+            seen.append(kwargs["classify"])
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(carto_module, "run_with_retry", recording)
+
+        with mock.patch.object(carto_module, "_get_row_count", return_value=2):
+            table = carto_to_table("https://example.carto.com/api/v2/sql", "tbl", geometry=False)
+
+        assert table.num_rows == 2
+        assert seen, "the fetch did not go through http_retry.run_with_retry"
+        assert slept == [1.0]  # http_retry.DEFAULT_RETRY_DELAY, one step

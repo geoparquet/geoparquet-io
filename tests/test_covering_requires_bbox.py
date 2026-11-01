@@ -190,59 +190,6 @@ class TestPartitionQuadkeyInterop:
         assert len(gdf) > 0
 
 
-def test_v2_fast_path_does_not_carry_a_bboxless_covering(tmp_path):
-    """The 2.0 no-rewrite path carries the input's block verbatim — gate it too."""
-    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
-
-    carried = {
-        "geo": json.dumps(
-            {
-                "version": "2.0.0",
-                "primary_column": "geometry",
-                "columns": {
-                    "geometry": {
-                        "encoding": "WKB",
-                        "geometry_types": ["Point"],
-                        "bbox": [0, 0, 1, 1],
-                        "covering": {"h3": {"column": "h3", "resolution": 9}},
-                    }
-                },
-            }
-        )
-    }
-    # With the bbox-less covering gone the block says nothing DuckDB would not,
-    # so there is nothing to carry.
-    assert _geo_block_to_carry_on_fast_path(carried, "geometry", "2.0") is None
-
-
-def test_v2_fast_path_carries_the_rest_of_the_block_without_the_covering():
-    """A block that still has something to say is carried -- minus the covering."""
-    from geoparquet_io.core.write_funnels import _geo_block_to_carry_on_fast_path
-
-    carried = {
-        "geo": json.dumps(
-            {
-                "version": "2.0.0",
-                "primary_column": "geometry",
-                "columns": {
-                    "geometry": {
-                        "encoding": "WKB",
-                        "geometry_types": ["Point"],
-                        "bbox": [0, 0, 1, 1],
-                        "orientation": "counterclockwise",
-                        "covering": {"h3": {"column": "h3", "resolution": 9}},
-                    }
-                },
-            }
-        )
-    }
-    block = _geo_block_to_carry_on_fast_path(carried, "geometry", "2.0")
-    assert block is not None
-    column = block["columns"]["geometry"]
-    assert column["orientation"] == "counterclockwise"
-    assert "covering" not in column
-
-
 class TestIndexEntriesBesideABboxColumn:
     """With a bbox column to declare, index entries are kept -- on every path."""
 
@@ -312,7 +259,7 @@ def test_add_kdtree_writes_no_bboxless_covering(buildings_test_file, tmp_path):
 
 
 def test_a_secondary_columns_bboxless_covering_is_gated_on_the_arrow_path():
-    """Secondary entries merge in after create_geo_metadata; the gate runs again."""
+    """Secondary entries go through the composer's steps; its gates judge them too."""
     import pyarrow as pa
 
     from geoparquet_io.core.arrow_geo_metadata import _build_geo_block
@@ -325,7 +272,7 @@ def test_a_secondary_columns_bboxless_covering_is_gated_on_the_arrow_path():
             "geom2": {"encoding": "WKB", "covering": {"h3": {"column": "h3", "resolution": 9}}}
         },
     }
-    geo = _build_geo_block(table, "geometry", None, None, None, "1.1.0", None, geometry_info, False)
+    geo = _build_geo_block(table, "geometry", None, None, None, "1.1", None, geometry_info, False)
 
     assert "geom2" in geo["columns"]
     assert "covering" not in geo["columns"]["geom2"]

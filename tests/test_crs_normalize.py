@@ -16,7 +16,7 @@ from geoparquet_io.core.crs_utils import (
     source_crs_string,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 
 EPSG_28992 = {"id": {"authority": "EPSG", "code": 28992}}
 
@@ -66,11 +66,13 @@ class TestTransformGeomSql:
         con = get_duckdb_connection(load_spatial=True)
         try:
             con.execute("SET geometry_always_xy = true;")
-            raw_x, lon, lat = con.execute(
-                f'SELECT ST_X(ST_Centroid("geometry")), '
-                f"ST_X(ST_Centroid({expr})), ST_Y(ST_Centroid({expr})) "
-                f"FROM '{fields_5070_file}' LIMIT 1"
-            ).fetchone()
+            raw_x, lon, lat = fetch_one(
+                con.execute(
+                    f'SELECT ST_X(ST_Centroid("geometry")), '
+                    f"ST_X(ST_Centroid({expr})), ST_Y(ST_Centroid({expr})) "
+                    f"FROM '{fields_5070_file}' LIMIT 1"
+                )
+            )
         finally:
             con.close()
         # Raw coords are projected metres (millions); transformed are valid degrees.
@@ -119,7 +121,7 @@ class TestCrsStringFromTable:
             """
             import sys
             import pyarrow.parquet as pq
-            from geoparquet_io.core.crs_utils import crs_string_from_table
+            from geoparquet_io.core.crs_utils import crs_of, transform_source_crs
 
             table = pq.read_table(sys.argv[1])
             field = table.schema.field("geometry")
@@ -134,7 +136,7 @@ class TestCrsStringFromTable:
                 "expected raw ARROW:extension:metadata on the geometry field"
             )
             assert "geoarrow.pyarrow" not in sys.modules
-            assert crs_string_from_table(table, "geometry") == "EPSG:5070"
+            assert transform_source_crs(crs_of(table, geometry_column="geometry")) == "EPSG:5070"
             """
         )
         result = subprocess.run(
@@ -150,10 +152,10 @@ class TestCrsStringFromTable:
         # Force the registered-extension-type carrier (Case 1).
         import geoarrow.pyarrow  # noqa: F401
 
-        from geoparquet_io.core.crs_utils import crs_string_from_table
+        from geoparquet_io.core.crs_utils import crs_of, transform_source_crs
 
         table = self._read_table(fields_5070_file)
-        assert crs_string_from_table(table, "geometry") == "EPSG:5070"
+        assert transform_source_crs(crs_of(table, geometry_column="geometry")) == "EPSG:5070"
 
 
 class TestHotPathUnchanged:
@@ -428,54 +430,53 @@ class TestAdminJoinIsCrsAware:
     """
 
     def test_admin_divisions_join_assigns_with_reprojection(self, fields_5070_file):
-        from geoparquet_io.core.add.admin_divisions import _build_spatial_join_query
+        from geoparquet_io.core.admin_datasets import build_admin_join_query
 
         con = _con_with_admin()
         try:
             kwargs = {
-                "input_source": fields_5070_file,
-                "admin_subquery": "(SELECT geom, region FROM _admin)",
+                "input_relation": sql_path(fields_5070_file),
+                "admin_table_ref": "_admin",
                 "admin_select_clause": 'b."region" AS region',
                 "input_bbox_col": None,
                 "admin_bbox_col": None,
                 "input_geom_col": "geometry",
                 "admin_geom_col": "geom",
+                "boundary_columns": ["region"],
             }
-            with_crs = _build_spatial_join_query(source_crs="EPSG:5070", **kwargs)
-            without = _build_spatial_join_query(source_crs=None, **kwargs)
-            assigned = con.execute(
-                f"SELECT COUNT(*) FROM ({with_crs}) WHERE region IS NOT NULL"
-            ).fetchone()[0]
-            not_assigned = con.execute(
-                f"SELECT COUNT(*) FROM ({without}) WHERE region IS NOT NULL"
-            ).fetchone()[0]
+            with_crs = build_admin_join_query(source_crs="EPSG:5070", **kwargs)
+            without = build_admin_join_query(source_crs=None, **kwargs)
+            assigned = fetch_one(
+                con.execute(f"SELECT COUNT(*) FROM ({with_crs}) WHERE region IS NOT NULL")
+            )[0]
+            not_assigned = fetch_one(
+                con.execute(f"SELECT COUNT(*) FROM ({without}) WHERE region IS NOT NULL")
+            )[0]
         finally:
             con.close()
         assert assigned > 0  # reprojected input intersects the admin polygon
         assert not_assigned == 0  # raw projected metres match nothing
 
     def test_admin_hierarchical_enrichment_assigns_with_reprojection(self, fields_5070_file):
-        from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
+        from geoparquet_io.core.admin_datasets import build_admin_join_query
 
         con = _con_with_admin()
         try:
-            sql = _build_enrichment_query(
-                input_source=fields_5070_file,
+            sql = build_admin_join_query(
+                input_relation=sql_path(fields_5070_file),
                 admin_table_ref="_admin",
-                admin_where_clause="",
                 admin_select_clause='b."region" AS region',
                 admin_geom_col="geom",
                 admin_bbox_col=None,
                 boundary_columns=["region"],
                 input_geom_col="geometry",
                 input_bbox_col=None,
-                enriched_table="_enriched",
                 source_crs="EPSG:5070",
             )
-            con.execute(sql)
-            assigned = con.execute(
-                "SELECT COUNT(*) FROM _enriched WHERE region IS NOT NULL"
-            ).fetchone()[0]
+            con.execute(f"CREATE TEMP TABLE _enriched AS {sql}")
+            assigned = fetch_one(
+                con.execute("SELECT COUNT(*) FROM _enriched WHERE region IS NOT NULL")
+            )[0]
         finally:
             con.close()
         assert assigned > 0
@@ -491,53 +492,50 @@ class TestAdminReprojectsAdminSideWithBbox:
     """
 
     def test_join_query_keeps_bbox_prefilter_and_leaves_input_untransformed(self):
-        from geoparquet_io.core.add.admin_divisions import _build_spatial_join_query
+        from geoparquet_io.core.admin_datasets import build_admin_join_query
 
-        sql = _build_spatial_join_query(
-            input_source="x.parquet",
-            admin_subquery="(SELECT geom, bbox, region FROM admin)",
+        sql = build_admin_join_query(
+            input_relation=sql_path("x.parquet"),
+            admin_table_ref="admin",
             admin_select_clause='b."region" AS region',
             input_bbox_col="bbox",
             admin_bbox_col="bbox",
             input_geom_col="geometry",
             admin_geom_col="geom",
+            boundary_columns=["region"],
             source_crs="EPSG:5070",
         )
-        # The join itself does not transform the input (admin reproject lives in
-        # the subquery); the bbox pre-filter is retained.
-        assert "ST_Transform" not in sql
+        # The join does not transform the input: the admin side is reprojected,
+        # in its subquery, and the bbox pre-filter is retained.
+        assert 'ST_Transform(a."geometry"' not in sql
+        assert "ST_Transform(\"geom\", 'OGC:CRS84', 'EPSG:5070')" in sql
         assert ".xmin" in sql and ".xmax" in sql
 
     def test_admin_subquery_reprojects_admin_and_synthesizes_bbox(self):
-        from geoparquet_io.core.add.admin_divisions import _build_admin_subquery
+        from geoparquet_io.core.admin_datasets import build_admin_subquery
 
-        sq = _build_admin_subquery(
-            dataset=None,
-            levels=None,
-            boundary_columns=["region"],
-            admin_table_ref="'admin.parquet'",
-            admin_geom_col="geom",
-            admin_bbox_col="bbox",
-            admin_where_clauses=[],
-            source_crs="EPSG:5070",
+        sq = build_admin_subquery(
+            "'admin.parquet'",
+            "geom",
+            "bbox",
+            ["region"],
+            reproject_to="EPSG:5070",
         )
         assert "ST_Transform" in sq  # admin polygons reprojected into input CRS
         assert "struct_pack" in sq  # source-CRS bbox synthesized for the pre-filter
 
     def test_enrichment_query_reprojects_admin_side_keeps_prefilter(self):
-        from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
+        from geoparquet_io.core.admin_datasets import build_admin_join_query
 
-        sql = _build_enrichment_query(
-            input_source="x.parquet",
+        sql = build_admin_join_query(
+            input_relation=sql_path("x.parquet"),
             admin_table_ref="admin",
-            admin_where_clause="",
             admin_select_clause='b."region" AS region',
             admin_geom_col="geom",
             admin_bbox_col="bbox",
             boundary_columns=["region"],
             input_geom_col="geometry",
             input_bbox_col="bbox",
-            enriched_table="_enriched",
             source_crs="EPSG:5070",
         )
         assert "ST_Transform" in sql  # admin reprojected
@@ -548,7 +546,7 @@ class TestAdminReprojectsAdminSideWithBbox:
 
     def test_enrichment_reproject_path_runs_and_assigns(self, fields_5070_file):
         """The reproject-admin SQL executes in DuckDB and assigns via the prefilter."""
-        from geoparquet_io.core.partition.admin_hierarchical import _build_enrichment_query
+        from geoparquet_io.core.admin_datasets import build_admin_join_query
 
         con = _con_with_admin()
         try:
@@ -565,24 +563,21 @@ class TestAdminReprojectsAdminSideWithBbox:
                 "ymin := ST_YMin(geometry), ymax := ST_YMax(geometry)) AS bbox "
                 f"FROM '{fields_5070_file}'"
             )
-            sql = _build_enrichment_query(
-                input_source="_inp",
+            sql = build_admin_join_query(
+                input_relation="_inp",
                 admin_table_ref="_admin_b",
-                admin_where_clause="",
                 admin_select_clause='b."region" AS region',
                 admin_geom_col="geom",
                 admin_bbox_col="bbox",
                 boundary_columns=["region"],
                 input_geom_col="geometry",
                 input_bbox_col="bbox",
-                enriched_table="_enriched",
-                input_is_table_ref=True,
                 source_crs="EPSG:5070",
             )
-            con.execute(sql)
-            assigned = con.execute(
-                "SELECT COUNT(*) FROM _enriched WHERE region IS NOT NULL"
-            ).fetchone()[0]
+            con.execute(f"CREATE TEMP TABLE _enriched AS {sql}")
+            assigned = fetch_one(
+                con.execute("SELECT COUNT(*) FROM _enriched WHERE region IS NOT NULL")
+            )[0]
         finally:
             con.close()
         assert assigned > 0

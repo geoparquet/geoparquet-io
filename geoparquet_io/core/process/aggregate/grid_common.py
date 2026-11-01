@@ -11,43 +11,60 @@ module stays a thin descriptor.
 from __future__ import annotations
 
 import gc
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 
 import duckdb
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
 from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.column_selection import find_column, fold, same_column
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
-    crs_transform_sql_expr,
-    extract_crs_from_parquet,
-    extract_crs_from_table,
-    is_geographic_crs,
+    crs_of,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
+    as_wkb_sql,
+    describe_query,
+    fetch_one,
     get_duckdb_connection,
-    load_community_extension,
     quote_identifier,
     register_arrow,
+    sql_literal,
     sql_path,
     validate_where_clause,
     where_sql_fragment,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.file_utils import has_glob_pattern, resolve_file_url
+from geoparquet_io.core.geo_metadata import (
+    QuerySource,
+    bounds_of,
+    is_bbox_struct_field,
+    missing_bbox_struct_fields,
+)
+from geoparquet_io.core.geometry_detection import (
+    BUILT_GEOMETRY_COLUMN,
+    primary_geometry_column,
+    require_geometry_column,
+    resolve_geometry_column,
+)
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
+from geoparquet_io.core.index_ops import (
+    IndexSpec,
+    index_point,
+    load_index,
+    validate_index_resolution,
+    validate_partition_arguments,
+)
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success, warn
 from geoparquet_io.core.memory_limits import open_bounded_connection
 from geoparquet_io.core.process.aggregate.common import (
     PCT_CELL_FUNC,
     VALID_OUT_GEOMETRY,
     MetricSpec,
-    _fold,
     aggregate_source_relation,
-    antimeridian_aware_bbox,
     build_breakdown_pivot,
     build_metric_select,
     geometry_to_geom_expr,
@@ -57,8 +74,13 @@ from geoparquet_io.core.process.aggregate.common import (
     validate_breakdown_metric,
     validate_metric_nodata,
 )
+from geoparquet_io.core.process.aggregate.options import BUCKET_POINT_GEOMETRY, AggregateOptions
 from geoparquet_io.core.remote import needs_httpfs
-from geoparquet_io.core.write_funnels import write_geoparquet_table
+from geoparquet_io.core.write_funnels import (
+    collect_nonplanar_edges,
+    table_nonplanar_edges,
+    write_aggregate_table,
+)
 
 
 @dataclass(frozen=True)
@@ -84,9 +106,7 @@ class GridScheme:
     """
 
     name: str
-    extension: str
-    min_resolution: int
-    max_resolution: int
+    spec: IndexSpec
     default_column: str
     key_template: str
     boundary_template: str
@@ -125,7 +145,7 @@ _NEEDS_SEAM_REPAIR = (
 # The exterior ring as an open DOUBLE[2][] (the closing repeat is sliced off).
 _CELL_RING = (
     "list_slice(list_transform(ST_Dump(ST_Points(ST_ExteriorRing({g}))), "
-    "p -> [ST_X(p.geom), ST_Y(p.geom)]), 1, -2)"
+    "lambda p: [ST_X(p.geom), ST_Y(p.geom)]), 1, -2)"
 )
 
 # Cumulative unwrapping: each vertex is placed relative to the PREVIOUS one, and
@@ -134,11 +154,11 @@ _CELL_RING = (
 # degrees of it, which polar rings do not -- there the `> 180` test fires on
 # vertices that were never wrapped and tears a ring that was intact.
 _UNWRAP_STEPS = (
-    "list_transform({r}, (p, i) -> CASE WHEN i = 1 THEN 0.0 "
+    "list_transform({r}, lambda p, i: CASE WHEN i = 1 THEN 0.0 "
     "WHEN p[1] - {r}[i - 1][1] > 180.0 THEN -360.0 "
     "WHEN p[1] - {r}[i - 1][1] < -180.0 THEN 360.0 ELSE 0.0 END)"
 )
-_UNWRAP_RING = "list_transform({r}, (p, i) -> [p[1] + list_sum(list_slice({s}, 1, i)), p[2]])"
+_UNWRAP_RING = "list_transform({r}, lambda p, i: [p[1] + list_sum(list_slice({s}, 1, i)), p[2]])"
 
 # Longitude winding of the closed ring, as a multiple of 360. Zero for an
 # ordinary cell -- the unwrapped ring closes on itself. Plus or minus 360 for a
@@ -146,11 +166,11 @@ _UNWRAP_RING = "list_transform({r}, (p, i) -> [p[1] + list_sum(list_slice({s}, 1
 # of unwrapping closes it and it needs an explicit seam instead.
 _RING_WINDING = "(360.0 * round((({u})[-1][1] - ({u})[1][1]) / 360.0))"
 
-_RING_LONS = "list_transform({r}, p -> p[1])"
+_RING_LONS = "list_transform({r}, lambda p: p[1])"
 _RING_LON_SPAN = "(list_max(" + _RING_LONS + ") - list_min(" + _RING_LONS + "))"
 
 # The pole a ring encircles is the one its vertices sit next to.
-_RING_POLE = "CASE WHEN list_avg(list_transform({r}, p -> p[2])) > 0 THEN 90.0 ELSE -90.0 END"
+_RING_POLE = "CASE WHEN list_avg(list_transform({r}, lambda p: p[2])) > 0 THEN 90.0 ELSE -90.0 END"
 
 # Explicit seam for a pole-enclosing ring: carry on past the last vertex to
 # where the first one comes round again, run up to the pole, back along it, and
@@ -166,11 +186,13 @@ _POLE_SEAM_RING = (
 # [-180, 180). Everything east of it is then below +540, which is what lets the
 # cut below need only the one eastern box.
 _NORMALIZE_RING = (
-    "list_transform({r}, p -> "
+    "list_transform({r}, lambda p: "
     "[p[1] - 360.0 * floor((list_min(" + _RING_LONS + ") + 180.0) / 360.0), p[2]])"
 )
 
-_MAKE_RING_POLYGON = "ST_MakePolygon(ST_MakeLine(list_transform({r}, p -> ST_Point(p[1], p[2]))))"
+_MAKE_RING_POLYGON = (
+    "ST_MakePolygon(ST_MakeLine(list_transform({r}, lambda p: ST_Point(p[1], p[2]))))"
+)
 
 # RFC 7946 section 3.1.9: a polygon crossing the antimeridian is cut at it and
 # written as a MultiPolygon. ST_CollectionExtract(..., 3) drops the degenerate
@@ -198,16 +220,17 @@ _RESERVED_INTERNAL = (
 )
 
 # --bucket-point mode keywords; any other value names an existing point column.
-BUCKET_POINT_GEOMETRY = "geometry"
 BUCKET_POINT_BBOX = "bbox"
-
-# Struct fields a bbox covering column must expose.
-_BBOX_STRUCT_FIELDS = frozenset({"xmin", "ymin", "xmax", "ymax"})
 
 
 def _relation_columns(con, relation: str) -> set[str]:
     """Column names exposed by ``relation``."""
-    return {row[0] for row in con.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()}
+    return {name for name, _ in describe_query(con, f"SELECT * FROM {relation}")}
+
+
+def _without(columns: set[str], hidden) -> set[str]:
+    """``columns`` less every spelling of the ``hidden`` names (an input ``__PT`` is ``__pt``)."""
+    return {c for c in columns if not any(same_column(c, h) for h in hidden)}
 
 
 def build_exclude_clause(
@@ -222,8 +245,11 @@ def build_exclude_clause(
     cols = _relation_columns(con, relation)
     drop: list[str] = []
     for name in columns:
-        if name in cols and name not in drop:
-            drop.append(name)
+        # Every spelling that folds to the name: a reserved ``__pt`` is not
+        # shadowable by an input column ``__PT`` (#1109).
+        for col in sorted(c for c in cols if same_column(c, name)):
+            if col not in drop:
+                drop.append(col)
     return f" EXCLUDE ({', '.join(quote_identifier(c) for c in drop)})" if drop else ""
 
 
@@ -243,71 +269,63 @@ def _validate_bucket_point_args(bucket_point: str, bbox_column: str | None) -> N
 
 def _validate_bbox_struct_column(con, relation: str, bbox_column: str) -> None:
     """Ensure ``bbox_column`` exists in ``relation`` and is a bbox covering struct."""
-    if bbox_column not in _relation_columns(con, relation):
+    if (
+        find_column(bbox_column, _relation_columns(con, relation), option_name="bbox-column")
+        is None
+    ):
         raise InvalidParameterError(
             "bbox-column", f"bbox column '{bbox_column}' not found in the input"
         )
     qbox = quote_identifier(bbox_column)
     try:
-        fields = {
-            row[0] for row in con.execute(f"DESCRIBE SELECT {qbox}.* FROM {relation}").fetchall()
-        }
+        fields = {name for name, _ in describe_query(con, f"SELECT {qbox}.* FROM {relation}")}
     except duckdb.Error:  # not a struct -- .* expansion does not bind
         fields = set()
-    missing = _BBOX_STRUCT_FIELDS - fields
+    missing = missing_bbox_struct_fields(fields)
     if missing:
         raise InvalidParameterError(
             "bbox-column",
             f"column '{bbox_column}' is not a bbox covering struct: expected "
-            f"xmin/ymin/xmax/ymax fields, missing {'/'.join(sorted(missing))}",
+            f"xmin/ymin/xmax/ymax fields, missing {'/'.join(missing)}",
         )
 
 
 def _validate_point_column(con, relation: str, bucket_point: str) -> None:
     """Ensure a point-column ``bucket_point`` names an existing column."""
-    if bucket_point in _relation_columns(con, relation):
-        return
-    hint = ""
-    lowered = bucket_point.lower()
+    lowered = fold(bucket_point)
     if lowered in (BUCKET_POINT_BBOX, BUCKET_POINT_GEOMETRY):
-        hint = f" (mode keywords are lowercase — did you mean '{lowered}'?)"
+        # Only a keyword spelled exactly gets here as a mode; any other
+        # spelling would silently bind to a column of that name (a `bbox`).
+        raise InvalidParameterError(
+            "bucket-point",
+            f"point column '{bucket_point}' not found in the input (mode keywords are "
+            f"lowercase — did you mean '{lowered}'?); the bucket point must be "
+            "'geometry', 'bbox', or the name of an existing point column",
+        )
+    if find_column(bucket_point, _relation_columns(con, relation), option_name="bucket-point"):
+        return
     raise InvalidParameterError(
         "bucket-point",
-        f"point column '{bucket_point}' not found in the input{hint}; the bucket "
+        f"point column '{bucket_point}' not found in the input; the bucket "
         "point must be 'geometry', 'bbox', or the name of an existing point column",
     )
-
-
-def _bbox_center_lon_sql(qbox: str, source_crs) -> str:
-    """Longitude of the bbox center, wraparound-aware for the antimeridian.
-
-    GeoJSON/GeoParquet coverings encode an antimeridian crossing as
-    ``xmin > xmax`` (Fiji: xmin=179.9, xmax=-179.9); the naive midpoint would
-    land near lon 0. For those rows take the +360-shifted midpoint and wrap
-    values > 180 back into (-180, 180]. Only geographic CRSs get this
-    treatment: in a projected CRS ``xmin > xmax`` cannot encode a dateline
-    crossing, so the plain midpoint is always correct there.
-    """
-    plain = f"({qbox}.xmin + {qbox}.xmax) / 2.0"
-    if not is_geographic_crs(source_crs):
-        return plain
-    shifted = f"(({qbox}.xmin + {qbox}.xmax + 360.0) / 2.0)"
-    wrapped = f"CASE WHEN {shifted} > 180.0 THEN {shifted} - 360.0 ELSE {shifted} END"
-    return f"CASE WHEN {qbox}.xmin > {qbox}.xmax THEN {wrapped} ELSE {plain} END"
 
 
 def bucket_point_expr(
     con: duckdb.DuckDBPyConnection,
     relation: str,
-    geom_col: str,
+    geom_col: str | None,
     source_crs: dict | str | None,
     bucket_point: str,
     bbox_column: str | None,
+    edges: Mapping[str, str] | None = None,
 ) -> tuple[str, tuple[str, ...]]:
     """Build the keying-point expression for a source relation.
 
-    Returns ``(pt_expr, exclude_columns)``. ``pt_expr`` yields a lon/lat POINT
-    (reprojected from a non-CRS84 ``source_crs``, #525). In ``bbox`` and
+    Returns ``(pt_expr, exclude_columns)``. ``pt_expr`` is ``index_ops.index_point``,
+    the lon/lat POINT the ``add`` cell keys take (reprojected from a non-CRS84
+    ``source_crs``, #525): a geometry's representative point for its column's
+    ``edges`` (#1293), or a bbox row's antimeridian-aware midpoint. In ``bbox`` and
     point-column modes the main geometry column is excluded from the passthrough
     SELECT so Parquet projection pushdown never reads its column chunks (#567).
     The bbox/point column is validated against ``relation`` so a typo fails with
@@ -315,10 +333,10 @@ def bucket_point_expr(
     """
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_GEOMETRY:
-        geom_expr = crs_transform_sql_expr(
-            geometry_to_geom_expr(con, relation, geom_col), source_crs
-        )
-        return f"ST_Centroid({geom_expr})", ()
+        geom_col = require_geometry_column(geom_col, "the input")
+        geom_expr = geometry_to_geom_expr(con, relation, geom_col)
+        return index_point(geom_expr, source_crs, edges=(edges or {}).get(geom_col)), ()
+    excluded = (geom_col,) if geom_col else ()
     if bucket_point == BUCKET_POINT_BBOX:
         if not bbox_column:
             raise InvalidParameterError(
@@ -326,18 +344,13 @@ def bucket_point_expr(
                 "bucket point 'bbox' requires a bbox column name (none given or detected)",
             )
         _validate_bbox_struct_column(con, relation, bbox_column)
-        qbox = quote_identifier(bbox_column)
-        lon = _bbox_center_lon_sql(qbox, source_crs)
-        pt = f"ST_Point({lon}, ({qbox}.ymin + {qbox}.ymax) / 2.0)"
         # The bbox covering column is stored in the file's CRS, same as geometry.
-        return crs_transform_sql_expr(pt, source_crs), (geom_col,)
-    # Any other value names an existing (point) geometry column. ST_Centroid is a
+        return index_point(None, source_crs, bbox_column), excluded
+    # Any other value names an existing (point) geometry column. The point is a
     # no-op for points and keeps non-point columns keyable rather than erroring.
     _validate_point_column(con, relation, bucket_point)
-    point_expr = crs_transform_sql_expr(
-        geometry_to_geom_expr(con, relation, bucket_point), source_crs
-    )
-    return f"ST_Centroid({point_expr})", (geom_col,)
+    point_expr = geometry_to_geom_expr(con, relation, bucket_point)
+    return index_point(point_expr, source_crs, edges=(edges or {}).get(bucket_point)), excluded
 
 
 def cell_area_expr(scheme: GridScheme, resolution: int, cell_expr: str) -> str | None:
@@ -385,13 +398,10 @@ def needed_source_columns(
         wanted.append(breakdown)
     if breakdown_spec:
         wanted.append(breakdown_spec.column)
-    seen: set[str] = set()
     kept: list[str] = []
     for name in wanted:
-        folded = _fold(name)
-        if folded in seen or name in _RESERVED_INTERNAL:
+        if any(same_column(name, other) for other in (*kept, *_RESERVED_INTERNAL)):
             continue
-        seen.add(folded)
         kept.append(name)
     return tuple(kept)
 
@@ -407,10 +417,7 @@ def _resolve_column_names(available: set[str], wanted: tuple[str, ...]) -> list[
     """
     resolved: list[str] = []
     for name in wanted:
-        if name in available:
-            resolved.append(name)
-            continue
-        match = next((c for c in sorted(available) if _fold(c) == _fold(name)), None)
+        match = find_column(name, sorted(available), option_name="column")
         if match is not None:
             resolved.append(match)
     return resolved
@@ -433,7 +440,7 @@ def source_select_list(
     """
     if keep_columns is None:
         return f"*{build_exclude_clause(con, relation, exclude)}, "
-    available = _relation_columns(con, relation) - set(exclude)
+    available = _without(_relation_columns(con, relation), exclude)
     return "".join(
         f"{quote_identifier(c)}, " for c in _resolve_column_names(available, keep_columns)
     )
@@ -442,12 +449,13 @@ def source_select_list(
 def read_grid_source_sql(
     con,
     input_url: str,
-    geom_col: str,
+    geom_col: str | None,
     source_crs=None,
     where: str | None = None,
     bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     keep_columns: tuple[str, ...] | None = None,
+    edges: Mapping[str, str] | None = None,
 ) -> str:
     """Source relation exposing the original columns plus a keying POINT ``__pt``.
 
@@ -470,7 +478,7 @@ def read_grid_source_sql(
     """
     read_rel = aggregate_source_relation(input_url)
     pt_expr, exclude = bucket_point_expr(
-        con, read_rel, geom_col, source_crs, bucket_point, bbox_column
+        con, read_rel, geom_col, source_crs, bucket_point, bbox_column, edges
     )
     select_list = source_select_list(con, read_rel, keep_columns, (*exclude, *_RESERVED_INTERNAL))
     return f"SELECT {select_list}{pt_expr} AS __pt FROM {read_rel}{where_sql_fragment(where)}"
@@ -513,7 +521,7 @@ def build_grid_query(
         # non-numeric metric.
         cols = source_columns
         if cols is None:
-            cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM ({source_sql})").fetchall()}
+            cols = {name for name, _ in describe_query(con, source_sql)}
         validate_agg_columns(cols, metrics, breakdown, bd_metric)
     # Resolve metric column types so sentinel literals match the column's actual
     # precision (REAL vs DOUBLE, #613) and non-numeric columns fail up-front.
@@ -617,10 +625,10 @@ def _repaired_poly_wkb() -> str:
     poly = _MAKE_RING_POLYGON.format(r="__fring")
     return (
         "CASE WHEN __bnd IS NULL THEN NULL "
-        "WHEN __ring IS NULL THEN ST_AsWKB(__bnd) "
+        f"WHEN __ring IS NULL THEN {as_wkb_sql('__bnd')} "
         f"WHEN list_max({_RING_LONS.format(r='__fring')}) > 180.0 "
-        f"THEN ST_AsWKB({_CUT_AT_ANTIMERIDIAN.format(g=poly)}) "
-        f"ELSE ST_AsWKB({poly}) END"
+        f"THEN {as_wkb_sql(_CUT_AT_ANTIMERIDIAN.format(g=poly))} "
+        f"ELSE {as_wkb_sql(poly)} END"
     )
 
 
@@ -681,16 +689,12 @@ def _resolve_resolution(
     """
     from geoparquet_io.core.partition import auto_resolution as _auto_resolution
 
-    if auto and resolution is not None:
-        raise InvalidParameterError("resolution", "Pass either --resolution or --auto, not both")
-    if not auto and resolution is None:
-        raise InvalidParameterError(
-            "resolution", f"{scheme.name.upper()} aggregation requires --resolution or --auto"
-        )
+    spec = scheme.spec
+    validate_partition_arguments(spec, resolution, auto=auto)
     if auto:
         resolution = _auto_resolution.calculate_auto_resolution(
             input_parquet,
-            scheme.name,
+            spec.name,
             target_rows_per_partition=target_per_cell,
             max_partitions=max_cells,
             verbose=verbose,
@@ -698,12 +702,7 @@ def _resolve_resolution(
         )
         if verbose:
             debug(f"Auto-selected {scheme.name} resolution {resolution}")
-    if not scheme.min_resolution <= resolution <= scheme.max_resolution:
-        raise InvalidParameterError(
-            "resolution",
-            f"{scheme.name.upper()} resolution must be "
-            f"{scheme.min_resolution}-{scheme.max_resolution}, got {resolution}",
-        )
+    validate_index_resolution(scheme.spec, resolution)
     return resolution
 
 
@@ -732,7 +731,6 @@ def _resolve_bbox_column_for_file(
 
 def _validate_bbox_column_in_table(table, bbox_column: str) -> None:
     """Ensure an explicit table-path ``bbox_column`` exists and is a bbox struct."""
-    import pyarrow as pa
 
     try:
         field = table.schema.field(bbox_column)
@@ -740,9 +738,7 @@ def _validate_bbox_column_in_table(table, bbox_column: str) -> None:
         raise InvalidParameterError(
             "bbox-column", f"bbox column '{bbox_column}' not found in the table"
         ) from None
-    if not pa.types.is_struct(field.type) or not _BBOX_STRUCT_FIELDS.issubset(
-        {f.name for f in field.type}
-    ):
+    if not is_bbox_struct_field(field):
         raise InvalidParameterError(
             "bbox-column",
             f"column '{bbox_column}' is not a bbox covering struct with xmin/ymin/xmax/ymax fields",
@@ -780,15 +776,17 @@ def _warn_files_missing_column(con, input_path: str, column: str) -> None:
 
     ``input_path`` is a RAW path: this function does its own escaping (#718).
     """
-    if not any(ch in input_path for ch in "*?["):
+    if not has_glob_pattern(input_path):
         return
-    col_lit = _escape_sql_string(column)
+    col_lit = sql_literal(column)
     try:
-        total, with_col = con.execute(
-            f"SELECT count(DISTINCT file_name), "
-            f"count(DISTINCT file_name) FILTER (WHERE name = '{col_lit}') "
-            f"FROM parquet_schema({sql_path(input_path)})"
-        ).fetchone()
+        total, with_col = fetch_one(
+            con.execute(
+                f"SELECT count(DISTINCT file_name), "
+                f"count(DISTINCT file_name) FILTER (WHERE name = {col_lit}) "
+                f"FROM parquet_schema({sql_path(input_path)})"
+            )
+        )
     except duckdb.Error:  # pragma: no cover - best-effort diagnostics only
         return
     if total and with_col < total:
@@ -798,22 +796,55 @@ def _warn_files_missing_column(con, input_path: str, column: str) -> None:
         )
 
 
+def _reject_folded_duplicates(con, input_parquet: str, requested: tuple[str, ...]) -> None:
+    """Refuse a requested column that two physical columns of one file fold to.
+
+    DuckDB renames the second of ``height``/``HEIGHT`` to ``HEIGHT_1`` on read
+    and then binds *both* spellings to the first, so ``--metric sum:HEIGHT``
+    summed ``height`` with no warning and no later check could see why: the
+    relation no longer shows the clash. The file's own schema still does (#1109).
+    """
+    if not requested:
+        return
+    try:
+        rows = con.execute(
+            f"SELECT file_name, name FROM parquet_schema({sql_path(input_parquet)})"
+        ).fetchall()
+    except duckdb.Error:  # pragma: no cover - best-effort diagnostics only
+        return
+    by_file: dict[str, list[str]] = {}
+    for file_name, name in rows:
+        by_file.setdefault(file_name, []).append(name)
+    for name in requested:
+        for physical in by_file.values():
+            find_column(name, physical, option_name="column")
+
+
 def _validate_keying_columns_for_file(
-    input_parquet: str, bucket_point: str, bbox_column: str | None, verbose: bool
+    input_parquet: str,
+    bucket_point: str,
+    bbox_column: str | None,
+    verbose: bool,
+    requested: tuple[str, ...] = (),
 ) -> None:
     """Validate the bbox/point keying column against the file schema up front.
 
     Runs before any expensive work (the --auto probe, grid extension install,
     admin dataset setup) so a typo'd or wrongly-shaped column fails immediately
     with a clear error rather than a late binder error. Also warns when a glob
-    input is heterogeneous (some files lack the keying column).
+    input is heterogeneous (some files lack the keying column). ``requested`` is
+    every metric/breakdown column the run reads, checked for a case-clash in the
+    file's own schema (:func:`_reject_folded_duplicates`).
     """
-    if bucket_point == BUCKET_POINT_GEOMETRY:
+    if bucket_point == BUCKET_POINT_GEOMETRY and not requested:
         return
     input_url = resolve_file_url(input_parquet, verbose=False)
     relation = f"read_parquet({sql_path(input_url)}, hive_partitioning=false, union_by_name=true)"
     con = get_duckdb_connection(load_spatial=False, load_httpfs=needs_httpfs(input_parquet))
     try:
+        _reject_folded_duplicates(con, input_url, requested)
+        if bucket_point == BUCKET_POINT_GEOMETRY:
+            return
         if bucket_point == BUCKET_POINT_BBOX and bbox_column:
             _validate_bbox_struct_column(con, relation, bbox_column)
             _warn_files_missing_column(con, input_parquet, bbox_column)
@@ -852,9 +883,12 @@ def _result_geo_bbox(con, result) -> list[float] | None:
     min/max over that reads as global coverage. Best-effort: a bbox is metadata,
     so a failure here leaves it to the writer rather than losing the output.
     """
+    # Measured on the caller's connection, under its memory settings.
     con.register("__agg_result", result)
     try:
-        return antimeridian_aware_bbox(con, "__agg_result", "geometry")
+        geometry = quote_identifier(BUILT_GEOMETRY_COLUMN)
+        source = QuerySource(con, f"SELECT {geometry} FROM __agg_result")
+        return bounds_of(source, BUILT_GEOMETRY_COLUMN, antimeridian=True)
     except duckdb.Error as exc:  # pragma: no cover - defensive
         debug(f"Could not compute an antimeridian-aware bbox: {exc}")
         return None
@@ -867,56 +901,69 @@ def aggregate_grid_file(
     input_parquet: str,
     output_parquet: str,
     *,
+    options: AggregateOptions | None = None,
     resolution: int | None = None,
     auto: bool = False,
     target_per_cell: int = 10000,
     max_cells: int = 500000,
-    metric: str | None = None,
-    breakdown: str | None = None,
-    breakdown_limit: int = 20,
-    out_geometry: str = "polygon",
     cell_column: str | None = None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     verbose: bool = False,
     show_sql: bool = False,
-    where: str | None = None,
-    metric_nodata: str | None = None,
-    bucket_point: str = BUCKET_POINT_GEOMETRY,
-    bbox_column: str | None = None,
-    breakdown_metric: str | None = None,
-    memory_limit: str | None = None,
 ) -> None:
     """Aggregate a GeoParquet file into grid cells. Writes the output file."""
+    options = options or AggregateOptions()
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     configure_verbose(verbose)
     cell_column = cell_column or scheme.default_column
-    _validate_out_geometry(out_geometry)
-    if where:
-        validate_where_clause(where)
+    _validate_out_geometry(options.out_geometry)
+    if options.where:
+        validate_where_clause(options.where)
     # Validate the parameter pairings before any expensive setup (--auto
     # scanning, CRS reads, connection + community-extension install).
-    breakdown_spec = parse_breakdown_metric(breakdown_metric)
-    validate_breakdown_metric(breakdown, breakdown_spec)
-    metrics, _ = validate_metric_nodata(metric, metric_nodata, breakdown_spec)
-    _validate_bucket_point_args(bucket_point, bbox_column)
-    if bucket_point == BUCKET_POINT_BBOX:
-        bbox_column = _resolve_bbox_column_for_file(input_parquet, bbox_column, verbose)
-    _validate_keying_columns_for_file(input_parquet, bucket_point, bbox_column, verbose)
+    breakdown_spec = parse_breakdown_metric(options.breakdown_metric)
+    validate_breakdown_metric(options.breakdown, breakdown_spec)
+    metrics, _ = validate_metric_nodata(options.metric, options.metric_nodata, breakdown_spec)
+    _validate_bucket_point_args(options.bucket_point, options.bbox_column)
+    if options.bucket_point == BUCKET_POINT_BBOX:
+        options = replace(
+            options,
+            bbox_column=_resolve_bbox_column_for_file(input_parquet, options.bbox_column, verbose),
+        )
+    _validate_keying_columns_for_file(
+        input_parquet,
+        options.bucket_point,
+        options.bbox_column,
+        verbose,
+        needed_source_columns(metrics, options.breakdown, breakdown_spec),
+    )
     resolution = _resolve_resolution(
-        scheme, input_parquet, resolution, auto, target_per_cell, max_cells, verbose, where=where
+        scheme,
+        input_parquet,
+        resolution,
+        auto,
+        target_per_cell,
+        max_cells,
+        verbose,
+        where=options.where,
     )
 
     input_url = resolve_file_url(input_parquet, verbose)
-    geom_col = find_primary_geometry_column(input_parquet, verbose) or "geometry"
-    warn_planar_math_for_file("aggregate", input_parquet, geom_col)
-    source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)
+    # None when the input has no geometry column: the bbox and point-column
+    # keying modes never read it (bucket_point_expr refuses it in geometry mode).
+    geom_col = primary_geometry_column(input_parquet, verbose=verbose)
+    if options.bucket_point == BUCKET_POINT_BBOX:
+        warn_planar_math_for_file("aggregate", input_parquet, geom_col)
+    edges = collect_nonplanar_edges(input_parquet)
+    source_crs = crs_of(input_parquet, verbose, geometry_column=geom_col)
 
     con = open_bounded_connection(
-        load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
+        load_spatial=True, load_httpfs=True, memory_limit=options.memory_limit, verbose=verbose
     )
     try:
-        load_community_extension(con, scheme.extension, feature=f"{scheme.name} aggregation")
+        load_index(con, scheme.spec, feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
 
         # The columns a user may name in --metric/--breakdown: everything the
@@ -926,18 +973,19 @@ def aggregate_grid_file(
         # missing column must still be reported against the whole input.
         read_rel = aggregate_source_relation(input_url)
         _, hidden = bucket_point_expr(
-            con, read_rel, geom_col, source_crs, bucket_point, bbox_column
+            con, read_rel, geom_col, source_crs, options.bucket_point, options.bbox_column
         )
-        input_columns = _relation_columns(con, read_rel) - {*hidden, *_RESERVED_INTERNAL}
+        input_columns = _without(_relation_columns(con, read_rel), (*hidden, *_RESERVED_INTERNAL))
         source_sql = read_grid_source_sql(
             con,
             input_url,
             geom_col,
             source_crs,
-            where=where,
-            bucket_point=bucket_point,
-            bbox_column=bbox_column,
-            keep_columns=needed_source_columns(metrics, breakdown, breakdown_spec),
+            where=options.where,
+            bucket_point=options.bucket_point,
+            bbox_column=options.bbox_column,
+            keep_columns=needed_source_columns(metrics, options.breakdown, breakdown_spec),
+            edges=edges,
         )
         final_sql = build_grid_query(
             con,
@@ -945,21 +993,21 @@ def aggregate_grid_file(
             source_sql,
             resolution,
             cell_column,
-            metric,
-            breakdown,
-            breakdown_limit,
-            out_geometry,
-            metric_nodata=metric_nodata,
+            options.metric,
+            options.breakdown,
+            options.breakdown_limit,
+            options.out_geometry,
+            metric_nodata=options.metric_nodata,
             breakdown_spec=breakdown_spec,
             source_columns=input_columns,
         )
         if show_sql or verbose:
             debug(final_sql)
-        result = con.execute(final_sql).arrow().read_all()
+        result = con.sql(final_sql).arrow().read_all()
         # The cells are keyed in lon/lat, so the output is always geographic --
         # whatever the input CRS was -- which is what makes the wrap form
-        # readable (see `antimeridian_aware_bbox`).
-        geo_bbox = None if out_geometry == "none" else _result_geo_bbox(con, result)
+        # readable (see `geo_metadata.bounds_of`).
+        geo_bbox = None if options.out_geometry == "none" else _result_geo_bbox(con, result)
     finally:
         con.close()
         # Release GDAL/spatial native handles before the next spatial connection
@@ -972,30 +1020,19 @@ def aggregate_grid_file(
         unassigned = result.column("count")[ids.index(None)].as_py()
         info(
             f"{unassigned} features had no assignable {scheme.name} cell "
-            f"({_unassigned_reason(bucket_point, bbox_column)})"
+            f"({_unassigned_reason(options.bucket_point, options.bbox_column)})"
         )
 
-    if out_geometry == "none":
-        if compression_level is not None:
-            pq.write_table(
-                result,
-                output_parquet,
-                compression=compression,
-                compression_level=compression_level,
-            )
-        else:
-            pq.write_table(result, output_parquet, compression=compression)
-    else:
-        write_geoparquet_table(
-            result,
-            output_parquet,
-            geometry_column="geometry",
-            compression=compression,
-            compression_level=compression_level,
-            geoparquet_version=geoparquet_version,
-            verbose=verbose,
-            geo_bbox=geo_bbox,
-        )
+    write_aggregate_table(
+        result,
+        output_parquet,
+        options.out_geometry,
+        compression=compression,
+        compression_level=compression_level,
+        geoparquet_version=geoparquet_version,
+        verbose=verbose,
+        geo_bbox=geo_bbox,
+    )
     success(f"Aggregated to {result.num_rows} {scheme.name} cells -> {output_parquet}")
 
 
@@ -1004,75 +1041,74 @@ def aggregate_grid_table(
     table,
     *,
     resolution: int,
-    metric: str | None = None,
-    breakdown: str | None = None,
-    breakdown_limit: int = 20,
-    out_geometry: str = "polygon",
+    options: AggregateOptions | None = None,
     cell_column: str | None = None,
     geometry_column: str | None = None,
-    where: str | None = None,
-    metric_nodata: str | None = None,
-    bucket_point: str = BUCKET_POINT_GEOMETRY,
-    bbox_column: str | None = None,
-    breakdown_metric: str | None = None,
-    memory_limit: str | None = None,
 ) -> pa.Table:
     """Aggregate an in-memory Arrow table into grid cells. Returns a new Arrow table."""
+    options = options or AggregateOptions()
     cell_column = cell_column or scheme.default_column
-    _validate_out_geometry(out_geometry)
-    if where:
-        validate_where_clause(where)
+    _validate_out_geometry(options.out_geometry)
+    if options.where:
+        validate_where_clause(options.where)
     # Validate the parameter pairings before connection setup and extension install.
-    breakdown_spec = parse_breakdown_metric(breakdown_metric)
-    validate_breakdown_metric(breakdown, breakdown_spec)
-    metrics, _ = validate_metric_nodata(metric, metric_nodata, breakdown_spec)
-    _validate_bucket_point_args(bucket_point, bbox_column)
-    if bucket_point == BUCKET_POINT_BBOX:
-        bbox_column = _resolve_bbox_column_for_table(table, bbox_column)
-    if not scheme.min_resolution <= resolution <= scheme.max_resolution:
-        raise InvalidParameterError(
-            "resolution",
-            f"{scheme.name.upper()} resolution must be "
-            f"{scheme.min_resolution}-{scheme.max_resolution}, got {resolution}",
+    breakdown_spec = parse_breakdown_metric(options.breakdown_metric)
+    validate_breakdown_metric(options.breakdown, breakdown_spec)
+    metrics, _ = validate_metric_nodata(options.metric, options.metric_nodata, breakdown_spec)
+    _validate_bucket_point_args(options.bucket_point, options.bbox_column)
+    if options.bucket_point == BUCKET_POINT_BBOX:
+        options = replace(
+            options, bbox_column=_resolve_bbox_column_for_table(table, options.bbox_column)
         )
+    validate_index_resolution(scheme.spec, resolution)
 
-    geom_col = geometry_column or "geometry"
-    con = open_bounded_connection(load_spatial=True, load_httpfs=False, memory_limit=memory_limit)
+    # None when the table has no geometry column: the bbox and point-column
+    # keying modes never read it (bucket_point_expr refuses it in geometry mode).
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table", required=False)
+    con = open_bounded_connection(
+        load_spatial=True, load_httpfs=False, memory_limit=options.memory_limit
+    )
     try:
-        load_community_extension(con, scheme.extension, feature=f"{scheme.name} aggregation")
+        load_index(con, scheme.spec, feature=f"{scheme.name} aggregation")
         con.execute("SET geometry_always_xy = true")
-        warn_planar_math("aggregate", table, geom_col)
+        if options.bucket_point == BUCKET_POINT_BBOX:
+            warn_planar_math("aggregate", table, geom_col)
+        edges = table_nonplanar_edges(table, geom_col, None)
         register_arrow(con, "__agg_input", table)
-        source_crs = extract_crs_from_table(table, geom_col)
+        source_crs = crs_of(table, geometry_column=geom_col)
         pt_expr, exclude = bucket_point_expr(
-            con, "__agg_input", geom_col, source_crs, bucket_point, bbox_column
+            con,
+            "__agg_input",
+            geom_col,
+            source_crs,
+            options.bucket_point,
+            options.bbox_column,
+            edges,
         )
-        hidden = (geom_col, *exclude, *_RESERVED_INTERNAL)
-        input_columns = _relation_columns(con, "__agg_input") - set(hidden)
+        hidden = (*((geom_col,) if geom_col else ()), *exclude, *_RESERVED_INTERNAL)
+        input_columns = _without(_relation_columns(con, "__agg_input"), hidden)
         select_list = source_select_list(
             con,
             "__agg_input",
-            needed_source_columns(metrics, breakdown, breakdown_spec),
+            needed_source_columns(metrics, options.breakdown, breakdown_spec),
             hidden,
         )
-        source_sql = (
-            f"SELECT {select_list}{pt_expr} AS __pt FROM __agg_input{where_sql_fragment(where)}"
-        )
+        source_sql = f"SELECT {select_list}{pt_expr} AS __pt FROM __agg_input{where_sql_fragment(options.where)}"
         final_sql = build_grid_query(
             con,
             scheme,
             source_sql,
             resolution,
             cell_column,
-            metric,
-            breakdown,
-            breakdown_limit,
-            out_geometry,
-            metric_nodata=metric_nodata,
+            options.metric,
+            options.breakdown,
+            options.breakdown_limit,
+            options.out_geometry,
+            metric_nodata=options.metric_nodata,
             breakdown_spec=breakdown_spec,
             source_columns=input_columns,
         )
-        return con.execute(final_sql).arrow().read_all()
+        return con.sql(final_sql).arrow().read_all()
     finally:
         con.close()
         # Release GDAL/spatial native handles before the next spatial connection

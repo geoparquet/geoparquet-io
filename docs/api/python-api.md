@@ -856,7 +856,10 @@ from the table. Non-planar edges are kept too. A native GEOGRAPHY table writes
 as a GEOGRAPHY at 2.0 and as `edges: spherical` in a 1.x `geo` block
 ([#1253](https://github.com/geoparquet/geoparquet-io/issues/1253)). A
 `1.1-geoarrow` output also names the edges in its GeoArrow type, so an Arrow
-reader sees the same answer. No WKB geometry column, primary or secondary,
+reader sees the same answer. Every algorithm survives that GeoArrow type
+(`spherical` and the four ellipsoidal ones), and planar is written by leaving
+the `edges` key out of the block. `Table.metadata` reports `edges` as the
+block states it, `None` when it states none. No WKB geometry column, primary or secondary,
 is dictionary-encoded, on any `write_strategy` and any `geoparquet_version`
 ([#1122](https://github.com/geoparquet/geoparquet-io/issues/1122)).
 
@@ -890,7 +893,11 @@ handed the writer the raw value: `row_group_rows=50000` wrote 51,200-row groups
 while the identical CLI request wrote 49,152, and `None` inherited DuckDB's
 122,880 — both outside the 10,000–50,000 band `gpio check optimization` scores.
 Pass `row_group_size_mb` instead to size groups by bytes; the row-count default
-does not override it.
+does not override it. The target is measured once, on the table's in-memory
+Arrow size (large string and binary offsets counted at 32 bits), turned into a
+whole number of 2,048-row vectors and never fewer than one, and every
+`write_strategy` writes that count — the CLI's `--row-group-size-mb` lands on
+the same groups ([#1215](https://github.com/geoparquet/geoparquet-io/issues/1215)).
 
 **GeoParquet Version**
 
@@ -1335,7 +1342,7 @@ Find parquet files exceeding a size threshold.
 from geoparquet_io.core.sub_partition import find_large_files
 
 # Find files over 100MB
-large_files = find_large_files('/data/partitions/', min_size_bytes=100 * 1024 * 1024)
+large_files = find_large_files('/data/partitions/', min_size_bytes=100_000_000)
 print(f"Found {len(large_files)} large files")
 for file_path in large_files:
     print(f"  {file_path}")
@@ -1359,7 +1366,7 @@ from geoparquet_io.core.sub_partition import sub_partition_directory
 result = sub_partition_directory(
     directory='/data/h3_partitions/',
     partition_type='h3',
-    min_size_bytes=100 * 1024 * 1024,
+    min_size_bytes=100_000_000,
     resolution=4,
     in_place=True,  # Replace originals
     verbose=True
@@ -1372,7 +1379,7 @@ print(f"Errors: {len(result['errors'])}")
 result = sub_partition_directory(
     directory='/data/s2_partitions/',
     partition_type='s2',
-    min_size_bytes=50 * 1024 * 1024,
+    min_size_bytes=50_000_000,
     auto=True,
     target_rows=50000,
     skip_analysis=True  # Skip per-file analysis for speed
@@ -1383,7 +1390,7 @@ result = sub_partition_directory(
 result = sub_partition_directory(
     directory='/data/quadkey_partitions/',
     partition_type='quadkey',
-    min_size_bytes=200 * 1024 * 1024,
+    min_size_bytes=200_000_000,
     resolution=13,
     partition_resolution=8,
     hive=True
@@ -1404,8 +1411,8 @@ result = sub_partition_directory(
 - `verbose` (bool): Print verbose output (default: False)
 - `force` (bool): Force operation even with warnings (default: False)
 - `skip_analysis` (bool): Skip partition analysis for performance (default: True)
-- `compression` (str): Compression codec (default: "ZSTD")
-- `compression_level` (int | None): Compression level (default: None — the codec picks its own; a fixed value is rejected by codecs whose range excludes it, e.g. GZIP is 1-9)
+- `compression` (str | None): Compression codec (default: None, which is ZSTD)
+- `compression_level` (int | None): Compression level (default: None — gpio's default for the codec: ZSTD 15, GZIP 6, BROTLI 11 (a DuckDB `COPY` path can write GZIP and BROTLI only at those levels, and warns when you ask for another); a level outside the codec's range is rejected, e.g. GZIP is 1-9)
 - `auto` (bool): Auto-calculate resolution (default: False)
 - `target_rows` (int): Target rows per partition for auto mode (default: 100000)
 - `max_partitions` (int): Max partitions for auto mode (default: 10000)
@@ -1588,7 +1595,7 @@ print(result)
 # Custom query
 result = Table.explain_analyze(
     'data.parquet',
-    query="SELECT * FROM read_parquet('{file}') WHERE id > 10"
+    query="SELECT * FROM read_parquet({file}) WHERE id > 10"
 )
 ```
 
@@ -1907,7 +1914,7 @@ for candidate in plan['candidates']:
 The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 (the files the threshold selected, with sizes and destinations) and `preview`.
 
-- `min_size` takes the CLI's `'100MB'` spelling or a plain byte count.
+- `min_size` takes the CLI's `'100MB'` spelling (MB/GB are powers of 1000, MiB/GiB of 1024) or a plain byte count.
 - A file whose sub-partitions do not hold all of its rows keeps its original —
   rows with a NULL or empty geometry get a NULL index cell and are dropped by
   partitioning — and is reported in `errors`.
@@ -1949,16 +1956,16 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.read_bigquery(table_id, project=None, credentials_file=None, where=None, bbox=None, bbox_mode='auto', bbox_threshold=500000, limit=None, columns=None, exclude_columns=None)` | Read BigQuery table (`None`/`[]` selects every column; a blank entry in the list raises) |
 | `ops.from_arcgis(service_url, token=None, where='1=1', bbox=None, include_cols=None, exclude_cols=None, limit=None, max_workers=1, output_crs=None, max_allowable_offset=None, repair_geometry=True, timeout=60.0, batch_size=None)` | Fetch ArcGIS Feature Service (`batch_size` lowers the page size for layers the server cannot serialize a full page of) |
 | `ops.convert_to_geojson(table, output, precision=7, write_bbox=False, id_field=None)` | Convert to GeoJSON |
-| `ops.convert_to_geopackage(table, output, layer_name='features', overwrite=False, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to GeoPackage, optionally filtering rows |
+| `ops.convert_to_geopackage(table, output, layer_name=None, overwrite=False, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to GeoPackage, optionally filtering rows |
 | `ops.convert_to_flatgeobuf(table, output, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to FlatGeobuf, optionally filtering rows |
 | `ops.convert_to_csv(table, output, include_wkt=True, include_bbox=True, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to CSV, optionally filtering rows |
 | `ops.convert_to_shapefile(table, output, encoding='UTF-8', overwrite=False)` | Convert to Shapefile |
 | `ops.from_wfs(service_url, typename, version='auto', bbox=None, limit=None, max_workers=1, page_size=100000, auto_tile=True, ...)` | Fetch from WFS service |
 | `ops.from_wfs_layers(service_url, typenames, output_dir, parallel_layers=1, max_workers=1, page_size=100000, ...)` | Fetch multiple WFS layers to directory |
-| `ops.create_overviews(input_parquet, levels=None, max_tile_kb=500, bytes_per_cell=None, cell_column=None, scheme=None, output_dir=None, force=False, ...)` | Build coarser overview levels from an aggregate file |
+| `ops.create_overviews(input_parquet, levels=None, max_tile_kb=500, bytes_per_cell=None, cell_column=None, scheme=None, output_dir=None, force=False, ...)` | Build coarser overview levels from an aggregate file; an unset ZSTD level resolves to the process default 9 |
 | `ops.create_overview_file(input_parquet, overview_out, levels=None, cell_detail=None, explicit_gsd=None, output_dir=None, force=False, ...)` | Assemble the overview ladder into one levelled GeoParquet (tylertoo overviews format) |
 | `ops.create_pmtiles(input_path, output_path, layer=None, min_zoom=None, max_zoom=None, bbox=None, where=None, include_cols=None, chunks=None, temporary_directory=None, ...)` | Stream a GeoParquet file into a PMTiles archive (requires tippecanoe; `chunks` also tile-join) |
-| `ops.create_pmtiles_pyramid(input_path, output_path, levels=None, max_tile_kb=500, layer_mode='grouped', include_features=False, features_source=None, max_zoom=None, temporary_directory=None, ...)` | Build a zoom-banded multi-level PMTiles archive from an aggregate file (requires tippecanoe + tile-join) |
+| `ops.create_pmtiles_pyramid(input_path, output_path, levels=None, max_tile_kb=500, layer_mode='grouped', include_features=False, features_source=None, max_zoom=None, temporary_directory=None, memory_limit=None, ...)` | Build a zoom-banded multi-level PMTiles archive from an aggregate file (requires tippecanoe + tile-join) |
 | `ops.partition_by_h3(table, output_dir, resolution=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_h3_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by H3 cell |
 | `ops.partition_by_a5(table, output_dir, resolution=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_a5_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by A5 cell |
 | `ops.partition_by_s2(table, output_dir, level=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_s2_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by S2 cell |
@@ -1971,7 +1978,7 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.sub_partition_by_quadkey(directory, min_size, resolution=None, partition_resolution=None, use_centroid=False, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into quadkey sub-partitions (pass both resolutions, or `auto=True`) |
 | `ops.sub_partition_by_s2(directory, min_size, level=None, auto=False, in_place=False, preview=False, ...)` | Split every file in a directory over `min_size` into S2 sub-partitions |
 | `ops.simplify(table, tolerance, coverage=False, preserve_topology=True, simplify_boundary=True, threads=None, geometry_column=None, drop_empty=False, simplify_crs=None)` | Simplify geometries with coarsen (requires the `simplify` extra; `coverage=True` preserves shared edges) |
-| `ops.polygonize(input_raster, band=1, values=None, value_column='value', nodata=None, use_mask=True)` | Polygonize a categorical raster band (requires the `raster` extra, Python 3.12+) |
+| `ops.polygonize(input_raster, band=1, values=None, value_column='value', nodata=None, use_mask=True, verbose=False, repair_geometry=True)` | Polygonize a categorical raster band (requires the `raster` extra, Python 3.12+). `repair_geometry=False` skips repairing the tracer's self-touching rings, which is much faster and still reports the count |
 | `ops.contour(input_raster, levels=None, interval=None, base=0.0, band=1, nodata=None, min_column='min', max_column='max')` | Extract filled contour bands from a raster band (requires the `raster` extra, Python 3.12+) |
 | `ops.get_row_group_geo_stats(parquet_file)` | Per-row-group geo bbox statistics |
 | `ops.preview_bbox_filter(parquet_file, bbox, geometry_column=None)` | Preview the row groups a bbox read would touch, with estimated rows/bytes, before reading |

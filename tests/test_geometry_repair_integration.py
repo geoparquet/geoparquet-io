@@ -18,6 +18,7 @@ import duckdb
 import pytest
 
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.duckdb_utils import fetch_one
 
 _DATA_DIR = Path(__file__).parent / "data"
 # Real WFS extraction (IDECOR "Carlos_Paz_Peligrosidad", 64 features, 3 invalid
@@ -70,9 +71,11 @@ def _invalid_count(parquet_path, geom_col="geom"):
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
     try:
-        return con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{parquet_path}') WHERE NOT ST_IsValid({geom_col})"
-        ).fetchone()[0]
+        return fetch_one(
+            con.execute(
+                f"SELECT COUNT(*) FROM read_parquet('{parquet_path}') WHERE NOT ST_IsValid({geom_col})"
+            )
+        )[0]
     finally:
         con.close()
 
@@ -99,7 +102,7 @@ def test_convert_repair_preserves_row_count(tmp_path):
     convert_to_geoparquet(src, out)
     con = duckdb.connect()
     try:
-        assert con.execute(f"SELECT COUNT(*) FROM read_parquet('{out}')").fetchone()[0] == 3
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{out}')"))[0] == 3
     finally:
         con.close()
 
@@ -162,5 +165,9 @@ def test_pmtiles_from_invalid_geometry_does_not_crash(tmp_path):
     assert _invalid_count(raw) == 2
 
     out = str(tmp_path / "out.pmtiles")
-    create_pmtiles_from_geoparquet(raw, out, force=True)
+    # A fixed low max zoom: the property is that tippecanoe copes with the
+    # geometry, which z0-z4 exercises. Left to -zg, tippecanoe 2.79 (macOS
+    # runners) guesses a deep zoom for three tiny overlapping polygons and
+    # spent 277 s tiling them; 2.53 (ubuntu) took 1.6 s.
+    create_pmtiles_from_geoparquet(raw, out, force=True, min_zoom=0, max_zoom=4)
     assert (tmp_path / "out.pmtiles").exists()

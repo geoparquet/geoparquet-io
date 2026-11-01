@@ -11,23 +11,32 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
 
 import duckdb
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.duckdb_utils import quote_identifier, sql_path
+from geoparquet_io.core.column_selection import matching_columns
+from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.duckdb_utils import fetch_one, query_schema, quote_identifier, sql_path
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
+from geoparquet_io.core.geo_metadata import (
+    QuerySource,
+    bbox_column_to_declare,
+    bounds_of,
+    sanitized_carried_geo_of_file,
+)
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
+from geoparquet_io.core.index_ops import get_index_spec, load_index
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.logging_config import info as log_info
-from geoparquet_io.core.partition.auto_resolution import _register_quadkey_udf
 from geoparquet_io.core.process.aggregate.common import (
-    antimeridian_aware_bbox,
     geometry_to_geom_expr,
 )
 from geoparquet_io.core.process.overview.detect import (
+    ADMIN_SCHEME,
+    GRID_SCHEMES,
     AggregateInfo,
     aggregate_connection,
     detect_aggregate_info,
@@ -41,13 +50,12 @@ from geoparquet_io.core.process.overview.levels import (
     select_bands,
 )
 from geoparquet_io.core.process.overview.rollup import (
-    GRID_PARENT_TEMPLATES,
-    GRID_SCHEMES,
     admin_parent_expr,
     build_level_sql,
     validate_level,
+    with_input_bbox,
 )
-from geoparquet_io.core.write_funnels import write_geoparquet_table
+from geoparquet_io.core.write_funnels import write_aggregate_table
 
 
 def overview_output_path(
@@ -61,7 +69,7 @@ def overview_output_path(
     path = Path(input_parquet)
     directory = Path(output_dir) if output_dir else path.parent
     suffix = path.suffix or ".parquet"
-    if scheme == "admin":
+    if scheme == ADMIN_SCHEME:
         return str(directory / f"{path.stem}_{level}{suffix}")
     return str(directory / f"{path.stem}_r{level}{suffix}")
 
@@ -77,7 +85,7 @@ def parse_levels(levels: str | Sequence[int | str], info: AggregateInfo) -> list
     parsed = [validate_level(info, level) for level in raw]
     if len(set(parsed)) != len(parsed):
         raise InvalidParameterError("levels", f"duplicate levels in {parsed}")
-    if info.scheme == "admin":
+    if info.scheme == ADMIN_SCHEME:
         return parsed
     return sorted(parsed)
 
@@ -88,14 +96,10 @@ def _grid_cells_probe_sql(info: AggregateInfo, source_sql: str, level: int) -> s
     if level == info.base_level:
         parent = qcol
     else:
-        parent = GRID_PARENT_TEMPLATES[info.scheme].format(cell=qcol, level=level)
-    # a5_cell_to_lonlat returns [lon, lat]; h3_cell_to_latlng returns [lat, lng].
-    if info.scheme == "a5":
-        lonlat = "a5_cell_to_lonlat(__parent)"
-        lon, lat = "__ll[1]", "__ll[2]"
-    else:
-        lonlat = "h3_cell_to_latlng(__parent)"
-        lon, lat = "__ll[2]", "__ll[1]"
+        parent = GRID_SCHEMES[info.scheme].spec.parent_template.format(cell=qcol, level=level)
+    scheme = GRID_SCHEMES[info.scheme]
+    lonlat = scheme.latlng_template.format(cell="__parent")
+    lon, lat = ("__ll[1]", "__ll[2]") if scheme.spec.longitude_first else ("__ll[2]", "__ll[1]")
     return (
         f"SELECT {lon} AS lon, {lat} AS lat FROM ("
         f"SELECT {lonlat} AS __ll FROM ("
@@ -113,7 +117,7 @@ def _admin_cells_probe_sql(con, info: AggregateInfo, source_sql: str, level: str
             "without geometry; pass explicit levels",
         )
     qcol = quote_identifier(info.cell_column)
-    geom_expr = geometry_to_geom_expr(con, f"({source_sql})", "geometry")
+    geom_expr = geometry_to_geom_expr(con, f"({source_sql})", BUILT_GEOMETRY_COLUMN)
     centroids = (
         f"SELECT {qcol}, ST_X(__c) AS lon, ST_Y(__c) AS lat FROM ("
         f"SELECT {qcol}, ST_Centroid({geom_expr}) AS __c FROM ({source_sql}) "
@@ -147,20 +151,20 @@ def plan_bands(
     ``max_probe_zoom`` caps the probed zoom range (e.g. to an archive's max
     zoom) so band transitions never land beyond it.
     """
-    if info.scheme == "admin":
+    if info.scheme == ADMIN_SCHEME:
         candidates: list[int | str] = ["country", "region"]
     elif levels is not None:
         candidates = [*levels, info.base_level]
     else:
         scheme = GRID_SCHEMES[info.scheme]
-        candidates = [*range(scheme.min_resolution, int(info.base_level)), info.base_level]
+        candidates = [*range(scheme.spec.min_resolution, int(info.base_level)), info.base_level]
 
     bpc = bytes_per_cell or estimate_bytes_per_cell(info.num_attributes, info.out_geometry)
     probe_zoom = MAX_PROBE_ZOOM if max_probe_zoom is None else max(0, max_probe_zoom)
-    _register_quadkey_udf(con)
+    load_index(con, get_index_spec("quadkey"))
     worst: dict[int | str, dict[int, int]] = {}
     for level in candidates:
-        if info.scheme == "admin":
+        if info.scheme == ADMIN_SCHEME:
             cells_sql = _admin_cells_probe_sql(con, info, source_sql, str(level))
         else:
             cells_sql = _grid_cells_probe_sql(info, source_sql, int(level))
@@ -185,7 +189,7 @@ def _auto_levels(
     ``[]`` when the base level already fits the budget. A geometry-less admin
     aggregate cannot be probed; it falls back to the only coarser level.
     """
-    if info.scheme == "admin" and info.out_geometry == "none":
+    if info.scheme == ADMIN_SCHEME and info.out_geometry == "none":
         return ["country"]
     bands = plan_bands(
         con,
@@ -202,22 +206,16 @@ def _write_overview(
     table: pa.Table,
     out_path: str,
     info: AggregateInfo,
-    compression: str,
+    compression: str | None,
     compression_level: int | None,
     gpq_version: str | None,
     verbose: bool,
     geo_bbox: list[float] | None = None,
 ) -> None:
-    if info.out_geometry == "none":
-        kwargs: dict[str, Any] = {"compression": compression}
-        if compression_level is not None:
-            kwargs["compression_level"] = compression_level
-        pq.write_table(table, out_path, **kwargs)
-        return
-    write_geoparquet_table(
+    write_aggregate_table(
         table,
         out_path,
-        geometry_column="geometry",
+        info.out_geometry,
         compression=compression,
         compression_level=compression_level,
         geoparquet_version=gpq_version,
@@ -232,14 +230,16 @@ def _overview_geo_bbox(con, table: pa.Table, info: AggregateInfo) -> list[float]
     A grid rollup regenerates parent geometry through the same seam-repairing
     builder the aggregate uses, so a parent cell can be a MultiPolygon cut at
     the antimeridian and needs the same bbox treatment (see
-    ``antimeridian_aware_bbox``). Best-effort: a bbox is metadata, so a failure
-    leaves it to the writer rather than losing the level.
+    ``geo_metadata.bounds_of(..., antimeridian=True)``). Best-effort: a bbox is
+    metadata, so a failure leaves it to the writer rather than losing the level.
     """
     if info.out_geometry == "none":
         return None
+    # Measured on the caller's connection, under its memory settings.
     con.register("__overview_result", table)
     try:
-        return antimeridian_aware_bbox(con, "__overview_result", "geometry")
+        source = QuerySource(con, "SELECT geometry FROM __overview_result")
+        return bounds_of(source, BUILT_GEOMETRY_COLUMN, antimeridian=True)
     except duckdb.Error as exc:  # pragma: no cover - defensive
         debug(f"Could not compute an antimeridian-aware bbox: {exc}")
         return None
@@ -256,7 +256,7 @@ def create_overviews(
     cell_column: str | None = None,
     scheme: str | None = None,
     output_dir: str | None = None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     force: bool = False,
@@ -290,6 +290,7 @@ def create_overviews(
         List of ``(level, output_path)`` for every overview written,
         coarse to fine.
     """
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     configure_verbose(verbose)
     with aggregate_connection(input_parquet, verbose, memory_limit) as (con, relation):
         info = detect_aggregate_info(con, relation, cell_column, scheme)
@@ -315,6 +316,7 @@ def create_overviews(
             geoparquet_version=geoparquet_version,
             verbose=verbose,
             show_sql=show_sql,
+            input_parquet=input_parquet,
         )
 
 
@@ -331,13 +333,24 @@ def _plan_levels(
 
 def _refuse_existing(paths: list[str], force: bool) -> None:
     """Refuse to silently overwrite files the user did not name one by one
-    (mirrors the --force gate on gpio pmtiles pyramid)."""
-    existing = [path for path in paths if Path(path).exists()]
-    if existing and not force:
-        raise InvalidParameterError(
-            "output",
-            f"overview output already exists: {', '.join(existing)}. Use --force to overwrite.",
-        )
+    (the --force gate gpio pmtiles pyramid shares, through the one owner)."""
+    for path in paths:
+        handle_output_overwrite(path, force, flag="--force", remove=False)
+
+
+def _input_bbox_field(con, source_sql: str, input_parquet: str | None, info) -> pa.Field | None:
+    """The input's bbox column a rolled-up level carries too, or None (#1121).
+
+    The column the composer would declare for the input (its declared covering,
+    or the conventional ``bbox`` struct): a level that dropped it lost the
+    covering every other write of the same data declares.
+    """
+    if info.out_geometry == "none":
+        return None
+    schema = query_schema(con, source_sql)
+    geo = sanitized_carried_geo_of_file(input_parquet) if input_parquet else None
+    name = bbox_column_to_declare(schema, geo)
+    return schema.field(name) if name else None
 
 
 def _build_levels(
@@ -347,14 +360,16 @@ def _build_levels(
     target_levels: list[int | str],
     outputs: list[str],
     *,
-    compression: str,
+    compression: str | None,
     compression_level: int | None,
     geoparquet_version: str | None,
     verbose: bool,
     show_sql: bool,
+    input_parquet: str | None = None,
 ) -> list[tuple[int | str, str]]:
     """Roll the input up to each level and write it as a sibling file."""
     source_sql = f"SELECT * FROM {relation}"
+    bbox_field = _input_bbox_field(con, source_sql, input_parquet, info)
     results: list[tuple[int | str, str]] = []
     for out_path in outputs:
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
@@ -362,7 +377,7 @@ def _build_levels(
         sql = build_level_sql(con, info, source_sql, level)
         if show_sql or verbose:
             debug(sql)
-        table = con.execute(sql).arrow().read_all()
+        table = with_input_bbox(con.sql(sql).arrow().read_all(), bbox_field)
         _write_overview(
             table,
             out_path,
@@ -390,7 +405,7 @@ def create_overview_file(
     cell_column: str | None = None,
     scheme: str | None = None,
     output_dir: str | None = None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     force: bool = False,
@@ -418,6 +433,7 @@ def create_overview_file(
     the knobs, the output path against the input and the ``level`` column,
     so a bad option costs no minutes of aggregation.
     """
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     from geoparquet_io.core.process.overview.overview_file import (
         DEFAULT_CELL_DETAIL,
         LevelInput,
@@ -464,6 +480,7 @@ def create_overview_file(
             geoparquet_version=geoparquet_version,
             verbose=verbose,
             show_sql=show_sql,
+            input_parquet=input_parquet,
         )
         # Coarse first: the built ladder, then the base, which is the input
         # itself and always the finest (OVERVIEWS_SPEC 4.2).
@@ -487,13 +504,8 @@ def _refuse_overview_out(input_parquet: str, overview_out: str, force: bool) -> 
     the siblings, is not silently replaced. Its ``level`` column must not
     shadow one the input already has (OVERVIEWS_SPEC 4.1) -- checked on the
     input before any rollup runs."""
-    if Path(overview_out).exists():
-        if Path(overview_out).samefile(input_parquet):
-            raise InvalidParameterError(
-                "overview_out", f"{overview_out} is the input; it would be destroyed while read"
-            )
-        _refuse_existing([overview_out], force)
-    names = [n for n in pq.read_schema(input_parquet).names if n.lower() == "level"]
+    handle_output_overwrite(overview_out, force, input_parquet, flag="--force", remove=False)
+    names = matching_columns("level", pq.read_schema(input_parquet).names)
     if names:
         raise InvalidParameterError(
             "input",
@@ -518,11 +530,13 @@ def _measured_gsds(con, paths: list[str], cell_detail: float) -> list[float]:
     gsds: list[float] = []
     for path in paths:
         url = resolve_file_url(path)
-        row = con.execute(
-            "SELECT median(ST_XMax(geometry) - ST_XMin(geometry)), "
-            "median(ST_YMax(geometry) - ST_YMin(geometry)) "
-            f"FROM read_parquet({sql_path(url)}) WHERE geometry IS NOT NULL"
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                "SELECT median(ST_XMax(geometry) - ST_XMin(geometry)), "
+                "median(ST_YMax(geometry) - ST_YMin(geometry)) "
+                f"FROM read_parquet({sql_path(url)}) WHERE geometry IS NOT NULL"
+            )
+        )
         dx, dy = (float(v or 0.0) for v in (row or (0.0, 0.0)))
         width_m = math.sqrt(dx * dy) * METERS_PER_DEGREE
         if not width_m > 0:

@@ -13,25 +13,42 @@ where PyArrow would require fsspec configuration.
 
 import json
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Literal
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.crs_utils import (
-    _projjson_from_authority,
+    _GEOARROW_EXTENSION_NAMES,
+    AUTHORITY_CODE_CRS,
+    UnresolvableCRSError,
+    column_is_geographic,
     geoarrow_crs_to_projjson,
-    merge_longitude_ranges,
+    projjson_for_label,
 )
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, sql_path
-from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    fetch_one,
+    sql_literal,
+    sql_path,
+)
+from geoparquet_io.core.edges import logical_type_algorithm
+from geoparquet_io.core.exceptions import (
+    FailureKind,
+    GeoParquetError,
+    InvalidParameterError,
+    classify_failure,
+    not_parquet_file_error,
+)
 from geoparquet_io.core.file_utils import (
     get_first_parquet_file,
     is_partition_path,
     resolve_file_url,
 )
+from geoparquet_io.core.geo_metadata import row_group_geometry_stats
 from geoparquet_io.core.geoarrow_compat import srid_crs_as_text
-from geoparquet_io.core.parquet_schema import root_schema_columns
+from geoparquet_io.core.parquet_schema import root_schema_columns, root_schema_index
 from geoparquet_io.core.remote import is_remote_url, is_s3_url, needs_httpfs
 
 # =============================================================================
@@ -59,7 +76,10 @@ def _resolve_local_path(parquet_file: str) -> str:
 
 
 def _pyarrow_get_kv_metadata(parquet_file: str) -> dict[bytes, bytes]:
-    """Get key-value metadata using PyArrow (fast path for local files)."""
+    """Get key-value metadata using PyArrow (fast path for local files).
+
+    The one footer read for both the KV and the ``geo`` readers.
+    """
     try:
         # Closed on exit, not left to the collector: an in-place `check --fix`
         # renames over this file next, and Windows refuses while a reader holds
@@ -69,35 +89,8 @@ def _pyarrow_get_kv_metadata(parquet_file: str) -> dict[bytes, bytes]:
         return dict(metadata) if metadata else {}
     except Exception as e:
         error_msg = str(e)
-        if "not a parquet file" in error_msg.lower() or "magic" in error_msg.lower():
-            raise GeoParquetError(
-                f"Not a valid Parquet file: {parquet_file}\n"
-                f"This command requires .parquet files with valid Parquet format.\n"
-                f"Hint: Use 'gpio convert geoparquet' to convert other formats."
-            ) from e
-        raise GeoParquetError(f"Cannot read file: {parquet_file}\n{error_msg}") from e
-
-
-def _pyarrow_get_geo_metadata(parquet_file: str) -> dict | None:
-    """Get and parse 'geo' metadata using PyArrow (fast path for local files)."""
-    try:
-        with pq.ParquetFile(parquet_file) as pf:
-            metadata = pf.metadata.metadata
-        if metadata and b"geo" in metadata:
-            return json.loads(metadata[b"geo"].decode("utf-8"))
-        return None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        # Unparsable 'geo' bytes mean "no usable geo metadata", the same answer
-        # invalid JSON already got -- not an unreadable file.
-        return None
-    except Exception as e:
-        error_msg = str(e)
-        if "not a parquet file" in error_msg.lower() or "magic" in error_msg.lower():
-            raise GeoParquetError(
-                f"Not a valid GeoParquet file: {parquet_file}\n"
-                f"This command requires .parquet files with valid Parquet format.\n"
-                f"Hint: Use 'gpio convert' to convert other formats to GeoParquet."
-            ) from e
+        if classify_failure(e).kind is FailureKind.NOT_PARQUET:
+            raise not_parquet_file_error(parquet_file) from e
         raise GeoParquetError(f"Cannot read file: {parquet_file}\n{error_msg}") from e
 
 
@@ -255,22 +248,11 @@ def _get_pyarrow_logical_type(field) -> str | None:
     1. geoarrow-pyarrow imported: CRS is in field.type.crs attribute
     2. geoarrow-pyarrow not imported: CRS is in field.metadata['ARROW:extension:metadata']
     """
-    geoarrow_extensions = (
-        "geoarrow.wkb",
-        "ogc.wkb",
-        "geoarrow.point",
-        "geoarrow.linestring",
-        "geoarrow.polygon",
-        "geoarrow.multipoint",
-        "geoarrow.multilinestring",
-        "geoarrow.multipolygon",
-        "geoarrow.geometry",
-    )
 
     # Check for extension type registered with PyArrow
     if hasattr(field.type, "extension_name"):
         ext_name = field.type.extension_name
-        if ext_name in geoarrow_extensions:
+        if ext_name in _GEOARROW_EXTENSION_NAMES:
             # Case 1: geoarrow-pyarrow is imported - CRS is in field.type.crs
             # This takes priority because geoarrow-pyarrow consumes the metadata.
             # `geoarrow_crs_to_projjson` is the one reader for that attribute
@@ -297,17 +279,7 @@ def _get_pyarrow_logical_type(field) -> str | None:
         ext_name = field.metadata.get(b"ARROW:extension:name")
         if ext_name:
             ext_name_str = ext_name.decode("utf-8") if isinstance(ext_name, bytes) else ext_name
-            if ext_name_str in (
-                "geoarrow.wkb",
-                "ogc.wkb",
-                "geoarrow.point",
-                "geoarrow.linestring",
-                "geoarrow.polygon",
-                "geoarrow.multipoint",
-                "geoarrow.multilinestring",
-                "geoarrow.multipolygon",
-                "geoarrow.geometry",
-            ):
+            if ext_name_str in _GEOARROW_EXTENSION_NAMES:
                 # Get extension metadata
                 ext_meta_raw = field.metadata.get(b"ARROW:extension:metadata")
                 if ext_meta_raw:
@@ -338,14 +310,22 @@ def _get_pyarrow_logical_type(field) -> str | None:
 # =============================================================================
 
 
-def _get_connection_for_file(parquet_file: str, existing_con=None, load_spatial=True):
+def _get_connection_for_file(
+    parquet_file: str, existing_con=None, load_spatial: bool | None = None
+):
     """Get or create DuckDB connection appropriate for file location.
 
     Args:
         parquet_file: Path or URL to the parquet file
         existing_con: Existing connection to reuse
-        load_spatial: Whether to load spatial extension (default: True)
-                     Set to False for metadata-only operations to save ~100ms
+        load_spatial: Whether to load spatial extension. Set to False for
+                     metadata-only operations to save ~100ms. The default
+                     (None) is the factory's auto mode, resolved by
+                     :func:`get_duckdb_connection` itself: spatial only when
+                     DuckDB's core lacks the GEOMETRY type (#1353); every
+                     caller that leaves it unset runs nothing beyond
+                     ``parquet_metadata()``/``parquet_schema()``/``DESCRIBE``,
+                     which DuckDB >= 2.0 covers without spatial.
 
     Returns:
         Tuple of (connection, should_close)
@@ -456,70 +436,12 @@ def _read_kv_entries(parquet_file: str, con=None) -> list[tuple[bytes | None, by
     except duckdb.InvalidInputException as e:
         # File is not a valid Parquet file (e.g., wrong format, corrupt)
         error_msg = str(e)
-        if "No magic bytes found" in error_msg or "not a parquet file" in error_msg.lower():
-            raise GeoParquetError(
-                f"Not a valid Parquet file: {parquet_file}\n"
-                f"This command requires .parquet files with valid Parquet format.\n"
-                f"Hint: Use 'gpio convert geoparquet' to convert other formats."
-            ) from e
+        if classify_failure(e).kind is FailureKind.NOT_PARQUET:
+            raise not_parquet_file_error(parquet_file) from e
         raise GeoParquetError(f"Invalid Parquet file: {parquet_file}\n{error_msg}") from e
     except duckdb.IOException as e:
         # File not found, permission denied, or other I/O error
         raise GeoParquetError(f"Cannot read file: {parquet_file}\n{str(e)}") from e
-    finally:
-        if should_close:
-            connection.close()
-
-
-def get_geo_metadata(parquet_file: str, con=None) -> dict | None:
-    """
-    Extract and parse 'geo' metadata key.
-
-    Returns parsed GeoParquet metadata dict or None if not present.
-
-    For local files, uses PyArrow for ~300x faster reads.
-    For remote files (S3, HTTP), uses DuckDB with httpfs.
-    """
-    # Fast path: use PyArrow for local files
-    resolved_path = _resolve_local_path(parquet_file)
-    if _is_local_file(resolved_path) and con is None:
-        return _pyarrow_get_geo_metadata(resolved_path)
-
-    # Slow path: use DuckDB for remote files or when connection is provided
-    import duckdb
-
-    metadata_path = _metadata_path(parquet_file)
-    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
-
-    try:
-        # Get raw bytes and decode manually to avoid DuckDB's VARCHAR escaping
-        result = connection.execute(f"""
-            SELECT value
-            FROM parquet_kv_metadata({sql_path(metadata_path)})
-            WHERE key::VARCHAR = 'geo'
-        """).fetchone()
-
-        if result and result[0]:
-            # Decode raw bytes to string and parse JSON
-            if isinstance(result[0], bytes):
-                json_str = result[0].decode("utf-8")
-            else:
-                json_str = str(result[0])
-            return json.loads(json_str)
-        return None
-    except duckdb.InvalidInputException as e:
-        # File is not a valid Parquet file (e.g., wrong format, corrupt)
-        raise GeoParquetError(
-            f"Not a valid GeoParquet file: {parquet_file}\n"
-            f"This command requires .parquet files with valid Parquet format.\n"
-            f"Hint: Use 'gpio convert' to convert other formats to GeoParquet."
-        ) from e
-    except duckdb.IOException as e:
-        # File not found, permission denied, or other I/O error
-        raise GeoParquetError(f"Cannot read file: {parquet_file}\n{str(e)}") from e
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        # Same answer as the PyArrow fast path: unparsable bytes = no metadata.
-        return None
     finally:
         if should_close:
             connection.close()
@@ -544,9 +466,11 @@ def get_file_metadata(parquet_file: str, con=None) -> dict:
     connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
 
     try:
-        result = connection.execute(f"""
+        result = fetch_one(
+            connection.execute(f"""
             SELECT * FROM parquet_file_metadata({sql_path(metadata_path)})
-        """).fetchone()
+        """)
+        )
 
         columns = [desc[0] for desc in connection.description]
         return dict(zip(columns, result, strict=True)) if result else {}
@@ -600,7 +524,7 @@ def get_usable_columns(parquet_file: str, con=None) -> list[dict]:
     """
     Get user-facing columns as DuckDB exposes them.
 
-    Uses DESCRIBE SELECT * FROM read_parquet() which returns the actual
+    Describes ``SELECT * FROM read_parquet()``, which returns the actual
     columns users can query. This handles quirky Parquet files that wrap
     all data in a struct (e.g., a 'schema' struct containing all fields).
 
@@ -610,12 +534,37 @@ def get_usable_columns(parquet_file: str, con=None) -> list[dict]:
     connection, should_close = _get_connection_for_file(parquet_file, con)
 
     try:
-        result = connection.execute(f"""
-            DESCRIBE SELECT * FROM read_parquet({sql_path(metadata_path)})
-        """).fetchall()
+        described = describe_query(
+            connection, f"SELECT * FROM read_parquet({sql_path(metadata_path)})"
+        )
+        return [{"name": name, "type": type_} for name, type_ in described]
+    finally:
+        if should_close:
+            connection.close()
 
-        # DESCRIBE returns: (column_name, column_type, null, key, default, extra)
-        return [{"name": row[0], "type": row[1]} for row in result]
+
+def get_usable_column_names(
+    parquet_file: str, con=None, *, read_expr: str | None = None
+) -> list[str]:
+    """The column names a query over the input can name (#963).
+
+    The one answer to "can the SQL I am about to write name this column?". The
+    physical schema (:func:`get_column_names`) cannot say yes to a hive
+    partition column, which ``read_parquet`` synthesizes from the directory
+    names and no file carries.
+
+    By default this is :func:`get_usable_columns`: the first file's
+    ``SELECT * FROM read_parquet()``, which exposes a hive column because DuckDB
+    detects ``key=value`` directories from that file's path. A caller that reads
+    more than that -- the union of every file under ``--allow-schema-diff``, an
+    explicit ``hive_partitioning`` -- passes the read expression it will use as
+    ``read_expr``, and the names are those of ``SELECT * FROM <read_expr>``.
+    """
+    if read_expr is None:
+        return [col["name"] for col in get_usable_columns(parquet_file, con)]
+    connection, should_close = _get_connection_for_file(parquet_file, con)
+    try:
+        return [name for name, _ in describe_query(connection, f"SELECT * FROM {read_expr}")]
     finally:
         if should_close:
             connection.close()
@@ -627,16 +576,36 @@ def get_row_group_metadata(parquet_file: str, con=None) -> list[dict]:
 
     Returns list of dicts with row_group_id, path_in_schema, stats_min, stats_max, etc.
     """
+    return _parquet_metadata_rows(parquet_file, con, "SELECT * FROM {source}", load_spatial=None)
+
+
+def _parquet_metadata_rows(
+    parquet_file: str, con, select: str | Callable[[str], str], *, load_spatial: bool | None
+) -> list[dict]:
+    """Rows of one query over the file's ``parquet_metadata()``, as dicts.
+
+    The one reader behind the per-row-group footer views here
+    (:func:`get_row_group_metadata`, :func:`get_compression_stats`,
+    :func:`get_row_group_sizes`): ``select`` names the table function as
+    ``{source}``; ``load_spatial`` is what differed between them (the raw view
+    keeps the connection factory's auto mode, the aggregates skip spatial). The connection is the caller's ``con`` or one
+    opened for the file and closed here.
+    """
     metadata_path = _metadata_path(parquet_file)
-    connection, should_close = _get_connection_for_file(parquet_file, con)
-
+    connection, should_close = _get_connection_for_file(
+        parquet_file, con, load_spatial=load_spatial
+    )
     try:
-        result = connection.execute(f"""
-            SELECT * FROM parquet_metadata({sql_path(metadata_path)})
-        """).fetchall()
-
-        columns = [desc[0] for desc in connection.description]
-        return [dict(zip(columns, row, strict=True)) for row in result]
+        source = f"parquet_metadata({sql_path(metadata_path)})"
+        # A constant query names the table function as ``{source}``; a query that
+        # interpolates a column name is a callable taking it, so no brace in the
+        # name can reach ``str.format``.
+        query = select(source) if callable(select) else select.format(source=source)
+        # The result's own description: a wrapped connection (validate's
+        # reopening one) answers ``execute`` but carries no ``description``.
+        result = connection.execute(query)
+        columns = [desc[0] for desc in result.description]
+        return [dict(zip(columns, row, strict=True)) for row in result.fetchall()]
     finally:
         if should_close:
             connection.close()
@@ -660,11 +629,10 @@ def get_compression_stats(parquet_file: str, con=None) -> list[dict]:
         - uncompressed_bytes: Total uncompressed size in bytes
         - ratio: Compression ratio (uncompressed / compressed), rounded to 2 decimals
     """
-    metadata_path = _metadata_path(parquet_file)
-    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
-
-    try:
-        result = connection.execute(f"""
+    return _parquet_metadata_rows(
+        parquet_file,
+        con,
+        """
             SELECT
                 path_in_schema AS column_name,
                 ANY_VALUE(compression) AS compression,
@@ -675,16 +643,12 @@ def get_compression_stats(parquet_file: str, con=None) -> list[dict]:
                     / NULLIF(SUM(total_compressed_size), 0),
                     2
                 ) AS ratio
-            FROM parquet_metadata({sql_path(metadata_path)})
+            FROM {source}
             GROUP BY path_in_schema
             ORDER BY compressed_bytes DESC
-        """).fetchall()
-
-        columns = [desc[0] for desc in connection.description]
-        return [dict(zip(columns, row, strict=True)) for row in result]
-    finally:
-        if should_close:
-            connection.close()
+        """,
+        load_spatial=False,
+    )
 
 
 def get_row_count(parquet_file: str, con=None) -> int:
@@ -693,58 +657,29 @@ def get_row_count(parquet_file: str, con=None) -> int:
     return metadata.get("num_rows", 0)
 
 
-def get_num_row_groups(parquet_file: str, con=None) -> int:
-    """Get number of row groups from file metadata."""
-    metadata = get_file_metadata(parquet_file, con)
-    return metadata.get("num_row_groups", 0)
-
-
 #: The prefixed CRS forms, which have the same ``a:b`` shape as a bare
 #: ``<authority>:<code>`` and must therefore be matched *before* it. ``srid:`` is
 #: an SRID (``srid:0`` meaning "unknown"), not an authority named "srid", and
 #: ``projjson:`` names a file-metadata key, not a CRS code.
 _PREFIXED_CRS_FORMS = ("projjson:", "srid:")
 
-#: A bare ``<authority>:<code>`` CRS, e.g. ``EPSG:32633`` or ``OGC:CRS84``.
-#:
-#: The Parquet geospatial spec permits it alongside ``srid:``, ``projjson:`` and
-#: inline PROJJSON, and geoarrow-based writers emit it whenever their CRS is a
-#: plain authority code. Deliberately narrow: an authority is an identifier and
-#: a code is alphanumeric, so neither ``<null>`` nor an empty ``crs=`` (what
-#: DuckDB emits for a type that declares no CRS) can match.
-_AUTHORITY_CODE_CRS = re.compile(r"^[A-Za-z][A-Za-z0-9_.\-]*:[A-Za-z0-9_.\-]+$")
-
-
-def _authority_code_crs(crs_value: Any) -> tuple[str, str] | None:
-    """The ``(authority, code)`` a bare ``<authority>:<code>`` CRS names, else None.
-
-    Returns None for the prefixed forms (``srid:``, ``projjson:``), which share
-    the shape but not the meaning, and for every value that is not that form.
-    """
-    if not isinstance(crs_value, str):
-        return None
-    token = crs_value.strip()
-    if token.lower().startswith(_PREFIXED_CRS_FORMS):
-        return None
-    if not _AUTHORITY_CODE_CRS.match(token):
-        return None
-    authority, code = token.split(":", 1)
-    return authority, code
-
 
 def resolve_authority_code_crs(crs_value: Any) -> Any:
-    """Resolve a bare ``<authority>:<code>`` CRS to PROJJSON, via pyproj.
+    """Resolve a bare ``<authority>:<code>`` CRS to PROJJSON, via the CRS owner.
 
-    Anything else -- another CRS form, an unknown authority, a code the PROJ
-    database does not carry -- is returned unchanged, so callers can keep
-    treating the value as opaque.
+    Anything else -- another CRS form, the prefixed ``srid:`` / ``projjson:``
+    forms, an unknown authority, a code the PROJ database does not carry -- is
+    returned unchanged, so callers can keep treating the value as opaque.
     """
-    pair = _authority_code_crs(crs_value)
-    if pair is None:
+    if not isinstance(crs_value, str):
         return crs_value
-
-    projjson = _projjson_from_authority(*pair)
-    return crs_value if projjson is None else json.loads(projjson)
+    token = crs_value.strip()
+    if token.lower().startswith(_PREFIXED_CRS_FORMS) or not AUTHORITY_CODE_CRS.match(token):
+        return crs_value
+    try:
+        return projjson_for_label(token)
+    except UnresolvableCRSError:
+        return crs_value
 
 
 #: The DuckDB spellings of "this geo logical type declares no CRS at all".
@@ -861,12 +796,10 @@ def parse_geometry_logical_type(logical_type: str) -> dict | None:
     if crs is not None:
         result["crs"] = crs
 
-    # Parse algorithm for Geography: the full parquet.thrift vocabulary, not
-    # just the 1.x pair -- an ellipsoidal algorithm read as "no algorithm"
-    # degraded to spherical in every caller's fallback (#1272).
-    algo_match = re.search(r"algorithm=(planar|spherical|vincenty|thomas|andoyer|karney)", params)
-    if algo_match:
-        result["algorithm"] = algo_match.group(1)
+    # Parse algorithm for Geography (the owner's reader, #1272).
+    algorithm = logical_type_algorithm(params)
+    if algorithm:
+        result["algorithm"] = algorithm
 
     # Parse geometry type and coordinate dimension from positional params
     # Split by comma but respect braces
@@ -913,12 +846,33 @@ def parse_geometry_logical_type(logical_type: str) -> dict | None:
     return result
 
 
+def native_geo_type(logical_type: object) -> str | None:
+    """``"GEOMETRY"``, ``"GEOGRAPHY"`` or None for a column's Parquet logical type.
+
+    The one answer to "is this column natively GEOMETRY or GEOGRAPHY?" (#1367).
+    Takes the logical type as either reader renders it: DuckDB's
+    ``parquet_schema()`` (``GeometryType(...)``/``GeographyType(...)``, the
+    ``logical_type`` of a :func:`get_schema_info` row) or PyArrow's
+    ``ColumnSchema.logical_type`` (``Geometry(...)``/``Geography(...)``).
+    """
+    text = str(logical_type or "")
+    if text.startswith("Geometry"):
+        return "GEOMETRY"
+    if text.startswith("Geography"):
+        return "GEOGRAPHY"
+    return None
+
+
+def is_native_geo_column(schema_info: list[dict] | None, column: str) -> str | None:
+    """:func:`native_geo_type` of ``column`` in :func:`get_schema_info` rows; None if absent."""
+    rows = schema_info or []
+    index = root_schema_index(rows, column)
+    return native_geo_type(rows[index].get("logical_type")) if index is not None else None
+
+
 def is_geometry_column(logical_type: str) -> bool:
-    """Check if logical_type indicates a geometry column."""
-    if not logical_type:
-        return False
-    # DuckDB returns GeometryType(...) and GeographyType(...) from parquet_schema()
-    return logical_type.startswith("GeometryType(") or logical_type.startswith("GeographyType(")
+    """Whether ``logical_type`` is a native GEOMETRY or GEOGRAPHY (see :func:`native_geo_type`)."""
+    return native_geo_type(logical_type) is not None
 
 
 def resolve_crs_reference(parquet_file: str, crs_value: Any) -> Any:
@@ -982,11 +936,8 @@ def resolve_crs_reference(parquet_file: str, crs_value: Any) -> Any:
             # `srid:0` is the type's spelling of an unknown CRS, not EPSG:0.
             return None
         try:
-            from pyproj import CRS
-
-            crs = CRS.from_authority("EPSG", int(srid))
-            return crs.to_json_dict()
-        except Exception:
+            return projjson_for_label(f"EPSG:{int(srid)}")
+        except (ValueError, UnresolvableCRSError):
             pass  # Fall through to return the original value
         return crs_value  # Return the srid string if resolution failed
 
@@ -1004,18 +955,13 @@ def detect_geometry_columns(parquet_file: str, con=None) -> dict[str, str]:
     schema = get_schema_info(parquet_file, con)
     geo_columns = {}
 
-    for col in schema:
+    for col in root_schema_columns(schema):
         logical_type = col.get("logical_type") or ""
         name = col.get("name", "")
 
-        if not name:
-            continue
-
-        # DuckDB returns GeometryType(...) and GeographyType(...) from parquet_schema()
-        if logical_type.startswith("GeometryType("):
-            geo_columns[name] = "Geometry"
-        elif logical_type.startswith("GeographyType("):
-            geo_columns[name] = "Geography"
+        kind = native_geo_type(logical_type)
+        if kind is not None:
+            geo_columns[name] = kind.title()
 
     return geo_columns
 
@@ -1046,42 +992,22 @@ def detect_native_geometry_columns(parquet_file: str, con=None) -> dict[str, str
     return {name: kind for name, kind in geo_columns.items() if name not in nested}
 
 
-def get_bbox_from_row_group_stats(
-    parquet_file: str, bbox_column: str = "bbox", con=None
-) -> list[float] | None:
-    """
-    Extract overall bbox from row group statistics.
+def _bbox_stats_aggregates(bbox_column: str) -> str:
+    """The four ``MIN/MAX(stats) FILTER`` columns over a bbox struct's chunk statistics."""
 
-    Queries parquet_metadata() for bbox columns (format: 'bbox, xmin' etc).
-    Returns [xmin, ymin, xmax, ymax] or None if not available.
-    """
-    metadata_path = _metadata_path(parquet_file)
-    connection, should_close = _get_connection_for_file(parquet_file, con)
+    # path_in_schema is compared against a string LITERAL, not an identifier.
+    def field(axis: str) -> str:
+        return sql_literal(f"{bbox_column}, {axis}")
 
-    try:
-        # DuckDB uses 'bbox, xmin' format for path_in_schema (comma-space)
-        # Use FILTER to aggregate stats for each bbox component
-        # Use TRY_CAST to handle non-numeric stats gracefully
-        escaped_bbox_col = _escape_sql_string(bbox_column)
-        result = connection.execute(f"""
-            SELECT
+    return f"""
                 MIN(TRY_CAST(stats_min AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped_bbox_col}, xmin') as xmin,
+                    FILTER (WHERE path_in_schema = {field("xmin")}) as xmin,
                 MIN(TRY_CAST(stats_min AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped_bbox_col}, ymin') as ymin,
+                    FILTER (WHERE path_in_schema = {field("ymin")}) as ymin,
                 MAX(TRY_CAST(stats_max AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped_bbox_col}, xmax') as xmax,
+                    FILTER (WHERE path_in_schema = {field("xmax")}) as xmax,
                 MAX(TRY_CAST(stats_max AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped_bbox_col}, ymax') as ymax
-            FROM parquet_metadata({sql_path(metadata_path)})
-        """).fetchone()
-
-        if result and all(v is not None for v in result):
-            return [float(v) for v in result]
-        return None
-    finally:
-        if should_close:
-            connection.close()
+                    FILTER (WHERE path_in_schema = {field("ymax")}) as ymax"""
 
 
 def get_per_row_group_bbox_stats(
@@ -1092,44 +1018,26 @@ def get_per_row_group_bbox_stats(
 
     Returns list of dicts with row_group_id, xmin, ymin, xmax, ymax.
     """
-    metadata_path = _metadata_path(parquet_file)
     # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
-    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
-
-    try:
-        # DuckDB uses 'bbox, xmin' format for path_in_schema (comma-space)
-        # Use TRY_CAST to handle non-numeric stats gracefully
-        escaped_bbox_col = _escape_sql_string(bbox_column)
-        result = connection.execute(f"""
-            SELECT
-                row_group_id,
-                MIN(TRY_CAST(stats_min AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped_bbox_col}, xmin') as xmin,
-                MIN(TRY_CAST(stats_min AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped_bbox_col}, ymin') as ymin,
-                MAX(TRY_CAST(stats_max AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped_bbox_col}, xmax') as xmax,
-                MAX(TRY_CAST(stats_max AS DOUBLE))
-                    FILTER (WHERE path_in_schema = '{escaped_bbox_col}, ymax') as ymax
-            FROM parquet_metadata({sql_path(metadata_path)})
+    rows = _parquet_metadata_rows(
+        parquet_file,
+        con,
+        lambda source: (
+            f"""
+            SELECT row_group_id, {_bbox_stats_aggregates(bbox_column)}
+            FROM {source}
             GROUP BY row_group_id
             ORDER BY row_group_id
-        """).fetchall()
-
-        return [
-            {
-                "row_group_id": row[0],
-                "xmin": row[1],
-                "ymin": row[2],
-                "xmax": row[3],
-                "ymax": row[4],
-            }
-            for row in result
-            if all(v is not None for v in row[1:])
-        ]
-    finally:
-        if should_close:
-            connection.close()
+        """
+        ),
+        load_spatial=False,
+    )
+    keys = ("xmin", "ymin", "xmax", "ymax")
+    return [
+        {"row_group_id": row["row_group_id"], **{k: row[k] for k in keys}}
+        for row in rows
+        if all(row[k] is not None for k in keys)
+    ]
 
 
 def get_compression_info(parquet_file: str, column_name: str | None = None, con=None) -> dict:
@@ -1138,23 +1046,17 @@ def get_compression_info(parquet_file: str, column_name: str | None = None, con=
 
     Returns dict mapping column path to compression algorithm.
     """
-    metadata_path = _metadata_path(parquet_file)
-    # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
-    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
+    where = f" WHERE path_in_schema = {sql_literal(column_name)}" if column_name else ""
 
-    try:
-        query = f"""
+    def query(source: str) -> str:
+        return f"""
             SELECT DISTINCT path_in_schema, compression
-            FROM parquet_metadata({sql_path(metadata_path)})
-        """
-        if column_name:
-            query += f" WHERE path_in_schema = '{_escape_sql_string(column_name)}'"
+            FROM {source}
+        {where}"""
 
-        result = connection.execute(query).fetchall()
-        return {row[0]: row[1] for row in result}
-    finally:
-        if should_close:
-            connection.close()
+    # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
+    rows = _parquet_metadata_rows(parquet_file, con, query, load_spatial=False)
+    return {row["path_in_schema"]: row["compression"] for row in rows}
 
 
 def get_row_group_stats_summary(parquet_file: str, con=None) -> dict:
@@ -1163,10 +1065,8 @@ def get_row_group_stats_summary(parquet_file: str, con=None) -> dict:
 
     Returns dict with num_groups, total_rows, avg_rows_per_group, total_size, avg_group_size.
     """
-    metadata_path = _metadata_path(parquet_file)
     # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
     connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
-
     try:
         # Get file-level info
         file_meta = get_file_metadata(parquet_file, connection)
@@ -1174,24 +1074,24 @@ def get_row_group_stats_summary(parquet_file: str, con=None) -> dict:
         total_rows = file_meta.get("num_rows", 0)
 
         # Get total size from row groups
-        result = connection.execute(f"""
-            SELECT
-                SUM(total_compressed_size) as total_size
-            FROM parquet_metadata({sql_path(metadata_path)})
-        """).fetchone()
-
-        total_size = result[0] if result and result[0] else 0
-
-        return {
-            "num_groups": num_groups,
-            "total_rows": total_rows,
-            "avg_rows_per_group": total_rows / num_groups if num_groups > 0 else 0,
-            "total_size": total_size,
-            "avg_group_size": total_size / num_groups if num_groups > 0 else 0,
-        }
+        rows = _parquet_metadata_rows(
+            parquet_file,
+            connection,
+            "SELECT SUM(total_compressed_size) AS total_size FROM {source}",
+            load_spatial=False,
+        )
     finally:
         if should_close:
             connection.close()
+
+    total_size = rows[0]["total_size"] if rows and rows[0]["total_size"] else 0
+    return {
+        "num_groups": num_groups,
+        "total_rows": total_rows,
+        "avg_rows_per_group": total_rows / num_groups if num_groups > 0 else 0,
+        "total_size": total_size,
+        "avg_group_size": total_size / num_groups if num_groups > 0 else 0,
+    }
 
 
 def get_row_group_sizes(parquet_file: str, con=None) -> list[dict]:
@@ -1206,27 +1106,29 @@ def get_row_group_sizes(parquet_file: str, con=None) -> list[dict]:
         One dict per row group, ordered by row_group_id, with ``row_group_id``,
         ``num_rows`` and ``compressed_bytes`` (summed over all column chunks).
     """
-    metadata_path = _metadata_path(parquet_file)
     # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
-    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
-
-    try:
-        result = connection.execute(f"""
+    rows = _parquet_metadata_rows(
+        parquet_file,
+        con,
+        """
             SELECT
                 row_group_id,
                 MIN(row_group_num_rows) AS num_rows,
                 SUM(total_compressed_size)::BIGINT AS compressed_bytes
-            FROM parquet_metadata({sql_path(metadata_path)})
+            FROM {source}
             GROUP BY row_group_id
             ORDER BY row_group_id
-        """).fetchall()
-        return [
-            {"row_group_id": row[0], "num_rows": int(row[1]), "compressed_bytes": int(row[2])}
-            for row in result
-        ]
-    finally:
-        if should_close:
-            connection.close()
+        """,
+        load_spatial=False,
+    )
+    return [
+        {
+            "row_group_id": row["row_group_id"],
+            "num_rows": int(row["num_rows"]),
+            "compressed_bytes": int(row["compressed_bytes"]),
+        }
+        for row in rows
+    ]
 
 
 def get_bloom_filter_info(parquet_file: str, con=None) -> list[dict]:
@@ -1244,11 +1146,10 @@ def get_bloom_filter_info(parquet_file: str, con=None) -> list[dict]:
         - bloom_filter_coverage_pct: Percentage of row groups with bloom filters
         - total_bloom_filter_bytes: Total size of bloom filter data in bytes
     """
-    metadata_path = _metadata_path(parquet_file)
-    connection, should_close = _get_connection_for_file(parquet_file, con, load_spatial=False)
-
-    try:
-        result = connection.execute(f"""
+    return _parquet_metadata_rows(
+        parquet_file,
+        con,
+        """
             SELECT
                 path_in_schema AS column_name,
                 COUNT(*) AS row_groups,
@@ -1257,37 +1158,39 @@ def get_bloom_filter_info(parquet_file: str, con=None) -> list[dict]:
                     100.0 * COUNT(bloom_filter_offset) / COUNT(*), 1
                 ) AS bloom_filter_coverage_pct,
                 COALESCE(SUM(bloom_filter_length), 0) AS total_bloom_filter_bytes
-            FROM parquet_metadata({sql_path(metadata_path)})
+            FROM {source}
             GROUP BY path_in_schema
             ORDER BY row_groups_with_bloom_filter DESC, path_in_schema
-        """).fetchall()
-
-        columns = [desc[0] for desc in connection.description]
-        return [dict(zip(columns, row, strict=True)) for row in result]
-    finally:
-        if should_close:
-            connection.close()
+        """,
+        load_spatial=False,
+    )
 
 
-def find_primary_geometry_column_duckdb(parquet_file: str, con=None) -> str:
+def get_row_group_bbox_stats(
+    parquet_file: str,
+    *,
+    bbox_column: Callable[[], str | None],
+    native: Callable[[], list[dict]] | None = None,
+) -> tuple[list[dict], Literal["native", "bbox_struct"] | None]:
+    """Per-row-group bboxes and where they came from, or ``([], None)`` (#1367 concept 17).
+
+    The one reader of a file's per-row-group spatial statistics: native Parquet
+    geo statistics first, then a bbox covering column's chunk statistics.
+    ``bbox_column`` resolves the covering column, called only when the native
+    rung is empty (the resolution lives above this module, in
+    ``bbox_structure``). ``native`` replaces the native rung for a caller that
+    reads one named column; by default it is the file's primary geometry
+    (:func:`get_per_row_group_native_geo_stats`).
     """
-    Find primary geometry column from GeoParquet metadata.
-
-    Falls back to 'geometry' if no metadata found.
-    """
-    geo_meta = get_geo_metadata(parquet_file, con)
-
-    if not geo_meta:
-        return "geometry"
-
-    if isinstance(geo_meta, dict):
-        return geo_meta.get("primary_column", "geometry")
-    elif isinstance(geo_meta, list):
-        for col in geo_meta:
-            if isinstance(col, dict) and col.get("primary", False):
-                return col.get("name", "geometry")
-
-    return "geometry"
+    stats = native() if native is not None else get_per_row_group_native_geo_stats(parquet_file)
+    if stats:
+        return stats, "native"
+    column = bbox_column()
+    if column:
+        stats = get_per_row_group_bbox_stats(parquet_file, column)
+        if stats:
+            return stats, "bbox_struct"
+    return [], None
 
 
 def get_native_geo_stats_by_row_group(
@@ -1304,7 +1207,7 @@ def get_native_geo_stats_by_row_group(
         None if the file carries no column of that name, otherwise one dict per
         column chunk carrying statistics, ordered by row group: row_group_id,
         xmin/ymin/xmax/ymax, zmin/zmax (None when absent) and geometry_types
-        (raw type codes, for :func:`_format_geo_types`).
+        (raw type codes, named by ``geo_metadata.geometry_type_name``).
 
     Raises:
         Whatever DuckDB raises when the file itself cannot be read. ``None``
@@ -1312,28 +1215,26 @@ def get_native_geo_stats_by_row_group(
         unreachable or corrupt file as the failure it is instead of diagnosing
         it as a missing geometry column.
     """
-    metadata_path = _metadata_path(parquet_file)
-    connection, should_close = _get_connection_for_file(parquet_file, con)
-
-    try:
-        # path_in_schema is compared against a string LITERAL, not an
-        # identifier, so the guard is _escape_sql_string, not quote_identifier.
-        escaped_geom_col = _escape_sql_string(geometry_column)
-        rows = connection.execute(f"""
+    # path_in_schema is compared against a string LITERAL, not an
+    # identifier, so the guard is sql_literal, not quote_identifier.
+    rows = _parquet_metadata_rows(
+        parquet_file,
+        con,
+        lambda source: (
+            f"""
             SELECT row_group_id, geo_bbox, geo_types
-            FROM parquet_metadata({sql_path(metadata_path)})
-            WHERE path_in_schema = '{escaped_geom_col}'
+            FROM {source}
+            WHERE path_in_schema = {sql_literal(geometry_column)}
             ORDER BY row_group_id
-        """).fetchall()
-    finally:
-        if should_close:
-            connection.close()
-
+        """
+        ),
+        load_spatial=None,
+    )
     if not rows:
         return None
 
     chunks = []
-    for row_group_id, geo_bbox, geo_types in rows:
+    for row_group_id, geo_bbox, geo_types in (tuple(r.values()) for r in rows):
         if not geo_bbox and not geo_types:
             continue
         bbox = geo_bbox or {}
@@ -1352,50 +1253,9 @@ def get_native_geo_stats_by_row_group(
     return chunks
 
 
-def get_native_geo_statistics(parquet_file: str, geometry_column: str, con=None) -> dict | None:
-    """
-    Get native Parquet GeospatialStatistics for a geometry column.
-
-    This retrieves the geo_bbox and geo_types from the Parquet column metadata,
-    which is part of the native Parquet geospatial support (not GeoParquet metadata).
-
-    Reports the first column chunk that carries statistics; for the whole file's
-    bounds use :func:`get_aggregated_native_geo_stats`.
-
-    Args:
-        parquet_file: Path to the parquet file
-        geometry_column: Name of the geometry column
-        con: Optional existing DuckDB connection
-
-    Returns:
-        dict with 'bbox' (list of 4 floats) and 'geometry_types' (list of strings),
-        or None if not available
-    """
-    try:
-        chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column, con)
-    except Exception:
-        return None
-    if not chunks:
-        return None
-
-    stats: dict = {}
-
-    # Both halves must describe the same column chunk: reporting one row group's
-    # bbox beside another's geometry types would be a dict that matches no row
-    # group in the file.
-    first = next((c for c in chunks if c["xmin"] is not None), chunks[0])
-    if first["xmin"] is not None:
-        stats["bbox"] = [first["xmin"], first["ymin"], first["xmax"], first["ymax"]]
-        if first["zmin"] is not None:
-            stats["bbox"].extend([first["zmin"], first["zmax"]])
-
-    if first["geometry_types"]:
-        stats["geometry_types"] = _format_geo_types(first["geometry_types"])
-
-    return stats if stats else None
-
-
-def get_aggregated_native_geo_stats(parquet_file: str, geometry_column: str, con=None) -> dict:
+def get_aggregated_native_geo_stats(
+    parquet_file: str, geometry_column: str, con=None, *, geographic: bool | None = None
+) -> dict:
     """
     Get aggregated native Parquet GeospatialStatistics across all row groups.
 
@@ -1405,6 +1265,8 @@ def get_aggregated_native_geo_stats(parquet_file: str, geometry_column: str, con
         parquet_file: Path to the parquet file
         geometry_column: Name of the geometry column
         con: Optional existing DuckDB connection
+        geographic: Whether the column's CRS is geographic, when the caller has
+            already read it; None reads it (``crs_utils.column_is_geographic``)
 
     Returns:
         dict with 'bbox' (list of 4+ floats) and 'geometry_types' (list of strings)
@@ -1413,46 +1275,46 @@ def get_aggregated_native_geo_stats(parquet_file: str, geometry_column: str, con
         chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column, con)
     except Exception:
         return {}
-    return aggregate_native_geo_stats(chunks) if chunks else {}
+    if not chunks:
+        return {}
+    if geographic is None:
+        geographic = column_is_geographic(parquet_file, geometry_column)
+    return aggregate_native_geo_stats(chunks, geographic=geographic)
 
 
-def aggregate_native_geo_stats(chunks: list[dict]) -> dict:
-    """Combine per-column-chunk statistics into one bbox and type list.
+def aggregate_native_geo_stats(chunks: list[dict], *, geographic: bool) -> dict:
+    """Per-column-chunk statistics as one ``{'bbox', 'geometry_types'}`` dict.
 
-    A chunk whose ``xmin`` exceeds its ``xmax`` wraps the antimeridian, which
-    the Parquet geospatial statistics permit; ``merge_longitude_ranges`` unions
-    the X ranges on the circle so the wrap is not inverted into its complement.
+    A reader over ``geo_metadata.row_group_geometry_stats``, the one fold: X
+    merged on the circle when ``geographic`` (a chunk may wrap the
+    antimeridian), plainly for a projected CRS, Z over the chunks
+    that carry it, the bbox in the spec's interleaved layout, and spec type
+    names only (code 0 and unknown values dropped). A key is absent when
+    nothing supplies it.
 
     Args:
         chunks: Output of :func:`get_native_geo_stats_by_row_group`
-
-    Returns:
-        dict with 'bbox' (list of 4+ floats) and 'geometry_types' (list of strings)
     """
+    folded = row_group_geometry_stats(chunks, geographic=geographic)
     stats: dict = {}
-
-    with_bbox = [c for c in chunks if c["xmin"] is not None]
-    if with_bbox:
-        xmin, xmax = merge_longitude_ranges([(c["xmin"], c["xmax"]) for c in with_bbox])
-        stats["bbox"] = [
-            xmin,
-            min(c["ymin"] for c in with_bbox),
-            xmax,
-            max(c["ymax"] for c in with_bbox),
-        ]
-        with_z = [c for c in with_bbox if c["zmin"] is not None]
-        if with_z:
-            stats["bbox"].extend([min(c["zmin"] for c in with_z), max(c["zmax"] for c in with_z)])
-
-    raw_types = [t for c in chunks for t in c["geometry_types"] if t or t == 0]
-    if raw_types:
-        stats["geometry_types"] = _format_geo_types(raw_types)
-
+    if folded.bbox is not None:
+        stats["bbox"] = folded.bbox
+    if folded.geometry_types:
+        stats["geometry_types"] = folded.geometry_types
     return stats
 
 
+def _chunk_bboxes(chunks: list[dict]) -> list[dict]:
+    """The per-row-group bbox rows of the chunks that carry one."""
+    return [
+        {key: chunk[key] for key in ("row_group_id", "xmin", "ymin", "xmax", "ymax")}
+        for chunk in chunks
+        if chunk["xmin"] is not None
+    ]
+
+
 def get_per_row_group_native_geo_stats(
-    parquet_file: str, geometry_column: str | None = None, con=None
+    parquet_file: str, geometry_column: str | None = None, con=None, *, strict: bool = False
 ) -> list[dict]:
     """
     Get per-row-group native Parquet geo_bbox statistics.
@@ -1464,141 +1326,34 @@ def get_per_row_group_native_geo_stats(
         parquet_file: Path to the parquet file
         geometry_column: Name of the geometry column (auto-detected if None)
         con: Optional existing DuckDB connection
+        strict: For a caller that named ``geometry_column`` itself (the preview's
+            explicit column): a column the file does not have raises
+            ``InvalidParameterError`` and a file that cannot be read raises,
+            instead of both reading as "no statistics". Ignored when the column
+            is auto-detected.
 
     Returns:
         List of dicts with row_group_id, xmin, ymin, xmax, ymax (empty if no stats)
     """
     if not geometry_column:
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
+
         try:
-            geometry_column = find_primary_geometry_column_duckdb(parquet_file, con)
+            geometry_column = primary_geometry_column(parquet_file, con=con)
         except Exception:
             return []
+        if geometry_column is None:
+            return []
+    elif strict:
+        chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column, con)
+        if chunks is None:
+            raise InvalidParameterError(
+                "geometry_column", f"the file has no column named {geometry_column!r}"
+            )
+        return _chunk_bboxes(chunks)
 
     try:
         chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column, con)
     except Exception:
         return []
-    if not chunks:
-        return []
-
-    return [
-        {
-            "row_group_id": chunk["row_group_id"],
-            "xmin": chunk["xmin"],
-            "ymin": chunk["ymin"],
-            "xmax": chunk["xmax"],
-            "ymax": chunk["ymax"],
-        }
-        for chunk in chunks
-        if chunk["xmin"] is not None
-    ]
-
-
-def _format_geo_types(geo_types: list) -> list[str]:
-    """
-    Format geo_types from parquet_metadata into human-readable strings.
-
-    DuckDB may return strings like 'polygon' or WKB integer codes.
-    This normalizes them to standard names like 'Polygon', 'Point Z', etc.
-    """
-    # WKB type code to name mapping (from Parquet geo spec)
-    WKB_TYPE_CODES = {
-        # XY
-        1: "Point",
-        2: "LineString",
-        3: "Polygon",
-        4: "MultiPoint",
-        5: "MultiLineString",
-        6: "MultiPolygon",
-        7: "GeometryCollection",
-        # XYZ (add 1000)
-        1001: "Point Z",
-        1002: "LineString Z",
-        1003: "Polygon Z",
-        1004: "MultiPoint Z",
-        1005: "MultiLineString Z",
-        1006: "MultiPolygon Z",
-        1007: "GeometryCollection Z",
-        # XYM (add 2000)
-        2001: "Point M",
-        2002: "LineString M",
-        2003: "Polygon M",
-        2004: "MultiPoint M",
-        2005: "MultiLineString M",
-        2006: "MultiPolygon M",
-        2007: "GeometryCollection M",
-        # XYZM (add 3000)
-        3001: "Point ZM",
-        3002: "LineString ZM",
-        3003: "Polygon ZM",
-        3004: "MultiPoint ZM",
-        3005: "MultiLineString ZM",
-        3006: "MultiPolygon ZM",
-        3007: "GeometryCollection ZM",
-    }
-
-    formatted = []
-    for t in geo_types:
-        if isinstance(t, int):
-            # WKB integer code
-            formatted.append(WKB_TYPE_CODES.get(t, f"Unknown({t})"))
-        elif isinstance(t, str):
-            # DuckDB returns lowercase strings like 'polygon'
-            # Capitalize properly
-            t_lower = t.lower()
-            if t_lower == "point":
-                formatted.append("Point")
-            elif t_lower == "linestring":
-                formatted.append("LineString")
-            elif t_lower == "polygon":
-                formatted.append("Polygon")
-            elif t_lower == "multipoint":
-                formatted.append("MultiPoint")
-            elif t_lower == "multilinestring":
-                formatted.append("MultiLineString")
-            elif t_lower == "multipolygon":
-                formatted.append("MultiPolygon")
-            elif t_lower == "geometrycollection":
-                formatted.append("GeometryCollection")
-            elif t_lower.endswith(" zm") or t_lower.endswith("zm"):
-                # Handle ZM variants (check first - most specific)
-                if t_lower.endswith(" zm"):
-                    base = t_lower[:-3]  # Strip " zm"
-                else:
-                    base = t_lower[:-2]  # Strip "zm"
-                formatted.append(_capitalize_geom_type(base) + " ZM")
-            elif t_lower.endswith(" z") or t_lower.endswith("z"):
-                # Handle Z variants
-                if t_lower.endswith(" z"):
-                    base = t_lower[:-2]  # Strip " z"
-                else:
-                    base = t_lower[:-1]  # Strip "z"
-                formatted.append(_capitalize_geom_type(base) + " Z")
-            elif t_lower.endswith(" m") or t_lower.endswith("m"):
-                # Handle M variants
-                if t_lower.endswith(" m"):
-                    base = t_lower[:-2]  # Strip " m"
-                else:
-                    base = t_lower[:-1]  # Strip "m"
-                formatted.append(_capitalize_geom_type(base) + " M")
-            else:
-                # Fallback: just capitalize
-                formatted.append(t.title())
-        else:
-            formatted.append(str(t))
-
-    return sorted(set(formatted))
-
-
-def _capitalize_geom_type(name: str) -> str:
-    """Capitalize geometry type name properly."""
-    name_map = {
-        "point": "Point",
-        "linestring": "LineString",
-        "polygon": "Polygon",
-        "multipoint": "MultiPoint",
-        "multilinestring": "MultiLineString",
-        "multipolygon": "MultiPolygon",
-        "geometrycollection": "GeometryCollection",
-    }
-    return name_map.get(name.lower().strip(), name.title())
+    return _chunk_bboxes(chunks or [])

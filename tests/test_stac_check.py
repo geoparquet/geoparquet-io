@@ -2,6 +2,7 @@
 
 import json
 import os
+from datetime import UTC
 
 import click
 import pystac
@@ -13,7 +14,7 @@ from geoparquet_io.core.stac_check import check_stac, validate_stac_file
 @pytest.fixture
 def valid_stac_item(temp_output_dir):
     """Create a valid STAC Item JSON file for testing."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     # Use pystac to create item with correct version for installed pystac
     item = pystac.Item(
@@ -23,7 +24,7 @@ def valid_stac_item(temp_output_dir):
             "coordinates": [[[-180, -90], [180, -90], [180, 90], [-180, 90], [-180, -90]]],
         },
         bbox=[-180, -90, 180, 90],
-        datetime=datetime(2024, 11, 8, 0, 0, 0, tzinfo=timezone.utc),
+        datetime=datetime(2024, 11, 8, 0, 0, 0, tzinfo=UTC),
         properties={},
     )
     item.add_link(pystac.Link("self", "./test-item.json", "application/json"))
@@ -143,13 +144,14 @@ def test_validate_missing_required_fields(temp_output_dir):
 
 def test_validate_bbox_ordering(temp_output_dir):
     """Test validation catches invalid bbox ordering."""
-    # Create Item with invalid bbox (xmin > xmax)
+    # Create Item with invalid bbox (ymin > ymax). xmin > xmax alone is the
+    # antimeridian wrap RFC 7946 5.2 allows, no longer an ordering error.
     invalid_bbox_item = {
         "type": "Feature",
         "stac_version": "1.1.0",
         "id": "invalid-bbox",
         "geometry": {"type": "Point", "coordinates": [0, 0]},
-        "bbox": [10, -90, -10, 90],  # Invalid: xmin > xmax
+        "bbox": [-10, 90, 10, -90],  # Invalid: ymin > ymax
         "properties": {"datetime": "2024-01-01T00:00:00Z"},
         "assets": {},
         "links": [],

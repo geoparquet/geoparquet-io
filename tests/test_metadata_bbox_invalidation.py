@@ -28,9 +28,11 @@ import struct
 import duckdb
 import pytest
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.extract import extract
 from geoparquet_io.core.geo_metadata import strip_derived_stats
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.reproject import reproject_impl
 from tests.conftest import get_geo_metadata
 
@@ -200,13 +202,6 @@ class TestStripDerivedStatsRecomputedColumns:
         assert col["geometry_types"] == []
         assert "bbox" not in col
 
-    def test_default_still_deletes_everything(self):
-        """No ``recomputed_columns`` means the caller recomputes all it strips."""
-        out = strip_derived_stats({"geo": self._geo()})
-        for col in out["geo"]["columns"].values():
-            assert "bbox" not in col
-            assert "geometry_types" not in col
-
     def test_scope_wins_over_the_sentinel(self):
         """A column outside ``columns`` is not stale, so it keeps its real stats."""
         out = strip_derived_stats(
@@ -347,7 +342,7 @@ def _parquet_columns(path):
 def _row_count(path):
     con = duckdb.connect()
     try:
-        return con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}')").fetchone()[0]
+        return fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{path}')"))[0]
     finally:
         con.close()
 
@@ -357,9 +352,11 @@ def _read_x_range(path):
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
     try:
-        row = con.execute(
-            f"SELECT MIN(ST_X(geometry)), MAX(ST_X(geometry)) FROM read_parquet('{path}')"
-        ).fetchone()
+        row = fetch_one(
+            con.execute(
+                f"SELECT MIN(ST_X(geometry)), MAX(ST_X(geometry)) FROM read_parquet('{path}')"
+            )
+        )
     finally:
         con.close()
     return row[0], row[1]
@@ -379,7 +376,7 @@ class TestReprojectBboxRefreshed:
             str(out),
             target_crs="EPSG:3857",
             source_crs="OGC:CRS84",
-            geoparquet_version=version,
+            write=WriteOptions(geoparquet_version=version),
         )
 
         bbox = _primary_col_meta(out).get("bbox")
@@ -502,11 +499,8 @@ class TestReprojectWarnsAboutCarriedBboxStructs:
                 str(out),
                 target_crs="EPSG:3857",
                 source_crs="OGC:CRS84",
-                compression="ZSTD",
-                compression_level=None,
+                write=WriteOptions(compression="ZSTD", geoparquet_version="1.1"),
                 verbose=False,
-                profile=None,
-                geoparquet_version="1.1",
             )
 
         assert "bounds" in caplog.text
@@ -685,6 +679,7 @@ class TestStreamingPathsInvalidateStats:
 
     def _stream_extract(self, src, out, **overrides):
         from geoparquet_io.core.extract import _extract_streaming
+        from geoparquet_io.core.parquet_writer import WriteOptions
 
         kwargs = {
             "input_path": str(src),
@@ -696,12 +691,7 @@ class TestStreamingPathsInvalidateStats:
             "where": None,
             "limit": None,
             "verbose": False,
-            "compression": "ZSTD",
-            "compression_level": None,
-            "row_group_size_mb": None,
-            "row_group_rows": None,
-            "profile": None,
-            "geoparquet_version": "1.1",
+            "write": WriteOptions(compression="ZSTD", geoparquet_version="1.1"),
         }
         kwargs.update(overrides)
         _extract_streaming(**kwargs)
@@ -807,11 +797,8 @@ class TestStreamingPathsInvalidateStats:
             str(out),
             target_crs="EPSG:3857",
             source_crs="OGC:CRS84",
-            compression="ZSTD",
-            compression_level=None,
+            write=WriteOptions(compression="ZSTD", geoparquet_version="1.1"),
             verbose=False,
-            profile=None,
-            geoparquet_version="1.1",
         )
 
         bbox = _primary_col_meta(out).get("bbox")

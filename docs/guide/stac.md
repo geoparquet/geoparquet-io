@@ -111,7 +111,7 @@ gpio publish stac partitions/ . \
 
 ## Overwriting Existing Files
 
-Use `--overwrite` to replace existing STAC files:
+An existing file at any output path is refused unless you pass `--overwrite`, whatever it holds. Use `--overwrite` to replace it:
 
 ```bash
 gpio publish stac data.parquet output.json --bucket s3://bucket/data/ --overwrite

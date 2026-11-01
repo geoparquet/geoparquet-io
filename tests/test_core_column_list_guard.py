@@ -29,7 +29,7 @@ import pytest
 
 import geoparquet_io as gpio
 from geoparquet_io.api import ops
-from geoparquet_io.core import arcgis, carto, pmtiles
+from geoparquet_io.core import arcgis, carto, column_selection, pmtiles
 from geoparquet_io.core import extract_bigquery as extract_bigquery_module
 from geoparquet_io.core.carto import CartoError
 from geoparquet_io.core.column_selection import (
@@ -126,9 +126,6 @@ def _layer_info() -> arcgis.ArcGISLayerInfo:
     )
 
 
-ARCGIS_URL = "https://example.com/arcgis/rest/services/x/FeatureServer/0"
-
-
 class TestSplitColumnList:
     """The splitter itself: one place that decides "unset" from "blank entry".
 
@@ -160,7 +157,7 @@ class TestSplitColumnList:
 
     @pytest.mark.parametrize("requested", [None, []])
     def test_nothing_requested_is_nothing_to_reject(self, requested):
-        """``core.extract.validate_columns`` calls the checker on an unset list."""
+        """``core.extract.build_column_selection`` calls the checker on an unset list."""
         assert reject_blank_column_entries(requested, "--include-cols") is None
 
 
@@ -283,14 +280,14 @@ class TestCartoExcludeIsCheckedAgainstTheFetchedTable:
         ``GEOMETRY`` used to miss the guard by exact match and then silently drop
         nothing; it now folds to ``geometry`` and reaches the refusal.
         """
-        with mock.patch.object(carto, "warn") as warn:
+        with mock.patch.object(column_selection, "warn") as warn:
             table = _run_carto(_geo_fetch(), exclude_cols=exclude_cols)
         assert table.column_names == ["cartodb_id", "Owner", "geometry"]
         assert any("Cannot exclude" in str(call.args[0]) for call in warn.call_args_list)
 
     def test_a_second_name_still_applies_when_geometry_is_dropped_from_the_list(self):
         """Refusing ``geometry`` must not swallow the rest of the list."""
-        with mock.patch.object(carto, "warn"):
+        with mock.patch.object(column_selection, "warn"):
             table = _run_carto(_geo_fetch(), exclude_cols="geometry,owner")
         assert table.column_names == ["cartodb_id", "geometry"]
 

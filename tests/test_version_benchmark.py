@@ -6,8 +6,9 @@ from pathlib import Path
 
 import pytest
 
-# Import via the scripts package (not a sys.path hack) so this also works from
-# mutmut's mutants/ copy of the tree, where relative-path insertion breaks.
+# Import via the scripts package (not a sys.path hack): a relative sys.path
+# insertion resolves against the CWD, not this file, and breaks when the suite
+# runs from anywhere but the repo root.
 from scripts.version_benchmark import analyze_trends
 
 

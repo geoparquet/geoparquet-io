@@ -21,9 +21,11 @@ Two different escapes are involved, and mixing them up is the recurring bug:
   callers wrap the query in a broad ``except Exception`` and return
   ``None``/``{}``/``[]`` instead of raising.
 
-Every adversarial-name test in this file runs against the same three names
-(:data:`ADVERSARIAL_COLUMNS`) so no site is accidentally covered only by the
-one flavour of hostility it happens to tolerate.
+The owner is run against each of the three names
+(:data:`ADVERSARIAL_COLUMNS`); every call site runs against one name that
+carries all three flavours at once (:data:`HOSTILE_COL`), so no site is
+accidentally covered only by the one flavour of hostility it happens to
+tolerate.
 """
 
 from __future__ import annotations
@@ -39,14 +41,16 @@ from geoparquet_io.cli.main import add, check, convert, extract, inspect, sort
 from geoparquet_io.core import common as common_module
 from geoparquet_io.core.check_spatial_order import check_spatial_order
 from geoparquet_io.core.duckdb_metadata import (
-    get_aggregated_native_geo_stats,
     get_compression_info,
-    get_native_geo_statistics,
     get_per_row_group_bbox_stats,
-    get_per_row_group_native_geo_stats,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
-from geoparquet_io.core.stream_io import _wrap_query_with_wkb_conversion
+from geoparquet_io.core.duckdb_utils import (
+    _wrap_query_with_wkb_conversion,
+    fetch_one,
+    get_duckdb_connection,
+    quote_identifier,
+)
+from geoparquet_io.core.parquet_writer import WriteOptions
 from tests.conftest import skip_if_geography_unavailable
 
 # A geometry column name with a space -- breaks unquoted identifier
@@ -71,7 +75,15 @@ ADVERSARIAL_COLUMNS = [SPACED_COL, DQUOTE_COL, SQUOTE_COL]
 #: proves the injection was neutralised, not merely that nothing crashed.
 INJECTION_COL = 'g") AS x, (SELECT 1) AS pwned --'
 
-adversarial_column = pytest.mark.parametrize("column_name", ADVERSARIAL_COLUMNS)
+#: All three hostilities in one name: a space (breaks an unquoted identifier),
+#: a ``"`` (breaks hand-rolled ``f'"{col}"'``) and a ``'`` (breaks an unescaped
+#: string literal). The owner, ``quote_identifier``, is run against each name
+#: on its own (:class:`TestQuoteIdentifierContract`); a call site only has to
+#: show it routes through the owner, which one name carrying every flavour does
+#: in one run instead of three (#1402).
+HOSTILE_COL = "ge\"o m'x"
+
+site_column = pytest.mark.parametrize("column_name", [HOSTILE_COL], ids=["hostile"])
 
 POLYGON_WKTS = [
     "POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))",
@@ -102,9 +114,7 @@ def _wkb_fixture(tmp_path, column_name: str, filename: str, wkts: list[str]) -> 
     values_sql = ", ".join(
         f"({i + 1}, ST_AsWKB(ST_GeomFromText('{w}')))" for i, w in enumerate(wkts)
     )
-    table = (
-        con.execute(f"SELECT * FROM (VALUES {values_sql}) AS t(id, {quoted})").arrow().read_all()
-    )
+    table = con.sql(f"SELECT * FROM (VALUES {values_sql}) AS t(id, {quoted})").arrow().read_all()
     con.close()
     return _write_geoparquet(table, column_name, ["Polygon"], str(tmp_path / filename))
 
@@ -117,9 +127,7 @@ def _points_fixture(tmp_path, column_name: str, filename: str, count: int = 10) 
     values_sql = ", ".join(
         f"({i + 1}, ST_AsWKB(ST_GeomFromText('POINT ({i} {i})')))" for i in range(count)
     )
-    table = (
-        con.execute(f"SELECT * FROM (VALUES {values_sql}) AS t(id, {quoted})").arrow().read_all()
-    )
+    table = con.sql(f"SELECT * FROM (VALUES {values_sql}) AS t(id, {quoted})").arrow().read_all()
     con.close()
     return _write_geoparquet(
         table,
@@ -128,25 +136,6 @@ def _points_fixture(tmp_path, column_name: str, filename: str, count: int = 10) 
         str(tmp_path / filename),
         bbox=[0.0, 0.0, float(count - 1), float(count - 1)],
     )
-
-
-def _native_geo_fixture(tmp_path, column_name: str, filename: str) -> str:
-    """Build a parquet-geo-only file (native GEOMETRY, geo_bbox row-group stats)."""
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-    con.execute("SET geometry_always_xy = true;")
-    quoted = quote_identifier(column_name)
-    query = (
-        "SELECT * FROM (VALUES "
-        "(1, ST_GeomFromText('POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))')), "
-        "(2, ST_GeomFromText('POLYGON ((2 2, 2 3, 3 3, 3 2, 2 2))'))"
-        f") AS t(id, {quoted})"
-    )
-    path = str(tmp_path / filename)
-    common_module.write_parquet_with_metadata(
-        con, query, path, original_metadata=None, geoparquet_version="parquet-geo-only"
-    )
-    con.close()
-    return path
 
 
 # --- The helper itself: contract and edge cases -----------------------------
@@ -166,17 +155,18 @@ class TestQuoteIdentifierContract:
             ("Geometry", '"Geometry"'),
             ("a\nb", '"a\nb"'),
             (INJECTION_COL, '"g"") AS x, (SELECT 1) AS pwned --"'),
+            (HOSTILE_COL, '"ge""o m\'x"'),
         ],
     )
     def test_quotes_hostile_names(self, raw, expected):
         assert quote_identifier(raw) == expected
 
-    @adversarial_column
+    @pytest.mark.parametrize("column_name", [*ADVERSARIAL_COLUMNS, HOSTILE_COL])
     def test_result_round_trips_through_duckdb(self, column_name):
         con = duckdb.connect()
         try:
             quoted = quote_identifier(column_name)
-            name = con.execute(f"SELECT 1 AS {quoted}").arrow().read_all().column_names[0]
+            name = con.sql(f"SELECT 1 AS {quoted}").arrow().read_all().column_names[0]
             assert name == column_name
         finally:
             con.close()
@@ -198,13 +188,13 @@ class TestQuoteIdentifierContract:
             quote_identifier("ge\x00om")
 
 
-# --- Site 1: stream_io._wrap_query_with_wkb_conversion ----------------------
+# --- Site 1: duckdb_utils._wrap_query_with_wkb_conversion---------------------
 
 
 class TestStreamIoWkbConversionQuoting:
     """geoparquet_io/core/stream_io.py: _wrap_query_with_wkb_conversion."""
 
-    @adversarial_column
+    @site_column
     def test_wraps_and_converts_correctly(self, column_name):
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
@@ -214,10 +204,10 @@ class TestStreamIoWkbConversionQuoting:
             )
 
             wrapped = _wrap_query_with_wkb_conversion("SELECT * FROM t", column_name)
-            row = con.execute(wrapped).fetchone()
+            row = fetch_one(con.execute(wrapped))
 
             assert row[0] == 1
-            wkt = con.execute("SELECT ST_AsText(ST_GeomFromWKB(?))", [row[1]]).fetchone()[0]
+            wkt = fetch_one(con.execute("SELECT ST_AsText(ST_GeomFromWKB(?))", [row[1]]))[0]
             assert wkt == "POINT (1 2)"
         finally:
             con.close()
@@ -232,7 +222,7 @@ class TestStreamIoWkbConversionQuoting:
             )
 
             wrapped = _wrap_query_with_wkb_conversion("SELECT * FROM t", INJECTION_COL)
-            columns = con.execute(wrapped).arrow().read_all().column_names
+            columns = con.sql(wrapped).arrow().read_all().column_names
 
             # The hostile name itself contains "pwned", so a substring check
             # would be vacuous: the proof is that the schema gained no EXTRA
@@ -250,7 +240,7 @@ class TestStreamIoWkbConversionQuoting:
 class TestCommonAddBboxQuoting:
     """geoparquet_io/core/common.py: add_bbox."""
 
-    @adversarial_column
+    @site_column
     def test_add_bbox_succeeds_with_correct_values(self, tmp_path, column_name):
         path = _wkb_fixture(tmp_path, column_name, "add_bbox_fixture.parquet", POLYGON_WKTS)
 
@@ -266,7 +256,7 @@ class TestCliAddBboxOnHostileColumn:
     """End-to-end `gpio add bbox`: core/add/bbox.py's _add_bbox_file_based ->
     common.py's add_computed_column -> the duckdb-kv write strategy."""
 
-    @adversarial_column
+    @site_column
     def test_cli_add_bbox_succeeds(self, tmp_path, column_name):
         input_path = _wkb_fixture(tmp_path, column_name, "cli_add_bbox_input.parquet", POLYGON_WKTS)
         output_path = str(tmp_path / "cli_add_bbox_output.parquet")
@@ -302,7 +292,7 @@ class TestAddComputedColumnQuotesUserSuppliedName:
     `add h3`, `add s2`, `add a5`, `add quadkey` and `add geometry-metrics`.
     """
 
-    @adversarial_column
+    @site_column
     def test_cli_bbox_name_is_quoted(self, tmp_path, column_name):
         input_path = _points_fixture(tmp_path, "geometry", "bbox_name_input.parquet")
         output_path = str(tmp_path / "bbox_name_output.parquet")
@@ -331,7 +321,7 @@ class TestAddComputedColumnQuotesUserSuppliedName:
 class TestCheckSpatialOrderSamplingQuoting:
     """geoparquet_io/core/check_spatial_order.py: the sampling-method queries."""
 
-    @adversarial_column
+    @site_column
     def test_sampling_method_succeeds(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "spatial_order_fixture.parquet")
 
@@ -346,7 +336,7 @@ class TestCheckSpatialOrderSamplingQuoting:
         # always closer than a random pair -> the ratio is safely under 1.
         assert result["ratio"] < 1.0
 
-    @adversarial_column
+    @site_column
     def test_cli_check_spatial_succeeds(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "spatial_order_cli_fixture.parquet")
 
@@ -368,26 +358,6 @@ class TestDuckdbMetadataNativeStatsEscaping:
     the name with teeth.
     """
 
-    def test_native_geo_stat_getters_return_correct_values(self, tmp_path):
-        path = _native_geo_fixture(tmp_path, SQUOTE_COL, "native_geo.parquet")
-
-        single = get_native_geo_statistics(path, SQUOTE_COL)
-        assert single is not None, "expected stats, got None (query silently failed)"
-        assert single["bbox"][:4] == pytest.approx([0.0, 0.0, 3.0, 3.0])
-        assert single["geometry_types"] == ["Polygon"]
-
-        agg = get_aggregated_native_geo_stats(path, SQUOTE_COL)
-        assert agg.get("bbox") is not None, "expected aggregated bbox, got empty dict"
-        assert agg["bbox"][:4] == pytest.approx([0.0, 0.0, 3.0, 3.0])
-        assert agg["geometry_types"] == ["Polygon"]
-
-        per_rg = get_per_row_group_native_geo_stats(path, SQUOTE_COL)
-        assert len(per_rg) == 1, "expected one row group of stats, got empty list"
-        assert per_rg[0]["xmin"] == pytest.approx(0.0)
-        assert per_rg[0]["ymin"] == pytest.approx(0.0)
-        assert per_rg[0]["xmax"] == pytest.approx(3.0)
-        assert per_rg[0]["ymax"] == pytest.approx(3.0)
-
 
 class TestDuckdbMetadataSiblingLiteralEscaping:
     """Other `path_in_schema = '...'` filters: the bbox-stat and compression
@@ -404,7 +374,7 @@ class TestDuckdbMetadataSiblingLiteralEscaping:
                 (2, {{'xmin': 2.0, 'ymin': 2.0, 'xmax': 3.0, 'ymax': 3.0}})
             ) AS t(id, {quoted})
         """
-        table = con.execute(query).arrow().read_all()
+        table = con.sql(query).arrow().read_all()
         con.close()
         path = str(tmp_path / "bbox_col_quote.parquet")
         pq.write_table(table, path)
@@ -419,7 +389,7 @@ class TestDuckdbMetadataSiblingLiteralEscaping:
         col = "va'l"
         con = duckdb.connect()
         quoted = quote_identifier(col)
-        table = con.execute(f"SELECT 1 AS id, 2 AS {quoted}").arrow().read_all()
+        table = con.sql(f"SELECT 1 AS id, 2 AS {quoted}").arrow().read_all()
         con.close()
         path = str(tmp_path / "compression_col_quote.parquet")
         pq.write_table(table, path)
@@ -441,7 +411,7 @@ class TestDuckdbMetadataSiblingLiteralEscaping:
 class TestApiTableAddBboxQuoting:
     """geoparquet_io/core/add/bbox.py: add_bbox_table -- backs Table.add_bbox()."""
 
-    @adversarial_column
+    @site_column
     def test_table_add_bbox_succeeds_with_correct_values(self, column_name):
         from geoparquet_io.api.table import Table
 
@@ -449,7 +419,7 @@ class TestApiTableAddBboxQuoting:
         con.execute("INSTALL spatial; LOAD spatial;")
         quoted = quote_identifier(column_name)
         arrow_table = (
-            con.execute(
+            con.sql(
                 f"""
                 SELECT * FROM (VALUES
                     (1, ST_AsWKB(ST_GeomFromText('POLYGON ((0 0, 0 1, 1 1, 1 0, 0 0))'))),
@@ -474,9 +444,9 @@ class TestAddBboxStreamingQuoting:
     """geoparquet_io/core/add/bbox.py: _make_add_bbox_query, used by
     _add_bbox_streaming (the `gpio add bbox -` stdin/stdout CLI path).
 
-    _add_bbox_streaming's own geometry-column auto-detection only checks
-    STANDARD_GEOMETRY_NAMES (a separate, pre-existing limitation, out of
-    scope for this fix), so the hostile name is added to that lookup via
+    _add_bbox_streaming's geometry-column auto-detection
+    (geometry_detection.primary_geometry_column over the stream's column names)
+    only knows STANDARD_GEOMETRY_NAMES, so the hostile name is added to that lookup via
     monkeypatch to let the *real* _add_bbox_streaming run end-to-end rather
     than testing the SQL-building helper in isolation.
 
@@ -500,7 +470,7 @@ class TestAddBboxStreamingQuoting:
             for i, w in enumerate(POLYGON_WKTS)
         )
         cols = f"id, {quoted}" + (f", {quoted_bbox}" if with_stale_bbox else "")
-        table = con.execute(f"SELECT * FROM (VALUES {rows}) AS t({cols})").arrow().read_all()
+        table = con.sql(f"SELECT * FROM (VALUES {rows}) AS t({cols})").arrow().read_all()
         con.close()
         return _write_geoparquet(
             table,
@@ -510,16 +480,17 @@ class TestAddBboxStreamingQuoting:
         )
 
     @pytest.mark.parametrize("force", [False, True])
-    @adversarial_column
+    @site_column
     def test_add_bbox_streaming_succeeds_with_correct_values(
         self, tmp_path, monkeypatch, column_name, force
     ):
+        from geoparquet_io.core import geometry_detection
         from geoparquet_io.core.add import bbox as bbox_module
 
         monkeypatch.setattr(
-            bbox_module,
+            geometry_detection,
             "STANDARD_GEOMETRY_NAMES",
-            [column_name, *bbox_module.STANDARD_GEOMETRY_NAMES],
+            [column_name, *geometry_detection.STANDARD_GEOMETRY_NAMES],
         )
         input_path = self._fixture(tmp_path, column_name, with_stale_bbox=force)
         output_path = str(tmp_path / "streaming_output.parquet")
@@ -535,14 +506,8 @@ class TestAddBboxStreamingQuoting:
             output_path=output_path,
             bbox_column_name=self.HOSTILE_BBOX_COL,
             verbose=False,
-            compression="ZSTD",
-            compression_level=None,
-            row_group_size_mb=None,
-            row_group_rows=None,
-            profile=None,
+            write=WriteOptions(compression="ZSTD", geoparquet_version="2.0"),
             force=force,
-            geoparquet_version="2.0",
-            memory_limit=None,
         )
 
         table = pq.read_table(output_path)
@@ -560,7 +525,7 @@ class TestAddBboxStreamingQuoting:
 class TestInspectStatsQuoting:
     """geoparquet_io/core/inspect_utils.py: the per-column stats queries."""
 
-    @adversarial_column
+    @site_column
     def test_inspect_stats_succeeds(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "inspect_stats.parquet")
 
@@ -579,7 +544,7 @@ class TestCheckSpecQuoting:
     verdict about a perfectly valid file.
     """
 
-    @adversarial_column
+    @site_column
     def test_check_spec_reports_no_false_failures(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "check_spec.parquet")
 
@@ -595,7 +560,7 @@ class TestSortHilbertQuoting:
     """geoparquet_io/core/hilbert_order.py: the empty-geometry count and the
     ORDER BY ST_Hilbert query."""
 
-    @adversarial_column
+    @site_column
     def test_sort_hilbert_succeeds(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "hilbert_input.parquet")
         out = str(tmp_path / "hilbert_output.parquet")
@@ -610,7 +575,7 @@ class TestSortHilbertQuoting:
 class TestExtractGeoparquetQuoting:
     """geoparquet_io/core/extract.py: the column-projection builders."""
 
-    @adversarial_column
+    @site_column
     def test_extract_geoparquet_succeeds(self, tmp_path, column_name):
         path = _points_fixture(tmp_path, column_name, "extract_input.parquet")
         out = str(tmp_path / "extract_output.parquet")
@@ -658,7 +623,7 @@ class TestExtractSpatialFilterQuoting:
 
         assert sql == f"ST_Intersects({quote_identifier(column_name)}, ST_GeomFromText('{wkt}'))"
 
-    @adversarial_column
+    @site_column
     def test_cli_geometry_filter_returns_the_right_rows(self, tmp_path, column_name):
         """A hostile-but-honest column name must still filter correctly."""
         path = _points_fixture(tmp_path, column_name, "geom_filter_input.parquet")
@@ -697,9 +662,7 @@ class TestExtractSpatialFilterQuoting:
             f"({i + 1}, ST_AsWKB(ST_GeomFromText('POINT ({i} {i})')))" for i in range(10)
         )
         table = (
-            con.execute(f"SELECT * FROM (VALUES {values_sql}) AS t(id, geometry)")
-            .arrow()
-            .read_all()
+            con.sql(f"SELECT * FROM (VALUES {values_sql}) AS t(id, geometry)").arrow().read_all()
         )
         con.close()
 
@@ -719,11 +682,18 @@ class TestExtractSpatialFilterQuoting:
         )
 
         # Nothing in the file intersects (999 999), so no row may be written.
-        # Quoting turns the payload into a column name that does not exist, so
-        # the run fails cleanly instead of silently returning the whole file.
+        # The payload names a column the file does not have, so the resolver
+        # does not answer with it (#1367): the filter runs on the real
+        # `geometry` column and keeps nothing. Before #1367 the payload was the
+        # answer, and quoting made the run fail cleanly instead.
         leaked = pq.read_table(out).num_rows if out.exists() else 0
         assert leaked == 0, f"spatial filter bypassed: {leaked} non-intersecting rows written"
-        assert result.exit_code != 0
+        assert self.BYPASS_COL not in result.output
+        # The payload never reaches SQL: the resolver does not answer a name
+        # the schema lacks, and every name it does answer is quoted.
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
+
+        assert primary_geometry_column(path) == "geometry"
 
 
 class TestAddCommandsQuoting:
@@ -733,7 +703,7 @@ class TestAddCommandsQuoting:
         "subcommand",
         ["h3", "s2", "a5", "quadkey", "geometry-metrics", "kdtree"],
     )
-    @adversarial_column
+    @site_column
     def test_add_subcommand_succeeds(self, tmp_path, subcommand, column_name):
         if subcommand == "s2":
             skip_if_geography_unavailable()
@@ -751,7 +721,7 @@ class TestConvertQuoting:
     """geoparquet_io/core/convert.py + format_writers.py."""
 
     @pytest.mark.parametrize("fmt", ["geojson", "csv"])
-    @adversarial_column
+    @site_column
     def test_convert_succeeds(self, tmp_path, fmt, column_name):
         path = _points_fixture(tmp_path, column_name, "convert_input.parquet")
         out = str(tmp_path / f"convert_output.{fmt}")
@@ -768,7 +738,7 @@ class TestSortColumnQuoting:
     """geoparquet_io/core/sort_by_column.py: the ORDER BY clause takes the
     column name straight from the CLI."""
 
-    @adversarial_column
+    @site_column
     def test_sort_column_succeeds(self, tmp_path, column_name):
         base = _points_fixture(tmp_path, "geometry", "sort_col_input.parquet")
         table = pq.read_table(base)

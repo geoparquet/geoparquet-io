@@ -13,6 +13,7 @@ the command used to write without a word (#1193).
 
 from __future__ import annotations
 
+import functools
 import json
 
 from geoparquet_io.core.common import (
@@ -21,22 +22,23 @@ from geoparquet_io.core.common import (
 )
 from geoparquet_io.core.constants import VECOREL_METRICS_SCHEMA, build_collection_metadata
 from geoparquet_io.core.crs_utils import (
-    crs_transform_sql_expr,
-    extract_crs_from_parquet,
+    crs_of,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import quote_identifier
-from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
+from geoparquet_io.core.duckdb_utils import describe_query, quote_identifier
+from geoparquet_io.core.file_utils import atomic_write, handle_output_overwrite, scratch_file
+from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
+    primary_geometry_column,
+    require_geometry_column,
 )
 from geoparquet_io.core.logging_config import success
+from geoparquet_io.core.parquet_footer import patch_or_rewrite
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.reader import require_single_file
-from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.stream_io import execute_transform
 from geoparquet_io.core.streaming import is_stdin, should_stream_output
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+from geoparquet_io.core.write_funnels import rewrite_footer_kv
 
 AREA_COLUMN = "metrics:area"
 PERIMETER_COLUMN = "metrics:perimeter"
@@ -63,7 +65,7 @@ def add_geometry_metrics(
     vecorel: bool = True,
     dry_run: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -101,19 +103,14 @@ def add_geometry_metrics(
     """
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming and not dry_run:
         _add_metrics_streaming(
             input_parquet,
             output_parquet,
             vecorel,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit,
+            write,
         )
         return
 
@@ -123,15 +120,9 @@ def add_geometry_metrics(
         vecorel,
         dry_run,
         verbose,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        profile,
-        geoparquet_version,
+        write,
         overwrite,
         show_sql,
-        memory_limit,
     )
 
 
@@ -140,30 +131,21 @@ def _add_metrics_streaming(
     output_path,
     vecorel,
     verbose,
-    compression,
-    compression_level,
-    row_group_size_mb,
-    row_group_rows,
-    profile,
-    geoparquet_version,
-    memory_limit,
+    write: WriteOptions,
 ) -> None:
     """Handle streaming input/output for geometry metrics."""
 
     if should_stream_output(output_path):
         verbose = False
 
-    def make_query(source: str, con, source_crs: str | None = None) -> str:
-        sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        col_names = [col[0] for col in sample]
-
-        geom_col = None
-        for name in STANDARD_GEOMETRY_NAMES:
-            if name in col_names:
-                geom_col = name
-                break
-        if not geom_col:
-            geom_col = "geometry"
+    def make_query(source: str, con, source_crs: str | None, edges, metadata) -> str:
+        # The owner over the source's typed columns and the carried block: a
+        # native geometry column answers whatever its name.
+        described = describe_query(con, f"SELECT * FROM {source}")
+        geom_col = require_geometry_column(
+            primary_geometry_column(described, geo=sanitized_carried_geo(metadata)),
+            "the input stream",
+        )
 
         # `source_crs` is the input's CRS as an AUTH:CODE string, read by
         # execute_transform from the file or the stream's geo metadata.
@@ -181,14 +163,9 @@ def _add_metrics_streaming(
         output_path,
         make_query,
         verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
+        input_aware=True,
         extra_kv_metadata=extra_kv,
-        memory_limit=memory_limit,
+        **write.funnel_kwargs(),
     )
 
     if not should_stream_output(output_path):
@@ -201,26 +178,23 @@ def _add_metrics_file_based(
     vecorel,
     dry_run,
     verbose,
-    compression,
-    compression_level,
-    row_group_size_mb,
-    row_group_rows,
-    profile,
-    geoparquet_version,
+    write: WriteOptions,
     overwrite,
     show_sql,
-    memory_limit,
 ) -> None:
     """Handle file-based geometry metrics addition — two passes via add_computed_column."""
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    # remove=False: the output is staged and replaced only on success.
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
     require_single_file(input_parquet, "add geometry-metrics")
 
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
+    geom_col = require_geometry_column(
+        primary_geometry_column(input_parquet, verbose=verbose), input_parquet
+    )
 
-    # RAW path: extract_crs_from_parquet escapes its own argument (#718).
-    source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)
+    # RAW path: crs_of escapes its own argument (#718).
+    source_crs = crs_of(input_parquet, verbose, geometry_column=geom_col)
     area_expr, perimeter_expr = _metric_exprs(
-        crs_transform_sql_expr(quote_identifier(geom_col), source_crs)
+        transform_geom_sql(quote_identifier(geom_col), source_crs)
     )
 
     if dry_run:
@@ -231,65 +205,56 @@ def _add_metrics_file_based(
         info(f"  {PERIMETER_COLUMN}: {perimeter_expr}")
         return
 
-    import os
-    import tempfile
-
-    # Pass 1: add area column to a temp file
-    fd, temp_file = tempfile.mkstemp(suffix=".parquet")
-    os.close(fd)
-    os.unlink(temp_file)
-
-    try:
+    # Pass 1 writes the area column to a scratch copy; pass 2 the perimeter
+    # into the staged output, which the Vecorel steps finish before it is
+    # published (file_utils.atomic_write): a failure leaves the destination as
+    # it was and no copy behind.
+    with scratch_file() as temp_file, atomic_write(output_parquet) as staged:
         add_computed_column(
             input_parquet,
             temp_file,
             column_name=AREA_COLUMN,
             sql_expression=area_expr,
             verbose=verbose,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
-
-        # Pass 2: add perimeter column to final output
         add_computed_column(
             temp_file,
-            output_parquet,
+            staged,
             column_name=PERIMETER_COLUMN,
             sql_expression=perimeter_expr,
             verbose=verbose,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
-    finally:
-        if os.path.exists(temp_file):
-            os.unlink(temp_file)
 
-    # Add Vecorel metadata and ensure required columns
-    if vecorel:
-        from geoparquet_io.core.constants import ensure_vecorel_columns
+        # Add Vecorel metadata and ensure required columns. These rewrite the
+        # file in place, so they must keep writing at the caller's resolved
+        # settings -- left to their own defaults they undid the level of
+        # everything above (DuckDB's 3 for the id column, pyarrow's 1 for the
+        # schema fix, before both resolved through `compression.resolve_codec`).
+        if vecorel:
+            from geoparquet_io.core.constants import ensure_vecorel_columns
 
-        _add_vecorel_metadata_to_file(output_parquet, verbose, memory_limit)
-        ensure_vecorel_columns(output_parquet, verbose)
+            _add_vecorel_metadata_to_file(staged, verbose, write)
+            ensure_vecorel_columns(
+                staged,
+                verbose,
+                compression=write.compression,
+                compression_level=write.compression_level,
+            )
 
     success(f"Added {AREA_COLUMN} and {PERIMETER_COLUMN} to: {output_parquet}")
 
 
-def _add_vecorel_metadata_to_file(
-    parquet_file: str, verbose: bool, memory_limit: str | None
-) -> None:
-    """Add Vecorel schema metadata to an existing file via rewrite."""
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+def _add_vecorel_metadata_to_file(parquet_file: str, verbose: bool, write: WriteOptions) -> None:
+    """Add the Vecorel ``collection`` key to the file this command just wrote.
 
+    One footer key: a footer patch, every page kept as the command wrote it.
+    A footer that cannot be patched falls back to the funnel's rewrite
+    (``patch_or_rewrite``), handed every write fact the command was given --
+    codec, level, row groups -- so a GZIP output is not re-encoded as ZSTD
+    (#1335) and ``--row-group-size`` is not dropped on that fallback.
+    """
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
     extra_kv = _build_vecorel_metadata(metadata)
 
@@ -304,37 +269,9 @@ def _add_vecorel_metadata_to_file(
             except (json.JSONDecodeError, AttributeError):
                 pass
 
-    import os
-    import tempfile
-
-    input_path = resolve_file_url(parquet_file, verbose=False)
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
-
-    fd, temp_out = tempfile.mkstemp(suffix=".parquet")
-    os.close(fd)
-    os.unlink(temp_out)
-
-    try:
-        try:
-            write_parquet_with_metadata(
-                con,
-                f"SELECT * FROM {sql_path(input_path)}",
-                temp_out,
-                original_metadata=metadata,
-                extra_kv_metadata=extra_kv,
-                verbose=verbose,
-                # A whole-file rewrite to attach one sidecar key must not also
-                # change the geometry encoding. Without this witness auto mode
-                # read the carried `geo` key, which does not say whether the
-                # column is native, and the rewrite re-encoded it as WKB (#993).
-                input_file=parquet_file,
-                memory_limit=memory_limit,
-            )
-        finally:
-            # Release DuckDB's read handle on the source before replacing it;
-            # an open connection makes os.replace() fail on Windows.
-            con.close()
-        os.replace(temp_out, parquet_file)
-    finally:
-        if os.path.exists(temp_out):
-            os.unlink(temp_out)
+    patch_or_rewrite(
+        parquet_file,
+        extra_kv,
+        rewrite=functools.partial(rewrite_footer_kv, write=write),
+        verbose=verbose,
+    )

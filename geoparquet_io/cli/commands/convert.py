@@ -25,9 +25,15 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
     where_option,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.crs_utils import transform_source_label
-from geoparquet_io.core.file_utils import validate_parquet_extension
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    scratch_file,
+    validate_parquet_extension,
+)
+from geoparquet_io.core.format_writers import EXTENSION_TO_FORMAT, default_output_name
 from geoparquet_io.core.logging_config import configure_verbose
 from geoparquet_io.core.reproject import reproject as reproject_core
 
@@ -53,16 +59,8 @@ class ConvertDefaultGroup(click.Group):
     - gpio convert geopackage input.parquet output.gpkg -> explicit subcommand
     """
 
-    # Extension to subcommand mapping
-    EXTENSION_TO_SUBCOMMAND = {
-        ".parquet": "geoparquet",
-        ".gpkg": "geopackage",
-        ".fgb": "flatgeobuf",
-        ".csv": "csv",
-        ".shp": "shapefile",
-        ".geojson": "geojson",
-        ".json": "geojson",
-    }
+    # Extension to subcommand mapping (the subcommands are named after the formats)
+    EXTENSION_TO_SUBCOMMAND = EXTENSION_TO_FORMAT
 
     def parse_args(self, ctx, args):
         """Parse args with format auto-detection from output file extension."""
@@ -127,6 +125,7 @@ def convert(ctx):
 @convert.command(name="geoparquet", cls=SingleFileCommand)
 @click.argument("input_file")
 @click.argument("output_file", type=click.Path(), required=False, default=None)
+@overwrite_option
 @click.option(
     "--skip-hilbert",
     is_flag=True,
@@ -204,6 +203,7 @@ def convert_to_geoparquet_cmd(
     ctx,
     input_file,
     output_file,
+    overwrite,
     skip_hilbert,
     wkt_column,
     lat_column,
@@ -285,6 +285,9 @@ def convert_to_geoparquet_cmd(
                 force_2d=force_2d,
             )
         else:
+            # COPY replaces the output itself, so an existing one survives a
+            # conversion that fails before the write.
+            handle_output_overwrite(output_file, overwrite, input_file, remove=False)
             convert_to_geoparquet(
                 input_file,
                 output_file,
@@ -326,8 +329,8 @@ def _convert_streaming(
     allow_no_geometry,
     profile,
     geoparquet_version,
-    compression="ZSTD",
-    compression_level=15,
+    compression=None,
+    compression_level=None,
     row_group_rows=None,
     row_group_size_mb=None,
     repair_geometry=True,
@@ -338,8 +341,6 @@ def _convert_streaming(
     force_2d=False,
 ):
     """Handle streaming output for convert command."""
-    import tempfile
-    import uuid
 
     # Registers the GeoArrow extension types process-wide, so the `pq.read_table`
     # below materialises a Parquet GEOMETRY/GEOGRAPHY column as `geoarrow.wkb`
@@ -352,9 +353,7 @@ def _convert_streaming(
     from geoparquet_io.core.streaming import write_arrow_stream
 
     # Convert to temp file first, then stream
-    temp_path = Path(tempfile.gettempdir()) / f"gpio_convert_{uuid.uuid4()}.parquet"
-
-    try:
+    with scratch_file(prefix="gpio_convert_") as temp_path:
         convert_to_geoparquet(
             input_file,
             str(temp_path),
@@ -383,7 +382,7 @@ def _convert_streaming(
         )
 
         # Read and stream to stdout. Through `ParquetFile` so the file handle is
-        # closed here, before the `unlink` below, rather than whenever the
+        # closed here, before the scratch copy is removed, rather than whenever the
         # reader `pq.read_table` creates internally is collected: with the
         # extension types registered the table it returns is reachable through
         # Python-side objects that outlive this frame's refcount drop, and
@@ -393,9 +392,6 @@ def _convert_streaming(
         with pq.ParquetFile(temp_path) as reader:
             table = reader.read()
         write_arrow_stream(table)
-    finally:
-        if temp_path.exists():
-            temp_path.unlink()
 
 
 def _reproject_impl_cli(
@@ -440,7 +436,7 @@ def _reproject_impl_cli(
             assume_crs84=assume_crs84,
         )
     except ValueError as e:
-        raise click.ClickException(str(e)) from None
+        raise click_error_for(e) from None
 
     # result is None for streaming mode (stdout)
     if result:
@@ -708,9 +704,8 @@ def convert_geojson(
 @overwrite_option
 @click.option(
     "--layer-name",
-    default="features",
-    show_default=True,
-    help="Layer name in GeoPackage",
+    default=None,
+    help="Layer name in GeoPackage (default: the output file name without extension)",
 )
 @spatial_filter_options
 @where_option
@@ -769,7 +764,7 @@ def convert_geopackage(
 
     if output_file is None:
         # Generate output filename
-        output_file = Path(input_file).stem + ".gpkg"
+        output_file = default_output_name(input_file, "geopackage")
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         write_geopackage(
@@ -836,7 +831,7 @@ def convert_flatgeobuf(
 
     if output_file is None:
         # Generate output filename
-        output_file = Path(input_file).stem + ".fgb"
+        output_file = default_output_name(input_file, "flatgeobuf")
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         write_flatgeobuf(
@@ -919,8 +914,7 @@ def convert_csv(
     configure_verbose(verbose)
 
     if output_file is None:
-        # Generate output filename
-        output_file = Path(input_file).stem + ".csv"
+        output_file = default_output_name(input_file, "csv")
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         write_csv(
@@ -993,7 +987,7 @@ def convert_shapefile(
 
     if output_file is None:
         # Generate output filename
-        output_file = Path(input_file).stem + ".shp"
+        output_file = default_output_name(input_file, "shapefile")
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         write_shapefile(

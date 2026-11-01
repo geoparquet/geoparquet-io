@@ -11,48 +11,46 @@ Speed: Slower (reads file twice, writes twice)
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.arrow_geo_metadata import (
-    _detect_version_from_table,
-    _parse_geo_metadata_quietly,
-    table_geometry_info,
-)
-from geoparquet_io.core.common import compute_geometry_types_via_sql
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.arrow_geo_metadata import table_geometry_info
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
     get_duckdb_connection,
-    quote_identifier,
     register_arrow,
     sql_path,
 )
+from geoparquet_io.core.file_utils import scratch_file, unlink_released_file
 from geoparquet_io.core.geo_metadata import (
-    compute_bbox_via_sql,
-    declare_carried_bbox_column,
-    gate_illegal_bbox_covering,
-    strip_bboxless_covering,
+    GeoBlockOptions,
+    QuerySource,
+    compose_geo_block,
+    geometry_stats_of,
+    sanitized_carried_geo,
+    with_geo_key,
 )
-from geoparquet_io.core.geoarrow_encoding import arrow_extension_name, native_wkb_type
+from geoparquet_io.core.geoarrow_encoding import native_wkb_type
+from geoparquet_io.core.geometry_detection import create_geometry_view
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
-from geoparquet_io.core.parquet_writer import apply_output_kv_metadata, output_schema_metadata
-from geoparquet_io.core.remote import is_remote_url, upload_if_remote
+from geoparquet_io.core.parquet_writer import (
+    apply_output_kv_metadata,
+    output_schema_metadata,
+    regroup,
+    resolve_output_geoparquet_version,
+    resolve_row_group_rows_for_query,
+    write_arrow_table,
+)
+from geoparquet_io.core.remote import remote_write_context, upload_if_remote
 from geoparquet_io.core.write_strategies.arrow_streaming import to_geoarrow_column
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
-    build_geo_metadata,
     native_geometry_crs,
-)
-from geoparquet_io.core.write_strategies.row_group_sizing import (
-    _resolve_row_group_rows,
-    _resolve_row_group_rows_for_table,
+    written_block_encoding,
 )
 
 if TYPE_CHECKING:
@@ -144,8 +142,8 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # DuckDB COPY TO sizes row groups by row count, so translate any MB target
         # into rows before it can take effect on this strategy (fixes #689 — both
         # sizing options were accepted and then ignored entirely).
-        resolved_row_group_rows = _resolve_row_group_rows(
-            con, query, row_group_size_mb, row_group_rows, verbose
+        resolved_row_group_rows = resolve_row_group_rows_for_query(
+            con, query, row_group_rows, row_group_size_mb, verbose
         )
 
         # Handle non-geo queries: write plain Parquet without geo metadata
@@ -161,39 +159,20 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             )
             return
 
-        compression_map = {
-            "zstd": "ZSTD",
-            "gzip": "GZIP",
-            "snappy": "SNAPPY",
-            "lz4": "LZ4",
-            "none": "UNCOMPRESSED",
-            "uncompressed": "UNCOMPRESSED",
-            "brotli": "BROTLI",
-        }
-        duckdb_compression = compression_map.get(compression.lower(), "ZSTD")
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
 
-        validated_compression, validated_level, _ = validate_compression_settings(
-            compression, compression_level, verbose
-        )
-
-        is_remote = is_remote_url(output_path)
-        work_dir = tempfile.mkdtemp(prefix="gpio_disk_rewrite_")
-
-        try:
-            temp_path = os.path.join(work_dir, "temp_duckdb.parquet")
-            final_path = os.path.join(work_dir, "final.parquet") if is_remote else output_path
-
+        with (
+            scratch_file(prefix="gpio_disk_rewrite_") as temp_path,
+            remote_write_context(output_path, verbose=verbose) as (final_path, is_remote),
+        ):
             if verbose:
-                debug("Computing bbox via SQL...")
-            bbox = compute_bbox_via_sql(con, query, geometry_column)
+                debug("Computing bbox and geometry types via SQL...")
+            stats = geometry_stats_of(QuerySource(con, query), geometry_column)
+            bbox, geometry_types = stats.bbox, stats.geometry_types
 
-            if verbose:
-                debug("Computing geometry types via SQL...")
-            geometry_types = compute_geometry_types_via_sql(con, query, geometry_column)
+            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
 
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column, con)
-
-            copy_options = ["FORMAT PARQUET", f"COMPRESSION {duckdb_compression}"]
+            copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
             if resolved_row_group_rows:
                 copy_options.append(f"ROW_GROUP_SIZE {resolved_row_group_rows}")
             copy_query = f"""
@@ -203,7 +182,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             """
 
             if verbose:
-                debug(f"Writing via DuckDB COPY TO with {duckdb_compression} compression...")
+                debug(f"Writing via DuckDB COPY TO with {codec.name} compression...")
 
             # This strategy takes no `--write-memory` (the CLI rejects the
             # combination), so the scope applies the ceiling-based default:
@@ -223,36 +202,25 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                         f"{pf.metadata.num_row_groups} row groups"
                     )
 
-            geo_meta = build_geo_metadata(
-                geometry_column=geometry_column,
-                geoparquet_version=geoparquet_version,
-                original_metadata=original_metadata,
-                input_crs=input_crs,
-                custom_metadata=custom_metadata,
-                bbox=bbox,
-                geometry_types=geometry_types,
-                geometry_info=geometry_info,
+            # The composer declares a conventional bbox column the output
+            # carries (and drops a carried covering over an illegal struct)
+            # before the #954 gate, for every column, as every write path does.
+            measured = {"geometry_types": geometry_types}
+            if bbox is not None:
+                measured["bbox"] = bbox
+            geo_meta = compose_geo_block(
+                QuerySource(con, query, original_metadata),
+                GeoBlockOptions(
+                    geometry_column=geometry_column,
+                    version=geoparquet_version,
+                    custom_metadata=custom_metadata,
+                    encoding=written_block_encoding(geoparquet_version),
+                    crs=input_crs,
+                    stats={geometry_column: measured},
+                    geometry_info=geometry_info,
+                    verbose=verbose,
+                ),
             )
-            # The same declare step duckdb-kv runs: a conventional bbox column
-            # the output carries gets its covering (and a carried covering over
-            # an illegal struct is dropped) before the #954 gate below, so an
-            # index entry beside a real bbox column is not thrown away.
-            declare_carried_bbox_column(
-                con,
-                query,
-                geo_meta["columns"][geometry_column],
-                verbose,
-                geoparquet_version,
-                geo_meta=geo_meta,
-            )
-            # That declare is primary-scoped, so a SECONDARY column's covering
-            # over an illegal struct reached the output verbatim and `gpio check
-            # spec` failed the file gpio had just written (#1172/#1035). Same
-            # gate the Arrow builders run, over every column.
-            geo_meta = gate_illegal_bbox_covering(geo_meta, con, query)
-            # A covering still without a bbox member is one geopandas cannot
-            # read (#954).
-            geo_meta = strip_bboxless_covering(geo_meta, verbose)
 
             # 2.0 and parquet-geo-only require a native Parquet GEOMETRY logical
             # type; 1.0/1.1 require plain BYTE_ARRAY WKB and forbid it. Every
@@ -271,25 +239,18 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 input_path=temp_path,
                 output_path=final_path,
                 geo_meta=None if geoparquet_version == "parquet-geo-only" else geo_meta,
-                compression=validated_compression,
-                compression_level=validated_level,
+                compression=codec.name,
+                compression_level=codec.level,
                 verbose=verbose,
                 extra_kv_metadata=extra_kv_metadata,
                 row_group_rows=resolved_row_group_rows,
                 native_geometry_crs=native_crs,
             )
 
-            os.unlink(temp_path)
+            unlink_released_file(temp_path)
 
             if is_remote:
                 upload_if_remote(final_path, output_path, is_directory=False, verbose=verbose)
-                os.unlink(final_path)
-
-        finally:
-            if os.path.exists(work_dir):
-                import shutil
-
-                shutil.rmtree(work_dir, ignore_errors=True)
 
     def write_from_table(
         self,
@@ -305,6 +266,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         input_crs: dict | None = None,
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        original_metadata: dict | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using temporary file and rewrite."""
 
@@ -318,60 +280,54 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # Read before the facade below, which drops `geo` under parquet-geo-only.
         # It is still the witness for which columns are geometry, and without it
         # a secondary lost its native type and kept its dictionary (#1122).
-        carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
+        carried_geo = sanitized_carried_geo(table.schema.metadata)
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
-        # Handle non-geo tables: write plain Parquet without geo metadata
+        # Handle non-geo tables: write plain Parquet without geo metadata,
+        # through the facade's one pyarrow table write, which decides the row
+        # count, codec, statistics, format version and dictionary policy.
         if geometry_column is None:
-            self._write_plain_parquet_from_table(
-                table,
-                output_path,
-                compression,
-                compression_level,
-                verbose,
-                _resolve_row_group_rows_for_table(
-                    table, row_group_size_mb, row_group_rows, verbose
-                ),
-            )
+            with remote_write_context(output_path, is_directory=False, verbose=verbose) as (
+                local_path,
+                is_remote,
+            ):
+                write_arrow_table(
+                    table,
+                    local_path,
+                    compression=compression,
+                    compression_level=compression_level,
+                    row_group_rows=row_group_rows,
+                    row_group_size_mb=row_group_size_mb,
+                    geoparquet_version=geoparquet_version,
+                    geometry_column=None,
+                    verbose=verbose,
+                    extra_kv_metadata=extra_kv_metadata,
+                )
+                if is_remote:
+                    upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
             return
 
-        # Auto-detect version from table schema metadata if not specified
-        effective_version = geoparquet_version
-        if effective_version is None:
-            effective_version = _detect_version_from_table(table, verbose)
+        # Auto mode: the facade decides from the table's own schema.
+        effective_version = resolve_output_geoparquet_version(
+            geoparquet_version, table=table, verbose=verbose
+        )
 
         con = get_duckdb_connection(load_httpfs=False)
         try:
             register_arrow(con, "input_table", table)
 
-            # Convert WKB bytes to GEOMETRY for proper spatial processing.
-            # A geoarrow.wkb column already registers as GEOMETRY, and
-            # ST_GeomFromWKB(GEOMETRY) is a binder error -- in either shape the
-            # extension name arrives in, resolved on the Arrow type or carried
-            # in the field metadata (#727).
-            if arrow_extension_name(table.schema.field(geometry_column)) == "geoarrow.wkb":
-                query = "SELECT * FROM input_table"
-            else:
-                query = f"""
-                    SELECT * REPLACE (ST_GeomFromWKB({quote_identifier(geometry_column)}) AS {quote_identifier(geometry_column)})
-                    FROM input_table
-                """
+            # Convert WKB bytes to GEOMETRY for proper spatial processing: the
+            # owner's view decodes a BLOB in place and leaves a column that
+            # already registers as GEOMETRY (a geoarrow.wkb field, in either
+            # shape its extension name arrives in, #727) as it is.
+            source = create_geometry_view(con, "input_table", geometry_column)
+            query = f"SELECT * FROM {source}"
 
-            self.write_from_query(
-                con=con,
-                query=query,
-                output_path=output_path,
-                geometry_column=geometry_column,
-                original_metadata=None,
+            self._write_table_query(
+                con,
+                query,
+                locals(),
                 geoparquet_version=effective_version,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                input_crs=input_crs,
-                verbose=verbose,
-                custom_metadata=custom_metadata,
-                extra_kv_metadata=extra_kv_metadata,
                 # This entry point gets no `geometry_info`, so the table's own
                 # schema is what names a block-less table's secondaries (#1175).
                 geometry_info=table_geometry_info(table, geometry_column, carried_geo),
@@ -379,86 +335,26 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         finally:
             con.close()
 
-    def _write_plain_parquet_from_table(
-        self,
-        table: pa.Table,
-        output_path: str,
-        compression: str,
-        compression_level: int | None,
-        verbose: bool,
-        row_group_rows: int | None = None,
-    ) -> None:
-        """Write plain Parquet (no geo metadata) from an Arrow table."""
-
-        validated_compression, validated_level, _ = validate_compression_settings(
-            compression, compression_level, verbose
-        )
-
-        pa_compression = validated_compression if validated_compression != "UNCOMPRESSED" else None
-        writer_kwargs = {"compression": pa_compression}
-        if validated_level is not None and pa_compression:
-            writer_kwargs["compression_level"] = validated_level
-        if row_group_rows:
-            writer_kwargs["row_group_size"] = row_group_rows
-
-        is_remote = is_remote_url(output_path)
-        work_dir = tempfile.mkdtemp(prefix="gpio_disk_rewrite_") if is_remote else None
-
-        try:
-            local_path = os.path.join(work_dir, "output.parquet") if is_remote else output_path
-
-            if verbose:
-                debug(f"Writing plain Parquet with {validated_compression} compression...")
-
-            pq.write_table(table, local_path, **writer_kwargs)
-
-            if is_remote:
-                upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
-
-            if verbose:
-                success(f"Wrote {table.num_rows:,} rows to {output_path}")
-        finally:
-            if work_dir and os.path.exists(work_dir):
-                import shutil
-
-                shutil.rmtree(work_dir, ignore_errors=True)
-
     def _write_plain_parquet_from_query(
         self,
         con: duckdb.DuckDBPyConnection,
         query: str,
         output_path: str,
         compression: str,
-        compression_level: int | None,  # noqa: ARG002 - DuckDB COPY doesn't support compression_level
+        compression_level: int | None,
         verbose: bool,
         row_group_rows: int | None = None,
     ) -> None:
         """Write plain Parquet (no geo metadata) from a query.
 
-        Note: compression_level is accepted for API consistency but not used.
-        DuckDB's COPY TO command doesn't support compression_level for most
-        compression types. For compression_level support, use write_from_table
-        which uses PyArrow directly.
+        The codec and level resolve through the owner like every other COPY, so
+        an unset ZSTD level is 15 here too, not DuckDB's 3 (#1335). DuckDB takes
+        a level for ZSTD only; GZIP and BROTLI write at DuckDB's level for them.
         """
+        codec = resolve_codec(compression, compression_level, context="write")
 
-        compression_map = {
-            "zstd": "ZSTD",
-            "gzip": "GZIP",
-            "snappy": "SNAPPY",
-            "lz4": "LZ4",
-            "none": "UNCOMPRESSED",
-            "uncompressed": "UNCOMPRESSED",
-            "brotli": "BROTLI",
-        }
-        duckdb_compression = compression_map.get(compression.lower(), "ZSTD")
-
-        is_remote = is_remote_url(output_path)
-        work_dir = tempfile.mkdtemp(prefix="gpio_disk_rewrite_") if is_remote else None
-
-        try:
-            local_path = os.path.join(work_dir, "output.parquet") if is_remote else output_path
-
-            copy_options = ["FORMAT PARQUET", f"COMPRESSION {duckdb_compression}"]
+        with remote_write_context(output_path, verbose=verbose) as (local_path, is_remote):
+            copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
             if row_group_rows:
                 copy_options.append(f"ROW_GROUP_SIZE {row_group_rows}")
 
@@ -469,7 +365,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             """
 
             if verbose:
-                debug(f"Writing plain Parquet with {duckdb_compression} compression...")
+                debug(f"Writing plain Parquet with {codec.name} compression...")
             with scoped_write_memory_limit(con, None, verbose):
                 con.execute(copy_query)
 
@@ -479,11 +375,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             if verbose:
                 with pq.ParquetFile(local_path) as pf:
                     success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
-        finally:
-            if work_dir and os.path.exists(work_dir):
-                import shutil
-
-                shutil.rmtree(work_dir, ignore_errors=True)
 
     def _rewrite_with_metadata(
         self,
@@ -567,7 +458,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # before the merge, so the caller's extras still have the last word.
         metadata = dict(schema.metadata or {})
         if geo_meta is not None:
-            metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+            metadata = with_geo_key(metadata, geo_meta)
         new_meta = output_schema_metadata(
             metadata,
             None if geo_meta is not None else "parquet-geo-only",
@@ -578,12 +469,9 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         if verbose:
             progress(f"Rewriting with geo metadata ({pf.metadata.num_row_groups} row groups)...")
 
-        pa_compression = compression if compression != "UNCOMPRESSED" else None
-        writer_kwargs = {
-            "compression": pa_compression,
-        }
-        if compression_level is not None and pa_compression:
-            writer_kwargs["compression_level"] = compression_level
+        writer_kwargs = resolve_codec(
+            compression, compression_level, context="write"
+        ).pyarrow_kwargs()
         # Imported here, not at the top, to keep this hunk clear of the module's
         # import block (#1281 edits that line).
         from geoparquet_io.core.parquet_writer import without_geometry_dictionary
@@ -605,28 +493,15 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                     if verbose and (i + 1) % 10 == 0:
                         debug(f"Rewrote {i + 1}/{num_source_groups} row groups...")
             else:
-                # Buffer until a whole target group is available, write exactly
-                # that many rows, and keep the overshoot for the next group.
-                pending: list[pa.Table] = []
-                pending_rows = 0
-                for i in range(num_source_groups):
-                    table = _conform_row_group(pf.read_row_group(i), new_schema, native_crs)
-                    pending.append(table)
-                    pending_rows += table.num_rows
-                    while pending_rows >= row_group_rows:
-                        combined = pa.concat_tables(pending)
-                        writer.write_table(
-                            combined.slice(0, row_group_rows), row_group_size=row_group_rows
-                        )
-                        remainder = combined.slice(row_group_rows)
-                        pending = [remainder] if remainder.num_rows else []
-                        pending_rows = remainder.num_rows
+                # Cut into whole target groups (the facade's one regrouper).
+                def conformed():
+                    for i in range(num_source_groups):
+                        yield _conform_row_group(pf.read_row_group(i), new_schema, native_crs)
+                        if verbose and (i + 1) % 10 == 0:
+                            debug(f"Rewrote {i + 1}/{num_source_groups} row groups...")
 
-                    if verbose and (i + 1) % 10 == 0:
-                        debug(f"Rewrote {i + 1}/{num_source_groups} row groups...")
-
-                if pending:
-                    writer.write_table(pa.concat_tables(pending), row_group_size=row_group_rows)
+                for group in regroup(conformed(), row_group_rows):
+                    writer.write_table(group, row_group_size=row_group_rows)
 
         if verbose:
             with pq.ParquetFile(output_path) as result_pf:

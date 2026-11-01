@@ -7,6 +7,7 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.linearize import (
     DEFAULT_MAX_ANGLE_DEG,
     LinearizeError,
@@ -344,9 +345,9 @@ class TestConvertIntegration:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        area, n = con.execute(
-            f"SELECT ST_Area(geometry), ST_NPoints(geometry) FROM '{out}'"
-        ).fetchone()
+        area, n = fetch_one(
+            con.execute(f"SELECT ST_Area(geometry), ST_NPoints(geometry) FROM '{out}'")
+        )
         # The fixture's CURVEPOLYGON is the full unit circle centred at (1, 0).
         assert area == pytest.approx(math.pi, rel=0.005)
         assert n >= 80
@@ -365,7 +366,7 @@ class TestConvertIntegration:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        area = con.execute(f"SELECT ST_Area(geometry) FROM '{out}'").fetchone()[0]
+        area = fetch_one(con.execute(f"SELECT ST_Area(geometry) FROM '{out}'"))[0]
         assert area == pytest.approx(math.pi, rel=0.005)
 
     def test_linearized_path_passes_linear_rows_through(self, monkeypatch, tmp_path):
@@ -403,7 +404,7 @@ class TestConvertParameters:
         for deg in (2.0, 30.0):
             out = tmp_path / f"deg{int(deg)}.parquet"
             gpio.convert(str(CURVED_GPKG), max_angle_deg=deg).write(str(out))
-            counts[deg] = con.execute(f"SELECT ST_NPoints(geometry) FROM '{out}'").fetchone()[0]
+            counts[deg] = fetch_one(con.execute(f"SELECT ST_NPoints(geometry) FROM '{out}'"))[0]
         assert counts[2.0] > counts[30.0] >= 13
 
     def test_non_positive_max_angle_rejected_early(self):
@@ -440,7 +441,7 @@ class TestCliConvert:
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
         # The CLI path preserves the source's geometry column name (#328).
-        area = con.execute(f"SELECT ST_Area(geom) FROM '{out}'").fetchone()[0]
+        area = fetch_one(con.execute(f"SELECT ST_Area(geom) FROM '{out}'"))[0]
         assert area == pytest.approx(math.pi, rel=0.005)
 
     def test_cli_opt_out_raises_actionable_error(self, tmp_path):
@@ -626,7 +627,7 @@ class TestCliCurveParityWithoutPrescan:
         con = sqlite3.connect(target)
         for (name,) in con.execute("SELECT name FROM sqlite_master WHERE type='trigger'"):
             con.execute(f'DROP TRIGGER "{name}"')  # GPKG triggers need SpatiaLite
-        blob = bytearray(con.execute("SELECT geom FROM curve").fetchone()[0])
+        blob = bytearray(fetch_one(con.execute("SELECT geom FROM curve"))[0])
         wkb = 8 + 32  # GeoPackage binary header + its 32-byte envelope
         assert int.from_bytes(blob[wkb + 1 : wkb + 5], "little") == 10  # CurvePolygon
         blob[wkb + 1 : wkb + 5] = (15).to_bytes(4, "little")
@@ -640,7 +641,7 @@ class TestCliCurveParityWithoutPrescan:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        return con.execute(f"SELECT ST_Area(geom) FROM '{out}'").fetchone()[0]
+        return fetch_one(con.execute(f"SELECT ST_Area(geom) FROM '{out}'"))[0]
 
     def test_cli_linearizes_source_the_prescan_cannot_see(self, tmp_path):
         from click.testing import CliRunner
@@ -695,7 +696,13 @@ class TestCliCurveParityWithoutPrescan:
         out.write_bytes(b"stale bytes the user put here")
         result = CliRunner().invoke(
             cli,
-            ["convert", str(self._unscannable_copy(tmp_path)), str(out), "--skip-hilbert"],
+            [
+                "convert",
+                str(self._unscannable_copy(tmp_path)),
+                str(out),
+                "--skip-hilbert",
+                "--overwrite",
+            ],
         )
         assert result.exit_code == 0, result.output
         assert self._area(out) == pytest.approx(math.pi, rel=0.005)
@@ -713,7 +720,14 @@ class TestCliCurveParityWithoutPrescan:
         precious = b"the user's own file"
         out.write_bytes(precious)
         result = CliRunner().invoke(
-            cli, ["convert", str(self._surface_copy(tmp_path)), str(out), "--skip-hilbert"]
+            cli,
+            [
+                "convert",
+                str(self._surface_copy(tmp_path)),
+                str(out),
+                "--skip-hilbert",
+                "--overwrite",
+            ],
         )
         assert result.exit_code != 0
         assert "CONVERT_TO_LINEAR" in result.output
@@ -737,6 +751,7 @@ class TestCliCurveParityWithoutPrescan:
                 str(out),
                 "--skip-hilbert",
                 "--no-linearize-curves",
+                "--overwrite",
             ],
         )
         assert result.exit_code != 0
@@ -814,7 +829,7 @@ class TestStreamingLinearizedRead:
 
         read = _LinearizedRead.__new__(_LinearizedRead)
         read.con = con
-        read.input_url = "fake.gdb"
+        read.input_file = "fake.gdb"
         read.layer = None
         read.max_angle_deg = 4.0
         read.wkb_col = "geom"
@@ -870,9 +885,9 @@ class TestStreamingLinearizedRead:
             con, "fake.gdb", None, "geom", read=self._read(con, batches)
         )
 
-        rows, kinds = con.execute(
-            f"SELECT count(*), list_distinct(list(ST_GeometryType(geom))) FROM {name}"
-        ).fetchone()
+        rows, kinds = fetch_one(
+            con.execute(f"SELECT count(*), list_distinct(list(ST_GeometryType(geom))) FROM {name}")
+        )
         assert rows == 6
         assert kinds == ["POLYGON"]
 

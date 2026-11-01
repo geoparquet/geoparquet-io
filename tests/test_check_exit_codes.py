@@ -13,6 +13,7 @@ Before this, six of the eight subcommands printed a failure and exited 0, so
 """
 
 import json
+from datetime import UTC
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -28,7 +29,7 @@ from geoparquet_io.core.check_verdict import (
     validation_verdict,
     worst,
 )
-from geoparquet_io.core.parquet_footer import patch_footer_kv
+from geoparquet_io.core.parquet_footer import _patch_footer_file
 
 DATA = Path(__file__).parent / "data"
 PLACES = DATA / "places_test.parquet"  # GeoParquet 1.0, SNAPPY, unsorted-enough
@@ -51,7 +52,7 @@ def _geo(path):
 def _refooter(src, dest, mutate):
     geo = _geo(src)
     mutate(geo)
-    patch_footer_kv(str(src), {"geo": json.dumps(geo)}, output_file=str(dest))
+    _patch_footer_file(str(src), {"geo": json.dumps(geo)}, output_file=str(dest))
     return str(dest)
 
 
@@ -266,7 +267,7 @@ class TestNotGeoParquet:
             "failure"
         )
 
-        monkeypatch.setattr(structure, "find_primary_geometry_column", lambda *a, **k: None)
+        monkeypatch.setattr(structure, "primary_geometry_column", lambda *a, **k: None)
         assert structure.check_compression(nogeo, return_results=True)["severity"] == "failure"
 
     @pytest.mark.parametrize("subcommand", ["bbox", "compression"])
@@ -280,8 +281,15 @@ class TestNotGeoParquet:
 
 
 class TestClean:
+    """A clean file exits 0 under ``--strict``, so its verdict is a pass.
+
+    The non-strict run of the same file is the owner's table
+    (``TestVerdictHelpers::test_exit_code_table``: a pass exits 0 either way),
+    so only the strict run is made per subcommand (#1402).
+    """
+
     @pytest.mark.parametrize("subcommand", [*RUNNER_SUBCOMMANDS, "spec"])
-    @pytest.mark.parametrize("strict", [False, True])
+    @pytest.mark.parametrize("strict", [True])
     def test_exits_0(self, subcommand, strict, clean):
         result = _invoke(subcommand, clean, *(["--strict"] if strict else []))
 
@@ -550,7 +558,7 @@ class TestZeroMatches:
 class TestStac:
     @pytest.fixture
     def item(self, tmp_path):
-        from datetime import datetime, timezone
+        from datetime import datetime
 
         import pystac
 
@@ -559,7 +567,7 @@ class TestStac:
                 id="t",
                 geometry={"type": "Point", "coordinates": [0, 0]},
                 bbox=[0, 0, 0, 0],
-                datetime=datetime(2024, 1, 1, tzinfo=timezone.utc),
+                datetime=datetime(2024, 1, 1, tzinfo=UTC),
                 properties={},
             )
             if self_link:

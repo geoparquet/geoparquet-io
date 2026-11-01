@@ -25,6 +25,7 @@ from pathlib import Path
 import pyarrow as pa
 import pytest
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection as real_get_duckdb_connection
 from tests._precommit_hook import core_tree, hook_script, needs_bash, run_hook_script
 
@@ -78,12 +79,12 @@ class TestFactoryAppliesMandatorySettings:
 
     def test_arrow_large_buffer_size_is_always_set(self):
         with real_get_duckdb_connection(load_spatial=False, load_httpfs=False) as con:
-            setting = con.execute("SELECT current_setting('arrow_large_buffer_size')").fetchone()
+            setting = fetch_one(con.execute("SELECT current_setting('arrow_large_buffer_size')"))
         assert setting[0] is True
 
     def test_geometry_always_xy_is_set_when_spatial_is_loaded(self):
         with real_get_duckdb_connection(load_httpfs=False) as con:
-            setting = con.execute("SELECT current_setting('geometry_always_xy')").fetchone()
+            setting = fetch_one(con.execute("SELECT current_setting('geometry_always_xy')"))
         assert setting[0] is True
 
 
@@ -176,8 +177,11 @@ class TestWkbToWktPreview:
         wkt = inspect_utils.wkb_to_wkt_preview(WKB_POINT)
 
         assert "POINT" in wkt
-        # Converts bytes already in memory; no file, so no httpfs.
-        assert captured == [{"load_httpfs": False}]
+        # Converts bytes already in memory; no file, so no httpfs. The call
+        # site passes the auto sentinel (None): the factory loads spatial only
+        # when DuckDB's core lacks the GEOMETRY functions (#1353) -- and the
+        # WKT above proves the resolved connection can render either way.
+        assert captured == [{"load_spatial": None, "load_httpfs": False}]
 
 
 class TestGetColumnStatistics:
@@ -193,7 +197,9 @@ class TestGetColumnStatistics:
 
         # Per-column failures are swallowed into a default dict, so asserting
         # the key exists proves nothing — assert the computed values.
-        assert stats["id"]["unique"] == 91
+        # APPROX_COUNT_DISTINCT over 100 distinct ids: an estimate, and its
+        # algorithm moved between DuckDB 1.5 (91) and 2.0 (98).
+        assert 80 <= stats["id"]["unique"] <= 120
         assert stats["id"]["nulls"] == 0
         assert captured == [{"load_httpfs": False}]
 
@@ -211,35 +217,6 @@ class TestGetColumnStatistics:
         inspect_utils.get_column_statistics("s3://example-bucket/data.parquet", [])
 
         assert captured == [{"load_httpfs": True}]
-
-
-class TestCountryCodesCreateConnection:
-    """core/add/country_codes.py (_create_duckdb_connection)."""
-
-    def test_local_countries_file_needs_no_cloud_access(self, monkeypatch):
-        import geoparquet_io.core.add.country_codes as country_codes
-
-        captured = _spy_factory(monkeypatch, country_codes)
-
-        with country_codes._create_duckdb_connection(using_default=False):
-            pass
-
-        assert captured == [{"load_httpfs": False}]
-
-    def test_using_default_reads_overture_over_httpfs(self, monkeypatch):
-        """The default countries source is the remote Overture release on S3,
-        so it needs both httpfs and the bucket's region. Asking for the region
-        while declaring load_httpfs=False was self-contradictory: DuckDB
-        autoloads httpfs on `SET s3_region` anyway."""
-        import geoparquet_io.core.add.country_codes as country_codes
-
-        captured = _spy_factory(monkeypatch, country_codes)
-
-        with country_codes._create_duckdb_connection(using_default=True) as con:
-            region = con.execute("SELECT current_setting('s3_region')").fetchone()[0]
-
-        assert captured == [{"load_httpfs": True, "s3_region": "us-west-2"}]
-        assert region == "us-west-2"
 
 
 class TestDiskRewriteWriteFromTable:

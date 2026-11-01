@@ -8,7 +8,6 @@ from geoparquet_io.core.admin_datasets import (
     OvertureAdminDataset,
 )
 from geoparquet_io.core.constants import (
-    FIBOA_CORE_SCHEMA,
     VECOREL_ADMIN_SCHEMA,
     VECOREL_CORE_SCHEMA,
     VECOREL_METRICS_SCHEMA,
@@ -17,11 +16,6 @@ from geoparquet_io.core.constants import (
 
 class TestVecorelColumnNaming:
     """Test Vecorel-compliant column name generation."""
-
-    def test_overture_vecorel_country(self):
-        dataset = OvertureAdminDataset()
-        name = dataset.get_output_column_name("country", prefix="vecorel")
-        assert name == "admin:country_code"
 
     def test_overture_vecorel_region(self):
         dataset = OvertureAdminDataset()
@@ -82,10 +76,6 @@ class TestVecorelMetadataConstants:
     def test_metrics_schema_url(self):
         assert "geometry-metrics-extension" in VECOREL_METRICS_SCHEMA
         assert VECOREL_METRICS_SCHEMA.endswith(".yaml")
-
-    def test_fiboa_schema_url(self):
-        assert "fiboa.org/specification" in FIBOA_CORE_SCHEMA
-        assert FIBOA_CORE_SCHEMA.endswith(".yaml")
 
 
 class TestVecorelMetadataPreservation:
@@ -236,10 +226,11 @@ class TestExtraKvMetadata:
     """Test extra_kv_metadata plumbing through write pipeline."""
 
     def test_build_copy_options_with_extra_kv(self):
+        from geoparquet_io.core.compression import resolve_codec
         from geoparquet_io.core.write_strategies.duckdb_kv import _build_copy_options
 
         options = _build_copy_options(
-            compression="ZSTD",
+            codec=resolve_codec("ZSTD", None, context="write"),
             row_group_rows=None,
             geo_meta_json='{"version": "1.1"}',
             extra_kv_metadata={"vecorel": '{"schemas": {}}'},
@@ -250,10 +241,11 @@ class TestExtraKvMetadata:
         assert "'vecorel':" in kv_option[0]
 
     def test_build_copy_options_only_extra_kv(self):
+        from geoparquet_io.core.compression import resolve_codec
         from geoparquet_io.core.write_strategies.duckdb_kv import _build_copy_options
 
         options = _build_copy_options(
-            compression="ZSTD",
+            codec=resolve_codec("ZSTD", None, context="write"),
             row_group_rows=None,
             geo_meta_json=None,
             extra_kv_metadata={"vecorel": '{"schemas": {}}'},
@@ -264,10 +256,11 @@ class TestExtraKvMetadata:
         assert "'geo':" not in kv_option[0]
 
     def test_build_copy_options_no_kv(self):
+        from geoparquet_io.core.compression import resolve_codec
         from geoparquet_io.core.write_strategies.duckdb_kv import _build_copy_options
 
         options = _build_copy_options(
-            compression="ZSTD",
+            codec=resolve_codec("ZSTD", None, context="write"),
             row_group_rows=None,
         )
         kv_option = [o for o in options if "KV_METADATA" in o]

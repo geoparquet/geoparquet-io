@@ -1,7 +1,7 @@
 """Every command reads the PRIMARY geometry's CRS, not a secondary's (#1248).
 
 A Parquet input with no ``geo`` block records each geometry column's CRS only
-in its native logical type. ``extract_crs_from_parquet`` asked with no column
+in its native logical type. ``crs_of`` asked with no column
 answered with the first non-default CRS in schema order, so a secondary column
 ahead of the primary lent the primary its CRS. #1235 patched ``convert`` by
 naming the column at two call sites. Every other caller (``convert reproject``,
@@ -22,8 +22,8 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet, source_crs_string
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.crs_utils import crs_of, source_crs_string
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 
 # POINT(10 10) in CRS84 projected to UTM 31N, and the H3 res-5 cell it lies in.
 UTM31_X, UTM31_Y = 1268980.13, 1113599.93
@@ -91,22 +91,22 @@ def _crs_code(crs):
 
 class TestPrimaryCrsResolver:
     def test_default_primary_after_projected_secondary(self, secondary_first):
-        assert extract_crs_from_parquet(str(secondary_first)) is None
+        assert crs_of(str(secondary_first)) is None
         assert source_crs_string(str(secondary_first)) is None
 
     def test_projected_primary_after_projected_secondary(self, tmp_path):
         path = _secondary_first(
             tmp_path / "utm.parquet", primary_crs="EPSG:32631", primary_xy=(5e5, 1e6)
         )
-        assert _crs_code(extract_crs_from_parquet(str(path))) == "EPSG:32631"
+        assert _crs_code(crs_of(str(path))) == "EPSG:32631"
         assert source_crs_string(str(path)) == "EPSG:32631"
 
     def test_named_column_is_read(self, secondary_first):
-        crs = extract_crs_from_parquet(str(secondary_first), geometry_column="other")
+        crs = crs_of(str(secondary_first), geometry_column="other")
         assert _crs_code(crs) == "EPSG:3857"
 
     def test_unknown_column_name_falls_back_to_the_primary(self, secondary_first):
-        assert extract_crs_from_parquet(str(secondary_first), geometry_column="nope") is None
+        assert crs_of(str(secondary_first), geometry_column="nope") is None
 
     def test_no_standard_name_reads_the_first_geometry_column(self, tmp_path):
         """Without a ``geometry``-like name the first native column is primary."""
@@ -116,7 +116,7 @@ class TestPrimaryCrsResolver:
             "SELECT ST_SetCRS(ST_Point(10, 10), 'OGC:CRS84') AS a, "
             "ST_SetCRS(ST_Point(1113194.9, 1118889.97), 'EPSG:3857') AS b",
         )
-        assert extract_crs_from_parquet(str(path)) is None
+        assert crs_of(str(path)) is None
 
     def test_geo_block_default_primary_ignores_a_projected_secondary(self, secondary_first):
         """A block naming a default-CRS primary must not fall to schema order either."""
@@ -135,7 +135,7 @@ class TestPrimaryCrsResolver:
                 },
             },
         )
-        assert extract_crs_from_parquet(str(secondary_first)) is None
+        assert crs_of(str(secondary_first)) is None
 
     def test_named_column_the_geo_block_omits_reads_its_native_type(self, secondary_first):
         """A requested column the block does not describe is still that column.
@@ -150,7 +150,7 @@ class TestPrimaryCrsResolver:
                 "columns": {"geometry": {"encoding": "WKB", "geometry_types": []}},
             },
         )
-        crs = extract_crs_from_parquet(str(secondary_first), geometry_column="other")
+        crs = crs_of(str(secondary_first), geometry_column="other")
         assert _crs_code(crs) == "EPSG:3857"
         assert source_crs_string(str(secondary_first), geometry_column="other") == "EPSG:3857"
 
@@ -163,7 +163,7 @@ class TestPrimaryCrsResolver:
 def _first_row(path, expr: str):
     con = get_duckdb_connection(load_spatial=True)
     try:
-        return con.execute(f"SELECT {expr} FROM {sql_path(str(path))}").fetchone()
+        return fetch_one(con.execute(f"SELECT {expr} FROM {sql_path(str(path))}"))
     finally:
         con.close()
 

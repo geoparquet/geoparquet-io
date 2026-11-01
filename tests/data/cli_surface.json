@@ -42,7 +42,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -55,7 +55,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -306,7 +306,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -319,7 +319,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -618,7 +618,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -631,7 +631,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -906,7 +906,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -919,7 +919,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -1138,7 +1138,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1151,7 +1151,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -1418,7 +1418,7 @@
        "type": "integer"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1431,7 +1431,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -1698,7 +1698,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1711,7 +1711,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -1962,7 +1962,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -1975,7 +1975,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -2739,7 +2739,7 @@
    "class": "_DefaultGroup",
    "commands": {
     "all": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -2970,7 +2970,7 @@
      ]
     },
     "bbox": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -3153,7 +3153,7 @@
      ]
     },
     "compression": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -3304,7 +3304,7 @@
      ]
     },
     "optimization": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -3391,7 +3391,7 @@
      ]
     },
     "row-group": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -3558,7 +3558,7 @@
      ]
     },
     "spatial": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -3741,7 +3741,7 @@
      ]
     },
     "spec": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -4614,7 +4614,7 @@
        "type": "text"
       },
       {
-       "default": "'features'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -4782,7 +4782,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -4795,7 +4795,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -5024,6 +5024,22 @@
        "type": "path[exists=False,file_okay=True,dir_okay=True,writable=False,readable=True,resolve_path=False]"
       },
       {
+       "default": "False",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "overwrite",
+       "nargs": 1,
+       "opts": [
+        "--overwrite"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "boolean"
+      },
+      {
        "default": "True",
        "hidden": false,
        "is_flag": true,
@@ -5226,7 +5242,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -5239,7 +5255,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -5645,7 +5661,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -5658,7 +5674,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -5738,7 +5754,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "integer"
+       "type": "integer range[min=0,max=None,min_open=False,max_open=False,clamp=False]"
       },
       {
        "default": "None",
@@ -6135,7 +6151,7 @@
        "type": "integer range[min=0,max=None,min_open=False,max_open=False,clamp=False]"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -6148,7 +6164,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -6561,7 +6577,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -6574,7 +6590,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -6818,7 +6834,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "integer range[min=1,max=3600,min_open=False,max_open=False,clamp=False]"
+       "type": "float range[min=0,max=None,min_open=True,max_open=False,clamp=False]"
       },
       {
        "default": "<unset>",
@@ -6872,7 +6888,7 @@
      ]
     },
     "geoparquet": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -6941,7 +6957,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -6954,7 +6970,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -7098,7 +7114,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "integer"
+       "type": "integer range[min=0,max=None,min_open=False,max_open=False,clamp=False]"
       },
       {
        "default": "None",
@@ -7385,7 +7401,7 @@
        "type": "choice[auto|server|local,case_sensitive=True]"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -7398,7 +7414,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -7752,7 +7768,7 @@
    "class": "_DefaultGroup",
    "commands": {
     "head": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -7928,7 +7944,7 @@
      ]
     },
     "meta": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -8064,7 +8080,7 @@
      ]
     },
     "stats": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -8136,7 +8152,7 @@
      ]
     },
     "summary": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -8224,7 +8240,7 @@
      ]
     },
     "tail": {
-     "class": "GlobAwareCommand",
+     "class": "ParquetInputCommand",
      "hidden": false,
      "kind": "command",
      "params": [
@@ -8391,7 +8407,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -8404,7 +8420,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -8767,7 +8783,7 @@
      "kind": "command",
      "params": [
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -8780,7 +8796,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -9111,7 +9127,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -9124,7 +9140,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -9535,7 +9551,7 @@
        "type": "integer"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -9548,7 +9564,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -9895,7 +9911,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -9908,7 +9924,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -10335,7 +10351,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -10348,7 +10364,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -10759,7 +10775,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -10772,7 +10788,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -11679,6 +11695,22 @@
        "required": false,
        "secondary_opts": [],
        "type": "boolean"
+      },
+      {
+       "default": "None",
+       "hidden": false,
+       "is_flag": false,
+       "metavar": null,
+       "multiple": false,
+       "name": "write_memory",
+       "nargs": 1,
+       "opts": [
+        "--write-memory"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [],
+       "type": "text"
       }
      ]
     }
@@ -11797,7 +11829,7 @@
          "type": "text"
         },
         {
-         "default": "'ZSTD'",
+         "default": "None",
          "hidden": false,
          "is_flag": false,
          "metavar": null,
@@ -11810,7 +11842,7 @@
          "param_type": "Option",
          "required": false,
          "secondary_opts": [],
-         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
         },
         {
          "default": "<unset>",
@@ -12125,7 +12157,7 @@
          "type": "text"
         },
         {
-         "default": "'ZSTD'",
+         "default": "None",
          "hidden": false,
          "is_flag": false,
          "metavar": null,
@@ -12138,7 +12170,7 @@
          "param_type": "Option",
          "required": false,
          "secondary_opts": [],
-         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
         },
         {
          "default": "<unset>",
@@ -12437,7 +12469,7 @@
          "type": "text"
         },
         {
-         "default": "'ZSTD'",
+         "default": "None",
          "hidden": false,
          "is_flag": false,
          "metavar": null,
@@ -12450,7 +12482,7 @@
          "param_type": "Option",
          "required": false,
          "secondary_opts": [],
-         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+         "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
         },
         {
          "default": "<unset>",
@@ -12724,7 +12756,7 @@
        "type": "float"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -12737,7 +12769,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -13004,7 +13036,7 @@
        "type": "float"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -13017,7 +13049,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -13253,7 +13285,7 @@
        "type": "integer"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -13266,7 +13298,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -13365,6 +13397,24 @@
        "type": "text"
       },
       {
+       "default": "True",
+       "hidden": false,
+       "is_flag": true,
+       "metavar": null,
+       "multiple": false,
+       "name": "repair_geometry",
+       "nargs": 1,
+       "opts": [
+        "--repair-geometry"
+       ],
+       "param_type": "Option",
+       "required": false,
+       "secondary_opts": [
+        "--no-repair-geometry"
+       ],
+       "type": "boolean"
+      },
+      {
        "default": "None",
        "hidden": false,
        "is_flag": false,
@@ -13453,7 +13503,7 @@
      "kind": "command",
      "params": [
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -13466,7 +13516,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -14214,7 +14264,7 @@
        "type": "text"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14227,7 +14277,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -14446,7 +14496,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14459,7 +14509,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -14478,7 +14528,7 @@
        "type": "integer range[min=1,max=22,min_open=False,max_open=False,clamp=False]"
       },
       {
-       "default": "'geometry'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14679,7 +14729,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14692,7 +14742,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -14959,7 +15009,7 @@
        "type": "boolean"
       },
       {
-       "default": "'ZSTD'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,
@@ -14972,7 +15022,7 @@
        "param_type": "Option",
        "required": false,
        "secondary_opts": [],
-       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED,case_sensitive=False]"
+       "type": "choice[ZSTD|GZIP|BROTLI|LZ4|SNAPPY|UNCOMPRESSED|NONE,case_sensitive=False]"
       },
       {
        "default": "<unset>",
@@ -14991,7 +15041,7 @@
        "type": "integer range[min=1,max=22,min_open=False,max_open=False,clamp=False]"
       },
       {
-       "default": "'geometry'",
+       "default": "None",
        "hidden": false,
        "is_flag": false,
        "metavar": null,

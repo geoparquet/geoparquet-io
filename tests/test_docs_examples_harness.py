@@ -11,6 +11,7 @@ the guides use.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,7 @@ from tests.docs_examples.collector import (
     BLOCK_TIMEOUT_SECONDS,
     NETWORK_BLOCK_TIMEOUT_SECONDS,
     DocExampleFailure,
+    DocExampleItem,
     block_timeout,
     check_menu_is_splittable,
     menu_refusal_reason,
@@ -391,3 +393,14 @@ class TestSkipOnPlatform:
 
     def test_it_is_a_known_keyword(self):
         assert "skip-on" in DIRECTIVE_KEYWORDS
+
+
+@pytest.mark.parametrize("directive", ["", "fast", "slow", "network"])
+def test_every_docs_example_is_slow(tmp_path, directive):
+    """Even former fast examples are whole-pipeline checks (#1402)."""
+    marks = []
+    item = SimpleNamespace(block=_block(tmp_path, directive), add_marker=marks.append)
+    DocExampleItem._apply_marks(item)
+    names = {mark.name for mark in marks}
+    assert {"docs_example", "slow"} <= names
+    assert ("network" in names) == (directive == "network")

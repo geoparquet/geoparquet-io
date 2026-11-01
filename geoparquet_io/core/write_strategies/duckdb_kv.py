@@ -14,9 +14,6 @@ Reliability: Atomic write - either succeeds completely or fails
 from __future__ import annotations
 
 import json
-import os
-import tempfile
-from pathlib import Path
 
 import duckdb
 import pyarrow as pa
@@ -24,43 +21,48 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
     _canonicalize_wkb_columns,
-    _detect_version_from_table,
-    _parse_geo_metadata_quietly,
     table_geometry_info,
 )
+from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
 from geoparquet_io.core.crs_utils import _wrap_query_with_crs as _common_wrap_query_with_crs
 from geoparquet_io.core.crs_utils import is_default_crs, is_unknown_type_crs
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     _wrap_query_with_blob_conversion,
     build_kv_metadata_clause,
+    describe_query,
+    geom_from_wkb_sql,
     quote_identifier,
     register_arrow,
+    sql_literal,
     sql_path,
-    validate_compression_level,
 )
+from geoparquet_io.core.file_utils import scratch_path, unlink_released_file
 from geoparquet_io.core.geo_metadata import (
     NATIVE_GEOMETRY_VERSIONS,
-    compute_geo_stats_via_sql,
-    declare_carried_bbox_column,
-    gate_illegal_bbox_covering,
-    strip_bboxless_covering,
+    GeoBlockOptions,
+    QuerySource,
+    compose_geo_block,
+    geo_key_value,
+    geometry_stats_of,
+    geometry_types_of,
+    sanitized_carried_geo,
 )
 from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
+from geoparquet_io.core.geometry_detection import GeometryRead
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.parquet_writer import (
+    resolve_output_geoparquet_version,
+    resolve_row_group_rows_for_query,
+)
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
-    build_geo_metadata,
     resolve_geometry_columns,
     type_crs_for,
     wrap_query_with_secondary_crs,
+    written_block_encoding,
 )
-from geoparquet_io.core.write_strategies.row_group_sizing import _resolve_row_group_rows
-
-# Valid compression values whitelist (prevents injection via compression param)
-VALID_COMPRESSIONS = frozenset({"ZSTD", "SNAPPY", "GZIP", "LZ4", "UNCOMPRESSED", "BROTLI"})
 
 
 def _wrap_query_with_crs(
@@ -119,7 +121,7 @@ def _plain_wkb_for_secondary_columns(
     it through a binary cast PyArrow cannot perform.
     """
 
-    carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
+    carried_geo = sanitized_carried_geo(table.schema.metadata)
     secondaries = resolve_geometry_columns(geometry_column, geometry_info, carried_geo) - {
         geometry_column
     }
@@ -168,12 +170,12 @@ def _table_query_with_native_geometry(
         ):
             continue
         ident = quote_identifier(name)
-        expr = f"ST_GeomFromWKB({ident})"
+        expr = geom_from_wkb_sql(ident)
         crs = type_crs_for(metadata.get(name)) if name != geometry_column else None
         if is_unknown_type_crs(crs):
-            expr = f"ST_SetCRS({expr}, '{_escape_sql_string(crs)}')"
+            expr = f"ST_SetCRS({expr}, {sql_literal(crs)})"
         elif isinstance(crs, dict) and crs and not is_default_crs(crs):
-            expr = f"ST_SetCRS({expr}, '{_escape_sql_string(json.dumps(crs))}')"
+            expr = f"ST_SetCRS({expr}, {sql_literal(json.dumps(crs))})"
         replacements.append(f"{expr} AS {ident}")
     if not replacements:
         return "SELECT * FROM input_table"
@@ -181,25 +183,17 @@ def _table_query_with_native_geometry(
 
 
 def _build_copy_options(
-    compression: str,
+    codec: ResolvedCodec,
     row_group_rows: int | None,
     geo_meta_json: str | None = None,
     extra_kv_metadata: dict[str, str] | None = None,
-    compression_level: int | None = None,
 ) -> list[str]:
-    """Build COPY TO options list."""
-    options = [
-        "FORMAT PARQUET",
-        f"COMPRESSION {compression}",
-        "GEOPARQUET_VERSION 'NONE'",
-    ]
-    # DuckDB accepts COMPRESSION_LEVEL for ZSTD only ("Compression level is only
-    # supported for the ZSTD compression codec"); naming any other codec with a
-    # level is a binder error. Omitting it entirely silently dropped the user's
-    # --compression-level and fell back to DuckDB's ZSTD default of 3 against
-    # gpio's default of 15 -- ~15% larger output on every write through here.
-    if compression_level is not None and compression.upper() == "ZSTD":
-        options.append(f"COMPRESSION_LEVEL {validate_compression_level(compression_level)}")
+    """Build COPY TO options list.
+
+    The codec clauses come from the owner, so an unset ZSTD level is written
+    at gpio's 15 rather than DuckDB's own 3 (#1335).
+    """
+    options = ["FORMAT PARQUET", *codec.duckdb_copy_options(), "GEOPARQUET_VERSION 'NONE'"]
     kv_pairs = dict(extra_kv_metadata or {})
     if geo_meta_json:
         # `geo` is generated by this write, so it wins over a preserved copy of
@@ -256,16 +250,12 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         configure_verbose(verbose)
         self._validate_output_path(output_path)
 
-        compression_upper = compression.upper()
-        if compression_upper not in VALID_COMPRESSIONS:
-            raise ValueError(
-                f"Invalid compression: {compression}. Valid: {', '.join(VALID_COMPRESSIONS)}"
-            )
+        codec = resolve_codec(compression, compression_level, context="write")
 
         # DuckDB COPY TO sizes row groups by row count, so translate any MB target
         # into rows before it can take effect on this strategy (fixes #547).
-        row_group_rows = _resolve_row_group_rows(
-            con, query, row_group_size_mb, row_group_rows, verbose
+        row_group_rows = resolve_row_group_rows_for_query(
+            con, query, row_group_rows, row_group_size_mb, verbose
         )
 
         # Handle non-geo queries: write plain Parquet without geo metadata
@@ -274,7 +264,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 con,
                 query,
                 output_path,
-                compression_upper,
+                codec,
                 row_group_rows,
                 verbose,
                 extra_kv_metadata,
@@ -295,8 +285,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                         query,
                         local_path,
                         geometry_column,
-                        compression_upper,
-                        compression_level,
+                        codec,
                         row_group_rows,
                         input_crs,
                         output_path,
@@ -312,8 +301,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                         local_path,
                         geometry_column,
                         geoparquet_version,
-                        compression_upper,
-                        compression_level,
+                        codec,
                         row_group_rows,
                         original_metadata,
                         input_crs,
@@ -328,8 +316,8 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                     upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
 
         finally:
-            if is_remote and Path(local_path).exists():
-                Path(local_path).unlink()
+            if is_remote:
+                unlink_released_file(local_path)
 
     #: Settings this strategy pins for the duration of one write, on top of the
     #: shared memory policy in ``scoped_write_memory_limit`` (#1174: one policy,
@@ -349,9 +337,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
     def _get_local_path(self, output_path: str, is_remote: bool) -> str:
         """Get local path for writing (temp file if remote)."""
         if is_remote:
-            fd, local_path = tempfile.mkstemp(suffix=".parquet")
-            os.close(fd)
-            return local_path
+            return scratch_path()
         return output_path
 
     def _write_parquet_geo_only(
@@ -360,8 +346,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         query: str,
         local_path: str,
         geometry_column: str,
-        compression: str,
-        compression_level: int,
+        codec: ResolvedCodec,
         row_group_rows: int | None,
         input_crs: dict | None,
         output_path: str,
@@ -379,22 +364,22 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         # the block is still built, never written, to type every geometry column
         # the way a 2.0 write does. Typing the primary alone left an unknown
         # secondary unset, which reads as OGC:CRS84 (#1277 review).
-        geo_meta = build_geo_metadata(
-            geometry_column=geometry_column,
-            geoparquet_version="parquet-geo-only",
-            original_metadata=original_metadata,
-            input_crs=input_crs,
-            geometry_info=geometry_info,
+        geo_meta = compose_geo_block(
+            QuerySource(con, query, original_metadata),
+            GeoBlockOptions(
+                geometry_column=geometry_column,
+                version="parquet-geo-only",
+                covering=None,
+                crs=input_crs,
+                geometry_info=geometry_info,
+            ),
         )
         final_query = _native_typed_query(
             con, query, geometry_column, geo_meta, input_crs, "parquet-geo-only"
         )
 
         copy_options = _build_copy_options(
-            compression,
-            row_group_rows,
-            extra_kv_metadata=extra_kv_metadata,
-            compression_level=compression_level,
+            codec, row_group_rows, extra_kv_metadata=extra_kv_metadata
         )
         copy_query = f"COPY ({final_query}) TO {sql_path(local_path)} ({', '.join(copy_options)})"
         con.execute(copy_query)
@@ -410,8 +395,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         local_path: str,
         geometry_column: str,
         geoparquet_version: str,
-        compression: str,
-        compression_level: int,
+        codec: ResolvedCodec,
         row_group_rows: int | None,
         original_metadata: dict | None,
         input_crs: dict | None,
@@ -423,30 +407,23 @@ class DuckDBKVStrategy(BaseWriteStrategy):
     ) -> None:
         """Write with geo metadata (v1.0, v1.1, v2.0)."""
 
-        geo_meta = build_geo_metadata(
-            geometry_column=geometry_column,
-            geoparquet_version=geoparquet_version,
-            original_metadata=original_metadata,
-            input_crs=input_crs,
-            custom_metadata=custom_metadata,
-            geometry_info=geometry_info,
+        # The carried stats stand; the ones the block lacks are measured from
+        # the query (one scan per column) inside the one composition.
+        geo_meta = compose_geo_block(
+            QuerySource(con, query, original_metadata),
+            GeoBlockOptions(
+                geometry_column=geometry_column,
+                version=geoparquet_version,
+                custom_metadata=custom_metadata,
+                encoding=written_block_encoding(geoparquet_version),
+                crs=input_crs,
+                geometry_info=geometry_info,
+                measure_missing=lambda block: self._missing_stats(
+                    con, query, geometry_column, block, verbose
+                ),
+                verbose=verbose,
+            ),
         )
-
-        col_meta = geo_meta["columns"][geometry_column]
-        self._compute_missing_metadata(con, query, geometry_column, col_meta, verbose)
-        declare_carried_bbox_column(
-            con, query, col_meta, verbose, geoparquet_version, geo_meta=geo_meta
-        )
-        self._compute_missing_secondary_metadata(con, query, geometry_column, geo_meta, verbose)
-        # The declare above is primary-scoped, so a SECONDARY column's covering
-        # over an illegal struct reached the output verbatim and `gpio check
-        # spec` failed the file gpio had just written (#1172/#1035). Same gate
-        # the Arrow builders run, over every column.
-        geo_meta = gate_illegal_bbox_covering(geo_meta, con, query)
-        # After the declare above, so an undeclared conventional bbox column
-        # gets its chance to supply the one member the spec defines; a covering
-        # still without a bbox member is one geopandas cannot read (#954).
-        geo_meta = strip_bboxless_covering(geo_meta, verbose)
 
         # For v1.x: Cast to BLOB so DuckDB writes plain binary WKB. EVERY geometry
         # column, not just the primary: validation applies the same per-version
@@ -468,27 +445,27 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             )
 
         copy_options = _build_copy_options(
-            compression, row_group_rows, json.dumps(geo_meta), extra_kv_metadata, compression_level
+            codec, row_group_rows, geo_key_value(geo_meta), extra_kv_metadata
         )
         copy_query = f"COPY ({final_query}) TO {sql_path(local_path)} ({', '.join(copy_options)})"
 
         if verbose:
-            debug(f"Writing via DuckDB COPY TO with {compression} compression...")
+            debug(f"Writing via DuckDB COPY TO with {codec.name} compression...")
         con.execute(copy_query)
 
         if verbose:
             pf = pq.ParquetFile(local_path)
             success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
 
-    def _compute_missing_metadata(
+    def _missing_stats(
         self,
         con: duckdb.DuckDBPyConnection,
         query: str,
         geometry_column: str,
-        col_meta: dict,
+        geo_meta: dict,
         verbose: bool,
-    ) -> None:
-        """Compute whichever of bbox/geometry_types the carried metadata lacks.
+    ) -> dict[str, dict]:
+        """The bbox/geometry_types each geometry column's block entry lacks, measured.
 
         Both come out of one scan, so a caller that invalidated both (a row
         filter, a reprojection, a multi-file merge) pays for a single pass.
@@ -500,63 +477,55 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         command ever recomputed it (#952). This path holds the rows, so it
         answers the question once; a genuinely empty result writes ``[]`` back
         and that is the end of it, with no warning and no second pass.
-        """
 
+        A SECONDARY column gets the same gap-fill (#952/#1000), keyed on the
+        spec-required ``geometry_types`` alone: a secondary whose types are known
+        is not rescanned for the optional ``bbox``. Only columns the query emits
+        as GEOMETRY (or a GeoArrow struct) can be measured; a secondary that
+        reaches the query as a plain BLOB -- an Arrow stream from a non-gpio
+        producer -- keeps its carried metadata, the same way the 1.x WKB wrap
+        leaves it alone; binding ST_* to it would abort the whole write.
+        """
+        columns = geo_meta["columns"]
+        stats = {}
+        primary = self._measure_gaps(con, query, geometry_column, columns[geometry_column], verbose)
+        if primary:
+            stats[geometry_column] = primary
+        gaps = sorted(
+            name
+            for name, meta in columns.items()
+            if name != geometry_column and isinstance(meta, dict)
+            if not meta.get("geometry_types")
+        )
+        if not gaps:
+            return stats
+        column_types = dict(describe_query(con, query))
+        for name in gaps:
+            type_ = column_types.get(name, "")
+            if GeometryRead.for_type(name, type_ or None).kind in ("native", "geoarrow"):
+                measured = self._measure_gaps(con, query, name, columns[name], verbose)
+                if measured:
+                    stats[name] = measured
+        return stats
+
+    @staticmethod
+    def _measure_gaps(con, query: str, column: str, col_meta: dict, verbose: bool) -> dict:
+        """``column``'s missing bbox and/or geometry_types, from one scan."""
         need_bbox = "bbox" not in col_meta
         need_types = not col_meta.get("geometry_types")
         if not (need_bbox or need_types):
-            return
+            return {}
 
         if verbose:
             debug("Computing bbox/geometry types via SQL...")
-        bbox, geometry_types = compute_geo_stats_via_sql(
-            con,
-            query,
-            geometry_column,
-            need_bbox=need_bbox,
-            need_geometry_types=need_types,
-        )
-        if need_bbox and bbox:
-            col_meta["bbox"] = bbox
+        source = QuerySource(con, query)
+        if not need_bbox:
+            return {"geometry_types": geometry_types_of(source, column)}
+        stats = geometry_stats_of(source, column)
+        measured = {"bbox": stats.bbox} if stats.bbox else {}
         if need_types:
-            col_meta["geometry_types"] = geometry_types
-
-    def _compute_missing_secondary_metadata(
-        self,
-        con: duckdb.DuckDBPyConnection,
-        query: str,
-        geometry_column: str,
-        geo_meta: dict,
-        verbose: bool,
-    ) -> None:
-        """The same gap-fill for every SECONDARY geometry column (#952/#1000).
-
-        The primary's pass above ran for it alone, so a secondary carried with
-        the ``[]`` sentinel -- or freshly derived from the input's logical types
-        -- kept its gap forever. Only the spec-required ``geometry_types`` makes
-        a gap here: a secondary whose types are known is not rescanned for the
-        optional ``bbox`` (the scan that fills a gap fills the bbox too).
-
-        Only columns the query emits as GEOMETRY (or a GeoArrow struct) can be
-        measured. A secondary that reaches the query as a plain BLOB -- an Arrow
-        stream from a non-gpio producer -- keeps its carried metadata, the same
-        way the 1.x WKB wrap leaves it alone; binding ST_* to it would abort the
-        whole write.
-        """
-        gaps = {
-            name: meta
-            for name, meta in geo_meta["columns"].items()
-            if name != geometry_column and isinstance(meta, dict)
-            if not meta.get("geometry_types")
-        }
-        if not gaps:
-            return
-        column_types = {
-            row[0]: str(row[1]).upper() for row in con.execute(f"DESCRIBE ({query})").fetchall()
-        }
-        for name in sorted(gaps):
-            if column_types.get(name, "").startswith(("GEOMETRY", "STRUCT")):
-                self._compute_missing_metadata(con, query, name, gaps[name], verbose)
+            measured["geometry_types"] = stats.geometry_types
+        return measured
 
     def write_from_table(
         self,
@@ -572,6 +541,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         input_crs: dict | None = None,
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        original_metadata: dict | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using DuckDB COPY TO with KV_METADATA."""
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
@@ -582,14 +552,19 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         # Handle non-geo tables: write plain Parquet without geo metadata
         if geometry_column is None:
             self._write_plain_parquet_from_table(
-                table, output_path, compression, row_group_rows, verbose, extra_kv_metadata
+                table,
+                output_path,
+                resolve_codec(compression, compression_level, context="write"),
+                row_group_rows,
+                verbose,
+                extra_kv_metadata,
             )
             return
 
-        # Auto-detect version from table schema metadata if not specified
-        effective_version = geoparquet_version
-        if effective_version is None:
-            effective_version = _detect_version_from_table(table, verbose)
+        # Auto mode: the facade decides from the table's own schema.
+        effective_version = resolve_output_geoparquet_version(
+            geoparquet_version, table=table, verbose=verbose
+        )
 
         # DuckDB registers a `geoarrow.wkb` column as GEOMETRY, and the COPY then
         # writes it as a native Parquet GEOMETRY logical type. That is right for
@@ -602,7 +577,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         # before the 1.x strip below, which needs their names, and threaded into
         # `write_from_query` so the output's `geo` block describes them too.
         geometry_info = table_geometry_info(
-            table, geometry_column, _parse_geo_metadata_quietly(table.schema.metadata)
+            table, geometry_column, sanitized_carried_geo(table.schema.metadata)
         )
 
         if effective_version in ("1.0", "1.1"):
@@ -619,21 +594,11 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 table, geometry_column, geometry_info, effective_version
             )
 
-            self.write_from_query(
-                con=con,
-                query=query,
-                output_path=output_path,
-                geometry_column=geometry_column,
-                original_metadata=None,
+            self._write_table_query(
+                con,
+                query,
+                locals(),
                 geoparquet_version=effective_version,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                input_crs=input_crs,
-                verbose=verbose,
-                custom_metadata=custom_metadata,
-                extra_kv_metadata=extra_kv_metadata,
                 geometry_info=geometry_info,
             )
         finally:
@@ -643,7 +608,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         self,
         table: pa.Table,
         output_path: str,
-        compression: str,
+        codec: ResolvedCodec,
         row_group_rows: int | None,
         verbose: bool,
         extra_kv_metadata: dict[str, str] | None = None,
@@ -657,12 +622,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         """
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
-        compression_upper = compression.upper()
-        if compression_upper not in VALID_COMPRESSIONS:
-            raise ValueError(
-                f"Invalid compression: {compression}. Valid: {', '.join(VALID_COMPRESSIONS)}"
-            )
-
         is_remote = is_remote_url(output_path)
         local_path = self._get_local_path(output_path, is_remote)
 
@@ -670,10 +629,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         try:
             register_arrow(con, "input_table", table)
 
-            options = [
-                "FORMAT PARQUET",
-                f"COMPRESSION {compression_upper}",
-            ]
+            options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
             kv_clause = build_kv_metadata_clause(extra_kv_metadata)
             if kv_clause:
                 options.append(kv_clause)
@@ -683,7 +639,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             copy_query = f"COPY input_table TO {sql_path(local_path)} ({', '.join(options)})"
 
             if verbose:
-                debug(f"Writing plain Parquet with {compression_upper} compression...")
+                debug(f"Writing plain Parquet with {codec.name} compression...")
             con.execute(copy_query)
 
             if is_remote:
@@ -694,15 +650,15 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
         finally:
             con.close()
-            if is_remote and Path(local_path).exists():
-                Path(local_path).unlink()
+            if is_remote:
+                unlink_released_file(local_path)
 
     def _write_plain_parquet_from_query(
         self,
         con: duckdb.DuckDBPyConnection,
         query: str,
         output_path: str,
-        compression: str,
+        codec: ResolvedCodec,
         row_group_rows: int | None,
         verbose: bool,
         extra_kv_metadata: dict[str, str] | None = None,
@@ -721,10 +677,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         local_path = self._get_local_path(output_path, is_remote)
 
         try:
-            options = [
-                "FORMAT PARQUET",
-                f"COMPRESSION {compression}",
-            ]
+            options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
             kv_clause = build_kv_metadata_clause(extra_kv_metadata)
             if kv_clause:
                 options.append(kv_clause)
@@ -734,7 +687,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             copy_query = f"COPY ({query}) TO {sql_path(local_path)} ({', '.join(options)})"
 
             if verbose:
-                debug(f"Writing plain Parquet with {compression} compression...")
+                debug(f"Writing plain Parquet with {codec.name} compression...")
             with scoped_write_memory_limit(con, memory_limit, verbose):
                 con.execute(copy_query)
 
@@ -745,5 +698,5 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 pf = pq.ParquetFile(local_path)
                 success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
         finally:
-            if is_remote and Path(local_path).exists():
-                Path(local_path).unlink()
+            if is_remote:
+                unlink_released_file(local_path)

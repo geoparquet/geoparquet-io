@@ -18,6 +18,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.reproject import reproject, reproject_table
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 from tests.conftest import get_geo_metadata
@@ -195,12 +196,9 @@ class TestMultiGeometryColumns:
                 str(spherical_two_columns),
                 str(out),
                 "EPSG:3857",
-                None,  # source_crs
-                "ZSTD",  # compression
-                None,  # compression_level
+                None,
                 False,  # verbose
-                None,  # profile
-                None,  # geoparquet_version
+                WriteOptions(compression="ZSTD"),
             )
 
         geo = get_geo_metadata(str(out))

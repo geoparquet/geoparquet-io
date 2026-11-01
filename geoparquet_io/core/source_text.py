@@ -27,7 +27,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    fetch_one,
+    quote_identifier,
+    sql_literal,
+)
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.remote import is_remote_url
@@ -63,6 +68,8 @@ _SHAPEFILE_SUFFIXES = (".shp", ".dbf", ".shz", ".shp.zip")
 
 #: The fail-closed message carries this phrase; :func:`text_error` keys off it.
 _NOT_UTF8 = "holds text that is not valid UTF-8"
+#: How DuckDB 2.0's client reports a C++ string it cannot decode as a Python str.
+_NANOBIND_STR_ERROR = "nanobind::str(): conversion error"
 
 _ENCODING_HINT = (
     "The source does not say which encoding it uses, or names one gpio cannot read. "
@@ -214,9 +221,9 @@ def _register_decoder(con, codec: str) -> str:
     from duckdb.sqltypes import VARCHAR
 
     name = "gpio_decode_" + re.sub(r"[^a-z0-9]", "_", codec.lower())
-    exists = con.execute(
-        "SELECT 1 FROM duckdb_functions() WHERE function_name = ?", [name]
-    ).fetchone()
+    exists = fetch_one(
+        con.execute("SELECT 1 FROM duckdb_functions() WHERE function_name = ?", [name])
+    )
     if not exists:
         con.create_function(name, _decoder(codec), [VARCHAR], VARCHAR, type="arrow")
     return name
@@ -238,16 +245,15 @@ def decoded_names(names: list[str] | None, plan: SourceText) -> list[str] | None
 
 def _guard(column: str) -> str:
     quoted = quote_identifier(column)
-    message = _escape_sql_string(f'Column "{column}" {_NOT_UTF8}. {_ENCODING_HINT}')
+    message = sql_literal(f'Column "{column}" {_NOT_UTF8}. {_ENCODING_HINT}')
     return (
         f"CASE WHEN {quoted} IS NULL OR TRY(decode(encode({quoted}))) IS NOT NULL "
-        f"THEN {quoted} ELSE error('{message}') END AS {quoted}"
+        f"THEN {quoted} ELSE error({message}) END AS {quoted}"
     )
 
 
 def _bind(con, table_expr: str) -> list[tuple[str, str]]:
-    description = con.execute(f"SELECT * FROM {table_expr} LIMIT 0").description
-    return [(col[0], str(col[1])) for col in description]
+    return describe_query(con, f"SELECT * FROM {table_expr}")
 
 
 def _guarded(table_expr: str, text: list[str]) -> str:
@@ -293,9 +299,13 @@ def text_error(error: BaseException) -> GeoParquetError | None:
     """The fail-closed refusal as a clean :class:`GeoParquetError`, else None.
 
     A column *name* that is not UTF-8 never reaches the value check: Python
-    fails decoding it from the bind, before any query runs.
+    fails decoding it from the bind, before any query runs. DuckDB 1.5 raises
+    that as ``UnicodeDecodeError``; 2.0's nanobind client raises a
+    ``RuntimeError`` naming the failed ``nanobind::str()`` conversion.
     """
-    if isinstance(error, UnicodeDecodeError):
+    if isinstance(error, UnicodeDecodeError) or (
+        isinstance(error, RuntimeError) and _NANOBIND_STR_ERROR in str(error)
+    ):
         return GeoParquetError(f"A column name in the source {_NOT_UTF8}. {_ENCODING_HINT}")
     message = str(error)
     if _NOT_UTF8 not in message:

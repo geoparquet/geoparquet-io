@@ -11,28 +11,29 @@ from __future__ import annotations
 import json
 import os
 import re
-import tempfile
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from geoparquet_io.core.crs_utils import (
     PARQUET_UNKNOWN_CRS,
-    apply_output_crs,
     entry_crs_is_unknown,
     is_default_crs,
     is_unknown_type_crs,
 )
-from geoparquet_io.core.duckdb_utils import _escape_sql_string, quote_identifier
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    duckdb_type_is_geometry,
+    quote_identifier,
+    sql_literal,
+)
 from geoparquet_io.core.geo_metadata import (
     GEOPARQUET_VERSIONS,
     NATIVE_GEOMETRY_VERSIONS,
-    decode_carried_geo,
-    sanitize_geo_metadata,
-    strip_unsupported_covering,
+    read_raw_geo,
 )
+from geoparquet_io.core.parquet_writer import carried_geoparquet_version
 
 if TYPE_CHECKING:
     import duckdb
@@ -97,7 +98,7 @@ def native_geometry_crs(
 
     One definition, shared by every strategy: the streaming writer's output
     schema, the disk-rewrite writer's, and the in-memory path in
-    ``common._apply_geoparquet_metadata``.
+    ``arrow_geo_metadata._apply_geoparquet_metadata``.
     """
     if geoparquet_version not in NATIVE_GEOMETRY_VERSIONS:
         return {}
@@ -156,194 +157,29 @@ def wrap_query_with_secondary_crs(
     wanted = secondary_type_crs(geo_columns, primary)
     if not wanted:
         return query
-    native = {
-        row[0]
-        for row in con.execute(f"DESCRIBE ({query})").fetchall()
-        if str(row[1]).upper().startswith("GEOMETRY")
-    }
+    native = {name for name, type_ in describe_query(con, query) if duckdb_type_is_geometry(type_)}
     replacements = []
     for name in sorted(set(wanted) & native):
         crs = wanted[name]
         literal = crs if isinstance(crs, str) else json.dumps(crs)
         ident = quote_identifier(name)
-        replacements.append(f"ST_SetCRS({ident}, '{_escape_sql_string(literal)}') AS {ident}")
+        replacements.append(f"ST_SetCRS({ident}, {sql_literal(literal)}) AS {ident}")
     if not replacements:
         return query
     return f"SELECT * REPLACE ({', '.join(replacements)}) FROM ({query})"
 
 
-def merge_secondary_geometry_metadata(geo_meta: dict, geometry_info: dict | None) -> None:
-    """Give every secondary geometry column an entry in ``geo["columns"]``.
+def written_block_encoding(geoparquet_version: str) -> str | None:
+    """The primary's encoding a DuckDB-written file actually has, for the composer.
 
-    Each secondary keeps the metadata the input declared for it -- crucially its
-    own ``crs``, which is what the native Parquet GEOMETRY type is then built
-    from -- and gains the ``encoding`` the spec requires when the input named
-    none. Existing keys win, so a caller that has already resolved something for
-    the column is not overwritten.
-
-    Mutates ``geo_meta`` in place. Shared by the three write paths that build a
-    block from ``geometry_info``: this module's ``build_geo_metadata``, the
-    streaming strategy's, and ``common._apply_geoparquet_metadata``.
+    DuckDB writes the geometry as WKB (a BLOB for 1.x, native Parquet GEOMETRY
+    for 2.0), so that is the writer's answer; for 1.1-geoarrow it keeps the
+    input's native encoding and leaves the composer's step 3 to name it.
     """
-    if not geometry_info:
-        return
-
-    column_metadata = geometry_info.get("metadata") or {}
-    for sec_col in geometry_info.get("secondary") or ():
-        sec_meta = geo_meta.setdefault("columns", {}).setdefault(sec_col, {})
-        for key, value in column_metadata.get(sec_col, {}).items():
-            if key not in sec_meta:
-                sec_meta[key] = value
-        if "encoding" not in sec_meta:
-            sec_meta["encoding"] = "WKB"
+    return None if geoparquet_version == "1.1-geoarrow" else "WKB"
 
 
-def build_geo_metadata(
-    geometry_column: str,
-    geoparquet_version: str,
-    original_metadata: dict | None = None,
-    input_crs: dict | None = None,
-    custom_metadata: dict | None = None,
-    bbox: list[float] | None = None,
-    geometry_types: list[str] | None = None,
-    geometry_info: dict | None = None,
-) -> dict:
-    """
-    Build GeoParquet metadata - single source of truth for all strategies.
-
-    This helper consolidates the metadata building logic that was previously
-    duplicated across strategies.
-
-    Args:
-        geometry_column: Name of the geometry column (primary)
-        geoparquet_version: Target GeoParquet version (1.0, 1.1, 2.0)
-        original_metadata: Original file metadata to parse for existing geo metadata
-        input_crs: PROJJSON dict with CRS to apply to primary column
-        custom_metadata: Custom metadata (e.g., H3 covering info)
-        bbox: Bounding box [xmin, ymin, xmax, ymax] for primary column
-        geometry_types: List of geometry types for primary column
-        geometry_info: Multi-geometry column info dict with keys:
-            - "primary": primary geometry column name
-            - "secondary": list of secondary geometry column names
-            - "metadata": dict mapping column names to their metadata
-
-    Returns:
-        dict: Complete geo metadata structure ready for embedding in Parquet
-    """
-
-    version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
-    metadata_version = version_config.get("metadata_version", "1.1.0")
-
-    # Parse existing geo metadata if provided
-    geo_meta = _parse_existing_geo_metadata(original_metadata)
-
-    # Initialize or update structure
-    geo_meta = _initialize_geo_metadata(geo_meta, geometry_column, metadata_version)
-
-    col_meta = geo_meta["columns"][geometry_column]
-
-    # Encoding (required by GeoParquet spec)
-    if "encoding" not in col_meta:
-        # For 1.1-geoarrow, preserve the input encoding (native type) from geometry_info.
-        # For all other v1.x versions, geometry is converted to WKB blob before writing.
-        input_encoding = (
-            geometry_info.get("metadata", {}).get(geometry_column, {}).get("encoding")
-            if geometry_info and geoparquet_version == "1.1-geoarrow"
-            else None
-        )
-        col_meta["encoding"] = input_encoding or "WKB"
-
-    # Geometry types
-    if geometry_types is not None:
-        col_meta["geometry_types"] = geometry_types
-
-    # Bounding box
-    if bbox is not None:
-        col_meta["bbox"] = bbox
-
-    # CRS: write non-default explicitly; omit (and strip any stale/default/null
-    # value carried from the source) when the output is the spec default.
-    apply_output_crs(col_meta, input_crs)
-
-    # Merge custom metadata into geometry column.
-    #
-    # `covering` is merged one entry deep rather than replaced: it holds one
-    # entry per covering kind (bbox, h3, s2, a5, quadkey), and callers supply
-    # only the one they just produced. Replacing the dict made `gpio sort
-    # quadkey` destroy the bbox covering its input declared while adding its own
-    # (#738). Individual entries still win, so a caller can correct one.
-    if custom_metadata:
-        for key, value in custom_metadata.items():
-            if key == "covering" and isinstance(value, dict):
-                existing = col_meta.get("covering")
-                col_meta["covering"] = (
-                    {**existing, **value} if isinstance(existing, dict) else dict(value)
-                )
-            else:
-                col_meta[key] = value
-
-    # Handle secondary geometry columns from geometry_info
-    merge_secondary_geometry_metadata(geo_meta, geometry_info)
-
-    # 'covering' is 1.1-only: drop whatever the source file or custom_metadata carried
-    return strip_unsupported_covering(geo_meta, geoparquet_version)
-
-
-def _parse_existing_geo_metadata(original_metadata: dict | None) -> dict | None:
-    """Parse existing geo metadata from file metadata.
-
-    A write-path reader: the result is indexed into while the output block is
-    built, so it goes through ``sanitize_geo_metadata`` -- a carried block whose
-    ``columns`` is not an object per column would otherwise abort the write with
-    a bare ``TypeError`` (#771).
-    """
-
-    return sanitize_geo_metadata(_decode_geo_key(original_metadata))
-
-
-def _decode_geo_key(original_metadata: dict | None):
-    """Decode the raw ``geo`` key, accepting bytes or str keys and values.
-
-    Bytes that are not UTF-8 and JSON that does not parse are treated like a
-    malformed block -- dropped with a warning, so fresh metadata gets built --
-    via :func:`geo_metadata.decode_carried_geo` (#771 follow-up).
-    """
-
-    if not isinstance(original_metadata, dict) or not original_metadata:
-        return None
-
-    if "geo" in original_metadata:
-        return decode_carried_geo(original_metadata["geo"])
-    if b"geo" in original_metadata:
-        return decode_carried_geo(original_metadata[b"geo"])
-
-    return None
-
-
-def _initialize_geo_metadata(geo_meta: dict | None, geometry_column: str, version: str) -> dict:
-    """Initialize geo metadata structure with column entry."""
-    if geo_meta is None:
-        return {
-            "version": version,
-            "primary_column": geometry_column,
-            "columns": {geometry_column: {}},
-        }
-
-    # Work with a copy to avoid mutation
-    geo_meta = dict(geo_meta)
-    # Always use the target version, not the original
-    geo_meta["version"] = version
-    if "primary_column" not in geo_meta:
-        geo_meta["primary_column"] = geometry_column
-    if "columns" not in geo_meta:
-        geo_meta["columns"] = {}
-    if geometry_column not in geo_meta["columns"]:
-        geo_meta["columns"][geometry_column] = {}
-
-    return geo_meta
-
-
-class WriteStrategy(str, Enum):
+class WriteStrategy(str, Enum):  # noqa: UP042 - Preserve str(member) in public messages.
     """Available write strategies for GeoParquet metadata writes."""
 
     ARROW_MEMORY = "in-memory"
@@ -352,38 +188,20 @@ class WriteStrategy(str, Enum):
     DISK_REWRITE = "disk-rewrite"
 
 
-@contextmanager
-def atomic_write(output_path: str, suffix: str = ".parquet"):
-    """
-    Context manager for atomic file writes with cleanup.
-
-    Writes to a temp file in the same directory, then renames atomically on success.
-    Ensures partial files are cleaned up on failure.
-
-    Args:
-        output_path: Final destination path for the file
-        suffix: File suffix for temp file (default: .parquet)
-
-    Yields:
-        str: Path to temp file to write to
-
-    Raises:
-        Any exception from the write operation (after cleanup)
-    """
-    dir_path = os.path.dirname(output_path) or "."
-    fd, temp_path = tempfile.mkstemp(suffix=suffix, dir=dir_path)
-    os.close(fd)
-
-    try:
-        yield temp_path
-        os.replace(temp_path, output_path)
-    except Exception:
-        if os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
-        raise
+#: The :meth:`BaseWriteStrategy.write_from_table` arguments a query write takes
+#: unchanged.
+_TABLE_WRITE_FORWARDED = (
+    "output_path",
+    "geometry_column",
+    "compression",
+    "compression_level",
+    "row_group_size_mb",
+    "row_group_rows",
+    "input_crs",
+    "verbose",
+    "custom_metadata",
+    "extra_kv_metadata",
+)
 
 
 class BaseWriteStrategy(ABC):
@@ -455,6 +273,7 @@ class BaseWriteStrategy(ABC):
         input_crs: dict | None = None,
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        original_metadata: dict | None = None,
     ) -> None:
         """
         Write Arrow table to GeoParquet file.
@@ -477,6 +296,25 @@ class BaseWriteStrategy(ABC):
                 (fiboa, vecorel, STAC) survive on every strategy (#690).
         """
         ...
+
+    def _write_table_query(
+        self, con, query: str, table_args: dict, *, geoparquet_version: str, geometry_info
+    ) -> None:
+        """:meth:`write_from_query` over a query on a registered table.
+
+        ``table_args`` is the caller's :meth:`write_from_table` arguments; the
+        ones a query write takes are forwarded under their own names, so each
+        strategy's table entry point does not restate the list.
+        """
+        forwarded = {name: table_args[name] for name in _TABLE_WRITE_FORWARDED}
+        self.write_from_query(
+            con=con,
+            query=query,
+            original_metadata=table_args.get("original_metadata"),
+            geoparquet_version=geoparquet_version,
+            geometry_info=geometry_info,
+            **forwarded,
+        )
 
     def _validate_output_path(self, output_path: str) -> None:
         """
@@ -526,34 +364,22 @@ def needs_metadata_rewrite(
         True if metadata rewrite is needed
     """
 
-    version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
+    version_config = GEOPARQUET_VERSIONS[geoparquet_version]
 
     if geoparquet_version == "parquet-geo-only":
         # For parquet-geo-only, we need to strip any existing geo metadata
         # Check if input has geo metadata that needs to be stripped
-        if original_metadata:
-            has_geo = "geo" in original_metadata or b"geo" in original_metadata
-            if has_geo:
-                return True  # Need rewrite to strip the metadata
-        return False
+        return read_raw_geo(original_metadata).present
 
     if geoparquet_version == "2.0":
         if operation in ("columns_only", "sort"):
             return False
         # For 2.0 output, check if input has different version that needs updating
-        if original_metadata:
-            geo_data = original_metadata.get("geo") or original_metadata.get(b"geo")
-            if geo_data:
-                # Undecodable or non-object carried metadata cannot vouch for a
-                # 2.x version, so it needs the rewrite (which builds fresh
-                # metadata); a raw json.loads here aborted the write instead.
-                geo_meta = decode_carried_geo(geo_data)
-                if not isinstance(geo_meta, dict):
-                    return True
-                input_version = geo_meta.get("version", "")
-                # Need rewrite if input version is not 2.x
-                if not isinstance(input_version, str) or not input_version.startswith("2."):
-                    return True
-        return False
+        # A carried block needs the rewrite unless it already vouches for a 2.x
+        # version. An undecodable or non-object one reads as `{}` and so cannot
+        # vouch (a raw json.loads here once aborted the write instead).
+        if carried_geoparquet_version(original_metadata) == "2.0":
+            return False
+        return read_raw_geo(original_metadata).present
 
-    return version_config.get("rewrite_metadata", True)
+    return version_config["rewrite_metadata"]

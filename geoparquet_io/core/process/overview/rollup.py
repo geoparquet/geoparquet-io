@@ -19,29 +19,29 @@ from __future__ import annotations
 
 import gc
 
-from geoparquet_io.core.duckdb_utils import quote_identifier, register_arrow, sql_path
+import pyarrow as pa
+
+from geoparquet_io.core.admin_datasets import resolve_admin_dataset
+from geoparquet_io.core.duckdb_utils import as_wkb_sql, quote_identifier, register_arrow
 from geoparquet_io.core.exceptions import InvalidParameterError
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.geo_metadata import (
+    bbox_column_to_declare,
+    bbox_struct_array,
+    sanitized_carried_geo,
+)
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.memory_limits import open_bounded_connection
-from geoparquet_io.core.partition.admin_hierarchical import _setup_admin_dataset
-from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
-from geoparquet_io.core.process.aggregate.by_h3 import H3_SCHEME
 from geoparquet_io.core.process.aggregate.common import PCT_CELL_FUNC, geometry_to_geom_expr
 from geoparquet_io.core.process.aggregate.grid_common import (
-    GridScheme,
     cell_area_expr,
     wrap_grid_geometry,
 )
 from geoparquet_io.core.process.overview.detect import (
+    ADMIN_SCHEME,
+    GRID_SCHEMES,
     AggregateInfo,
     detect_aggregate_info,
 )
-
-GRID_SCHEMES: dict[str, GridScheme] = {"a5": A5_SCHEME, "h3": H3_SCHEME}
-GRID_PARENT_TEMPLATES = {
-    "a5": "a5_cell_to_parent({cell}, {level})",
-    "h3": "h3_cell_to_parent({cell}, {level})",
-}
 
 
 def admin_parent_expr(cell_column: str) -> str:
@@ -94,7 +94,7 @@ def build_grid_rollup_sql(info: AggregateInfo, source_sql: str, level: int) -> s
     """Roll a grid aggregate up to ``level`` and regenerate parent geometry."""
     scheme = GRID_SCHEMES[info.scheme]
     qcol = quote_identifier(info.cell_column)
-    parent = GRID_PARENT_TEMPLATES[info.scheme].format(cell=qcol, level=level)
+    parent = GRID_SCHEMES[info.scheme].spec.parent_template.format(cell=qcol, level=level)
     # NULL cell ids (the 'unassigned' bucket) must not reach the parent
     # function; they group into their own NULL parent row.
     keyed = (
@@ -139,8 +139,8 @@ def build_admin_rollup_sql(
         f"ST_Union_Agg({country_geom_expr}) AS __country_geom "
         f"FROM {country_ref} GROUP BY {country_code_col}"
     )
-    polygon = "ST_AsWKB(c.__country_geom)"
-    centroid = "ST_AsWKB(ST_Centroid(c.__country_geom))"
+    polygon = as_wkb_sql("c.__country_geom")
+    centroid = as_wkb_sql("ST_Centroid(c.__country_geom)")
     if info.out_geometry == "polygon":
         geom_cols = f"{polygon} AS geometry"
     elif info.out_geometry == "centroid":
@@ -156,9 +156,11 @@ def build_admin_rollup_sql(
 def get_admin_country_context(con, verbose: bool = False) -> tuple[str, str, str]:
     """Return (country_ref, code_col, geom_expr) for the Overture country cache."""
 
-    dataset, _boundary_columns = _setup_admin_dataset("overture", verbose, ["country"])
+    dataset, _boundary_columns, _ = resolve_admin_dataset(
+        "overture", ["country"], cache=False, verbose=verbose
+    )
     path = dataset.get_source_for_level("country")
-    country_ref = f"read_parquet({sql_path(resolve_file_url(path, verbose))})"
+    country_ref = dataset.table_reference(path)
     code_col = quote_identifier(dataset.get_level_column_mapping()["country"])
     geom_expr = geometry_to_geom_expr(con, country_ref, dataset.get_geometry_column())
     return country_ref, code_col, geom_expr
@@ -166,7 +168,7 @@ def get_admin_country_context(con, verbose: bool = False) -> tuple[str, str, str
 
 def validate_level(info: AggregateInfo, level: int | str) -> int | str:
     """Validate one requested overview level against the input's base level."""
-    if info.scheme == "admin":
+    if info.scheme == ADMIN_SCHEME:
         if level != "country":
             raise InvalidParameterError(
                 "levels",
@@ -181,23 +183,31 @@ def validate_level(info: AggregateInfo, level: int | str) -> int | str:
             "levels", f"invalid {info.scheme} level '{level}': expected an integer"
         ) from None
     scheme = GRID_SCHEMES[info.scheme]
-    if not scheme.min_resolution <= level_int < int(info.base_level):
+    if not scheme.spec.min_resolution <= level_int < int(info.base_level):
         raise InvalidParameterError(
             "levels",
             f"level {level_int} is not coarser than the input's base resolution "
-            f"{info.base_level} (valid: {scheme.min_resolution}-{int(info.base_level) - 1})",
+            f"{info.base_level} (valid: {scheme.spec.min_resolution}-{int(info.base_level) - 1})",
         )
     return level_int
 
 
 def build_level_sql(con, info: AggregateInfo, source_sql: str, level: int | str) -> str:
     """Build the full rollup SQL for one validated overview level."""
-    if info.scheme == "admin":
+    if info.scheme == ADMIN_SCHEME:
         if info.out_geometry == "none":
             return build_admin_rollup_sql(info, source_sql, None, None, None)
         country_ref, code_col, geom_expr = get_admin_country_context(con)
         return build_admin_rollup_sql(info, source_sql, country_ref, code_col, geom_expr)
     return build_grid_rollup_sql(info, source_sql, int(level))
+
+
+def with_input_bbox(table: pa.Table, bbox_field: pa.Field | None) -> pa.Table:
+    """``table`` with ``bbox_field``'s column rebuilt over its ``geometry`` (#1121)."""
+    if bbox_field is None or bbox_field.name in table.column_names:
+        return table
+    column = bbox_struct_array(table, BUILT_GEOMETRY_COLUMN, bbox_field.type)
+    return table.append_column(bbox_field, column)
 
 
 def rollup_table(
@@ -222,7 +232,14 @@ def rollup_table(
         info = detect_aggregate_info(con, "__overview_input", cell_column, scheme)
         level = validate_level(info, level)
         sql = build_level_sql(con, info, "SELECT * FROM __overview_input", level)
-        return con.execute(sql).arrow().read_all()
+        # The input's bbox column comes along, rebuilt over the parent cells (#1121).
+        bbox_field = None
+        if info.out_geometry != "none":
+            name = bbox_column_to_declare(
+                table.schema, sanitized_carried_geo(table.schema.metadata)
+            )
+            bbox_field = table.schema.field(name) if name else None
+        return with_input_bbox(con.sql(sql).arrow().read_all(), bbox_field)
     finally:
         con.close()
         # Release GDAL/spatial native handles before the next spatial connection

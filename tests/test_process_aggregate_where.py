@@ -4,15 +4,20 @@ The clause must apply to the source scan feeding keying, metrics, breakdowns,
 and --auto resolution sizing, mirroring `gpio extract --where` semantics.
 """
 
+from dataclasses import replace
+
 import duckdb
 import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import ValidationError
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 
 def _write_points_geoparquet(path, rows):
@@ -43,7 +48,7 @@ def _points_arrow_table():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     tbl = (
-        con.execute("SELECT ST_AsWKB(ST_Point(10.0, 50.0)) AS geometry, 'wheat' AS crop")
+        con.sql("SELECT ST_AsWKB(ST_Point(10.0, 50.0)) AS geometry, 'wheat' AS crop")
         .arrow()
         .read_all()
     )
@@ -68,7 +73,7 @@ def test_read_grid_source_sql_appends_where(tmp_path):
         # The clause is closed on its own line so a trailing `--` comment in it
         # cannot swallow the paren (#612).
         assert "WHERE (area > 3\n)" in sql
-        count = con.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()[0]
+        count = fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sql})"))[0]
         assert count == 2  # areas 4.0 and 6.0
         # No clause -> unchanged behavior
         sql_all = read_grid_source_sql(con, str(src), "geometry")
@@ -98,7 +103,10 @@ def test_where_validation_rejects_dangerous_keywords(tmp_path):
     _write_points_geoparquet(src, FOUR_POINTS[:1])
     with pytest.raises(ValidationError, match="dangerous"):
         aggregate_by_a5(
-            str(src), str(tmp_path / "o.parquet"), resolution=5, where="1=1; DROP TABLE x"
+            str(src),
+            str(tmp_path / "o.parquet"),
+            resolution=5,
+            options=AggregateOptions(where="1=1; DROP TABLE x"),
         )
 
 
@@ -146,7 +154,7 @@ def test_table_where_validation_rejects_dangerous_keywords():
 
     tbl = _points_arrow_table()
     with pytest.raises(ValidationError, match="dangerous"):
-        aggregate_a5_table(tbl, resolution=5, where="TRUNCATE x")
+        aggregate_a5_table(tbl, resolution=5, options=AggregateOptions(where="TRUNCATE x"))
 
 
 # ---------------------------------------------------------------------------
@@ -177,7 +185,12 @@ def test_aggregate_auto_threads_where_to_auto_resolution(tmp_path, monkeypatch):
 
     monkeypatch.setattr(auto_res, "calculate_auto_resolution", fake_calc)
     with pytest.raises(RuntimeError, match="stop-after-capture"):
-        aggregate_by_a5(str(src), str(tmp_path / "o.parquet"), auto=True, where="area > 3")
+        aggregate_by_a5(
+            str(src),
+            str(tmp_path / "o.parquet"),
+            auto=True,
+            options=AggregateOptions(where="area > 3"),
+        )
     assert captured.get("where") == "area > 3"
 
 
@@ -241,9 +254,9 @@ def test_auto_empty_filter_result_names_the_filter(tmp_path):
 
 def test_probe_distinct_cell_counts_respects_where(tmp_path):
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.index_ops import get_index_spec, index_point, load_index
     from geoparquet_io.core.partition.auto_resolution import (
         _probe_distinct_cell_counts,
-        _register_quadkey_udf,
     )
 
     src = tmp_path / "f.parquet"
@@ -251,10 +264,11 @@ def test_probe_distinct_cell_counts_respects_where(tmp_path):
     _write_points_geoparquet(src, [(10.0, 50.0, "wheat", 4.0), (-120.0, 40.0, "corn", 1.0)])
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        _register_quadkey_udf(con)
-        counts_all = _probe_distinct_cell_counts(con, str(src), "quadkey", "geometry", "", [5])
+        load_index(con, get_index_spec("quadkey"))
+        point = index_point("geometry")
+        counts_all = _probe_distinct_cell_counts(con, str(src), "quadkey", point, "", [5])
         counts_filtered = _probe_distinct_cell_counts(
-            con, str(src), "quadkey", "geometry", "", [5], where="crop = 'wheat'"
+            con, str(src), "quadkey", point, "", [5], where="crop = 'wheat'"
         )
         assert counts_all == [2]
         assert counts_filtered == [1]
@@ -270,9 +284,9 @@ def test_probe_filters_beneath_the_sample(tmp_path):
     and --auto over-resolved (#612).
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.index_ops import get_index_spec, index_point, load_index
     from geoparquet_io.core.partition.auto_resolution import (
         _probe_distinct_cell_counts,
-        _register_quadkey_udf,
     )
 
     src = tmp_path / "f.parquet"
@@ -283,12 +297,12 @@ def test_probe_filters_beneath_the_sample(tmp_path):
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
-        _register_quadkey_udf(con)
+        load_index(con, get_index_spec("quadkey"))
         counts = _probe_distinct_cell_counts(
             con,
             str(src),
             "quadkey",
-            "geometry",
+            index_point("geometry"),
             " USING SAMPLE 200 ROWS",
             [8],
             where="crop = 'wheat'",
@@ -309,7 +323,7 @@ def test_read_grid_source_sql_tolerates_trailing_sql_comment(tmp_path):
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         sql = read_grid_source_sql(con, str(src), "geometry", where="area > 3 -- big only")
-        assert con.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()[0] == 2
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sql})"))[0] == 2
     finally:
         con.close()
 
@@ -318,18 +332,19 @@ def test_where_error_message_names_the_where_option():
     """An invalid clause must point at --where, not dump the generated SQL (#612)."""
     import duckdb as _duckdb
 
-    from geoparquet_io.cli.commands.process import _aggregate_error
+    from geoparquet_io.cli.commands.process import _where_hint
+    from geoparquet_io.cli.exception_handler import click_error_for
 
     exc = _duckdb.Error(
         'Binder Error: Referenced column "yr" not found in FROM clause!\n'
         "LINE 1: SELECT * EXCLUDE (...) FROM read_parquet('x.parquet') WHERE (yr = 2025)"
     )
-    err = _aggregate_error(exc, "yr = 2025")
+    err = click_error_for(exc, hint=_where_hint("yr = 2025"))
     assert "--where" in str(err)
     assert "yr = 2025" in str(err)
     assert "LINE 1" not in str(err)
     # Non-DuckDB errors pass through untouched.
-    assert str(_aggregate_error(ValueError("plain"), "yr = 2025")) == "plain"
+    assert str(click_error_for(ValueError("plain"), hint=_where_hint("yr = 2025"))) == "plain"
 
 
 # ---------------------------------------------------------------------------
@@ -357,9 +372,9 @@ def test_read_grid_source_sql_can_filter_on_hive_partition_column(tmp_path):
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         sql = read_grid_source_sql(con, glob, "geometry", where="year = 2025")
-        assert con.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()[0] == 1
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sql})"))[0] == 1
         sql_all = read_grid_source_sql(con, glob, "geometry")
-        assert con.execute(f"SELECT COUNT(*) FROM ({sql_all})").fetchone()[0] == 3
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sql_all})"))[0] == 3
     finally:
         con.close()
 
@@ -376,9 +391,7 @@ def test_grid_aggregation_output_has_no_hive_partition_column(tmp_path):
     # A scheme keyed by plain SQL so the test needs no community extension.
     scheme = GridScheme(
         name="test",
-        extension="",
-        min_resolution=0,
-        max_resolution=10,
+        spec=replace(get_index_spec("h3"), extension=None, min_resolution=0, max_resolution=10),
         default_column="test_cell",
         key_template="CAST(floor(ST_X({pt}) * {res}) AS VARCHAR)",
         boundary_template="ST_MakeEnvelope(0.0, 0.0, 1.0, 1.0)",
@@ -390,7 +403,7 @@ def test_grid_aggregation_output_has_no_hive_partition_column(tmp_path):
     try:
         source_sql = read_grid_source_sql(con, glob, "geometry")
         sql = build_grid_query(con, scheme, source_sql, 1, "test_cell", None, "crop", 20, "polygon")
-        cols = set(con.execute(sql).arrow().read_all().column_names)
+        cols = set(con.sql(sql).arrow().read_all().column_names)
         assert "year" not in cols
         assert {"test_cell", "count", "geometry"} <= cols
     finally:
@@ -422,7 +435,7 @@ def test_admin_joined_sql_can_filter_on_hive_partition_column(tmp_path):
             "geometry",
             where="year = 2025",
         )
-        assert con.execute(f"SELECT COUNT(*) FROM ({sql})").fetchone()[0] == 1
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sql})"))[0] == 1
     finally:
         con.close()
 
@@ -440,7 +453,9 @@ def test_aggregate_a5_where_filters_rows(tmp_path):
     out_all = tmp_path / "all.parquet"
     out_filtered = tmp_path / "filtered.parquet"
     aggregate_by_a5(str(src), str(out_all), resolution=5)
-    aggregate_by_a5(str(src), str(out_filtered), resolution=5, where="crop = 'wheat'")
+    aggregate_by_a5(
+        str(src), str(out_filtered), resolution=5, options=AggregateOptions(where="crop = 'wheat'")
+    )
     total_all = sum(pq.read_table(out_all).column("count").to_pylist())
     total_filtered = sum(pq.read_table(out_filtered).column("count").to_pylist())
     assert total_all == 4
@@ -457,9 +472,7 @@ def test_aggregate_a5_where_with_breakdown_and_metric(tmp_path):
         str(src),
         str(out),
         resolution=5,
-        metric="sum:area",
-        breakdown="crop",
-        where="area > 1",
+        options=AggregateOptions(metric="sum:area", breakdown="crop", where="area > 1"),
     )
     df = pq.read_table(out).to_pandas()
     # The (-120, 40) wheat row (area=1) is filtered out entirely.
@@ -475,7 +488,9 @@ def test_aggregate_h3_where_filters_rows(tmp_path):
     src = tmp_path / "f.parquet"
     _write_points_geoparquet(src, FOUR_POINTS)
     out = tmp_path / "o.parquet"
-    aggregate_by_h3(str(src), str(out), resolution=5, where="crop = 'corn'")
+    aggregate_by_h3(
+        str(src), str(out), resolution=5, options=AggregateOptions(where="crop = 'corn'")
+    )
     assert sum(pq.read_table(out).column("count").to_pylist()) == 1
 
 
@@ -539,7 +554,7 @@ def test_table_aggregate_a5_where():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     tbl = (
-        con.execute(
+        con.sql(
             """
             SELECT ST_AsWKB(ST_Point(lon, lat)) AS geometry, crop FROM (VALUES
                 (10.0, 50.0, 'wheat'), (10.001, 50.001, 'corn')

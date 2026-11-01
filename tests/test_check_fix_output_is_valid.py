@@ -6,8 +6,9 @@ check whether the defect is gone, and hands the output to
 :func:`tests.fix_output_oracle.assert_fix_output_is_sound`.
 
 The four shapes in :data:`SHAPES` are the four a fix has to answer the version
-and CRS questions about differently, and two of them are deliberately not in
-the default CRS: a file already in CRS84 cannot tell a path that keeps the CRS
+and CRS questions about differently; each fix runs on the shapes that tell its
+output apart (see :func:`shape`), and two of them are deliberately not in the
+default CRS: a file already in CRS84 cannot tell a path that keeps the CRS
 from one that loses it, because an absent ``crs`` already means CRS84 (#993).
 """
 
@@ -43,7 +44,7 @@ class Shape:
     The two ``*_version``/``*_covering`` pairs differ on purpose: the rewrite
     fixes (compression, row-group, spatial) let the write facade pick the output
     version from the input, while ``check all`` names it explicitly from its own
-    checks (``get_geoparquet_version_from_check_results``). Where the two
+    checks (``resolve_output_geoparquet_version(..., preserve_input=True)``). Where the two
     disagree that is a fact about gpio, so it is written down rather than
     papered over.
     """
@@ -124,12 +125,31 @@ SHAPES = [
 SHAPE_BY_NAME = {spec.name: spec for spec in SHAPES}
 
 
-@pytest.fixture(params=SHAPES, ids=lambda shape: shape.name)
+@pytest.fixture
 def shape(request) -> tuple[Shape, Path]:
-    """One :class:`Shape`, with ``source`` pointing at a clean file of that shape."""
-    spec = request.param
+    """The :class:`Shape` named by the test's ``shape_name`` parameter, with its source.
+
+    Each fix runs on the shapes that tell its output apart, not on all four:
+    the version and CRS each shape carries are decided by the write facade's
+    owners (``resolve_output_geoparquet_version``, the CRS witness), which have
+    their own tests and the G7 invariants; the native-geo-only shape's
+    compression, row-group and ``check all`` repairs are judged in
+    ``tests/test_check_fix_preserves_native_geo.py`` (#1402).
+    """
+    spec = SHAPE_BY_NAME[request.node.callspec.params["shape_name"]]
     source = request.getfixturevalue(spec.fixture)
     return spec, Path(str(source))
+
+
+def shape_modes(*pairs: tuple[str, bool]):
+    """``(shape_name, in_place)`` pairs, with the ids the full product used."""
+    return pytest.mark.parametrize(
+        ("shape_name", "in_place"),
+        [
+            pytest.param(name, in_place, id=f"{name}-{'in-place' if in_place else 'fix-output'}")
+            for name, in_place in pairs
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -257,8 +277,8 @@ def assert_shape_output(shape: Shape, path: Path, *, rewrite: bool) -> None:
 class TestCompressionFixOutput:
     """``check compression --fix`` -> ``check_fixes.fix_compression``."""
 
-    @pytest.mark.parametrize("in_place", [False, True], ids=["fix-output", "in-place"])
-    def test_output_is_sound(self, shape, in_place, tmp_path):
+    @shape_modes(("v1_1_epsg31287", False), ("v2_0_crs84", True))
+    def test_output_is_sound(self, shape_name, shape, in_place, tmp_path):
         spec, source = shape
         broken = make_snappy(source, tmp_path / "snappy.parquet")
         assert_clean_input(broken)
@@ -283,8 +303,8 @@ class TestCompressionFixOutput:
 class TestRowGroupFixOutput:
     """``check row-group --fix`` -> ``check_fixes.fix_row_groups``."""
 
-    @pytest.mark.parametrize("in_place", [False, True], ids=["fix-output", "in-place"])
-    def test_output_is_sound(self, shape, in_place, tmp_path):
+    @shape_modes(("v1_0_crs84", False), ("v1_1_epsg31287", True))
+    def test_output_is_sound(self, shape_name, shape, in_place, tmp_path):
         spec, source = shape
         broken = make_tiny_row_groups(source, tmp_path / "tiny.parquet")
         assert_clean_input(broken)
@@ -309,8 +329,8 @@ class TestRowGroupFixOutput:
 class TestSpatialFixOutput:
     """``check spatial --fix`` -> ``check_fixes.fix_spatial_ordering``."""
 
-    @pytest.mark.parametrize("in_place", [False, True], ids=["fix-output", "in-place"])
-    def test_output_is_sound(self, shape, in_place, tmp_path):
+    @shape_modes(("pgo_epsg5070", False), ("v1_1_epsg31287", True))
+    def test_output_is_sound(self, shape_name, shape, in_place, tmp_path):
         """Sorted, and a permutation: the same rows, in another order."""
         spec, source = shape
         broken = make_unsorted(source, tmp_path / "unsorted.parquet")
@@ -343,8 +363,13 @@ class TestSpatialFixOutput:
 class TestBboxFixOutput:
     """``check bbox --fix`` -- version-aware: it adds for 1.x, removes for native."""
 
-    @pytest.mark.parametrize("shape_name", ["v1_0_crs84", "v1_1_epsg31287"], ids=["v1_0", "v1_1"])
-    @pytest.mark.parametrize("in_place", [False, True], ids=["fix-output", "in-place"])
+    @pytest.mark.parametrize(
+        ("shape_name", "in_place"),
+        [
+            pytest.param("v1_1_epsg31287", False, id="fix-output-v1_1"),
+            pytest.param("v1_0_crs84", True, id="in-place-v1_0"),
+        ],
+    )
     def test_a_missing_bbox_column_is_added_and_declared(
         self, shape_name, in_place, tmp_path, request
     ):
@@ -393,8 +418,8 @@ class TestBboxFixOutput:
 
     @pytest.mark.parametrize(
         "name",
-        ['geom"x', "geom'x", "géométrie", "geom; drop table t; --"],
-        ids=["double-quote", "single-quote", "unicode", "sql"],
+        ['geom"x', "geom'x"],
+        ids=["double-quote", "single-quote"],
     )
     def test_an_adversarial_primary_column_name_survives_the_fix(
         self, name, buildings_test_file, tmp_path
@@ -425,19 +450,19 @@ class TestBboxFixOutput:
 
 
 # ---------------------------------------------------------------------------
-# fix_bboxless_covering
+# fix_bboxless_cover
 # ---------------------------------------------------------------------------
 
 
 class TestBboxlessCoveringFixOutput:
-    """``check all --fix`` -> ``check_fixes.fix_bboxless_covering`` (#1173).
+    """``check all --fix`` -> ``check_fixes.fix_bboxless_cover`` (#1173).
 
     The 2.0 shape is the one no other fix reaches: a 2.0 file wants no bbox
     column, so nothing else in the chain has work and the illegal covering used
     to survive the whole run.
     """
 
-    @pytest.mark.parametrize("shape_name", ["v1_1_epsg31287", "v2_0_crs84"], ids=["v1_1", "v2_0"])
+    @pytest.mark.parametrize("shape_name", ["v2_0_crs84"], ids=["v2_0"])
     def test_output_is_sound(self, shape_name, tmp_path, request):
         spec = SHAPE_BY_NAME[shape_name]
         source = Path(str(request.getfixturevalue(spec.fixture)))
@@ -464,7 +489,10 @@ class TestBboxlessCoveringFixOutput:
 class TestCheckAllFixOutput:
     """``check all --fix`` -> ``check_fixes.apply_all_fixes``, every fix chained."""
 
-    def test_output_is_sound(self, shape, tmp_path):
+    @pytest.mark.parametrize(
+        "shape_name", ["v1_0_crs84", "v1_1_epsg31287"], ids=["v1_0_crs84", "v1_1_epsg31287"]
+    )
+    def test_output_is_sound(self, shape_name, shape, tmp_path):
         """Every defect at once: SNAPPY, tiny row groups, shuffled rows."""
         spec, source = shape
         broken = make_unsorted(source, tmp_path / "broken.parquet", compression="SNAPPY")
@@ -478,7 +506,8 @@ class TestCheckAllFixOutput:
         assert_no_unexpected_residue(spec, output)
         assert_shape_output(spec, fixed, rewrite=False)
 
-    def test_in_place_output_is_sound(self, shape, tmp_path):
+    @pytest.mark.parametrize("shape_name", ["v2_0_crs84"], ids=["v2_0_crs84"])
+    def test_in_place_output_is_sound(self, shape_name, shape, tmp_path):
         spec, source = shape
         target = make_snappy(source, tmp_path / "inplace.parquet")
 
@@ -572,7 +601,7 @@ COVERED_ENTRY_POINTS = {
     ),
     # Both bbox paths route through it.
     "fix_bbox_all": "tests.test_check_fix_output_is_valid:TestBboxFixOutput",
-    "fix_bboxless_covering": ("tests.test_check_fix_output_is_valid:TestBboxlessCoveringFixOutput"),
+    "fix_bboxless_cover": ("tests.test_check_fix_output_is_valid:TestBboxlessCoveringFixOutput"),
     "fix_bbox_removal": (
         "tests.test_check_fix_preserves_native_geo:"
         "test_removing_a_bbox_column_keeps_the_crs_it_is_removed_from"

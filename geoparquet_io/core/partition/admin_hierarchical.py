@@ -15,21 +15,36 @@ import shutil
 
 import duckdb
 
-from geoparquet_io.core.admin_datasets import AdminDatasetFactory
+from geoparquet_io.core.admin_datasets import (
+    AdminJoinStep,
+    admin_column_ref,
+    admin_input_reprojected,
+    open_admin_join_connection,
+    resolve_admin_dataset,
+    run_admin_join,
+)
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import (
-    reproject_to_source_sql,
     source_crs_string,
-    transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import fetch_rows, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    SPATIAL_JOIN_BBOX_PREFILTER,
+    fetch_one,
+    fetch_rows,
+    query_schema,
+    quote_identifier,
+    spatial_join_strategy,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import PartitionError
-from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.file_utils import output_is_kept, resolve_file_url, unlink_released_file
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    require_geometry_column,
+)
 from geoparquet_io.core.logging_config import debug, progress, success, warn
-from geoparquet_io.core.memory_limits import scoped_write_memory_limit
-from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
 from geoparquet_io.core.partition.common import raise_if_no_rows, sanitize_filename
 from geoparquet_io.core.partition.staging import (
     PartitionWriteOptions,
@@ -43,216 +58,6 @@ from geoparquet_io.core.partition.staging import (
 from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
 
 
-def _build_enrichment_query(
-    input_source,
-    admin_table_ref,
-    admin_where_clause,
-    admin_select_clause,
-    admin_geom_col,
-    admin_bbox_col,
-    boundary_columns,
-    input_geom_col,
-    input_bbox_col,
-    enriched_table,
-    input_is_table_ref=False,
-    source_crs=None,
-):
-    """Build enrichment query for spatial join.
-
-    ``input_is_table_ref`` marks ``input_source`` as a DuckDB temp-table name
-    (per-level chaining) rather than a file path, so it is referenced without
-    surrounding quotes. A file path arrives RAW and is quoted and escaped here
-    by :func:`sql_path` -- escaping it earlier would carry the escape into the
-    branch that emits a bare table name (#802).
-
-    ``source_crs`` (an ``"AUTH:CODE"`` string) reprojects a non-CRS84 input to
-    the admin CRS before ``ST_Intersects`` (#525). When set, the input's stored
-    bbox is in the source CRS and is skipped for the pre-filter.
-    """
-    # Build column list for subquery - handle struct access
-    subquery_cols = []
-    for i, col in enumerate(boundary_columns):
-        if "[" in col or "(" in col:
-            subquery_cols.append(f"{col} as _col_{i}")
-        else:
-            subquery_cols.append(quote_identifier(col))
-    subquery_cols_str = ", ".join(subquery_cols)
-
-    input_ref = input_source if input_is_table_ref else sql_path(input_source)
-
-    q_input_geom = quote_identifier(input_geom_col)
-    q_admin_geom = quote_identifier(admin_geom_col)
-    # Struct-field access ``a.<col>.xmin``: quote the column segment only, so the
-    # ``a.`` alias and the ``.xmin`` accessor stay bare. ``input_bbox_col`` comes
-    # from the input file's own schema and ``admin_bbox_col`` from the dataset;
-    # both reach here RAW, so quote exactly once (#926).
-    q_input_bbox = quote_identifier(input_bbox_col) if input_bbox_col else None
-    q_admin_bbox = quote_identifier(admin_bbox_col) if admin_bbox_col else None
-    bbox_filter = f"""
-            (a.{q_input_bbox}.xmin <= b.{q_admin_bbox}.xmax AND
-             a.{q_input_bbox}.xmax >= b.{q_admin_bbox}.xmin AND
-             a.{q_input_bbox}.ymin <= b.{q_admin_bbox}.ymax AND
-             a.{q_input_bbox}.ymax >= b.{q_admin_bbox}.ymin)
-        """
-
-    if source_crs and input_bbox_col and admin_bbox_col:
-        # Non-CRS84 input with bboxes on both sides: reproject the (small) admin
-        # polygons into the input CRS and synthesize their source-CRS bbox, so the
-        # join runs in one CRS and keeps the cheap bbox pre-filter — instead of
-        # transforming the (large) input per row and degrading to a nested-loop
-        # ST_Intersects (#525, preserving the #460 pre-filter).
-        radmin = reproject_to_source_sql(q_admin_geom, source_crs)
-        bbox_struct = (
-            f"struct_pack(xmin := ST_XMin({radmin}), xmax := ST_XMax({radmin}), "
-            f"ymin := ST_YMin({radmin}), ymax := ST_YMax({radmin})) AS {q_admin_bbox}"
-        )
-        return f"""
-            CREATE TEMP TABLE {enriched_table} AS
-            SELECT
-                a.*,
-                {admin_select_clause}
-            FROM {input_ref} a
-            LEFT JOIN (
-                SELECT {radmin} AS {q_admin_geom}, {bbox_struct}, {subquery_cols_str}
-                FROM {admin_table_ref}
-                {admin_where_clause}
-            ) b
-            ON {bbox_filter}
-                AND ST_Intersects(b.{q_admin_geom}, a.{q_input_geom})
-        """
-
-    if input_bbox_col and admin_bbox_col and not source_crs:
-        return f"""
-            CREATE TEMP TABLE {enriched_table} AS
-            SELECT
-                a.*,
-                {admin_select_clause}
-            FROM {input_ref} a
-            LEFT JOIN (
-                SELECT {q_admin_geom}, {q_admin_bbox}, {subquery_cols_str}
-                FROM {admin_table_ref}
-                {admin_where_clause}
-            ) b
-            ON {bbox_filter}
-                AND ST_Intersects(b.{q_admin_geom}, a.{q_input_geom})
-        """
-
-    # No bbox on one side: reproject the input geometry inline (no pre-filter to
-    # preserve either way).
-    input_geom_sql = transform_geom_sql(f"a.{q_input_geom}", source_crs)
-    return f"""
-            CREATE TEMP TABLE {enriched_table} AS
-            SELECT
-                a.*,
-                {admin_select_clause}
-            FROM {input_ref} a
-            LEFT JOIN (
-                SELECT {q_admin_geom}, {subquery_cols_str}
-                FROM {admin_table_ref}
-                {admin_where_clause}
-            ) b
-            ON ST_Intersects(b.{q_admin_geom}, {input_geom_sql})
-        """
-
-
-def _compute_input_extent(con, input_path, input_bbox_col, input_geom_col, source_crs=None):
-    """Compute the input's (xmin, xmax, ymin, ymax) extent in one scan.
-
-    ``input_path`` is RAW; ``sql_path`` escapes it at each interpolation (#802).
-
-    The extent does not change across admin levels, so callers compute it once
-    and reuse it for every level's WHERE clause (issue #480) rather than
-    re-scanning the input per level — important when there is no bbox column and
-    the fallback decodes every geometry.
-
-    The admin boundaries are OGC:CRS84, so for a non-CRS84 input the extent must
-    be computed over the reprojected geometry (the stored bbox is in the source
-    CRS) so the admin extent filter is in the right units (#525).
-    """
-    if input_bbox_col and not source_crs:
-        # ``input_bbox_col`` is read from the input file's schema; quote the
-        # column segment of the struct-field access, leaving ``.xmin`` bare (#926).
-        q_input_bbox = quote_identifier(input_bbox_col)
-        extent_query = f"""
-            SELECT
-                MIN({q_input_bbox}.xmin) as xmin,
-                MAX({q_input_bbox}.xmax) as xmax,
-                MIN({q_input_bbox}.ymin) as ymin,
-                MAX({q_input_bbox}.ymax) as ymax
-            FROM {sql_path(input_path)}
-        """
-    else:
-        geom_ref = transform_geom_sql(quote_identifier(input_geom_col), source_crs)
-        extent_query = f"""
-            SELECT
-                MIN(ST_XMin({geom_ref})) as xmin,
-                MAX(ST_XMax({geom_ref})) as xmax,
-                MIN(ST_YMin({geom_ref})) as ymin,
-                MAX(ST_YMax({geom_ref})) as ymax
-            FROM {sql_path(input_path)}
-        """
-    extent = con.execute(extent_query).fetchone()
-    if extent and all(v is not None for v in extent):
-        return extent
-    return None
-
-
-def _build_admin_where_clause(dataset, levels, admin_bbox_col, extent, verbose, admin_source=None):
-    """Build WHERE clause for admin boundaries with filters.
-
-    ``extent`` is the precomputed input extent (from ``_compute_input_extent``)
-    or None; it is reused across levels instead of being recomputed each call.
-    ``admin_source`` is the resolved source for these levels: how much
-    filtering the subtype clause has to carry depends on whether it is a
-    pre-filtered cache or a raw release (#819).
-    """
-    admin_where_clauses = []
-
-    # Add subtype filter if applicable
-    subtype_filter = dataset.get_subtype_filter(levels, source=admin_source)
-    if subtype_filter:
-        admin_where_clauses.append(subtype_filter)
-        if verbose:
-            debug(f"  → Filtering admin boundaries: {subtype_filter}")
-
-    # Add bbox extent filter
-    if admin_bbox_col and extent:
-        xmin, xmax, ymin, ymax = extent
-        # Quote the column segment of the struct-field access (#926).
-        q_admin_bbox = quote_identifier(admin_bbox_col)
-        extent_filter = f"""
-            ({q_admin_bbox}.xmin <= {xmax} AND
-             {q_admin_bbox}.xmax >= {xmin} AND
-             {q_admin_bbox}.ymin <= {ymax} AND
-             {q_admin_bbox}.ymax >= {ymin})
-        """
-        admin_where_clauses.append(extent_filter)
-        if verbose:
-            debug(
-                f"  → Filtering admin boundaries to input extent: ({xmin:.2f}, {ymin:.2f}, {xmax:.2f}, {ymax:.2f})"
-            )
-
-    return "WHERE " + " AND ".join(admin_where_clauses) if admin_where_clauses else ""
-
-
-def _setup_admin_dataset(dataset_name, verbose, levels):
-    """Setup and validate admin dataset."""
-    dataset = AdminDatasetFactory.create(dataset_name, source_path=None, verbose=verbose)
-
-    if verbose:
-        debug(f"\nUsing admin dataset: {dataset.get_dataset_name()}")
-        debug(f"Remote source: {dataset.get_source()}")
-        debug(f"Hierarchical levels: {' → '.join(levels)}")
-
-    dataset.validate_levels(levels)
-    boundary_columns = dataset.get_partition_columns(levels)
-
-    if verbose:
-        debug(f"Boundary dataset columns: {', '.join(boundary_columns)}")
-
-    return dataset, boundary_columns
-
-
 def _get_input_file_info(input_parquet, verbose):
     """Get input file info (RAW path, geometry column, bbox column).
 
@@ -261,47 +66,32 @@ def _get_input_file_info(input_parquet, verbose):
     boundary (:func:`sql_path`) rather than in this return value (#802).
     """
     input_path = resolve_file_url(input_parquet, verbose)
-    input_geom_col = find_primary_geometry_column(input_parquet, verbose)
+    input_geom_col = require_geometry_column(
+        primary_geometry_column(input_parquet, verbose=verbose), input_parquet
+    )
     input_bbox_info = check_bbox_structure(input_parquet, verbose)
     input_bbox_col = input_bbox_info["bbox_column_name"]
 
     return input_path, input_geom_col, input_bbox_col
 
 
-def _setup_admin_join_connection(dataset, get_duckdb_connection):
-    """Create the DuckDB connection for the enrichment join.
+def _report_join_strategy(input_bbox_col, admin_bbox_col, source_crs):
+    """Name the predicate the join runs, as the owner classifies it (#538).
 
-    Per-level datasets (Overture) can join multi-million-feature inputs and need
-    the same memory discipline as ``gpio add admin-divisions`` to spill rather
-    than OOM (see add_divisions todo 013): spill onto the admin cache volume,
-    single-threaded execution (parallel spatial-join operators each grab memory
-    and cannot coordinate spilling, so they OOM even with a temp dir), and no
-    insertion-order buffering. Other datasets keep the simple default connection,
-    which spills under the OS temp directory.
-
-    The spill goes in a private leaf of the cache dir, never the cache dir
-    itself: DuckDB's spill filenames carry no connection identity, so two runs
-    sharing that well-known path would overwrite each other's blocks.
+    ``partition admin`` keeps an input's bbox column whatever its geometry
+    encoding, so its join never takes the native-geometry path; the bbox
+    pre-filter goes only when the input geometry is rewritten (#525).
     """
-    if dataset.supports_per_level_sources():
-        from geoparquet_io.core.admin_datasets import get_cache_dir
-        from geoparquet_io.core.duckdb_utils import spill_directory
-
-        temp_dir = get_cache_dir()
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        con = get_duckdb_connection(
-            load_spatial=True,
-            load_httpfs=True,
-            temp_directory=spill_directory(temp_dir),
-            threads=1,
-        )
-        con.execute("SET preserve_insertion_order = false")
-        # Reproject (CRS-aware admin join, #525) emits lon/lat order to match CRS84.
-        con.execute("SET geometry_always_xy = true")
-        return con
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
-    con.execute("SET geometry_always_xy = true")
-    return con
+    strategy = spatial_join_strategy(
+        False,
+        input_bbox_col,
+        admin_bbox_col,
+        admin_input_reprojected(source_crs, admin_bbox_col),
+    )
+    if strategy == SPATIAL_JOIN_BBOX_PREFILTER:
+        debug("  → Using bbox columns for optimized spatial join")
+    else:
+        debug("  → Using full geometry intersection (no bbox optimization)")
 
 
 def _build_admin_select_for_partitioning(levels, boundary_columns, dataset=None, vecorel=False):
@@ -325,152 +115,79 @@ def _build_admin_select_for_partitioning(levels, boundary_columns, dataset=None,
             col_transform = None
         output_column_names.append(output_col)
 
-        # Handle struct field access vs simple column names
-        if col_transform:
-            expr = col_transform
-        elif "[" in col or "(" in col:
-            expr = f"b._col_{i}"
-        else:
-            expr = f"b.{quote_identifier(col)}"
+        expr = col_transform or admin_column_ref(i, col)
 
         admin_select_parts.append(f"{expr} as {quote_identifier(output_col)}")
 
     return ", ".join(admin_select_parts), output_column_names
 
 
-def _build_admin_table_reference(dataset, admin_source):
-    """Build admin table reference with read options if needed."""
-    read_options = dataset.get_read_parquet_options()
-    if read_options:
-        options_str = ", ".join([f"{k}={v}" for k, v in read_options.items()])
-        return f"read_parquet({admin_source}, {options_str})"
-    return admin_source
-
-
-def _perform_enrichment_join(
-    con,
-    enriched_table,
-    input_path,
-    admin_table_ref,
-    admin_where_clause,
-    admin_select_clause,
-    admin_geom_col,
-    admin_bbox_col,
-    boundary_columns,
-    input_geom_col,
-    input_bbox_col,
-    source_crs=None,
-    memory_limit=None,
-    verbose=False,
-):
-    """Perform spatial join enrichment.
-
-    The join materializes the whole input into a temp table, so it is the
-    largest piece of DuckDB work in the command -- bigger than the split that
-    follows it. It runs under the same memory policy as every gpio write
-    (``--write-memory`` when given, else the ceiling-based default): left
-    unbounded it sized itself for the host and was measured at 14.3 GiB on 12
-    threads while ``--write-memory 700MB`` was in force (#1174).
-    """
-    enrichment_query = _build_enrichment_query(
-        input_path,
-        admin_table_ref,
-        admin_where_clause,
-        admin_select_clause,
-        admin_geom_col,
-        admin_bbox_col,
-        boundary_columns,
-        input_geom_col,
-        input_bbox_col,
-        enriched_table,
-        source_crs=source_crs,
-    )
-    with scoped_write_memory_limit(con, memory_limit, verbose):
-        con.execute(enrichment_query)
-
-
-def _perform_per_level_enrichment_join(
+def _enrich_with_admin(
     con,
     dataset,
     levels,
-    boundary_columns,
     enriched_table,
     input_path,
-    admin_geom_col,
-    admin_bbox_col,
     input_geom_col,
     input_bbox_col,
+    admin_bbox_col,
     vecorel,
     verbose,
     source_crs=None,
     memory_limit=None,
 ):
-    """Enrich by chaining one LEFT JOIN per level against its own land cache.
+    """Fill ``enriched_table`` with the input plus its admin columns.
 
-    Datasets that ``supports_per_level_sources()`` (Overture) split each admin
-    level into a separate, land-only cache file (see
-    ``OvertureAdminDataset._build_level_cache_query``). Joining each level
-    against its own non-overlapping cache — rather than one combined join over
-    the raw remote dataset, which still contains the maritime (EEZ) polygons
-    that double-match every land feature — is what keeps the output row count
-    ≈ the input and bounds memory. Each level reads the previous level's temp
-    table so a feature carries all admin columns forward; the final join
-    produces ``enriched_table``.
+    The join is :func:`run_admin_join`'s: for a dataset with per-level sources
+    (Overture's land-only caches, see
+    ``OvertureAdminDataset._build_level_cache_query``) one join per level,
+    each reading the one before; for any other, one join of every level. Each
+    join keeps one admin region per input feature
+    (:func:`~geoparquet_io.core.duckdb_utils.build_spatial_join_query`, #543),
+    so ``enriched_table`` has exactly the input's rows; the per-level caches
+    are about cost -- smaller, pre-filtered polygons to join against.
 
-    Every level's join is bounded like the single-source one above (#1174).
+    The last join materializes the whole input into the temp table, the
+    largest piece of DuckDB work in the command -- bigger than the split that
+    follows it. Like every chained join, it runs under the same memory policy
+    as every gpio write (``--write-memory`` when given, else the
+    ceiling-based default): left unbounded it sized itself for the host and
+    was measured at 14.3 GiB on 12 threads while ``--write-memory 700MB`` was
+    in force (#1174).
 
     Returns the list of output admin column names.
     """
-    current_source = input_path
-    current_is_table_ref = False
     output_column_names = []
-    intermediate_tables = []
 
-    # The data extent does not change across levels, so compute it once and reuse
-    # it for every level's WHERE clause rather than re-scanning per level (#480).
-    extent = _compute_input_extent(con, input_path, input_bbox_col, input_geom_col, source_crs)
-
-    for i, (level, col) in enumerate(zip(levels, boundary_columns, strict=True)):
-        level_source = dataset.get_source_for_level(level)
-        admin_table_ref = _build_admin_table_reference(dataset, sql_path(level_source))
-        select_clause, level_outputs = _build_admin_select_for_partitioning(
-            [level], [col], dataset=dataset, vecorel=vecorel
+    def select_for(step_levels, columns):
+        select_clause, names = _build_admin_select_for_partitioning(
+            step_levels, columns, dataset=dataset, vecorel=vecorel
         )
-        output_column_names.extend(level_outputs)
+        output_column_names.extend(names)
+        return select_clause
 
-        admin_where_clause = _build_admin_where_clause(
-            dataset, [level], admin_bbox_col, extent, verbose, admin_source=level_source
-        )
+    def report(step: AdminJoinStep) -> None:
+        if verbose and step.per_level:
+            debug(
+                f"  → Level {step.index + 1}/{step.count}: "
+                f"joining {step.levels[0]} from {step.source}"
+            )
 
-        is_last = i == len(levels) - 1
-        target = enriched_table if is_last else f"_admin_step_{i}"
-        if verbose:
-            debug(f"  → Level {i + 1}/{len(levels)}: joining {level} from {level_source}")
-
-        level_query = _build_enrichment_query(
-            current_source,
-            admin_table_ref,
-            admin_where_clause,
-            select_clause,
-            admin_geom_col,
-            admin_bbox_col,
-            [col],
-            input_geom_col,
-            input_bbox_col,
-            target,
-            input_is_table_ref=current_is_table_ref,
-            source_crs=source_crs,
-        )
-        with scoped_write_memory_limit(con, memory_limit, verbose):
-            con.execute(level_query)
-        if not is_last:
-            intermediate_tables.append(target)
-        current_source = target
-        current_is_table_ref = True
-
-    for table in intermediate_tables:
-        con.execute(f"DROP TABLE IF EXISTS {table}")
-
+    run_admin_join(
+        con,
+        dataset,
+        levels,
+        input_path=input_path,
+        input_geom_col=input_geom_col,
+        input_bbox_col=input_bbox_col,
+        admin_bbox_col=admin_bbox_col,
+        select_for=select_for,
+        final_table=enriched_table,
+        source_crs=source_crs,
+        memory_limit=memory_limit,
+        verbose=verbose,
+        on_step=report,
+    )
     return output_column_names
 
 
@@ -495,7 +212,7 @@ def _verify_enrichment_results(con, enriched_table, output_column_names):
             COUNT(CASE WHEN {all_clause} THEN 1 END) as with_all_admin
         FROM {enriched_table}
     """
-    total_count, with_admin_count, with_all_count = con.execute(stats_query).fetchone()
+    total_count, with_admin_count, with_all_count = fetch_one(con.execute(stats_query))
 
     success(f"  ✓ Matched {with_admin_count:,} of {total_count:,} features to admin boundaries")
 
@@ -517,9 +234,7 @@ def _verify_enrichment_results(con, enriched_table, output_column_names):
 
 def _get_original_columns(con, input_path):
     """Get original column names from the (RAW) input file path."""
-    original_columns_query = f"SELECT * FROM {sql_path(input_path)} LIMIT 0"
-    original_schema = con.execute(original_columns_query)
-    return [desc[0] for desc in original_schema.description]
+    return query_schema(con, f"SELECT * FROM {sql_path(input_path)}").names
 
 
 def _build_admin_staging_select(
@@ -576,7 +291,7 @@ def _finalize_admin_partition(
     check_output_collision(seen_outputs, output_file, tuple(values))
 
     os.makedirs(partition_folder, exist_ok=True)
-    if verbose and not (os.path.exists(output_file) and not overwrite):
+    if verbose and not output_is_kept(output_file, overwrite):
         debug(f"  → Creating: {'/'.join(folder_parts)}")
 
     created = finalize_partition_file(
@@ -605,14 +320,8 @@ def _create_all_partitions(
     metadata,
     input_parquet,
     verbose,
-    profile,
     original_cols,
-    geoparquet_version=None,
-    compression="ZSTD",
-    compression_level=15,
-    row_group_size_mb=None,
-    row_group_rows=None,
-    memory_limit=None,
+    write: WriteOptions,
     vecorel=False,
     extra_kv=None,
 ):
@@ -638,15 +347,10 @@ def _create_all_partitions(
     )
     write_options = PartitionWriteOptions(
         geoparquet_version=resolve_output_geoparquet_version(
-            geoparquet_version, input_file=input_parquet, verbose=verbose
+            write.geoparquet_version, input_file=input_parquet, verbose=verbose
         ),
         input_file=input_parquet,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        memory_limit=memory_limit,
-        profile=profile,
+        write=write,
         extra_kv_metadata=extra_kv,
     )
 
@@ -657,7 +361,7 @@ def _create_all_partitions(
         select_sql = _build_admin_staging_select(
             enriched_table, output_column_names, original_cols, vecorel, aliases
         )
-        run_partitioned_copy(con, select_sql, aliases, staging_dir, verbose, memory_limit)
+        run_partitioned_copy(con, select_sql, aliases, staging_dir, verbose, write.memory_limit)
 
         for values, partition_dir in iter_staging_partitions(staging_dir):
             if _finalize_admin_partition(
@@ -699,8 +403,8 @@ def partition_by_admin_hierarchical(
     filename_prefix: str | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
-    compression: str = "ZSTD",
-    compression_level: int = 15,
+    compression: str | None = None,
+    compression_level: int | None = None,
     row_group_size_mb: int | None = None,
     row_group_rows: int | None = None,
     memory_limit: str | None = None,
@@ -757,10 +461,11 @@ def partition_by_admin_hierarchical(
         # boundaries and spatially joining against nothing (#823).
         raise_if_no_rows(actual_input)
 
-        # Setup dataset and get input file info
-        dataset, boundary_columns = _setup_admin_dataset(dataset_name, verbose, levels)
-        # --write-memory also bounds the dataset's cache downloads (#1156).
-        dataset.memory_limit = memory_limit
+        # Setup dataset and get input file info. --write-memory also bounds
+        # the dataset's cache downloads (#1156).
+        dataset, _boundary_columns, _ = resolve_admin_dataset(
+            dataset_name, levels, cache=False, memory_limit=memory_limit, verbose=verbose
+        )
         input_path, input_geom_col, input_bbox_col = _get_input_file_info(actual_input, verbose)
 
         # Admin boundaries are OGC:CRS84; reproject a non-CRS84 input before the
@@ -768,78 +473,36 @@ def partition_by_admin_hierarchical(
         # matches nothing (#525).
         source_crs = source_crs_string(actual_input, verbose, input_geom_col)
 
-        # Get admin dataset info
-        admin_geom_col = dataset.get_geometry_column()
         admin_bbox_col = dataset.get_bbox_column()
 
         # Use ambient S3 config from dataset, applied via get_duckdb_connection
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, s3_config_scope
+        from geoparquet_io.core.duckdb_utils import s3_config_scope
 
         with s3_config_scope(dataset.get_s3_config()):
-            con = _setup_admin_join_connection(dataset, get_duckdb_connection)
+            con = open_admin_join_connection(spill_to_cache=dataset.supports_per_level_sources())
 
             # STEP 1: Spatial join to create enriched data with admin columns
             progress("\n📍 Step 1/2: Performing spatial join with admin boundaries...")
 
             enriched_table = "_enriched_with_admin"
 
-            if input_bbox_col and admin_bbox_col and verbose:
-                debug("  → Using bbox columns for optimized spatial join")
-            elif not (input_bbox_col and admin_bbox_col) and verbose:
-                debug("  → Using full geometry intersection (no bbox optimization)")
+            if verbose:
+                _report_join_strategy(input_bbox_col, admin_bbox_col, source_crs)
 
-            if dataset.supports_per_level_sources():
-                # Per-level land caches: chain one join per level so maritime
-                # (EEZ) polygons don't double-match and memory stays bounded.
-                output_column_names = _perform_per_level_enrichment_join(
-                    con,
-                    dataset,
-                    levels,
-                    boundary_columns,
-                    enriched_table,
-                    input_path,
-                    admin_geom_col,
-                    admin_bbox_col,
-                    input_geom_col,
-                    input_bbox_col,
-                    vecorel,
-                    verbose,
-                    source_crs=source_crs,
-                    memory_limit=memory_limit,
-                )
-            else:
-                admin_source = dataset.prepare_data_source(con)
-                admin_select_clause, output_column_names = _build_admin_select_for_partitioning(
-                    levels, boundary_columns, dataset=dataset, vecorel=vecorel
-                )
-                admin_table_ref = _build_admin_table_reference(dataset, admin_source)
-                extent = _compute_input_extent(
-                    con, input_path, input_bbox_col, input_geom_col, source_crs
-                )
-                admin_where_clause = _build_admin_where_clause(
-                    dataset,
-                    levels,
-                    admin_bbox_col,
-                    extent,
-                    verbose,
-                    admin_source=dataset.get_source(),
-                )
-                _perform_enrichment_join(
-                    con,
-                    enriched_table,
-                    input_path,
-                    admin_table_ref,
-                    admin_where_clause,
-                    admin_select_clause,
-                    admin_geom_col,
-                    admin_bbox_col,
-                    boundary_columns,
-                    input_geom_col,
-                    input_bbox_col,
-                    source_crs=source_crs,
-                    memory_limit=memory_limit,
-                    verbose=verbose,
-                )
+            output_column_names = _enrich_with_admin(
+                con,
+                dataset,
+                levels,
+                enriched_table,
+                input_path,
+                input_geom_col,
+                input_bbox_col,
+                admin_bbox_col,
+                vecorel,
+                verbose,
+                source_crs=source_crs,
+                memory_limit=memory_limit,
+            )
 
             # Verify enrichment results
             _verify_enrichment_results(con, enriched_table, output_column_names)
@@ -891,14 +554,8 @@ def partition_by_admin_hierarchical(
                 metadata,
                 actual_input,
                 verbose,
-                profile,
                 original_cols,
-                geoparquet_version,
-                compression,
-                compression_level,
-                row_group_size_mb,
-                row_group_rows,
-                memory_limit,
+                WriteOptions.pick(locals()),
                 vecorel,
                 extra_kv,
             )
@@ -908,8 +565,7 @@ def partition_by_admin_hierarchical(
         return partition_count
     finally:
         # Clean up stdin temp file
-        if stdin_temp_file and os.path.exists(stdin_temp_file):
-            os.remove(stdin_temp_file)
+        unlink_released_file(stdin_temp_file)
 
 
 def _get_preview_partitions(con, table_name, partition_columns, level_names):

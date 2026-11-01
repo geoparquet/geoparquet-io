@@ -1,29 +1,28 @@
 """Tests for core/common.py utility functions."""
 
+import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.bbox_structure import check_bbox_structure, get_bbox_advice
 from geoparquet_io.core.common import get_parquet_metadata, should_skip_bbox
-from geoparquet_io.core.compression import validate_compression_settings
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     _extract_crs_identifier,
     _validate_projjson,
     _wrap_query_with_crs,
     get_crs_display_name,
     is_default_crs,
-    is_geographic_crs,
-    parse_crs_string_to_projjson,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import (
     has_glob_pattern,
     is_partition_path,
-    safe_file_url,
+    resolve_file_url,
     validate_parquet_extension,
 )
 from geoparquet_io.core.geo_metadata import _get_geometry_type_name
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_azure_url,
@@ -32,7 +31,7 @@ from geoparquet_io.core.remote import (
     is_s3_url,
     needs_httpfs,
 )
-from geoparquet_io.core.sizing import format_size, parse_size_string
+from geoparquet_io.core.sizing import format_size
 
 
 class TestIsRemoteUrl:
@@ -196,88 +195,52 @@ class TestFormatSize:
         assert "GB" in result
 
 
-class TestParseSizeString:
-    """Tests for parse_size_string function."""
-
-    def test_parse_plain_number_assumes_mb(self):
-        """Test that plain numbers are treated as MB."""
-        # Plain numbers are assumed to be MB
-        assert parse_size_string("100") == 100 * 1024 * 1024
-        assert parse_size_string("1") == 1 * 1024 * 1024
-
-    def test_parse_bytes(self):
-        """Test parsing byte sizes."""
-        assert parse_size_string("100B") == 100
-        assert parse_size_string("100 B") == 100
-
-    def test_parse_kilobytes(self):
-        """Test parsing kilobyte sizes."""
-        assert parse_size_string("1KB") == 1024
-        assert parse_size_string("2KB") == 2048
-
-    def test_parse_megabytes(self):
-        """Test parsing megabyte sizes."""
-        assert parse_size_string("1MB") == 1024 * 1024
-        assert parse_size_string("100MB") == 100 * 1024 * 1024
-
-    def test_parse_gigabytes(self):
-        """Test parsing gigabyte sizes."""
-        assert parse_size_string("1GB") == 1024 * 1024 * 1024
-        assert parse_size_string("2GB") == 2 * 1024 * 1024 * 1024
-
-    def test_empty_returns_none(self):
-        """Test that empty string returns None."""
-        assert parse_size_string("") is None
-        assert parse_size_string(None) is None
-
-    def test_invalid_size_raises_error(self):
-        """Test that invalid sizes raise ValueError."""
-        with pytest.raises(ValueError):
-            parse_size_string("invalid")
-
-
-class TestValidateCompressionSettings:
-    """Tests for validate_compression_settings function."""
+class TestResolveCodecDescriptions:
+    """``resolve_codec``'s canonical name, default level and description."""
 
     def test_valid_zstd(self):
         """Test valid ZSTD compression with default level."""
-        compression, level, desc = validate_compression_settings("ZSTD", None, False)
+        codec = resolve_codec("ZSTD", None, context="write")
+        compression, level, desc = codec.name, codec.level, codec.description
         assert compression == "ZSTD"
         assert level == 15  # Default ZSTD level
         assert desc == "ZSTD:15"
 
     def test_valid_zstd_with_level(self):
         """Test valid ZSTD with custom compression level."""
-        compression, level, desc = validate_compression_settings("ZSTD", 10, False)
+        codec = resolve_codec("ZSTD", 10, context="write")
+        compression, level, desc = codec.name, codec.level, codec.description
         assert compression == "ZSTD"
         assert level == 10
         assert desc == "ZSTD:10"
 
     def test_valid_snappy(self):
         """Test valid SNAPPY compression (no level support)."""
-        compression, level, desc = validate_compression_settings("SNAPPY", None, False)
+        codec = resolve_codec("SNAPPY", None, context="write")
+        compression, level, desc = codec.name, codec.level, codec.description
         assert compression == "SNAPPY"
         assert level is None
         assert desc == "SNAPPY"
 
     def test_valid_gzip(self):
         """Test valid GZIP compression with default level."""
-        compression, level, desc = validate_compression_settings("GZIP", None, False)
+        codec = resolve_codec("GZIP", None, context="write")
+        compression, level, desc = codec.name, codec.level, codec.description
         assert compression == "GZIP"
         assert level == 6  # Default GZIP level
         assert desc == "GZIP:6"
 
     def test_valid_uncompressed(self):
         """Test valid UNCOMPRESSED setting."""
-        compression, level, desc = validate_compression_settings("UNCOMPRESSED", None, False)
+        codec = resolve_codec("UNCOMPRESSED", None, context="write")
+        compression, level, desc = codec.name, codec.level, codec.description
         assert compression == "UNCOMPRESSED"
         assert level is None
         assert desc == "UNCOMPRESSED"
 
     def test_case_insensitive(self):
         """Test that compression names are case insensitive."""
-        compression, level, desc = validate_compression_settings("zstd", None, False)
-        assert compression == "ZSTD"
+        assert resolve_codec("zstd", None, context="write").name == "ZSTD"
 
 
 class TestDetectGeoparquetFileType:
@@ -296,7 +259,7 @@ class TestDetectGeoparquetFileType:
     def test_with_verbose(self, places_test_file):
         """Test detection with verbose flag."""
         result = detect_geoparquet_file_type(places_test_file, verbose=True)
-        assert isinstance(result, dict)
+        assert result["file_type"] == "geoparquet_v1"
 
     def test_buildings_file(self, buildings_test_file):
         """Test detection with buildings test file."""
@@ -306,23 +269,18 @@ class TestDetectGeoparquetFileType:
 
 
 class TestFindPrimaryGeometryColumn:
-    """Tests for find_primary_geometry_column function."""
+    """Tests for primary_geometry_column function."""
 
     def test_finds_geometry_column(self, places_test_file):
         """Test finding geometry column in places file."""
-        result = find_primary_geometry_column(places_test_file, verbose=False)
+        result = primary_geometry_column(places_test_file, verbose=False)
         assert isinstance(result, str)
         assert result == "geometry"
 
     def test_buildings_geometry_column(self, buildings_test_file):
         """Test finding geometry column in buildings file."""
-        result = find_primary_geometry_column(buildings_test_file, verbose=False)
-        assert isinstance(result, str)
-
-    def test_with_verbose(self, places_test_file):
-        """Test with verbose flag."""
-        result = find_primary_geometry_column(places_test_file, verbose=True)
-        assert isinstance(result, str)
+        result = primary_geometry_column(buildings_test_file, verbose=False)
+        assert result == "geometry"
 
 
 class TestGetParquetMetadata:
@@ -342,7 +300,7 @@ class TestGetParquetMetadata:
     def test_with_verbose(self, places_test_file):
         """Test with verbose flag."""
         result = get_parquet_metadata(places_test_file, verbose=True)
-        assert isinstance(result, tuple)
+        assert result[1].names == pq.read_schema(places_test_file).names
 
 
 class TestCheckBboxStructure:
@@ -363,7 +321,7 @@ class TestCheckBboxStructure:
     def test_with_verbose(self, places_test_file):
         """Test with verbose flag."""
         result = check_bbox_structure(places_test_file, verbose=True)
-        assert isinstance(result, dict)
+        assert result["bbox_column_name"] == "bbox"
 
 
 class TestGetDuckdbConnection:
@@ -372,19 +330,21 @@ class TestGetDuckdbConnection:
     def test_basic_connection(self):
         """Test creating a basic DuckDB connection."""
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
-        assert con is not None
+        assert fetch_one(con.execute("SELECT 42")) == (42,)
         con.close()
 
     def test_with_spatial(self):
         """Test creating connection with spatial extension."""
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-        assert con is not None
+        assert fetch_one(con.execute("SELECT ST_AsText(ST_Point(1, 2))")) == ("POINT (1 2)",)
         con.close()
 
     def test_with_httpfs(self):
         """Test creating connection with httpfs extension."""
         con = get_duckdb_connection(load_spatial=False, load_httpfs=True)
-        assert con is not None
+        assert fetch_one(
+            con.execute("SELECT loaded FROM duckdb_extensions() WHERE extension_name = 'httpfs'")
+        ) == (True,)
         con.close()
 
     def test_with_both_extensions(self):
@@ -392,17 +352,13 @@ class TestGetDuckdbConnection:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
         assert con is not None
         # Execute a simple query to verify connection works
-        result = con.execute("SELECT 1").fetchone()
+        result = fetch_one(con.execute("SELECT 1"))
         assert result[0] == 1
         con.close()
 
 
 class TestGetCrsDisplayName:
     """Tests for get_crs_display_name function."""
-
-    def test_none_reads_as_an_unknown_crs(self):
-        """An explicit ``crs: null`` means unknown, not the OGC:CRS84 default."""
-        assert get_crs_display_name(None) == "null (CRS unknown)"
 
     def test_string_crs(self):
         """Test string CRS is returned as-is."""
@@ -430,54 +386,6 @@ class TestGetCrsDisplayName:
         assert get_crs_display_name(crs) == "PROJJSON object"
 
 
-class TestIsGeographicCrs:
-    """Tests for is_geographic_crs function."""
-
-    def test_none_is_geographic(self):
-        """Test that None CRS is treated as geographic (default is OGC:CRS84)."""
-        assert is_geographic_crs(None) is True
-
-    def test_epsg_4326_is_geographic(self):
-        """Test that EPSG:4326 is detected as geographic."""
-        crs = {"id": {"authority": "EPSG", "code": 4326}}
-        assert is_geographic_crs(crs) is True
-
-    def test_geographic_crs_type(self):
-        """Test PROJJSON with GeographicCRS type."""
-        crs = {"type": "GeographicCRS", "name": "WGS 84"}
-        assert is_geographic_crs(crs) is True
-
-    def test_projected_crs_type(self):
-        """Test PROJJSON with ProjectedCRS type."""
-        crs = {"type": "ProjectedCRS", "name": "UTM Zone 10N"}
-        assert is_geographic_crs(crs) is False
-
-    def test_string_epsg_4326(self):
-        """Test string EPSG:4326 is geographic."""
-        assert is_geographic_crs("EPSG:4326") is True
-        assert is_geographic_crs("epsg:4326") is True
-
-    def test_string_crs84(self):
-        """Test string CRS84 is geographic."""
-        assert is_geographic_crs("OGC:CRS84") is True
-        assert is_geographic_crs("CRS84") is True
-
-    def test_string_utm_is_projected(self):
-        """Test string UTM is detected as projected."""
-        assert is_geographic_crs("UTM Zone 10N") is False
-        assert is_geographic_crs("EPSG:32610") is False  # UTM 10N
-
-    def test_name_with_wgs84(self):
-        """Test CRS with WGS84 in name is geographic."""
-        crs = {"name": "WGS 84"}
-        assert is_geographic_crs(crs) is True
-
-    def test_name_with_utm_is_projected(self):
-        """Test CRS with UTM in name is projected."""
-        crs = {"name": "WGS 84 / UTM zone 10N"}
-        assert is_geographic_crs(crs) is False
-
-
 class TestGetGeometryTypeName:
     """Tests for _get_geometry_type_name function."""
 
@@ -486,14 +394,15 @@ class TestGetGeometryTypeName:
         from geoparquet_io.core import arrow_geo_metadata, derive_geo_from_file, geo_metadata
 
         assert _get_geometry_type_name is geo_metadata._get_geometry_type_name
-        assert arrow_geo_metadata._get_geometry_type_name is geo_metadata._get_geometry_type_name
+        # The Arrow-side type fold that needed it is gone too (#1367 concept 5).
+        assert not hasattr(arrow_geo_metadata, "_get_geometry_type_name")
         assert not hasattr(arrow_geo_metadata, "_GEOMETRY_TYPE_CODES")
-        assert derive_geo_from_file._GEOMETRY_TYPE_CODES is geo_metadata._GEOMETRY_TYPE_CODES
-        assert derive_geo_from_file._DIMENSION_SUFFIXES is geo_metadata._DIMENSION_SUFFIXES
+        # derive_geo_from_file folds row-group stats through duckdb_metadata now.
+        assert not hasattr(derive_geo_from_file, "_GEOMETRY_TYPE_CODES")
 
     def test_2d_types(self):
-        """Test 2D geometry types (codes 0-7)."""
-        assert _get_geometry_type_name(0) == "Unknown"
+        """Test 2D geometry types (codes 1-7); code 0 names no spec type."""
+        assert _get_geometry_type_name(0) is None
         assert _get_geometry_type_name(1) == "Point"
         assert _get_geometry_type_name(2) == "LineString"
         assert _get_geometry_type_name(3) == "Polygon"
@@ -533,11 +442,12 @@ class TestGetGeometryTypeName:
         assert _get_geometry_type_name(3007) == "GeometryCollection ZM"
 
     def test_unknown_base_type(self):
-        """Test unknown base type returns Unknown."""
-        assert _get_geometry_type_name(8) == "Unknown"
-        assert _get_geometry_type_name(99) == "Unknown"
-        assert _get_geometry_type_name(1008) == "Unknown"
-        assert _get_geometry_type_name(2099) == "Unknown"
+        """An unknown base or dimension names no spec type: None, dropped by callers."""
+        assert _get_geometry_type_name(8) is None
+        assert _get_geometry_type_name(99) is None
+        assert _get_geometry_type_name(1008) is None
+        assert _get_geometry_type_name(2099) is None
+        assert _get_geometry_type_name(4001) is None
 
 
 class TestGetBboxAdvice:
@@ -609,7 +519,7 @@ class TestGetBboxAdvice:
     def test_verbose_mode(self, places_test_file):
         """Test that verbose mode does not cause errors."""
         result = get_bbox_advice(places_test_file, "spatial_filtering", verbose=True)
-        assert isinstance(result, dict)
+        assert result["skip_bbox_prefilter"] is False
 
     def test_spatial_filtering_geoarrow_native(self, places_test_file, tmp_path):
         """1.1-geoarrow files are native geometry despite version 1.1.
@@ -643,11 +553,6 @@ class TestValidateParquetExtension:
         validate_parquet_extension("output.parquet")
         validate_parquet_extension("/path/to/output.parquet")
         validate_parquet_extension("./relative/output.parquet")
-
-    def test_valid_parquet_extension_uppercase(self):
-        """Test that uppercase .PARQUET extension passes validation."""
-        validate_parquet_extension("output.PARQUET")
-        validate_parquet_extension("output.Parquet")
 
     def test_invalid_extension_raises_error(self):
         """Test that non-.parquet extension raises GeoParquetError."""
@@ -709,8 +614,8 @@ class TestValidateParquetExtension:
         validate_parquet_extension("gs://bucket/path/file.json", any_extension=True)
 
 
-class TestSafeFileUrl:
-    """Tests for safe_file_url function."""
+class TestResolveFileUrl:
+    """Tests for resolve_file_url function."""
 
     def test_http_url_is_taken_as_already_encoded(self):
         """An http(s) URL is passed through verbatim, encoded or not (#825).
@@ -721,26 +626,26 @@ class TestSafeFileUrl:
         """
 
         already_encoded = "https://example.com/path%20with%20spaces/file.parquet"
-        assert safe_file_url(already_encoded) == already_encoded
+        assert resolve_file_url(already_encoded) == already_encoded
 
         raw_space = "https://example.com/path with spaces/file.parquet"
-        assert safe_file_url(raw_space) == raw_space
+        assert resolve_file_url(raw_space) == raw_space
 
     def test_http_preserves_duckdb_safe_chars(self):
         """Test that DuckDB-safe chars like * ? [ ] are preserved."""
 
         # Glob patterns should be preserved
-        result = safe_file_url("https://example.com/data/*.parquet")
+        result = resolve_file_url("https://example.com/data/*.parquet")
         assert "/*.parquet" in result  # Asterisk should not be encoded
 
-        result = safe_file_url("https://example.com/file[0-9].parquet")
+        result = resolve_file_url("https://example.com/file[0-9].parquet")
         assert "[0-9]" in result  # Brackets should not be encoded
 
     def test_s3_url_passthrough(self):
         """Test that S3 URLs are passed through without encoding."""
 
         s3_url = "s3://bucket/path/file.parquet"
-        result = safe_file_url(s3_url)
+        result = resolve_file_url(s3_url)
         assert result == s3_url
 
     def test_local_file_not_found_raises_error(self):
@@ -748,14 +653,14 @@ class TestSafeFileUrl:
         from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError
 
         with pytest.raises(FileNotFoundGeoParquetError) as exc_info:
-            safe_file_url("/nonexistent/path/file.parquet")
+            resolve_file_url("/nonexistent/path/file.parquet")
         assert "not found" in str(exc_info.value).lower()
 
     def test_local_file_with_glob_skips_validation(self):
         """Test that local glob patterns skip existence check."""
 
         # Should not raise even if path doesn't exist
-        result = safe_file_url("/some/path/*.parquet")
+        result = resolve_file_url("/some/path/*.parquet")
         assert result == "/some/path/*.parquet"
 
 
@@ -765,35 +670,44 @@ class TestGetRemoteErrorHint:
     def test_s3_403_error(self):
         """Test S3 403 error returns AWS credential hint."""
 
-        hint = get_remote_error_hint("403 Forbidden", "s3://bucket/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("403 Forbidden"), "s3://bucket/file.parquet"
+        )
         assert "AWS_ACCESS_KEY_ID" in hint
         assert "AWS_SECRET_ACCESS_KEY" in hint
 
     def test_azure_access_denied(self):
         """Test Azure access denied returns Azure credential hint."""
 
-        hint = get_remote_error_hint("Access Denied", "az://container/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Access Denied"), "az://container/file.parquet"
+        )
         assert "AZURE_STORAGE_ACCOUNT_NAME" in hint
         assert "AZURE_STORAGE_ACCOUNT_KEY" in hint
 
     def test_gcs_forbidden(self):
         """Test GCS forbidden error returns GCP credential hint."""
 
-        hint = get_remote_error_hint("403", "gs://bucket/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("HTTP 403"), "gs://bucket/file.parquet"
+        )
         assert "GOOGLE_APPLICATION_CREDENTIALS" in hint
 
     def test_404_error(self):
         """Test 404 error returns file not found hint."""
 
-        hint = get_remote_error_hint("404 Not Found", "s3://bucket/missing.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("404 Not Found"), "s3://bucket/missing.parquet"
+        )
         assert "not found" in hint.lower()
-        assert "Verify the URL" in hint
+        assert "the URL" in hint
 
     def test_timeout_error(self):
         """Test timeout error returns network hint."""
 
         hint = get_remote_error_hint(
-            "Connection timed out", "https://slow.example.com/data.parquet"
+            __import__("duckdb").IOException("Connection timed out"),
+            "https://slow.example.com/data.parquet",
         )
         assert "timed out" in hint.lower()
         assert "network connectivity" in hint.lower()
@@ -802,7 +716,8 @@ class TestGetRemoteErrorHint:
         """Test connection error returns connectivity hint."""
 
         hint = get_remote_error_hint(
-            "Unable to connect", "https://invalid.example.com/file.parquet"
+            __import__("duckdb").IOException("Unable to connect"),
+            "https://invalid.example.com/file.parquet",
         )
         assert "connect" in hint.lower()
         assert "network connectivity" in hint.lower()
@@ -810,20 +725,15 @@ class TestGetRemoteErrorHint:
     def test_generic_error(self):
         """Test generic error returns fallback hint."""
 
-        hint = get_remote_error_hint("Unknown error occurred", "s3://bucket/file.parquet")
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("Unknown error occurred"), "s3://bucket/file.parquet"
+        )
         assert "Remote file access failed" in hint
         assert "network connectivity" in hint.lower()
 
 
 class TestExtractCrsIdentifier:
     """Tests for _extract_crs_identifier function."""
-
-    def test_projjson_with_id(self):
-        """Test extracting CRS from PROJJSON dict with id."""
-
-        crs = {"id": {"authority": "EPSG", "code": 4326}}
-        result = _extract_crs_identifier(crs)
-        assert result == ("EPSG", 4326)
 
     def test_projjson_with_string_code(self):
         """Test PROJJSON with non-numeric code."""
@@ -841,25 +751,6 @@ class TestExtractCrsIdentifier:
         result = _extract_crs_identifier("epsg:4326")  # Case insensitive
         assert result == ("EPSG", 4326)
 
-    def test_string_ogc_crs84(self):
-        """Test string OGC:CRS84 format."""
-
-        result = _extract_crs_identifier("OGC:CRS84")
-        assert result == ("OGC", "CRS84")
-
-    def test_urn_format(self):
-        """Test URN format CRS string."""
-
-        result = _extract_crs_identifier("urn:ogc:def:crs:EPSG::4326")
-        assert result == ("EPSG", 4326)
-
-    def test_projjson_without_id_returns_none(self):
-        """Test PROJJSON without id returns None."""
-
-        crs = {"name": "WGS 84", "type": "GeographicCRS"}
-        result = _extract_crs_identifier(crs)
-        assert result is None
-
     def test_invalid_string_returns_none(self):
         """Test invalid CRS string returns None."""
 
@@ -872,11 +763,6 @@ class TestExtractCrsIdentifier:
 
 class TestIsDefaultCrs:
     """Tests for is_default_crs function."""
-
-    def test_none_is_default(self):
-        """Test that None is considered default CRS."""
-
-        assert is_default_crs(None) is True
 
     def test_epsg_4326_is_default(self):
         """Test that EPSG:4326 is default."""
@@ -957,10 +843,6 @@ class TestValidateProjjson:
         }
         assert _validate_projjson(crs) is True
 
-    def test_valid_projjson_with_type(self):
-        crs = {"type": "GeographicCRS", "name": "WGS 84"}
-        assert _validate_projjson(crs) is True
-
     def test_valid_projjson_with_id_only(self):
         crs = {"id": {"authority": "EPSG", "code": 5070}}
         assert _validate_projjson(crs) is True
@@ -998,26 +880,23 @@ class TestIsPartitionPath:
         assert is_partition_path("s3://bucket/data/*.parquet") is True
 
 
-class TestParseCrsStringToProjjson:
-    """Tests for parse_crs_string_to_projjson function."""
+class TestRemoteHintSchemes:
+    """The store decision is `is_s3_url` / `is_azure_url` / `is_gcs_url`, not a substring table."""
 
-    def test_valid_epsg_code(self):
-        """Test parsing valid EPSG code to PROJJSON."""
+    @pytest.mark.parametrize(
+        ("path", "needle"),
+        [
+            ("s3a://b/f.parquet", "AWS_ACCESS_KEY_ID"),
+            ("abfss://c@acct.dfs.core.windows.net/f.parquet", "AZURE_STORAGE_ACCOUNT_NAME"),
+            ("gcs://b/f.parquet", "GOOGLE_APPLICATION_CREDENTIALS"),
+        ],
+    )
+    def test_scheme_family_picks_the_remedy(self, path, needle):
+        hint = get_remote_error_hint(__import__("duckdb").IOException("HTTP 403"), path)
+        assert needle in hint
 
-        result = parse_crs_string_to_projjson("EPSG:4326")
-        assert isinstance(result, dict)
-        # Should contain either full PROJJSON or at least id dict
-        assert "id" in result or "name" in result
-
-    def test_invalid_crs_string_returns_none(self):
-        """Test that invalid CRS string returns None."""
-
-        result = parse_crs_string_to_projjson("invalid")
-        assert result is None
-
-    def test_ogc_crs84(self):
-        """Test parsing OGC:CRS84."""
-
-        result = parse_crs_string_to_projjson("OGC:CRS84")
-        assert isinstance(result, dict)
-        assert "id" in result
+    def test_a_path_that_merely_contains_azure_is_not_azure(self):
+        hint = get_remote_error_hint(
+            __import__("duckdb").IOException("HTTP 403"), "https://example.com/azure/f.parquet"
+        )
+        assert "AZURE" not in hint

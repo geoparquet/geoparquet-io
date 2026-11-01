@@ -1,4 +1,4 @@
-"""`patch_footer(geography=...)` retypes a GEOMETRY column GEOGRAPHY in the footer (#999).
+"""`_patch_footer_file(geography=...)` retypes a GEOMETRY column GEOGRAPHY in the footer (#999).
 
 DuckDB writes a planar GEOMETRY whatever it read, and a GEOGRAPHY's data pages
 are the same WKB bytes, so the retype is a footer edit: the column's logical
@@ -27,10 +27,10 @@ from geoparquet_io.core.parquet_footer import (
     _bbox_splice,
     _field_header,
     _patch_footer,
+    _patch_footer_file,
     _patch_geography,
     _struct_fields,
     _with_geography_fields,
-    patch_footer,
     read_footer_kv,
 )
 
@@ -108,7 +108,7 @@ def test_the_named_column_becomes_a_geography(duckdb_file, tmp_path):
     out = tmp_path / "out.parquet"
     before = _logical(duckdb_file)
 
-    retyped = patch_footer(
+    retyped = _patch_footer_file(
         str(duckdb_file), geography={"geometry": "spherical"}, output_file=str(out)
     )
 
@@ -125,7 +125,7 @@ def test_the_named_column_becomes_a_geography(duckdb_file, tmp_path):
 
 def test_each_chunk_loses_its_bbox_and_keeps_its_types(duckdb_file, tmp_path):
     out = tmp_path / "out.parquet"
-    patch_footer(str(duckdb_file), geography={"geometry": "spherical"}, output_file=str(out))
+    _patch_footer_file(str(duckdb_file), geography={"geometry": "spherical"}, output_file=str(out))
 
     assert _geo_stats(out, "geometry") == [(None, [1])] * 3
     assert _geo_stats(out, "other") == _geo_stats(duckdb_file, "other")
@@ -153,7 +153,7 @@ class TestGeographyBbox:
         out = tmp_path / "out.parquet"
         boxes = {"geometry": [(1.0, -2.0, 3.0, 4.0)] * 3}
 
-        patch_footer(
+        _patch_footer_file(
             str(duckdb_file),
             geography={"geometry": "spherical"},
             geography_bbox=boxes,
@@ -170,7 +170,7 @@ class TestGeographyBbox:
         out = tmp_path / "out.parquet"
         boxes = {"geometry": [(170.0, 5.0, -170.0, 9.0)] * 3}
 
-        patch_footer(
+        _patch_footer_file(
             str(duckdb_file),
             geography={"geometry": "spherical"},
             geography_bbox=boxes,
@@ -184,7 +184,7 @@ class TestGeographyBbox:
         out = tmp_path / "out.parquet"
         boxes = {"geometry": [(1.0, -2.0, 3.0, 4.0), None, (5.0, -6.0, 7.0, 8.0)]}
 
-        patch_footer(
+        _patch_footer_file(
             str(duckdb_file),
             geography={"geometry": "spherical"},
             geography_bbox=boxes,
@@ -198,7 +198,7 @@ class TestGeographyBbox:
         out = tmp_path / "out.parquet"
         boxes = {"geometry": [(1.0, -2.0, 3.0, 4.0)]}
 
-        patch_footer(
+        _patch_footer_file(
             str(duckdb_file),
             geography={"geometry": "spherical"},
             geography_bbox=boxes,
@@ -220,7 +220,7 @@ class TestGeographyBbox:
         before = pq.read_metadata(str(path)).row_group(0).column(0).geo_statistics
         assert before.zmin == 5.0
 
-        patch_footer(
+        _patch_footer_file(
             str(path),
             geography={"geometry": "spherical"},
             geography_bbox={"geometry": [(9.0, 19.0, 11.0, 21.0)]},
@@ -233,7 +233,7 @@ class TestGeographyBbox:
 
 def test_the_rows_read_back_unchanged(duckdb_file, tmp_path):
     out = tmp_path / "out.parquet"
-    patch_footer(str(duckdb_file), geography={"geometry": "karney"}, output_file=str(out))
+    _patch_footer_file(str(duckdb_file), geography={"geometry": "karney"}, output_file=str(out))
 
     con = get_duckdb_connection(load_spatial=True)
     try:
@@ -247,7 +247,7 @@ def test_the_rows_read_back_unchanged(duckdb_file, tmp_path):
 
 def test_kv_updates_and_the_retype_land_in_one_patch(duckdb_file, tmp_path):
     out = tmp_path / "out.parquet"
-    patch_footer(
+    _patch_footer_file(
         str(duckdb_file),
         {"note": "hello"},
         geography={"geometry": "spherical"},
@@ -259,10 +259,10 @@ def test_kv_updates_and_the_retype_land_in_one_patch(duckdb_file, tmp_path):
 
 
 def test_an_already_geography_column_writes_nothing(duckdb_file):
-    patch_footer(str(duckdb_file), geography={"geometry": "spherical"})
+    _patch_footer_file(str(duckdb_file), geography={"geometry": "spherical"})
     before = Path(duckdb_file).read_bytes()
 
-    assert patch_footer(str(duckdb_file), geography={"geometry": "spherical"}) == []
+    assert _patch_footer_file(str(duckdb_file), geography={"geometry": "spherical"}) == []
     assert Path(duckdb_file).read_bytes() == before
 
 
@@ -275,7 +275,10 @@ def test_a_column_with_no_geo_logical_type_is_left_alone(tmp_path):
     )
     before = Path(path).read_bytes()
 
-    assert patch_footer(str(path), geography={"geometry": "spherical", "name": "spherical"}) == []
+    assert (
+        _patch_footer_file(str(path), geography={"geometry": "spherical", "name": "spherical"})
+        == []
+    )
     assert Path(path).read_bytes() == before
 
 
@@ -283,7 +286,7 @@ def test_an_unknown_algorithm_is_refused_before_anything_is_written(duckdb_file)
     before = Path(duckdb_file).read_bytes()
 
     with pytest.raises(ValueError, match="not a GEOGRAPHY edge algorithm: geodesic"):
-        patch_footer(str(duckdb_file), geography={"geometry": "geodesic"})
+        _patch_footer_file(str(duckdb_file), geography={"geometry": "geodesic"})
     assert Path(duckdb_file).read_bytes() == before
 
 
@@ -310,7 +313,7 @@ class TestTheEmbeddedArrowSchema:
         )
         assert b"ARROW:schema" in pq.read_metadata(str(path)).metadata
 
-        assert patch_footer(str(path), geography={"geometry": "spherical"}) == ["geometry"]
+        assert _patch_footer_file(str(path), geography={"geometry": "spherical"}) == ["geometry"]
 
         field = pq.read_schema(str(path)).field("geometry")
         assert str(field.type.edge_type) == "EdgeType.SPHERICAL"
@@ -428,7 +431,7 @@ class TestManySplices:
         assert all(stats[0] is not None for stats in _geo_stats(source, "geometry"))
         out = tmp_path / "out.parquet"
 
-        patch_footer(str(source), geography={"geometry": "spherical"}, output_file=str(out))
+        _patch_footer_file(str(source), geography={"geometry": "spherical"}, output_file=str(out))
 
         assert _geo_stats(out, "geometry") == [(None, [1])] * rows
         assert pq.read_table(str(out)).column("id").to_pylist() == list(range(rows))

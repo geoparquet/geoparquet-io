@@ -2,7 +2,6 @@
 
 import codecs
 import gc
-import math
 import os
 import re
 import time
@@ -10,36 +9,50 @@ from pathlib import Path
 
 import duckdb
 
-from geoparquet_io.core.arrow_geo_metadata import describe_wkb_geometry
 from geoparquet_io.core.bbox_structure import check_bbox_structure, resolve_bbox_name
+from geoparquet_io.core.column_selection import (
+    find_column,
+    fold,
+    matching_columns,
+    same_column,
+    unique_name,
+)
 from geoparquet_io.core.common import should_skip_bbox
 from geoparquet_io.core.crs_utils import (
     _format_crs_display,
+    crs_equal,
+    crs_of,
     detect_crs_from_spatial_file,
-    extract_crs_from_parquet,
     horizontal_crs,
     is_default_crs,
     normalize_projjson_crs,
     note_default_crs_normalized,
-    parse_crs_string_to_projjson,
+    projjson_for_label,
 )
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     _geoarrow_coord_exprs,
     _get_query_columns,
     _install_and_load_extension,
-    free_column_name,
+    as_wkb_sql,
+    complete_without_fetch,
+    describe_query,
+    duckdb_type_is_numeric,
+    fetch_one,
+    geom_from_wkb_sql,
     get_duckdb_connection,
     quote_identifier,
+    sql_literal,
     sql_path,
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import (
+    FailureKind,
     GeometryError,
     GeoParquetError,
     InvalidParameterError,
     RemoteAccessError,
+    classify_failure,
+    not_parquet_file_error,
 )
 from geoparquet_io.core.file_utils import (
     is_partition_path,
@@ -47,19 +60,33 @@ from geoparquet_io.core.file_utils import (
     validate_output_path,
 )
 from geoparquet_io.core.geo_metadata import (
+    KEEP_CRS,
+    GeoBlockOptions,
+    QuerySource,
+    SchemaSource,
+    bbox_struct_sql,
+    bbox_xy,
+    bounds_of,
     build_bbox_covering,
-    sanitize_geo_metadata,
+    compose_geo_block,
+    sanitized_carried_geo_of_file,
+    split_zm_suffix,
+    with_geo_block,
 )
 from geoparquet_io.core.geojson_datetimes import DatetimeRead, plan_datetime_read
 from geoparquet_io.core.geometry_detection import (
+    BUILT_GEOMETRY_COLUMN,
     STANDARD_GEOMETRY_NAMES,
-    detect_parquet_geometry_column,
+    GeometryRead,
+    primary_geometry_column,
+    resolve_geometry_read,
 )
 from geoparquet_io.core.geometry_repair import (
     repair_arrow_table_geometry,
     repair_query_geometry,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version, version_to_describe
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
@@ -68,7 +95,7 @@ from geoparquet_io.core.remote import (
     show_remote_read_message,
     validate_profile_for_urls,
 )
-from geoparquet_io.core.sizing import format_size
+from geoparquet_io.core.sizing import BYTES_PER_MIB, format_size
 from geoparquet_io.core.source_text import (
     SourceText,
     check_arrow_text,
@@ -89,13 +116,14 @@ def _validate_layer_name(layer: str) -> str:
     """Validate and sanitize a layer name for use in SQL.
 
     Layer names in GeoPackage/FileGDB can contain letters, numbers, underscores,
-    and spaces. We escape single quotes to prevent SQL injection.
+    and spaces. The name comes back as a complete SQL string literal
+    (:func:`sql_literal`), so a quote in it cannot break out.
 
     Args:
         layer: Layer name to validate
 
     Returns:
-        Sanitized layer name safe for SQL interpolation
+        The layer name as a quoted, escaped SQL literal
 
     Raises:
         ValueError: If layer name contains dangerous characters
@@ -108,8 +136,7 @@ def _validate_layer_name(layer: str) -> str:
                 f"Invalid layer name '{layer}': contains unsafe character sequence '{pattern}'"
             )
 
-    # Escape single quotes (SQL standard: double them)
-    return _escape_sql_string(layer)
+    return sql_literal(layer)
 
 
 _OPEN_OPTION_RE = re.compile(r"^[A-Z][A-Z0-9_]*=[A-Za-z0-9._:/ -]+$")
@@ -218,16 +245,8 @@ def _parquet_geometry_expr(con, source: str, geom_column: str) -> tuple[str, boo
     ``BLOB`` it is stored as. ``ST_GeomFromWKB`` binds only against the latter,
     so the column has to be asked which shape it has before either is wrapped.
     """
-    quoted = quote_identifier(geom_column)
-    (column_type,) = con.execute(
-        f"SELECT column_type FROM (DESCRIBE SELECT {quoted} FROM {source})"
-    ).fetchone()
-    if column_type.upper().startswith("GEOMETRY"):
-        return quoted, True
-    return f"ST_GeomFromWKB({quoted})", False
-
-
-_DIMENSION_SUFFIX_RE = re.compile(r" (Z|M|ZM)$")
+    read = resolve_geometry_read(con, source, geom_column, relation=True)
+    return read.shape_expr, read.native
 
 
 def _flatten_geometry_metadata(column_meta: dict) -> dict:
@@ -242,11 +261,11 @@ def _flatten_geometry_metadata(column_meta: dict) -> dict:
     meta = dict(column_meta)
     types = meta.get("geometry_types")
     if isinstance(types, list):
-        flat = [_DIMENSION_SUFFIX_RE.sub("", t) for t in types if isinstance(t, str)]
+        flat = [split_zm_suffix(t)[0] for t in types if isinstance(t, str)]
         meta["geometry_types"] = list(dict.fromkeys(flat))
     bbox = meta.get("bbox")
-    if isinstance(bbox, list) and len(bbox) == 6:
-        meta["bbox"] = [bbox[0], bbox[1], bbox[3], bbox[4]]
+    if isinstance(bbox, list) and len(bbox) in (6, 8):
+        meta["bbox"] = list(bbox_xy(bbox))
     return meta
 
 
@@ -269,7 +288,7 @@ def _force_2d_parquet_expr(con, input_file: str, geom_info: dict) -> str:
                 "force_2d", f"Parquet geometry column {column!r} must be WKB to drop Z/M"
             )
         expr, native = _parquet_geometry_expr(con, source, column)
-        flattened = f"ST_Force2D({expr})" if native else f"ST_AsWKB(ST_Force2D({expr}))"
+        flattened = f"ST_Force2D({expr})" if native else as_wkb_sql(f"ST_Force2D({expr})")
         replacements.append(f"{flattened} AS {quote_identifier(column)}")
     for column in geom_info["secondary"]:
         geom_info["metadata"][column] = _flatten_geometry_metadata(
@@ -301,6 +320,11 @@ _ALIASED_SOURCE = "gpio_source"
 #: one; everywhere else the read keeps whatever GDAL called it.
 _DRIVER_FID_COLUMNS = {"GPKG": "fid", "OpenFileGDB": "OBJECTID", "FileGDB": "OBJECTID"}
 _DEFAULT_FID_COLUMN = "OGC_FID"
+
+
+#: The column GDAL's ``ST_Read(..., keep_wkb := true)`` names its geometry when
+#: the source names none: GDAL's fixed name, not one gpio chooses.
+_ST_READ_WKB_COLUMN = "wkb_geometry"
 
 
 def _build_st_read_expr(
@@ -342,7 +366,7 @@ def _build_st_read_expr(
     if keep_wkb:
         params += ", keep_wkb := true"
     if layer:
-        params += f", layer := '{_validate_layer_name(layer)}'"
+        params += f", layer := {_validate_layer_name(layer)}"
     if open_options:
         joined = ", ".join(f"'{_validate_open_option(option)}'" for option in open_options)
         params += f", open_options := [{joined}]"
@@ -365,9 +389,9 @@ def _st_read_layer_meta(con, input_path: str, layer: str | None) -> tuple[str, l
     makes the collision recoverable at all: it is the only way to learn the
     column names of a file whose names the binder refuses.
     """
-    row = con.execute(
-        f"SELECT driver_short_name, layers FROM ST_Read_Meta({sql_path(input_path)})"
-    ).fetchone()
+    row = fetch_one(
+        con.execute(f"SELECT driver_short_name, layers FROM ST_Read_Meta({sql_path(input_path)})")
+    )
     if not row or not row[1]:
         return None
     driver, layers = row[0], row[1]
@@ -392,32 +416,7 @@ def _st_read_column_count(
     """
     probe = [f"c{index}" for index in range(probe_width)]
     expr = _build_st_read_expr(input_path, layer, open_options=open_options, column_aliases=probe)
-    return len(con.execute(f"SELECT * FROM {expr} LIMIT 0").description)
-
-
-def _suffixed_to_unique(names: list[str]) -> list[str]:
-    """Keep the first spelling of each name; suffix every later case-collision.
-
-    ``['id', 'Id', 'ID']`` becomes ``['id', 'Id_1', 'ID_2']``. Parquet field
-    names are case-sensitive, so none of these columns has to be dropped --
-    they only have to stop colliding under DuckDB's case-insensitive binder.
-    """
-    seen: dict[str, int] = {}
-    unique = []
-    for name in names:
-        key = name.lower()
-        if key not in seen:
-            seen[key] = 0
-            unique.append(name)
-            continue
-        seen[key] += 1
-        candidate = f"{name}_{seen[key]}"
-        while candidate.lower() in seen:
-            seen[key] += 1
-            candidate = f"{name}_{seen[key]}"
-        seen[candidate.lower()] = 0
-        unique.append(candidate)
-    return unique
+    return len(describe_query(con, f"SELECT * FROM {expr}"))
 
 
 def _case_collision_aliases(
@@ -450,7 +449,13 @@ def _case_collision_aliases(
     if prefix:
         names = [_DRIVER_FID_COLUMNS.get(driver, _DEFAULT_FID_COLUMN)] + names
 
-    unique = _suffixed_to_unique(names)
+    # Keep the first spelling of each name and suffix every later case-collision
+    # (['id', 'Id', 'ID'] -> ['id', 'Id_1', 'ID_2']): Parquet field names are
+    # case-sensitive, so no column has to go, only stop colliding under DuckDB's
+    # case-insensitive binder.
+    unique: list[str] = []
+    for name in names:
+        unique.append(unique_name(name, unique))
     if unique == names:
         return None
     for before, after in zip(names, unique, strict=True):
@@ -512,7 +517,7 @@ def _detect_geometry_column(
 ):
     """Detect geometry column name from input file.
 
-    ``input_file`` is RAW: ``detect_parquet_geometry_column`` escapes its own
+    ``input_file`` is RAW: ``primary_geometry_column`` escapes its own
     argument, and ``_build_st_read_expr`` escapes at the SQL boundary.
 
     ``columns_out``, when a list, receives every ``(name, type)`` a non-parquet
@@ -526,27 +531,21 @@ def _detect_geometry_column(
 
     # For parquet files, check GeoParquet metadata first, then fall back to names
     if is_parquet:
-        result = detect_parquet_geometry_column(input_file, verbose=verbose)
+        result = primary_geometry_column(input_file, verbose=verbose)
         return result
 
     # For other formats, use schema-based detection with standard names
     table_expr = _build_st_read_expr(
         input_file, layer, open_options=open_options, column_aliases=column_aliases
     )
+    # A bind, not DESCRIBE: DESCRIBE hands the names back as row values, and a
+    # name that is not UTF-8 (an undeclared shapefile codepage) then fails as a
+    # bare "Invalid unicode" instead of reaching the read's named refusal.
     description = con.execute(f"SELECT * FROM {table_expr} LIMIT 0").description
-    names = [col[0] for col in description]
+    typed = [(col[0], str(col[1])) for col in description]
     if columns_out is not None:
-        columns_out[:] = [(col[0], str(col[1])) for col in description]
-
-    for name in names:
-        if name.lower() in STANDARD_GEOMETRY_NAMES:
-            if verbose:
-                debug(f"Detected geometry column: {name}")
-            return name
-
-    if verbose:
-        debug("No geometry column found in input file")
-    return None
+        columns_out[:] = typed
+    return primary_geometry_column(typed, verbose=verbose)
 
 
 def _detect_spatial_geometry(con, input_file, verbose, layer, open_options, columns_out=None):
@@ -592,11 +591,11 @@ def _detect_spatial_geometry(con, input_file, verbose, layer, open_options, colu
         )
 
 
-def _schema_geometry_column(input_file: str, verbose: bool, is_parquet: bool = True) -> str | None:
-    """``_detect_geometry_column`` on a connection of its own, closed either way."""
+def _schema_geometry_column(input_file: str, verbose: bool) -> str | None:
+    """``_detect_geometry_column`` of a non-parquet source, on its own connection."""
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
     try:
-        return _detect_geometry_column(con, input_file, verbose, is_parquet=is_parquet)
+        return _detect_geometry_column(con, input_file, verbose)
     finally:
         con.close()
 
@@ -626,7 +625,7 @@ def detect_all_geometry_columns(input_file: str, verbose: bool = False) -> dict:
     # Only GeoParquet files can have multiple geometry columns with metadata
     if not _is_parquet_file(input_file):
         # For non-parquet, detect single geometry column the standard way
-        geom_col = _schema_geometry_column(input_file, verbose, is_parquet=False)
+        geom_col = _schema_geometry_column(input_file, verbose)
         if geom_col:
             result["primary"] = geom_col
             result["metadata"][geom_col] = {"encoding": "WKB"}
@@ -638,24 +637,20 @@ def detect_all_geometry_columns(input_file: str, verbose: bool = False) -> dict:
     # Without it `columns: null` crashed on `.items()`, a non-string
     # `primary_column` reached `quote_identifier`, and a non-string `encoding`
     # reached `_calculate_bounds`'s `encoding.lower()`.
-    geo_meta = sanitize_geo_metadata(get_geo_metadata(input_file))
+    geo_meta = sanitized_carried_geo_of_file(input_file)
 
+    # The primary is the owner's answer over the file's typed columns and the
+    # sanitized block (#1367): a dropped or stale `primary_column` falls through
+    # to the schema rather than naming a column the file may not have (#887).
+    primary_col = primary_geometry_column(input_file, geo=geo_meta, verbose=verbose)
     if not geo_meta or not geo_meta.get("columns"):
         # No GeoParquet metadata -- or nothing left of it once the malformed
-        # parts were dropped. Either way, detect the column from the schema.
-        geom_col = _schema_geometry_column(input_file, verbose)
-        if geom_col:
-            result["primary"] = geom_col
-            result["metadata"][geom_col] = {"encoding": "WKB"}
+        # parts were dropped.
+        if primary_col:
+            result["primary"] = primary_col
+            result["metadata"][primary_col] = {"encoding": "WKB"}
         return result
 
-    # Extract from GeoParquet metadata
-    primary_col = geo_meta.get("primary_column")
-    if not isinstance(primary_col, str):
-        # Sanitizing dropped a malformed `primary_column` and could not repair
-        # it from a single column. The literal "geometry" would name a column
-        # this file may not have, so ask the schema (#887 review).
-        primary_col = _schema_geometry_column(input_file, verbose)
     columns = geo_meta.get("columns", {})
 
     result["primary"] = primary_col
@@ -705,38 +700,12 @@ def _calculate_bounds(
         else:
             table_expr = _build_st_read_expr(input_file, layer)
 
-    # Quote column name to handle special characters, spaces, and reserved words
-    quoted_geom = quote_identifier(geom_column)
-
-    # GeoArrow native encodings store geometry as nested structs/arrays that
-    # DuckDB cannot pass to ST_XMin directly. Use list_min/list_max via
-    # _geoarrow_coord_exprs — consistent with _build_conversion_query and
-    # avoids UNNEST row explosion for large multipolygon datasets.
-    geoarrow_native = encoding.lower() not in {"wkb", "wkt"}
-    if geoarrow_native:
-        xmin_e, ymin_e, xmax_e, ymax_e, _, _ = _geoarrow_coord_exprs(quoted_geom, encoding)
-        bounds_query = f"""
-            SELECT
-                MIN({xmin_e}) as xmin,
-                MIN({ymin_e}) as ymin,
-                MAX({xmax_e}) as xmax,
-                MAX({ymax_e}) as ymax
-            FROM {table_expr}
-            WHERE NOT isnan({xmax_e}) AND NOT isnan({ymax_e})
-        """
-    else:
-        bounds_query = f"""
-            SELECT
-                MIN(ST_XMin({quoted_geom})) as xmin,
-                MIN(ST_YMin({quoted_geom})) as ymin,
-                MAX(ST_XMax({quoted_geom})) as xmax,
-                MAX(ST_YMax({quoted_geom})) as ymax
-            FROM {table_expr}
-        """
-    bounds_result = con.execute(bounds_query).fetchone()
-
-    if not bounds_result or any(v is None for v in bounds_result):
+    # The owner measures a GeoArrow native column (nested coordinate structs)
+    # off its coordinate lists, and anything else as GEOMETRY.
+    bbox = bounds_of(QuerySource(con, f"SELECT * FROM {table_expr}"), geom_column)
+    if bbox is None:
         return None
+    bounds_result = tuple(bbox)
 
     if verbose:
         xmin, ymin, xmax, ymax = bounds_result
@@ -789,13 +758,13 @@ def _dated_st_read_expr(input_file, layer, dates: DatetimeRead, column_aliases=N
 # with complex polygons (coastlines, admin boundaries) that exceed this.
 # 50MB should handle virtually any reasonable geospatial data.
 # See: https://github.com/geoparquet/geoparquet-io/issues/301
-CSV_MAX_LINE_SIZE_DEFAULT = 50 * 1024 * 1024  # 50 MB
+CSV_MAX_LINE_SIZE_DEFAULT = 50 * BYTES_PER_MIB  # 50 MiB
 # Floor for the CSV reader's buffer. DuckDB hands parallel scan work out per
 # buffer, so a buffer that tracks a small --csv-max-line-size all the way down
 # starves the scan: a 200k-row read costs 170ms at a 1KB buffer against 26ms at
 # 4MiB. Overhead is flat from ~4MiB up, and 4MiB is nowhere near the 800MiB
 # allocation #1113 removed.
-CSV_READ_BUFFER_MIN = 4 * 1024 * 1024  # 4 MB
+CSV_READ_BUFFER_MIN = 4 * BYTES_PER_MIB  # 4 MiB
 
 # Module-level override (set by CLI --csv-max-line-size option)
 _csv_max_line_size_override = None
@@ -863,10 +832,10 @@ def _build_csv_read_expr(input_url: str, delimiter: str | None, encoding: str | 
     size_options = f"max_line_size={max_line_size}, buffer_size={buffer_size}"
     reader_encoding = csv_encoding(encoding)
     if reader_encoding:
-        size_options += f", encoding='{_escape_sql_string(reader_encoding)}'"
+        size_options += f", encoding={sql_literal(reader_encoding)}"
     if delimiter:
         return (
-            f"read_csv({sql_path(input_url)}, delim='{_escape_sql_string(delimiter)}', "
+            f"read_csv({sql_path(input_url)}, delim={sql_literal(delimiter)}, "
             f"header=true, AUTO_DETECT=TRUE, {size_options})"
         )
     return f"read_csv_auto({sql_path(input_url)}, {size_options})"
@@ -887,7 +856,7 @@ def _column_suggestions(name, actual_cols):
     close = difflib.get_close_matches(name, actual_cols, n=3, cutoff=0.7)
     # difflib compares case-sensitively, so a pure case slip scores 0 and has
     # to be looked for separately -- it is the likeliest intent of all.
-    exact_fold = [c for c in actual_cols if c.lower() == name.lower()]
+    exact_fold = matching_columns(name, actual_cols)
     return exact_fold + [c for c in close if c not in exact_fold]
 
 
@@ -920,21 +889,25 @@ def _validate_explicit_latlon_columns(lat_column, lon_column, columns):
     _require_column("lon_column", lon_column, columns)
 
 
-def _try_detect_wkt_column(con, csv_read, col_names_lower):
+def _try_detect_wkt_column(con, csv_read, column_names):
     """Try to auto-detect WKT column. Returns column name or None."""
-    wkt_candidates = ["wkt", "geometry", "geom", "the_geom", "shape"]
+    # "wkt" first: a CSV's own name for a text column, then the geometry names.
+    wkt_candidates = ["wkt", *STANDARD_GEOMETRY_NAMES]
     for candidate in wkt_candidates:
-        if candidate in col_names_lower:
-            actual_col = col_names_lower[candidate]
+        actual_col = find_column(candidate, column_names)
+        if actual_col is not None:
+            q_col = quote_identifier(actual_col)
             try:
                 # Validate by trying to parse sample row
-                sample = con.execute(
-                    f"SELECT {actual_col} FROM {csv_read} WHERE {actual_col} IS NOT NULL LIMIT 1"
-                ).fetchone()
+                sample = fetch_one(
+                    con.execute(f"SELECT {q_col} FROM {csv_read} WHERE {q_col} IS NOT NULL LIMIT 1")
+                )
                 if sample and sample[0]:
-                    # Validate WKT by parsing it — execute without fetchone to avoid
-                    # DuckDB 1.5+ GEOMETRY serialization error
-                    con.execute("SELECT ST_GeomFromText(?)", [sample[0]])
+                    # Validate WKT by parsing it — no fetchone, which would hit
+                    # DuckDB 1.5+'s GEOMETRY serialization error. complete() (2.0)
+                    # discards the rows unconverted so the result isn't left open.
+                    probe = con.execute("SELECT ST_GeomFromText(?)", [sample[0]])
+                    complete_without_fetch(probe)
                     return actual_col
             except Exception:
                 continue
@@ -943,29 +916,12 @@ def _try_detect_wkt_column(con, csv_read, col_names_lower):
 
 _LAT_TOKENS = ("lat", "latitude")
 _LON_TOKENS = ("lon", "lng", "long", "longitude")
-_NUMERIC_TYPES = frozenset(
-    {
-        "TINYINT",
-        "SMALLINT",
-        "INTEGER",
-        "BIGINT",
-        "HUGEINT",
-        "UTINYINT",
-        "USMALLINT",
-        "UINTEGER",
-        "UBIGINT",
-        "UHUGEINT",
-        "FLOAT",
-        "DOUBLE",
-        "DECIMAL",
-    }
-)
 
 
 def _name_tokens(name):
     """Lower-cased words of a column name: ``decimalLatitude`` -> decimal, latitude."""
     spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", name)
-    return [token for token in re.split(r"[^0-9a-z]+", spaced.lower()) if token]
+    return [token for token in re.split(r"[^0-9a-z]+", fold(spaced)) if token]
 
 
 def _axis_affix(name, axis_tokens):
@@ -992,8 +948,7 @@ def _coordinate_castable(col_type):
     (BOOLEAN, TIMESTAMP, a list or struct) cannot be a coordinate, and used to
     be "detected" here only to fail later as a raw DuckDB cast error.
     """
-    base = str(col_type).split("(")[0]
-    return base in _NUMERIC_TYPES or base == "VARCHAR"
+    return duckdb_type_is_numeric(col_type) or str(col_type).split("(")[0] == "VARCHAR"
 
 
 def _exact_latlon_pair(columns, allow_xy=True):
@@ -1007,15 +962,19 @@ def _exact_latlon_pair(columns, allow_xy=True):
     invent one and consume both columns where the file previously converted as
     non-spatial.
     """
-    by_lower = {}
-    for col in columns:
-        by_lower.setdefault(col[0].lower(), col)
+    by_name = {col[0]: col for col in columns}
+    names = list(by_name)
+
+    def named(tokens):
+        """The first column called one of ``tokens``, as the schema spells it."""
+        return next((by_name[n] for t in tokens if (n := find_column(t, names))), None)
+
     candidates = [(_LAT_TOKENS, _LON_TOKENS)]
     if allow_xy:
         candidates.append((("y",), ("x",)))
     for lat_names, lon_names in candidates:
-        lat = next((by_lower[n] for n in lat_names if n in by_lower), None)
-        lon = next((by_lower[n] for n in lon_names if n in by_lower), None)
+        lat = named(lat_names)
+        lon = named(lon_names)
         if lat and lon and _coordinate_castable(lat[1]) and _coordinate_castable(lon[1]):
             return lat[0], lon[0]
     return None, None
@@ -1137,9 +1096,8 @@ def _handle_explicit_columns(wkt_column, lat_column, lon_column, columns, csv_re
 
 def _auto_detect_geometry(con, csv_read, columns, verbose, allow_xy=True):
     """Auto-detect geometry columns. Returns geom_info dict or None."""
-    col_names_lower = {col[0].lower(): col[0] for col in columns}
     # Try WKT first
-    wkt_col = _try_detect_wkt_column(con, csv_read, col_names_lower)
+    wkt_col = _try_detect_wkt_column(con, csv_read, [col[0] for col in columns])
     if wkt_col:
         if verbose:
             debug(f"Auto-detected WKT column: {wkt_col}")
@@ -1173,7 +1131,9 @@ def _detect_tabular_geometry(
     ``allow_xy`` is passed down to the bare ``y``/``x`` fallback; see
     :func:`_exact_latlon_pair` for why Parquet turns it off.
     """
-    columns = con.execute(f"SELECT * FROM {read_expr} LIMIT 0").description
+    # ``(name, DuckDB type)`` pairs; one relation, so its reader has already
+    # de-duplicated the names (``a``, ``a_1``) exactly as ``.description`` did.
+    columns = describe_query(con, f"SELECT * FROM {read_expr}")
     if verbose:
         debug(f"Detected columns: {', '.join([col[0] for col in columns])}")
 
@@ -1303,7 +1263,7 @@ def _validate_latlon_ranges(con, csv_read, lat_col, lon_col, verbose):
     """
 
     try:
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
         min_lat, max_lat, min_lon, max_lon, null_count = result
 
         if null_count > 0:
@@ -1331,9 +1291,9 @@ def _validate_latlon_ranges(con, csv_read, lat_col, lon_col, verbose):
 def _check_null_wkt_rows(con, csv_read, wkt_col):
     """Check and warn about NULL WKT values."""
     quoted_wkt = quote_identifier(wkt_col)
-    null_count = con.execute(
-        f"SELECT COUNT(*) FILTER ({quoted_wkt} IS NULL) FROM {csv_read}"
-    ).fetchone()[0]
+    null_count = fetch_one(
+        con.execute(f"SELECT COUNT(*) FILTER ({quoted_wkt} IS NULL) FROM {csv_read}")
+    )[0]
 
     if null_count > 0:
         warn(
@@ -1357,10 +1317,12 @@ def _check_invalid_wkt_rows(con, csv_read, wkt_col):
     quoted_wkt = quote_identifier(wkt_col)
     try:
         # Use TRY() to catch WKT parse errors — returns NULL for invalid WKT
-        invalid_count = con.execute(
-            f"SELECT COUNT(*) FROM {csv_read} "
-            f"WHERE {quoted_wkt} IS NOT NULL AND TRY(ST_GeomFromText({quoted_wkt})) IS NULL"
-        ).fetchone()[0]
+        invalid_count = fetch_one(
+            con.execute(
+                f"SELECT COUNT(*) FROM {csv_read} "
+                f"WHERE {quoted_wkt} IS NOT NULL AND TRY(ST_GeomFromText({quoted_wkt})) IS NULL"
+            )
+        )[0]
 
         if invalid_count > 0:
             warn(f"⚠️  Warning: {invalid_count} rows have invalid WKT and will be skipped")
@@ -1389,10 +1351,12 @@ def _validate_wkt_strict(con, csv_read, wkt_col):
     quoted_wkt = quote_identifier(wkt_col)
     try:
         # Use ::VARCHAR cast to avoid DuckDB 1.5+ GEOMETRY serialization error
-        con.execute(
-            f"SELECT ST_GeomFromText({quoted_wkt})::VARCHAR FROM {csv_read} "
-            f"WHERE {quoted_wkt} IS NOT NULL LIMIT 1"
-        ).fetchone()
+        fetch_one(
+            con.execute(
+                f"SELECT ST_GeomFromText({quoted_wkt})::VARCHAR FROM {csv_read} "
+                f"WHERE {quoted_wkt} IS NOT NULL LIMIT 1"
+            )
+        )
     except Exception as e:
         raise GeometryError(
             f"Invalid WKT in column '{wkt_col}': {str(e)}. "
@@ -1404,11 +1368,13 @@ def _warn_if_projected_crs(con, csv_read, wkt_col):
     """Warn if coordinates suggest projected CRS instead of WGS84."""
     quoted_wkt = quote_identifier(wkt_col)
     try:
-        result = con.execute(
-            f"SELECT MAX(ABS(ST_XMax(ST_GeomFromText({quoted_wkt})))) as max_x, "
-            f"MAX(ABS(ST_YMax(ST_GeomFromText({quoted_wkt})))) as max_y "
-            f"FROM {csv_read} WHERE {quoted_wkt} IS NOT NULL LIMIT 1000"
-        ).fetchone()
+        result = fetch_one(
+            con.execute(
+                f"SELECT MAX(ABS(ST_XMax(ST_GeomFromText({quoted_wkt})))) as max_x, "
+                f"MAX(ABS(ST_YMax(ST_GeomFromText({quoted_wkt})))) as max_y "
+                f"FROM {csv_read} WHERE {quoted_wkt} IS NOT NULL LIMIT 1000"
+            )
+        )
 
         if result and result[0] is not None:
             max_x, max_y = result
@@ -1444,11 +1410,15 @@ def _csv_carried_columns(geom_info):
     are not among them and cannot collide with a name gpio computes.
     """
     source = [geom_info.get(key) for key in ("wkt_column", "lat_column", "lon_column")]
-    excluded = {str(name).lower() for name in source if name}
-    return [name for name in geom_info["source_columns"] if str(name).lower() not in excluded]
+    consumed = [str(name) for name in source if name]
+    return [
+        name
+        for name in geom_info["source_columns"]
+        if not any(same_column(str(name), used) for used in consumed)
+    ]
 
 
-def _resolve_tabular_geometry_name(carried_columns, base="geometry"):
+def _resolve_tabular_geometry_name(carried_columns, base=BUILT_GEOMETRY_COLUMN):
     """The name the geometry built from WKT or lat/lon columns is written under.
 
     ``base`` is the name asked for -- ``geometry_column``'s value on the Arrow
@@ -1464,9 +1434,9 @@ def _resolve_tabular_geometry_name(carried_columns, base="geometry"):
     ("ST_IsEmpty(VARCHAR)", #1176). The computed column moves aside instead, as
     the computed bbox does (#1079).
     """
-    geometry_name = free_column_name(base, carried_columns)
+    geometry_name = unique_name(base, carried_columns)
     if geometry_name != base:
-        taken = next(str(name) for name in carried_columns if str(name).lower() == base.lower())
+        taken = matching_columns(base, carried_columns)[0]
         warn(
             f"Input already has a column named '{taken}' that is not geometry; "
             f"writing the geometry built from the source columns as '{geometry_name}'"
@@ -1481,7 +1451,7 @@ def _build_csv_conversion_query(
     skip_invalid,
     skip_bbox=False,
     bbox_name="bbox",
-    geometry_name="geometry",
+    geometry_name=BUILT_GEOMETRY_COLUMN,
 ):
     """Build SQL query for CSV/TSV conversion with geometry construction.
 
@@ -1508,12 +1478,7 @@ def _build_csv_conversion_query(
         if skip_bbox:
             return ""
         return f""",
-                STRUCT_PACK(
-                    xmin := ST_XMin({geom}),
-                    ymin := ST_YMin({geom}),
-                    xmax := ST_XMax({geom}),
-                    ymax := ST_YMax({geom})
-                ) AS {quote_identifier(bbox_name)}"""
+                {bbox_struct_sql(geom, geometry_name)} AS {quote_identifier(bbox_name)}"""
 
     # Build geometry expression and exclusion list
     if geom_info["type"] == "wkt":
@@ -1613,24 +1578,18 @@ def _calculate_csv_bounds(con, geom_info, verbose):
 
     csv_read = geom_info["csv_read"]
     geom_expr, where_clause = _get_geom_expr_and_where(geom_info)
-
-    bounds_query = f"""
-        SELECT
-            MIN(ST_XMin({geom_expr})) as xmin,
-            MIN(ST_YMin({geom_expr})) as ymin,
-            MAX(ST_XMax({geom_expr})) as xmax,
-            MAX(ST_YMax({geom_expr})) as ymax
-        FROM {csv_read}
-        {where_clause}
-    """
+    query = f"SELECT {geom_expr} AS __geometry FROM {csv_read} {where_clause}"
 
     try:
-        bounds_result = con.execute(bounds_query).fetchone()
+        bbox = bounds_of(QuerySource(con, query), "__geometry")
+    except GeoParquetError:
+        raise
     except Exception as e:
         raise GeoParquetError(str(e)) from e
 
-    if not bounds_result or any(v is None for v in bounds_result):
+    if bbox is None:
         return None  # nothing to measure: caller writes unordered (#649)
+    bounds_result = tuple(bbox)
 
     if verbose:
         xmin, ymin, xmax, ymax = bounds_result
@@ -1684,27 +1643,16 @@ _NO_BOUNDS_WARNING = (
     "writing without Hilbert ordering."
 )
 
-#: Warned when the envelope exists but cannot be rendered into SQL (#1157): a
-#: NaN/inf bound interpolated as a Python float becomes the bare token
-#: ``nan``/``inf`` inside ``ST_MakeEnvelope`` and fails binding.
-_NONFINITE_BOUNDS_WARNING = (
-    "Dataset bounds contain a NaN or infinite coordinate; writing without Hilbert ordering."
-)
-
 
 def _usable_bounds(bounds):
-    """``bounds`` when Hilbert ordering can use them, else None with a warning.
+    """``bounds``, or None with a warning when there was nothing to measure (#649).
 
-    None means there was nothing to measure (#649); a non-finite value would
-    fail binding once interpolated into ``ST_MakeEnvelope`` (#1157). Either
-    way the caller falls back to an unordered write.
+    The caller then falls back to an unordered write. A non-finite bound never
+    arrives: the bounds owner refuses an infinite coordinate and skips NaN
+    (EMPTY) geometries (#1157, #1165).
     """
     if bounds is None:
         warn(_NO_BOUNDS_WARNING)
-        return None
-    if not all(math.isfinite(v) for v in bounds):
-        warn(_NONFINITE_BOUNDS_WARNING)
-        return None
     return bounds
 
 
@@ -1806,13 +1754,7 @@ def _build_conversion_query(
     quoted_bbox = quote_identifier(existing_bbox_col) if existing_bbox_col else None
 
     geoarrow_native = encoding.lower() not in {"wkb", "wkt"}
-    if geoarrow_native:
-        xmin_e, ymin_e, xmax_e, ymax_e, cx_e, cy_e = _geoarrow_coord_exprs(quoted_geom, encoding)
-    else:
-        xmin_e = f"ST_XMin({quoted_geom})"
-        ymin_e = f"ST_YMin({quoted_geom})"
-        xmax_e = f"ST_XMax({quoted_geom})"
-        ymax_e = f"ST_YMax({quoted_geom})"
+    read = GeometryRead.for_geoarrow(geom_column, encoding) if geoarrow_native else None
 
     exclude_cols = []
     if existing_bbox_col and skip_bbox:
@@ -1845,12 +1787,7 @@ def _build_conversion_query(
         # caller either preserves it or, for 2.0, skips the bbox.)
         base_select = f"""
             SELECT *,
-                STRUCT_PACK(
-                    xmin := {xmin_e},
-                    ymin := {ymin_e},
-                    xmax := {xmax_e},
-                    ymax := {ymax_e}
-                ) AS {quote_identifier(bbox_name)}
+                {bbox_struct_sql(quoted_geom, geom_column, read)} AS {quote_identifier(bbox_name)}
             FROM {table_expr}
         """
 
@@ -1863,6 +1800,7 @@ def _build_conversion_query(
     # Native encodings key on centroid coordinates, which are NULL for a
     # geometry with no coordinates — ST_Hilbert returns NULL rather than
     # failing, so those rows only need the flag to pin them last.
+    _, _, _, _, cx_e, cy_e = _geoarrow_coord_exprs(quoted_geom, encoding)
     return base_select, _hilbert_order_by(
         bounds, f"{cx_e} IS NULL OR {cy_e} IS NULL", f"{cx_e}, {cy_e}"
     )
@@ -2037,6 +1975,32 @@ def _convert_tabular_path(
     return query, (None if skip_bbox else bbox_name), order_by, geometry_name
 
 
+def _is_unsupported_wkb_error(e: BaseException) -> bool:
+    """DuckDB's one message for a WKB type it cannot parse (curves, the surface family).
+
+    DuckDB gives no structured field for it, so this is the single place the
+    string is read; every curve fallback and curve message asks here.
+    """
+    return "Unsupported geometry type in WKB" in str(e)
+
+
+def _conversion_failure(e: Exception, input_file, layer, prefix: str) -> Exception:
+    """The error a failed read/convert surfaces as: the specific answer, else ``<prefix>: <text>``.
+
+    Specific answers, in order: a WKB type DuckDB cannot parse (name the types and
+    the remedy -- reached when nothing parsed the geometry early enough to
+    linearize it, e.g. ``--skip-hilbert`` skips the bounds pass), a file that is
+    not Parquet, and a refused text encoding.
+    """
+    if _is_unsupported_wkb_error(e):
+        from geoparquet_io.core.curved_geometry import unsupported_wkb_error_message
+
+        return GeoParquetError(unsupported_wkb_error_message(input_file, layer, str(e)))
+    if classify_failure(e).kind is FailureKind.NOT_PARQUET:
+        return not_parquet_file_error(input_file)
+    return text_error(e) or GeoParquetError(f"{prefix}: {e}")
+
+
 def _is_linearizable_curve_error(e, *, is_parquet, linearize_curves):
     """True when ``e`` is DuckDB refusing WKB that gpio may try to linearize.
 
@@ -2046,7 +2010,7 @@ def _is_linearizable_curve_error(e, *, is_parquet, linearize_curves):
     bounds pass, the Arrow read and the retry in ``convert_to_geoparquet``
     share it so they stay in step if that string ever changes.
     """
-    return not is_parquet and linearize_curves and "Unsupported geometry type in WKB" in str(e)
+    return not is_parquet and linearize_curves and _is_unsupported_wkb_error(e)
 
 
 def _bounds_with_curve_fallback(
@@ -2259,6 +2223,12 @@ def _convert_spatial_path(
                 geom_column,
             )
 
+    if is_parquet:
+        source = table_expr or f"read_parquet({sql_path(input_file)})"
+        read = resolve_geometry_read(con, source, geom_column, relation=True)
+        if read.kind == "wkb":
+            table_expr = f"(SELECT * REPLACE ({read.shape_expr} AS {read.quoted}) FROM {source})"
+
     # Determine if bbox should be skipped for this version
     skip_bbox = should_skip_bbox(geoparquet_version)
 
@@ -2375,6 +2345,23 @@ def _carry_input_kv_metadata(arrow_table, input_file: str, verbose: bool):
     return arrow_table.replace_schema_metadata(metadata)
 
 
+def _described_read(arrow_table, geometry_column, input_edges, detected_crs):
+    """``arrow_table`` with the block a read describes it by (see the call site)."""
+    geo = compose_geo_block(
+        SchemaSource(arrow_table.schema),
+        GeoBlockOptions(
+            geometry_column=geometry_column,
+            version=version_to_describe(arrow_table.schema),
+            describe=True,
+            covering=None,
+            column_edges={geometry_column: input_edges} if input_edges else None,
+            crs=KEEP_CRS if detected_crs is None else detected_crs,
+            stats={geometry_column: {"geometry_types": []}},
+        ),
+    )
+    return with_geo_block(arrow_table, geo)
+
+
 @uses_aws_profile
 def read_spatial_to_arrow(
     input_file,
@@ -2387,7 +2374,7 @@ def read_spatial_to_arrow(
     crs="EPSG:4326",
     skip_invalid=False,
     profile=None,
-    geometry_column="geometry",
+    geometry_column=BUILT_GEOMETRY_COLUMN,
     layer=None,
     repair_geometry=True,
     linearize_curves=True,
@@ -2467,7 +2454,7 @@ def read_spatial_to_arrow(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_file))
 
     # Determine CRS
-    user_specified_crs = crs != "EPSG:4326"
+    user_specified_crs = not crs_equal(crs, "EPSG:4326")
     detected_crs = None
 
     try:
@@ -2494,19 +2481,17 @@ def read_spatial_to_arrow(
                     f"only valid for CSV/TSV files and Parquet lat/lon or WKT columns. "
                     f"For {os.path.splitext(input_file)[1]} files, CRS is read from the file metadata.",
                 )
-            detected_crs = parse_crs_string_to_projjson(crs, con)
+            detected_crs = projjson_for_label(crs)
             if verbose:
                 debug(f"Using user-specified CRS: {crs}")
         elif tabular:
             # CSV with default CRS - detected_crs stays None
             pass
         elif is_parquet:
-            # RAW path: extract_crs_from_parquet escapes its own argument (#718).
+            # RAW path: crs_of escapes its own argument (#718).
             # Name the primary: with no geo block, a secondary column ahead of
             # it in schema order would otherwise lend it its CRS (#1232).
-            crs_from_file = extract_crs_from_parquet(
-                input_file, verbose=verbose, geometry_column=parquet_geom_column
-            )
+            crs_from_file = crs_of(input_file, verbose=verbose, geometry_column=parquet_geom_column)
             if crs_from_file and not is_default_crs(crs_from_file):
                 # Same repair-or-reject as _determine_effective_crs: the API
                 # write path copies this CRS into the output verbatim (#705).
@@ -2545,7 +2530,7 @@ def read_spatial_to_arrow(
                 skip_invalid,
                 verbose,
                 force_2d=force_2d,
-                geometry_name=geometry_column or "geometry",
+                geometry_name=geometry_column or BUILT_GEOMETRY_COLUMN,
             )
         elif is_csv:
             arrow_table, geometry_column = _read_csv_to_arrow(
@@ -2559,7 +2544,7 @@ def read_spatial_to_arrow(
                 verbose,
                 encoding=encoding,
                 force_2d=force_2d,
-                geometry_name=geometry_column or "geometry",
+                geometry_name=geometry_column or BUILT_GEOMETRY_COLUMN,
             )
         else:
             arrow_table = _read_spatial_to_arrow(
@@ -2577,7 +2562,7 @@ def read_spatial_to_arrow(
             # Both spatial reads emit `ST_AsWKB(...) AS geometry` (here and in the
             # linearized retry), so report that rather than the requested name: the
             # repair below and the Table the API hands back both key off it (#1176).
-            geometry_column = "geometry"
+            geometry_column = BUILT_GEOMETRY_COLUMN
 
         # No geometry found — read as plain table
         if arrow_table is None:
@@ -2588,7 +2573,7 @@ def read_spatial_to_arrow(
             else:
                 # Spatial formats (GeoJSON, Shapefile, GeoPackage, etc.)
                 table_expr = _plain_st_read_expr(input_file, encoding, layer, con=con)
-            arrow_table = con.execute(f"SELECT * FROM {table_expr}").arrow().read_all()
+            arrow_table = con.sql(f"SELECT * FROM {table_expr}").arrow().read_all()
             if is_parquet:
                 arrow_table = _carry_input_kv_metadata(arrow_table, input_file, verbose)
             return arrow_table, None, None
@@ -2611,9 +2596,11 @@ def read_spatial_to_arrow(
         # is the geometry, what CRS it is in and which edges it declares, so every
         # Table method that passes the Arrow table down to core sees what a
         # read() table shows (#1222) and the write keeps spherical edges (#1287).
-        arrow_table = describe_wkb_geometry(
-            arrow_table, geometry_column, detected_crs, edges=input_edges
-        )
+        # A description, not an output decision (``version=None``, no covering,
+        # ``geometry_types`` "not known"): the write funnels compose again from
+        # the data.
+        if geometry_column in arrow_table.column_names:
+            arrow_table = _described_read(arrow_table, geometry_column, input_edges, detected_crs)
         if is_parquet:
             arrow_table = _carry_input_kv_metadata(arrow_table, input_file, verbose)
         return arrow_table, detected_crs, geometry_column
@@ -2621,7 +2608,7 @@ def read_spatial_to_arrow(
     except duckdb.IOException as e:
         error_msg = str(e)
         if is_remote_url(input_file):
-            hints = get_remote_error_hint(error_msg, input_file)
+            hints = get_remote_error_hint(e, input_file)
             raise RemoteAccessError(
                 input_file, f"Failed to read remote file. {hints}. Original error: {error_msg}"
             ) from e
@@ -2636,14 +2623,7 @@ def read_spatial_to_arrow(
         raise
 
     except Exception as e:
-        if "Unsupported geometry type in WKB" in str(e):
-            from geoparquet_io.core.curved_geometry import unsupported_wkb_error_message
-
-            raise GeoParquetError(unsupported_wkb_error_message(input_file, layer, str(e))) from e
-        refused = text_error(e)
-        if refused is not None:
-            raise refused from e
-        raise GeoParquetError(f"Reading failed: {str(e)}") from e
+        raise _conversion_failure(e, input_file, layer, "Reading failed") from e
 
     finally:
         con.close()
@@ -2665,7 +2645,7 @@ def _read_csv_to_arrow(
     verbose,
     encoding=None,
     force_2d=False,
-    geometry_name="geometry",
+    geometry_name=BUILT_GEOMETRY_COLUMN,
 ):
     """``(table, geometry column)`` with geometry as WKB; ``(None, None)`` if none."""
     geom_info = _detect_csv_geometry_column(
@@ -2680,7 +2660,7 @@ def _read_csv_to_arrow(
 
 
 def _tabular_geometry_to_arrow(
-    con, geom_info, skip_invalid, verbose, force_2d=False, geometry_name="geometry"
+    con, geom_info, skip_invalid, verbose, force_2d=False, geometry_name=BUILT_GEOMETRY_COLUMN
 ):
     """``(table, geometry column)``: WKB geometry built from WKT or lat/lon columns.
 
@@ -2725,14 +2705,14 @@ def _tabular_geometry_to_arrow(
                     FROM {csv_read}
                 )
                 SELECT * EXCLUDE (_geom),
-                       ST_AsWKB(_geom) AS {quoted_geometry}
+                       {as_wkb_sql("_geom")} AS {quoted_geometry}
                 FROM _parsed
                 WHERE _geom IS NOT NULL
             """
         else:
             query = f"""
                 SELECT * EXCLUDE ({wkt_col}),
-                       ST_AsWKB({_csv_wkt_geom_expr(wkt_col, geom_info)}) AS {quoted_geometry}
+                       {as_wkb_sql(_csv_wkt_geom_expr(wkt_col, geom_info))} AS {quoted_geometry}
                 FROM {csv_read}
                 WHERE {wkt_col} IS NOT NULL
             """
@@ -2741,13 +2721,13 @@ def _tabular_geometry_to_arrow(
         lon_col = quote_identifier(geom_info["lon_column"])
         query = f"""
             SELECT * EXCLUDE ({lat_col}, {lon_col}),
-                   ST_AsWKB(ST_Point(CAST({lon_col} AS DOUBLE), CAST({lat_col} AS DOUBLE)))
+                   {as_wkb_sql(f"ST_Point(CAST({lon_col} AS DOUBLE), CAST({lat_col} AS DOUBLE))")}
                        AS {quoted_geometry}
             FROM {csv_read}
             WHERE {lat_col} IS NOT NULL AND {lon_col} IS NOT NULL
         """
 
-    result = con.execute(query)
+    result = con.sql(query)
     return result.arrow().read_all(), geometry_name
 
 
@@ -2822,12 +2802,12 @@ def _read_spatial_to_arrow(
         geometry_expr = f"ST_Force2D({geometry_expr})"
     query = f"""
         SELECT * EXCLUDE ({quoted_geom}),
-               ST_AsWKB({geometry_expr}) AS geometry
+               {as_wkb_sql(geometry_expr)} AS geometry
         FROM {table_expr}
     """
 
     try:
-        result = con.execute(query)
+        result = con.sql(query)
         return result.arrow().read_all()
     except duckdb.Error as e:
         # Curved geometries (CIRCULARSTRING..MULTISURFACE) cannot pass through
@@ -2857,9 +2837,9 @@ def _read_spatial_to_arrow(
 #: point of streaming. Stroking multiplies a geometry's size (an arc becomes
 #: ~90 vertices), so the batch has to be small: on a 50k-row curved GeoPackage,
 #: peak RSS was 503 MB at the default and 100k rows, 395 MB at 20k, 370 MB at
-#: 5k, with no measurable difference in wall time. The repo's generic
-#: ``DEFAULT_BATCH_SIZE`` (100k, write_strategies/arrow_streaming.py) is too
-#: coarse here for that reason.
+#: 5k, with no measurable difference in wall time. A write's row-group-sized
+#: batch (49,152 rows, ``parquet_writer.DEFAULT_ROW_GROUP_ROWS``) is too coarse
+#: here for that reason.
 _LINEARIZE_BATCH_ROWS = 20_000
 
 
@@ -2888,7 +2868,7 @@ class _LinearizedRead:
         self.max_angle_deg = DEFAULT_MAX_ANGLE_DEG if max_angle_deg is None else max_angle_deg
         self._reader = self._open_reader()
         self.schema = self._reader.schema
-        self.wkb_col = geom_column if geom_column in self.schema.names else "wkb_geometry"
+        self.wkb_col = geom_column if geom_column in self.schema.names else _ST_READ_WKB_COLUMN
         if self.wkb_col not in self.schema.names:
             raise GeoParquetError(
                 f"keep_wkb read of {input_file} exposes no '{geom_column}' column"
@@ -2908,12 +2888,12 @@ class _LinearizedRead:
         # spatial settings (axis order) would not carry over, but the raw
         # keep_wkb read does not consult them.
         self._cursor = self.con.cursor()
-        return self._cursor.execute(
+        return self._cursor.sql(
             "SELECT * FROM "
             + _build_st_read_expr(
                 self.input_file, self.layer, keep_wkb=True, open_options=self.open_options
             )
-        ).arrow(rows_per_batch=_LINEARIZE_BATCH_ROWS)
+        ).to_arrow_reader(batch_size=_LINEARIZE_BATCH_ROWS)
 
     def batches(self):
         """Yield the source's record batches with curved WKB stroked in place."""
@@ -2990,12 +2970,12 @@ def _read_spatial_linearized(
     # WKB-encoded `geometry` column shape as the normal read path.
     con.register("_gpio_linearized_src", table)
     quoted_wkb = quote_identifier(read.wkb_col)
-    geometry_expr = f"ST_GeomFromWKB({quoted_wkb})"
+    geometry_expr = f"{geom_from_wkb_sql(quoted_wkb)}"
     if force_2d:
         geometry_expr = f"ST_Force2D({geometry_expr})"
-    result = con.execute(
+    result = con.sql(
         f"SELECT * EXCLUDE ({quoted_wkb}), "
-        f"ST_AsWKB({geometry_expr}) AS geometry "
+        f"{as_wkb_sql(geometry_expr)} AS geometry "
         f"FROM _gpio_linearized_src"
     )
     return result.arrow().read_all()
@@ -3019,7 +2999,7 @@ def _register_linearized_view(
     )
     quoted_wkb = quote_identifier(read.wkb_col)
     select = (
-        f"SELECT * REPLACE (ST_GeomFromWKB({quoted_wkb}) AS {quoted_wkb}) "
+        f"SELECT * REPLACE ({geom_from_wkb_sql(quoted_wkb)} AS {quoted_wkb}) "
         "FROM _gpio_linearized_batch"
     )
     con.execute("DROP TABLE IF EXISTS _gpio_linearized")
@@ -3063,7 +3043,7 @@ def _determine_effective_crs(
     and without the name the first non-default CRS in schema order answers --
     a secondary column's, when one comes first (#1232).
     """
-    user_specified_crs = crs != "EPSG:4326"
+    user_specified_crs = not crs_equal(crs, "EPSG:4326")
 
     if user_specified_crs:
         if not is_csv:
@@ -3074,16 +3054,14 @@ def _determine_effective_crs(
             )
         if verbose:
             debug(f"Using user-specified CRS: {crs}")
-        return parse_crs_string_to_projjson(crs, con)
+        return projjson_for_label(crs)
 
     if is_csv:
         return None  # CSV with default CRS
 
     if is_parquet:
-        # RAW path: extract_crs_from_parquet escapes its own argument (#718).
-        detected = extract_crs_from_parquet(
-            input_file, verbose=verbose, geometry_column=geometry_column
-        )
+        # RAW path: crs_of escapes its own argument (#718).
+        detected = crs_of(input_file, verbose=verbose, geometry_column=geometry_column)
         if not detected or is_default_crs(detected):
             return None
         # Repair or reject before writing: an input CRS that is not valid
@@ -3166,8 +3144,8 @@ def convert_to_geoparquet(
     output_file,
     skip_hilbert=False,
     verbose=False,
-    compression="ZSTD",
-    compression_level=15,
+    compression=None,
+    compression_level=None,
     row_group_rows=None,
     row_group_size_mb=None,
     wkt_column=None,
@@ -3269,14 +3247,9 @@ def convert_to_geoparquet(
         # Auto version mode: preserve a parquet input's GeoParquet version
         # (and upgrade native-geo-only inputs to 2.0) instead of silently
         # falling back to the 1.1 default and stripping native types (#587).
-        if geoparquet_version is None and is_parquet:
-            from geoparquet_io.core.common import resolve_geoparquet_version_from_file
-
-            geoparquet_version = resolve_geoparquet_version_from_file(input_file, verbose)
-            if geoparquet_version:
-                debug(f"Auto-detected GeoParquet version from input: {geoparquet_version}")
-            else:
-                debug("Could not detect input GeoParquet version; using writer default")
+        geoparquet_version = resolve_output_geoparquet_version(
+            geoparquet_version, input_file=input_file if is_parquet else None, verbose=verbose
+        )
 
         # A plain Parquet file with WKT or lat/lon columns converts like a CSV
         # would: same detection, same query, same user-supplied CRS. The
@@ -3430,8 +3403,8 @@ def convert_to_geoparquet(
                 query = _apply_order(query, order_by)
 
                 # This convert rebuilds the output's `geo` block from the converted
-                # data (`original_metadata=None` below, and at 2.0 DuckDB regenerates
-                # the block outright on the plain-COPY fast path), so an input `crs`
+                # data (only declarations survive below; at 2.0 DuckDB regenerates
+                # the block on the plain-COPY fast path), so an input `crs`
                 # that spelled out the default never reaches `apply_output_crs` and
                 # its note never fired here. Emit the same note from the same helper
                 # so the key does not vanish unannounced on this path alone (#844).
@@ -3439,12 +3412,8 @@ def convert_to_geoparquet(
                     (geometry_info or {}).get("metadata", {}).get(geom_col, {}).get("crs")
                 )
 
-            # Sidecar KV payloads (fiboa, vecorel, STAC fragments) live next to the
-            # 'geo' key and are rebuilt from scratch by every write strategy, so a
-            # parquet→parquet convert has to hand them to the writer explicitly or
-            # they vanish (#690). Only the non-geo keys travel: 'geo' is regenerated
-            # from the converted data, never copied.
-            preserved_kv = read_preserved_kv_metadata(input_file, verbose) if is_parquet else {}
+            # The funnel carries sidecars under the same key policy as a
+            # metadata-only rewrite; the composer rebuilds derived geo facts.
 
             # A covering is declared only for a column this conversion computed, or
             # one the input's metadata already declared -- never inferred from a
@@ -3456,13 +3425,15 @@ def convert_to_geoparquet(
                 else None
             )
 
+            from geoparquet_io.core.duckdb_metadata import get_kv_metadata
+
             write_parquet_with_metadata(
                 con,
                 query,
                 output_file,
-                original_metadata=None,
+                original_metadata=get_kv_metadata(input_file) if is_parquet else None,
+                rebuild_geo_metadata=True,
                 custom_metadata=custom_metadata,
-                extra_kv_metadata=preserved_kv or None,
                 compression=compression,
                 compression_level=compression_level,
                 row_group_rows=row_group_rows,
@@ -3502,7 +3473,7 @@ def convert_to_geoparquet(
         con.close()
         error_msg = str(e)
         if is_remote_url(input_file):
-            hints = get_remote_error_hint(error_msg, input_file)
+            hints = get_remote_error_hint(e, input_file)
             raise RemoteAccessError(
                 input_file, f"Failed to read remote file. {hints}. Original error: {error_msg}"
             ) from e
@@ -3528,17 +3499,7 @@ def convert_to_geoparquet(
 
     except Exception as e:
         con.close()
-        if "Unsupported geometry type in WKB" in str(e):
-            # Reached when nothing parsed the geometry early enough to linearize
-            # it (e.g. --skip-hilbert skips the bounds pass): at least name the
-            # offending types and the remedy instead of DuckDB's raw error.
-            from geoparquet_io.core.curved_geometry import unsupported_wkb_error_message
-
-            raise GeoParquetError(unsupported_wkb_error_message(input_file, layer, str(e))) from e
-        refused = text_error(e)
-        if refused is not None:
-            raise refused from e
-        raise GeoParquetError(f"Conversion failed: {str(e)}") from e
+        raise _conversion_failure(e, input_file, layer, "Conversion failed") from e
 
     finally:
         con.close()

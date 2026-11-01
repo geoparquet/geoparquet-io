@@ -27,6 +27,15 @@ _OFFLINE = (
     '"http://community-extensions.duckdb.org/v1.5.5/osx_arm64/geography.duckdb_extension.gz" '
     "(ERROR Could not establish connection)"
 )
+# DuckDB 2.0's community a5 build, verbatim (abridged after the first line):
+# it downloads, then its init refuses because a5 moved to Query.Farm's repository.
+_A5_MOVED = (
+    'Invalid Input Error: Initialization function "a5_duckdb_cpp_init" from file '
+    '"/home/u/.duckdb/extensions/v2.0.0/linux_amd64/a5.duckdb_extension" threw an '
+    'exception: "The a5 extension for DuckDB 2.0 and later is distributed from the '
+    "Query.Farm extension repository, not the DuckDB community repository.\n\n"
+    'Add the repository and install the extension once: ..."'
+)
 
 
 class TestCoreExceptions:
@@ -136,6 +145,69 @@ class TestCoreExceptions:
         assert not is_unpublished_extension_error(_OFFLINE)
         assert not is_unpublished_extension_error(None)
 
+    def test_a5_moved_off_the_community_repository_counts_as_unpublished(self):
+        """On DuckDB 2.0 the community a5 is a stub: not a network problem.
+
+        gpio itself installs a5 from Query.Farm on 2.0 (#1347), so the stub
+        text only arrives when the community build was installed outside gpio.
+        The hint explains where gpio installs from, not "use DuckDB 1.5".
+        """
+        exc = ExtensionUnavailableError("a5", "2.0.0", _A5_MOVED, feature="gpio add a5")
+
+        assert exc.unpublished
+        message = str(exc)
+        assert "proxy, firewall" not in message
+        assert "Query.Farm" in message
+        assert "https://duckdb-extensions.query.farm" in message
+        assert "Use DuckDB 1.5" not in message
+
+    def test_a5_query_farm_404_says_the_query_farm_install_failed(self):
+        """A 404 from the Query.Farm registry itself names what failed (#1347)."""
+        detail = (
+            "installing 'a5' from the Query.Farm repository "
+            "(https://duckdb-extensions.query.farm) failed: HTTP Error: Failed to "
+            'download extension "a5" at URL '
+            '"https://duckdb-extensions.query.farm/v2.0.0/linux_amd64/a5.duckdb_extension.gz" '
+            "(HTTP 404)"
+        )
+        exc = ExtensionUnavailableError("a5", "2.0.0", detail, feature="gpio add a5")
+
+        assert exc.unpublished
+        message = str(exc)
+        assert "Query.Farm install" in message
+        assert "https://duckdb-extensions.query.farm" in message
+
+    def test_query_farm_offline_failure_points_at_the_query_farm_host(self):
+        """A non-404 Query.Farm failure must not send users to the community host.
+
+        DuckDB 2.0 offline with nothing cached fails reading the repository's
+        metadata file -- a reachability problem with
+        duckdb-extensions.query.farm, which checking
+        community-extensions.duckdb.org says nothing about.
+        """
+        detail = (
+            "installing 'a5' from the Query.Farm repository "
+            "(https://duckdb-extensions.query.farm) failed: IO Error: "
+            "Failed to read the metadata file of the extension repository "
+            '"https://duckdb-extensions.query.farm": Could not resolve hostname'
+        )
+        exc = ExtensionUnavailableError(
+            "a5", "2.0.0", detail, feature="gpio add a5", query_farm=True
+        )
+
+        assert not exc.unpublished
+        message = str(exc)
+        assert "check that https://duckdb-extensions.query.farm is reachable" in message
+        assert "community-extensions.duckdb.org is reachable" not in message
+
+    def test_non_query_farm_offline_failure_keeps_the_community_host(self):
+        """The community registry stays the host to check for everything else."""
+        exc = ExtensionUnavailableError("geography", "1.5.5", _OFFLINE)
+
+        message = str(exc)
+        assert "check that https://community-extensions.duckdb.org is reachable" in message
+        assert "query.farm is reachable" not in message
+
     def test_file_not_found_error_with_detail(self):
         with pytest.raises(FileNotFoundGeoParquetError) as exc_info:
             raise FileNotFoundGeoParquetError("test.parquet", "no read permission")
@@ -211,10 +283,8 @@ class TestCoreExceptions:
         # Query string should be stripped
         assert "AWSAccessKeyId" not in exc.url
         assert "SECRET" not in exc.url
-        # URL is truncated but filename preserved: s3://bucket/path/.../file.parquet
-        assert "..." in exc.url
-        assert "bucket" in exc.url
-        assert exc.url.endswith("file.parquet")
+        # One policy for gpio errors: the destination is named in full, query stripped.
+        assert exc.url == "s3://bucket/path/to/file.parquet"
 
     def test_geometry_error(self):
         with pytest.raises(GeometryError):

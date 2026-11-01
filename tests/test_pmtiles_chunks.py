@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 import pytest
 
 import geoparquet_io.core.pmtiles_chunks as pc
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.geo_metadata import OVERVIEWS_KEY, is_levelled_overview
 from geoparquet_io.core.pmtiles_chunks import (
     MAX_CHUNK_CELLS,
@@ -206,7 +206,7 @@ class TestGuards:
     def test_existing_output_fails_before_any_tiling(self, tmp_path, fake_tools):
         out = tmp_path / "o.pmtiles"
         out.write_bytes(b"old")
-        with pytest.raises(InvalidParameterError, match="already exists"):
+        with pytest.raises(GeoParquetError, match="already exists.*\n.*--force"):
             _run(tmp_path, out)
         assert fake_tools["split"] == []
 
@@ -271,14 +271,19 @@ class TestOrchestration:
         assert [Path(t["input"]).name for t in tiles] == [
             f"{c}.parquet" for c in fake_tools["cells"]
         ]
-        # Tiled under a temporary name; the final name means "complete".
-        assert all(t["output"].endswith(".building.pmtiles") for t in tiles)
+        # Tiled into the staging owner's directory; the final name means "complete".
+        assert all(
+            Path(t["output"]).parent.name.startswith(".gpio-stage-")
+            and t["output"].endswith(".pmtiles")
+            for t in tiles
+        )
         assert all(t["layer"] == "out" and t["force"] is True for t in tiles)
         assert all(t["max_zoom"] == 12 for t in tiles)
         (join,) = fake_tools["joins"]
-        assert join[join.index("-o") + 1].endswith("joined.pmtiles")
+        joined = Path(join[join.index("-o") + 1])
+        assert joined.parent.name.startswith(".gpio-stage-") and joined.parent.parent == tmp_path
         assert "--name=out" in join and "--attribution=<a>x</a>" in join
-        assert [Path(p).name for p in join if p.endswith(".pmtiles") and "joined" not in p] == [
+        assert [Path(p).name for p in join if p.endswith(".pmtiles") and Path(p) != joined] == [
             f"{c}.pmtiles" for c in fake_tools["cells"]
         ]
 
@@ -321,9 +326,11 @@ class TestOrchestration:
         with _failing_join(monkeypatch), pytest.raises(RuntimeError):
             _run(tmp_path, out, force=True)
         # Simulate a crash while re-tiling the second chunk: its final part is
-        # gone and tippecanoe's in-progress file sits at the temporary name.
+        # gone and tippecanoe's in-progress file sits in an abandoned stage.
         (parts_dir / "chunk_0_1.pmtiles").unlink()
-        (parts_dir / "chunk_0_1.building.pmtiles").write_bytes(b"sqlite junk")
+        abandoned = parts_dir / ".gpio-stage-crashed"
+        abandoned.mkdir()
+        (abandoned / "chunk_0_1.pmtiles").write_bytes(b"sqlite junk")
         fake_tools["tiles"].clear()
         fake_tools["split"].clear()
 
@@ -412,9 +419,9 @@ class TestSplit:
 
 
 def _bounds(path):
-    from geoparquet_io.core.common import get_dataset_bounds
+    from geoparquet_io.core.bbox_structure import dataset_bounds
 
-    return get_dataset_bounds(path, geometry_column="geometry")
+    return dataset_bounds(path, geometry_column="geometry")
 
 
 class TestSplitDropsUnplaceableRows:

@@ -22,13 +22,19 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.add.kdtree import (
     DEFAULT_KDTREE_TARGET_ROWS,
     ITERATIONS_CONFLICT,
-    ITERATIONS_MISSING,
+    require_iterations_or_auto,
 )
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.duckdb_utils import quote_identifier
+from geoparquet_io.core.edges import edges_of, state_edges
+from geoparquet_io.core.file_utils import get_all_parquet_files, scratch_path, unlink_released_file
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
+from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
+from geoparquet_io.core.index_ops import get_index_spec, validate_partition_arguments
 from geoparquet_io.core.logging_config import warn
+from geoparquet_io.core.process.aggregate.grid_common import BUCKET_POINT_GEOMETRY
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
 from geoparquet_io.core.write_funnels import write_geoparquet_table
@@ -39,65 +45,6 @@ if TYPE_CHECKING:
     from geoparquet_io.api.check import CheckResult
 
 
-def _safe_unlink(path: Path, attempts: int = 3) -> None:
-    """
-    Safely unlink a file with retry for Windows file handle release.
-
-    Args:
-        path: Path to the file to delete
-        attempts: Number of retry attempts (default: 3)
-    """
-    import time
-
-    for attempt in range(attempts):
-        try:
-            path.unlink(missing_ok=True)
-            break
-        except OSError:
-            time.sleep(0.1 * (attempt + 1))
-
-
-def _require_auto_or_resolution(
-    auto: bool,
-    values: dict[str, int | None],
-    *,
-    conflict: str,
-    missing: str,
-) -> None:
-    """
-    Mirror the core partition gate before any I/O is spent on the call.
-
-    The auto-capable partition methods hand an in-memory table to core through a
-    temporary parquet file. Core raises for a call that names neither a
-    resolution nor ``auto`` -- but only after the whole table has been
-    serialized. Checking here makes an invalid call cost nothing; core keeps its
-    own gate as the backstop for every other caller.
-
-    Args:
-        auto: Whether the caller asked for auto-sizing
-        values: The resolution-ish parameters by their public name, in the order
-            core reports them
-        conflict: Reason for the error when ``auto`` is combined with an
-            explicit value (worded as core words it)
-        missing: Reason for the error when neither was given
-
-    Raises:
-        InvalidParameterError: If ``auto`` conflicts with an explicit value, or
-            neither was given
-    """
-    from geoparquet_io.core.exceptions import InvalidParameterError
-
-    given = [name for name, value in values.items() if value is not None]
-
-    if auto:
-        if given:
-            raise InvalidParameterError("auto", conflict)
-        return
-
-    if len(given) != len(values):
-        raise InvalidParameterError(next(iter(values)), missing)
-
-
 def _run_partition_with_temp_file(
     table: pa.Table,
     geometry_column: str | None,
@@ -106,7 +53,7 @@ def _run_partition_with_temp_file(
     *,
     temp_prefix: str = "gpio_partition",
     core_kwargs: dict,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
 ) -> dict:
     """
@@ -135,11 +82,9 @@ def _run_partition_with_temp_file(
         directory, the number of ``.parquet`` files written under it, and
         whether they are laid out Hive-style.
     """
-    import tempfile
-    import uuid
     from pathlib import Path as PathLib
 
-    temp_input = PathLib(tempfile.gettempdir()) / f"{temp_prefix}_{uuid.uuid4()}.parquet"
+    temp_input = PathLib(scratch_path(prefix=f"{temp_prefix}_"))
 
     try:
         write_geoparquet_table(
@@ -158,95 +103,56 @@ def _run_partition_with_temp_file(
         )
 
         output_path = PathLib(output_dir)
-        parquet_files = list(output_path.rglob("*.parquet"))
+        parquet_files = get_all_parquet_files(str(output_path))
         return {
             "output_dir": str(output_path),
             "file_count": len(parquet_files),
             "hive": core_kwargs.get("hive", False),
         }
     finally:
-        _safe_unlink(temp_input)
+        unlink_released_file(temp_input)
 
 
 def _calculate_bounds_from_table(
     table: pa.Table,
     geometry_column: str | None,
 ) -> tuple[float, float, float, float] | None:
+    """``(xmin, ymin, xmax, ymax)`` of an in-memory table's geometry, or None.
+
+    Measured by the one bounds owner (``geo_metadata.bounds_of``) on the Arrow
+    path, so a GeoArrow WKB extension column reads like plain WKB (#1292). None
+    when there is no geometry column or nothing to measure; an infinite
+    coordinate raises ``GeometryError`` there, as on every other path.
     """
-    Calculate bounding box from an in-memory PyArrow Table.
+    from geoparquet_io.core.exceptions import GeometryError
+    from geoparquet_io.core.geo_metadata import bounds_of
 
-    Uses DuckDB to compute the bbox from geometry column.
-
-    Args:
-        table: PyArrow Table
-        geometry_column: Name of geometry column
-
-    Returns:
-        Tuple of (xmin, ymin, xmax, ymax) or None if empty/error
-    """
     if geometry_column is None or geometry_column not in table.column_names:
         return None
-
-    if table.num_rows == 0:
-        return None
-
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, register_arrow
-
-    con = None
     try:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-        register_arrow(con, "input_table", table)
-
-        # Use ST_Extent to get the bounding box of all geometries
-        query = f"""
-            SELECT
-                ST_XMin(ST_Extent_Agg(ST_GeomFromWKB({quote_identifier(geometry_column)}))),
-                ST_YMin(ST_Extent_Agg(ST_GeomFromWKB({quote_identifier(geometry_column)}))),
-                ST_XMax(ST_Extent_Agg(ST_GeomFromWKB({quote_identifier(geometry_column)}))),
-                ST_YMax(ST_Extent_Agg(ST_GeomFromWKB({quote_identifier(geometry_column)})))
-            FROM input_table
-            WHERE {quote_identifier(geometry_column)} IS NOT NULL
-        """
-        result = con.execute(query).fetchone()
-
-        if result and all(v is not None for v in result):
-            return (result[0], result[1], result[2], result[3])
-        return None
-
+        bbox = bounds_of(table, geometry_column)
+    except GeometryError:
+        raise
     except Exception:
         return None
-    finally:
-        if con is not None:
-            con.close()
+    return None if bbox is None else (bbox[0], bbox[1], bbox[2], bbox[3])
 
 
 def _surviving_geometry_column(current: str | None, result: pa.Table) -> str | None:
     """Which geometry column a projected table should report, if any.
 
-    A column projection can drop the geometry column the Table was pointing at.
-    Keeping the old name made ``write()`` ask the writer for a column that is no
-    longer there (#731), but collapsing straight to ``None`` was equally wrong
-    when the input declared more than one geometry column: the survivor's geo
-    metadata was then silently thrown away. So prefer the carried
-    ``primary_column`` (``extract_table`` has already re-pointed it at a
-    survivor), then any other declared geometry column, and only then ``None``
-    — the same state ``read()`` reports for a plain Parquet file.
+    A column projection can drop the geometry column the Table was pointing at
+    (#731). The column it still has is kept; otherwise the owner answers over
+    what survived (#1367) -- the carried block's primary (``extract_table`` has
+    already re-pointed it at a survivor), then any declared column, then the
+    schema -- and ``None`` when nothing is left, the state ``read()`` reports
+    for a plain Parquet file.
     """
     if current is not None and current in result.column_names:
         return current
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
 
-    from geoparquet_io.core.geo_metadata import parse_geo_metadata
-
-    geo = parse_geo_metadata(result.schema.metadata)
-    if not geo:
-        return None
-
-    declared = geo.get("columns")
-    candidates = [geo.get("primary_column")] + list(declared if isinstance(declared, dict) else [])
-    for name in candidates:
-        if isinstance(name, str) and name in result.column_names:
-            return name
-    return None
+    return primary_geometry_column(result)
 
 
 def read(path: str | Path, **kwargs) -> Table:
@@ -274,14 +180,14 @@ def read(path: str | Path, **kwargs) -> Table:
     # invisible to the write, and left out of `geo.columns` (#1175).
     import geoarrow.pyarrow  # noqa: F401
 
-    from geoparquet_io.core.common import resolve_geoparquet_version_from_file
+    from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
     arrow_table = pq.read_table(str(path), **kwargs)
     table = Table(arrow_table)
     # CLI-parity auto-version hint (todo 043): remember the file-based decision
     # so write() picks the same version the CLI would for this input, even when
     # native geometry columns were demoted to plain binary by pq.read_table.
-    table._auto_version_hint = resolve_geoparquet_version_from_file(str(path))
+    table._auto_version_hint = resolve_output_geoparquet_version(None, input_file=str(path))
     # Remember the file this Table is a view of, so `check_*` and `validate()`
     # measure it rather than a re-write of its rows (#1060). A projected or
     # filtered read is not a view of the file, so it gets no source.
@@ -332,12 +238,14 @@ def read_partition(
     """
     from geoparquet_io.core.duckdb_utils import (
         _wrap_query_with_wkb_conversion,
+        describe_query,
+        duckdb_type_is_geometry,
         get_duckdb_connection,
         s3_config_scope,
     )
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
     from geoparquet_io.core.partition.reader import build_read_parquet_expr
     from geoparquet_io.core.remote import needs_httpfs, resolve_s3_config
-    from geoparquet_io.core.streaming import find_geometry_column_from_table
 
     s3_config = resolve_s3_config(
         s3_endpoint=s3_endpoint,
@@ -356,16 +264,17 @@ def read_partition(
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path_str))
         try:
             query = f"SELECT * FROM {expr}"
-            for row in con.execute(f"DESCRIBE ({query})").fetchall():
-                if row[1] and row[1].upper() == "GEOMETRY":
-                    query = _wrap_query_with_wkb_conversion(query, row[0], con=con)
+            for name, type_ in describe_query(con, query):
+                # A CRS-typed GEOMETRY crosses Arrow with its CRS; only a bare one is wrapped.
+                if duckdb_type_is_geometry(type_, allow_crs=False):
+                    query = _wrap_query_with_wkb_conversion(query, name)
 
-            arrow_table = con.execute(query).arrow().read_all()
+            arrow_table = con.sql(query).arrow().read_all()
         finally:
             con.close()
 
     # Detect geometry column from the combined table
-    geometry_column = find_geometry_column_from_table(arrow_table)
+    geometry_column = primary_geometry_column(arrow_table)
 
     return Table(arrow_table, geometry_column=geometry_column)
 
@@ -373,7 +282,7 @@ def read_partition(
 def convert(
     path: str | Path,
     *,
-    geometry_column: str = "geometry",
+    geometry_column: str = BUILT_GEOMETRY_COLUMN,
     wkt_column: str | None = None,
     lat_column: str | None = None,
     lon_column: str | None = None,
@@ -481,7 +390,7 @@ def extract_arcgis(
     output_crs: str | None = None,
     max_allowable_offset: float | None = None,
     repair_geometry: bool = True,
-    timeout: float = 60.0,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> Table:
     """
     Extract features from an ArcGIS Feature Service to a Table.
@@ -574,7 +483,7 @@ def extract_arcgis(
     # exclude_cols="geometry" leaves an attribute table with no geo block
     # (#966): report no geometry column, so write() emits plain Parquet on every
     # strategy instead of asking the writer for a column that is not there.
-    return Table(arrow_table, geometry_column=_surviving_geometry_column("geometry", arrow_table))
+    return Table(arrow_table, geometry_column=_surviving_geometry_column(None, arrow_table))
 
 
 class Table:
@@ -615,7 +524,14 @@ class Table:
                 claimed OGC:CRS84 for projected data (issue #625).
         """
         self._table = table
-        self._geometry_column = geometry_column or self._detect_geometry_column()
+        from geoparquet_io.core.geometry_detection import primary_geometry_column
+
+        # A Table may hold a name its table lacks (a derived table, #1176):
+        # ``write()`` refuses it through ``resolve_geometry_column`` and names
+        # what the table has, so only the unnamed case is answered here.
+        self._geometry_column = (
+            geometry_column if geometry_column is not None else primary_geometry_column(table)
+        )
         # Auto-version hint captured at read time (see read()): pq.read_table
         # demotes native geometry columns to plain binary when geoarrow isn't
         # registered, so the table alone can't always tell a native-geo-only
@@ -655,12 +571,6 @@ class Table:
     def _wrap_geographic(self, table: pa.Table, geometry_column: str | None) -> Table:
         """Wrap new grid or admin boundaries in their output CRS, not the source CRS."""
         return self._wrap(table, geometry_column, crs="OGC:CRS84" if geometry_column else None)
-
-    def _detect_geometry_column(self) -> str | None:
-        """Detect geometry column from metadata or common names."""
-        from geoparquet_io.core.streaming import find_geometry_column_from_table
-
-        return find_geometry_column_from_table(self._table)
 
     @classmethod
     def from_bigquery(
@@ -719,8 +629,9 @@ class Table:
             geography_column: Column containing geometry data. Auto-detected
                 for native GEOGRAPHY columns. Specify to parse VARCHAR columns.
             geometry_format: Format of VARCHAR geometry ("wkt" or "geojson")
-            edges: Edge interpretation ("spherical" or "planar"). Native
-                GEOGRAPHY columns default to "spherical", VARCHAR to "planar".
+            edges: Edge interpretation, one of ``edges.EDGES``: ``"planar"``,
+                ``"spherical"`` or an ellipsoidal algorithm. Native GEOGRAPHY
+                columns default to "spherical", VARCHAR to "planar".
 
         Returns:
             Table for chaining operations
@@ -816,6 +727,7 @@ class Table:
         value_column: str = "value",
         nodata: float | None = None,
         use_mask: bool = True,
+        repair_geometry: bool = True,
     ) -> Table:
         """
         Create a Table by polygonizing a categorical raster band (contourrs).
@@ -830,6 +742,9 @@ class Table:
             value_column: Name of the class attribute column (default: 'value')
             nodata: Nodata value to exclude (default: the raster's own tag)
             use_mask: Honor the raster's mask/nodata (default: True)
+            repair_geometry: Repair the self-touching rings contourrs emits
+                where a region pinches to one pixel corner (default: True).
+                The count is reported either way; see ``ops.polygonize``.
 
         Returns:
             Table with one feature per contiguous class region
@@ -848,6 +763,7 @@ class Table:
                 value_column=value_column,
                 nodata=nodata,
                 use_mask=use_mask,
+                repair_geometry=repair_geometry,
             )
         )
 
@@ -1029,9 +945,9 @@ class Table:
             >>> table = gpio.read('data.parquet')
             >>> print(table.crs)  # e.g., {'id': {'authority': 'EPSG', 'code': 4326}, ...}
         """
-        from geoparquet_io.core.streaming import extract_crs_from_table
+        from geoparquet_io.core.crs_utils import crs_of
 
-        embedded = extract_crs_from_table(self._table, self._geometry_column)
+        embedded = crs_of(self._table, geometry_column=self._geometry_column)
         if embedded is not None:
             return embedded
         return self._crs_hint
@@ -1137,12 +1053,12 @@ class Table:
             >>> table = gpio.read('data.parquet')
             >>> print(table.geoparquet_version)  # e.g., '1.0.0'
         """
-        from geoparquet_io.core.geo_metadata import carried_version, parse_geo_metadata
+        from geoparquet_io.core.geo_metadata import declared_version, read_raw_geo
 
-        geo_meta = parse_geo_metadata(self._table.schema.metadata)
-        if not isinstance(geo_meta, dict):
+        geo_meta = read_raw_geo(self._table.schema.metadata).block
+        if geo_meta is None:
             return None
-        return carried_version(geo_meta.get("version"))
+        return declared_version(geo_meta, default=None)
 
     def info(self, verbose: bool = True) -> dict | None:
         """
@@ -1214,7 +1130,7 @@ class Table:
         self,
         path: str | Path,
         format: str | None = None,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         compression_level: int | None = None,
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
@@ -1224,7 +1140,7 @@ class Table:
         verbose: bool = False,
         # Format-specific options
         overwrite: bool = False,
-        layer_name: str = "features",
+        layer_name: str | None = None,
         include_wkt: bool = True,
         include_bbox: bool = True,
         encoding: str = "UTF-8",
@@ -1265,7 +1181,7 @@ class Table:
                            'duckdb-kv', 'disk-rewrite'). Default: 'duckdb-kv'
             profile: AWS profile for S3 operations
             overwrite: Overwrite existing file (GeoPackage, Shapefile)
-            layer_name: Layer name for GeoPackage (default: 'features')
+            layer_name: Layer name for GeoPackage (default: the output file stem)
             include_wkt: Include WKT geometry column for CSV (default: True)
             include_bbox: Include bbox column for CSV (default: True)
             encoding: Character encoding for Shapefile (default: 'UTF-8')
@@ -1367,17 +1283,11 @@ class Table:
         """Detect output format from file extension."""
         from pathlib import Path as PathLib
 
-        ext = PathLib(path).suffix.lower()
-        EXTENSION_MAP = {
-            ".parquet": "parquet",
-            ".gpkg": "geopackage",
-            ".fgb": "flatgeobuf",
-            ".csv": "csv",
-            ".shp": "shapefile",
-            ".geojson": "geojson",
-            ".json": "geojson",
-        }
-        return EXTENSION_MAP.get(ext, "parquet")  # Default to parquet
+        from geoparquet_io.core.format_writers import EXTENSION_TO_FORMAT
+
+        detected = EXTENSION_TO_FORMAT.get(PathLib(path).suffix.lower(), "geoparquet")
+        # write() spells GeoParquet "parquet"; an unknown suffix defaults to it.
+        return "parquet" if detected == "geoparquet" else detected
 
     def _require_geometry_column_present(self) -> None:
         """Refuse a write whose named geometry column is not in the table (#1176).
@@ -1401,17 +1311,9 @@ class Table:
         """
         if self._geometry_column is None:
             return
-        if self._geometry_column in self._table.column_names:
-            return
+        from geoparquet_io.core.geometry_detection import resolve_geometry_column
 
-        from geoparquet_io.core.exceptions import InvalidParameterError
-
-        available = ", ".join(repr(name) for name in self._table.column_names) or "none"
-        raise InvalidParameterError(
-            "geometry_column",
-            f"the table has no column named {self._geometry_column!r}; "
-            f"its columns are: {available}",
-        )
+        resolve_geometry_column(self._table, self._geometry_column, where="the table")
 
     def _write_geoparquet(
         self,
@@ -1426,19 +1328,17 @@ class Table:
         verbose: bool = False,
     ) -> Path:
         """Write table to GeoParquet format (supports local and cloud)."""
-        import tempfile
-        import uuid
         from pathlib import Path as PathLib
 
         import pyarrow as pa
 
         from geoparquet_io.core.parquet_writer import (
             note_duckdb_copy_rounding,
-            resolve_row_group_rows,
+            resolve_row_group_rows_for_table,
         )
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload
-        from geoparquet_io.core.write_strategies import WriteStrategy, WriteStrategyFactory
+        from geoparquet_io.core.write_strategies import WriteStrategy
 
         self._require_geometry_column_present()
 
@@ -1449,8 +1349,10 @@ class Table:
         # 50000` wrote 49,152 (#971), and passing nothing at all inherited
         # DuckDB's 122,880. The parameter name travels with the call so a
         # rejected value blames `row_group_rows`, not a CLI flag this caller
-        # never typed.
-        row_group_rows = resolve_row_group_rows(
+        # never typed. An MB target is measured on this table here, once, so
+        # the four strategies write the same groups for it (#1215).
+        row_group_rows = resolve_row_group_rows_for_table(
+            self._table,
             row_group_rows,
             row_group_size_mb,
             param_name="row_group_rows",
@@ -1462,23 +1364,21 @@ class Table:
         # at read() time, then the default. Passing a concrete version keeps
         # output self-consistent (a None version made duckdb-kv keep the native
         # GEOMETRY logical type while stamping 1.1.0/WKB geo metadata).
-        if geoparquet_version is None:
-            from geoparquet_io.core.common import resolve_geoparquet_version_from_table
-            from geoparquet_io.core.geo_metadata import DEFAULT_GEOPARQUET_VERSION
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
-            geoparquet_version = (
-                resolve_geoparquet_version_from_table(self._table, verbose)
-                or self._auto_version_hint
-                or DEFAULT_GEOPARQUET_VERSION
-            )
+        geoparquet_version = resolve_output_geoparquet_version(
+            geoparquet_version,
+            table=self._table,
+            source_version=self._auto_version_hint,
+            verbose=verbose,
+        )
 
         path_str = str(path)
         is_remote = is_remote_url(path_str)
 
         # For remote destinations, write to temp file first
         if is_remote:
-            temp_dir = PathLib(tempfile.gettempdir())
-            local_path = temp_dir / f"gpio_write_{uuid.uuid4()}.parquet"
+            local_path = PathLib(scratch_path(prefix="gpio_write_"))
         else:
             local_path = PathLib(path)
 
@@ -1506,7 +1406,6 @@ class Table:
 
             # Get the appropriate write strategy
             strategy_enum = WriteStrategy(write_strategy)
-            strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
             # duckdb-kv -- the default -- lets DuckDB's COPY have the last word
             # on row-group size, so a sub-vector request lands at 2,048 rows
@@ -1522,9 +1421,9 @@ class Table:
             # PROJJSON dict, so normalise a string identifier (e.g. "EPSG:3857").
             input_crs = self.crs
             if isinstance(input_crs, str):
-                from geoparquet_io.core.crs_utils import parse_crs_string_to_projjson
+                from geoparquet_io.core.crs_utils import projjson_for_label
 
-                input_crs = parse_crs_string_to_projjson(input_crs)
+                input_crs = projjson_for_label(input_crs)
             elif input_crs is None:
                 # `self.crs` is None for an unknown CRS and for the default
                 # alike. Unknown has to be said on the way out (`crs: null`,
@@ -1537,48 +1436,20 @@ class Table:
                 if table_crs_is_unknown(self._table, self._geometry_column):
                     input_crs = PARQUET_UNKNOWN_CRS
 
-            # Carry the table's non-geo file-level KV metadata (fiboa, vecorel,
-            # STAC fragments) into the write. The Arrow strategies copied it
-            # incidentally off the schema while the DuckDB COPY strategies —
-            # including the default — rebuilt the KV block from scratch and
-            # dropped it, so preservation depended on the strategy (#690).
-            # 'geo' is deliberately excluded: it is regenerated from the table.
-            from geoparquet_io.core.write_funnels import extract_preserved_kv_metadata
-
-            preserved_kv = extract_preserved_kv_metadata(self._table.schema.metadata)
-
-            # A strategy's `write_from_table` gets `original_metadata=None` on
-            # purpose: the input's stats no longer describe whatever happened to
-            # the table in between. A `covering` is not a stat, though -- it says
-            # which column holds the geometry's envelope, and nothing else in a
-            # write can establish that for a column not named exactly `bbox`. So
-            # it travels through the provenance channel instead, which is how a
-            # caller that computed a bbox column already declares one. Three of
-            # the four strategies could not see it at all, which lost a GDAL
-            # `geometry_bbox` covering and the one `add_bbox(column_name=...)`
-            # records on everything but `in-memory` (#1172).
+            # The funnel carries declarations and sidecars, and recomputes
+            # derived metadata. Coverings also travel as explicit provenance.
             from geoparquet_io.core.geo_metadata import carried_covering_as_provenance
 
             carried_covering = carried_covering_as_provenance(
                 self._table.schema.metadata, self._geometry_column, self._table.column_names
             )
 
-            # DuckDB refuses a GeoArrow column with non-planar edges, and the
-            # strategies rebuild the geo block without them. So the edges are
-            # read off the table, cleared for the write, and restored on the
-            # written file, as the CLI write paths do (#1253).
-            from geoparquet_io.core.arrow_geo_metadata import with_planar_edge_types
-            from geoparquet_io.core.write_funnels import (
-                apply_nonplanar_edges,
-                table_nonplanar_edges,
-            )
+            from geoparquet_io.core.write_funnels import write_geoparquet_table
 
-            edges_by_col = table_nonplanar_edges(self._table, self._geometry_column, None)
-            write_table = with_planar_edge_types(self._table)
-
-            strategy.write_from_table(
-                table=write_table,
-                output_path=str(local_path),
+            write_geoparquet_table(
+                table=self._table,
+                output_file=str(local_path),
+                write_strategy=write_strategy,
                 geometry_column=self._geometry_column,
                 geoparquet_version=geoparquet_version,
                 compression=compression,
@@ -1588,15 +1459,6 @@ class Table:
                 verbose=verbose,
                 input_crs=input_crs,
                 custom_metadata={"covering": carried_covering} if carried_covering else None,
-                extra_kv_metadata=preserved_kv or None,
-            )
-            apply_nonplanar_edges(
-                edges_by_col,
-                str(local_path),
-                compression=compression,
-                compression_level=compression_level,
-                row_group_rows=row_group_rows,
-                verbose=verbose,
             )
 
             # Upload to remote if needed
@@ -1607,8 +1469,8 @@ class Table:
             return local_path
         finally:
             # Clean up temp file for remote writes
-            if is_remote and local_path.exists():
-                local_path.unlink()
+            if is_remote:
+                unlink_released_file(local_path)
 
     def _write_format(
         self,
@@ -1618,8 +1480,6 @@ class Table:
         **format_options,
     ) -> Path:
         """Write table to non-parquet format (handles local and cloud)."""
-        import tempfile
-        import uuid
         from pathlib import Path as PathLib
 
         from geoparquet_io.core.remote import is_remote_url
@@ -1631,8 +1491,7 @@ class Table:
 
         # Determine output path (temp file for remote, direct for local)
         if is_remote:
-            temp_dir = PathLib(tempfile.gettempdir())
-            output_path = temp_dir / f"gpio_write_{uuid.uuid4()}{PathLib(path).suffix}"
+            output_path = PathLib(scratch_path(PathLib(path).suffix, prefix="gpio_write_"))
         else:
             output_path = PathLib(path)
 
@@ -1662,7 +1521,7 @@ class Table:
                     str(temp_parquet),
                     str(output_path),
                     overwrite=format_options.get("overwrite", False),
-                    layer_name=format_options.get("layer_name", "features"),
+                    layer_name=format_options.get("layer_name"),
                     verbose=False,
                     profile=profile,
                     **filter_options,
@@ -1752,21 +1611,19 @@ class Table:
 
         finally:
             # Clean up temp parquet
-            if temp_parquet:
-                temp_parquet.unlink(missing_ok=True)
+            unlink_released_file(temp_parquet)
             # Clean up zip file if created
-            if zip_path:
-                zip_path.unlink(missing_ok=True)
+            unlink_released_file(zip_path)
             # Clean up temp output if remote
-            if is_remote and output_path.exists():
-                output_path.unlink(missing_ok=True)
+            if is_remote:
+                unlink_released_file(output_path)
             # Clean up shapefile sidecars if remote
             if is_remote and format == "shapefile":
                 # Remove all sidecar files (.shx, .dbf, .prj, etc.)
-                stem = output_path.stem
-                parent = output_path.parent
-                for sidecar in parent.glob(f"{stem}.*"):
-                    sidecar.unlink(missing_ok=True)
+                from geoparquet_io.core.format_writers import shapefile_members
+
+                for sidecar in shapefile_members(output_path):
+                    unlink_released_file(sidecar)
 
     def _table_to_temp_parquet(self) -> Path:
         """Write table to temporary parquet file for format conversion.
@@ -1774,22 +1631,19 @@ class Table:
         Uses write_geoparquet_table to preserve GeoParquet metadata (CRS, geometry column).
         This is critical for format conversions that need metadata (e.g., GeoJSON reprojection).
         """
-        import tempfile
-        import uuid
         from pathlib import Path as PathLib
 
         from geoparquet_io.core.write_funnels import write_geoparquet_table
 
-        temp_dir = PathLib(tempfile.gettempdir())
-        temp_path = temp_dir / f"gpio_table_{uuid.uuid4()}.parquet"
+        temp_path = PathLib(scratch_path(prefix="gpio_table_"))
 
         # Use write_geoparquet_table to preserve metadata
         write_geoparquet_table(
             self._table,
             output_file=str(temp_path),
             geometry_column=self._geometry_column,
-            compression="ZSTD",
-            compression_level=15,
+            compression=None,
+            compression_level=None,
             row_group_size_mb=None,
             row_group_rows=None,
             geoparquet_version=None,  # Use existing version from table
@@ -1869,7 +1723,7 @@ class Table:
     def add_quadkey(
         self,
         column_name: str = "quadkey",
-        resolution: int = 13,
+        resolution: int = get_index_spec("quadkey").default_resolution,
         use_centroid: bool = False,
     ) -> Table:
         """
@@ -1988,7 +1842,7 @@ class Table:
     def add_h3(
         self,
         column_name: str = "h3_cell",
-        resolution: int = 9,
+        resolution: int = get_index_spec("h3").default_resolution,
     ) -> Table:
         """
         Add an H3 cell column based on geometry location.
@@ -2012,7 +1866,7 @@ class Table:
     def add_a5(
         self,
         column_name: str = "a5_cell",
-        resolution: int = 15,
+        resolution: int = get_index_spec("a5").default_resolution,
     ) -> Table:
         """
         Add an A5 cell column based on geometry location.
@@ -2042,7 +1896,7 @@ class Table:
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
-        bucket_point: str = "geometry",
+        bucket_point: str = BUCKET_POINT_GEOMETRY,
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
         memory_limit: str | None = None,
@@ -2073,23 +1927,17 @@ class Table:
             New Table with one row per A5 cell
         """
         from geoparquet_io.core.process.aggregate.by_a5 import aggregate_a5_table
+        from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
         result = aggregate_a5_table(
             self._table,
             resolution=resolution,
-            metric=metric,
-            breakdown=breakdown,
-            breakdown_limit=breakdown_limit,
-            out_geometry=out_geometry,
+            options=AggregateOptions.pick(locals()),
             geometry_column=self._geometry_column,
-            where=where,
-            metric_nodata=metric_nodata,
-            bucket_point=bucket_point,
-            bbox_column=bbox_column,
-            breakdown_metric=breakdown_metric,
-            memory_limit=memory_limit,
         )
-        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(
+            result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
+        )
 
     def aggregate_h3(
         self,
@@ -2100,7 +1948,7 @@ class Table:
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
-        bucket_point: str = "geometry",
+        bucket_point: str = BUCKET_POINT_GEOMETRY,
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
         memory_limit: str | None = None,
@@ -2131,23 +1979,17 @@ class Table:
             New Table with one row per H3 cell
         """
         from geoparquet_io.core.process.aggregate.by_h3 import aggregate_h3_table
+        from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
         result = aggregate_h3_table(
             self._table,
             resolution=resolution,
-            metric=metric,
-            breakdown=breakdown,
-            breakdown_limit=breakdown_limit,
-            out_geometry=out_geometry,
+            options=AggregateOptions.pick(locals()),
             geometry_column=self._geometry_column,
-            where=where,
-            metric_nodata=metric_nodata,
-            bucket_point=bucket_point,
-            bbox_column=bbox_column,
-            breakdown_metric=breakdown_metric,
-            memory_limit=memory_limit,
         )
-        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(
+            result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
+        )
 
     def aggregate_admin(
         self,
@@ -2158,7 +2000,7 @@ class Table:
         out_geometry: str = "polygon",
         where: str | None = None,
         metric_nodata: str | None = None,
-        bucket_point: str = "geometry",
+        bucket_point: str = BUCKET_POINT_GEOMETRY,
         bbox_column: str | None = None,
         breakdown_metric: str | None = None,
         memory_limit: str | None = None,
@@ -2204,7 +2046,9 @@ class Table:
             breakdown_metric=breakdown_metric,
             memory_limit=memory_limit,
         )
-        return self._wrap_geographic(result, "geometry" if out_geometry != "none" else None)
+        return self._wrap_geographic(
+            result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
+        )
 
     def overview(
         self,
@@ -2242,13 +2086,13 @@ class Table:
             scheme=scheme,
             memory_limit=memory_limit,
         )
-        has_geometry = "geometry" in result.column_names
-        return self._wrap_geographic(result, "geometry" if has_geometry else None)
+        has_geometry = BUILT_GEOMETRY_COLUMN in result.column_names
+        return self._wrap_geographic(result, BUILT_GEOMETRY_COLUMN if has_geometry else None)
 
     def add_s2(
         self,
         column_name: str = "s2_cell",
-        level: int = 13,
+        level: int = get_index_spec("s2").default_resolution,
     ) -> Table:
         """
         Add an S2 cell column based on geometry location.
@@ -2380,7 +2224,7 @@ class Table:
     def sort_quadkey(
         self,
         column_name: str = "quadkey",
-        resolution: int = 13,
+        resolution: int = get_index_spec("quadkey").default_resolution,
         use_centroid: bool = False,
         remove_column: bool = False,
     ) -> Table:
@@ -2449,7 +2293,7 @@ class Table:
         auto: bool = False,
         target_rows: int = 100000,
         max_partitions: int = 10000,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         hive: bool = False,
         keep_quadkey_column: bool | None = None,
         overwrite: bool = False,
@@ -2496,11 +2340,8 @@ class Table:
         """
         from geoparquet_io.core.partition.by_quadkey import partition_by_quadkey
 
-        _require_auto_or_resolution(
-            auto,
-            {"resolution": resolution, "partition_resolution": partition_resolution},
-            conflict="cannot specify --resolution or --partition-resolution with --auto",
-            missing="must specify either --auto or both --resolution and --partition-resolution",
+        validate_partition_arguments(
+            get_index_spec("quadkey"), resolution, partition_resolution, auto=auto
         )
 
         return _run_partition_with_temp_file(
@@ -2530,7 +2371,7 @@ class Table:
         auto: bool = False,
         target_rows: int = 100000,
         max_partitions: int = 10000,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         hive: bool = False,
         keep_h3_column: bool | None = None,
         overwrite: bool = False,
@@ -2572,12 +2413,7 @@ class Table:
         """
         from geoparquet_io.core.partition.by_h3 import partition_by_h3
 
-        _require_auto_or_resolution(
-            auto,
-            {"resolution": resolution},
-            conflict="cannot specify both --auto and --resolution",
-            missing="must specify either --resolution or --auto",
-        )
+        validate_partition_arguments(get_index_spec("h3"), resolution, auto=auto)
 
         return _run_partition_with_temp_file(
             self._table,
@@ -2605,7 +2441,7 @@ class Table:
         auto: bool = False,
         target_rows: int = 100000,
         max_partitions: int = 10000,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         hive: bool = False,
         keep_s2_column: bool | None = None,
         overwrite: bool = False,
@@ -2650,12 +2486,7 @@ class Table:
         """
         from geoparquet_io.core.partition.by_s2 import partition_by_s2
 
-        _require_auto_or_resolution(
-            auto,
-            {"level": level},
-            conflict="cannot specify both --auto and --level",
-            missing="must specify either --level or --auto",
-        )
+        validate_partition_arguments(get_index_spec("s2"), level, auto=auto)
 
         return _run_partition_with_temp_file(
             self._table,
@@ -2683,7 +2514,7 @@ class Table:
         auto: bool = False,
         target_rows: int = 100000,
         max_partitions: int = 10000,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         hive: bool = False,
         keep_a5_column: bool | None = None,
         overwrite: bool = False,
@@ -2728,12 +2559,7 @@ class Table:
         """
         from geoparquet_io.core.partition.by_a5 import partition_by_a5
 
-        _require_auto_or_resolution(
-            auto,
-            {"resolution": resolution},
-            conflict="cannot specify both --auto and --resolution",
-            missing="must specify either --resolution or --auto",
-        )
+        validate_partition_arguments(get_index_spec("a5"), resolution, auto=auto)
 
         return _run_partition_with_temp_file(
             self._table,
@@ -2757,7 +2583,7 @@ class Table:
         self,
         destination: str,
         *,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         compression_level: int | None = None,
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
@@ -2798,15 +2624,12 @@ class Table:
             ...     s3_use_ssl=False,
             ... )
         """
-        import tempfile
-        import time
-        import uuid
         from pathlib import Path
 
         from geoparquet_io.core.upload import upload as do_upload
 
         # Write to temp file with uuid to avoid Windows file locking issues
-        temp_path = Path(tempfile.gettempdir()) / f"gpio_upload_{uuid.uuid4()}.parquet"
+        temp_path = Path(scratch_path(prefix="gpio_upload_"))
 
         try:
             self.write(
@@ -2828,13 +2651,7 @@ class Table:
                 chunk_concurrency=chunk_concurrency,
             )
         finally:
-            # Retry cleanup with incremental backoff for Windows file handle release
-            for attempt in range(3):
-                try:
-                    temp_path.unlink(missing_ok=True)
-                    break
-                except OSError:
-                    time.sleep(0.1 * (attempt + 1))
+            unlink_released_file(temp_path)
 
     def head(self, n: int = 10) -> Table:
         """
@@ -2996,7 +2813,6 @@ class Table:
             >>> print(meta['crs'])
             {'id': {'authority': 'EPSG', 'code': 4326}}
         """
-        import json
 
         result = {
             "rows": self.num_rows,
@@ -3016,37 +2832,36 @@ class Table:
         }
 
         # Extract full geo metadata if available
+        from geoparquet_io.core.geo_metadata import read_raw_geo
+
         schema_metadata = self._table.schema.metadata
-        if schema_metadata and b"geo" in schema_metadata:
-            try:
-                geo_meta = json.loads(schema_metadata[b"geo"].decode("utf-8"))
-                # A read-only reader, the Python API's `gpio inspect meta`:
-                # `geo_metadata` is documented as the file's full `geo` block,
-                # so it is handed back exactly as the file holds it and is NOT
-                # sanitized -- the same line #883 drew around `parse_geo_metadata`
-                # and `check`. Only the derived keys below need guarding: they
-                # indexed the raw block and crashed on a `columns` that is not
-                # an object, or an entry that is not one (#947).
-                result["geo_metadata"] = geo_meta
+        raw_geo = read_raw_geo(schema_metadata)
+        if raw_geo.present:
+            # A read-only reader, the Python API's `gpio inspect meta`:
+            # `geo_metadata` is documented as the file's full `geo` block, so it
+            # is handed back exactly as the file holds it and is NOT sanitized --
+            # the same line #883 drew around the raw reader (`read_raw_geo`) and
+            # `check`. Undecodable reads as None. Only the derived keys below
+            # need guarding: they indexed the raw block and crashed on a
+            # `columns` that is not an object, or an entry that is not one (#947).
+            result["geo_metadata"] = raw_geo.value
 
-                # Extract geometry_types from geo metadata
-                columns_meta = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
-                col_meta = (
-                    columns_meta.get(self._geometry_column)
-                    if isinstance(columns_meta, dict) and self._geometry_column
-                    else None
-                )
-                if isinstance(col_meta, dict):
-                    result["geometry_types"] = col_meta.get("geometry_types")
-                    result["edges"] = col_meta.get("edges")
-                    result["orientation"] = col_meta.get("orientation")
+            # Extract geometry_types from geo metadata
+            columns_meta = raw_geo.block.get("columns") if raw_geo.block else None
+            col_meta = (
+                columns_meta.get(self._geometry_column)
+                if isinstance(columns_meta, dict) and self._geometry_column
+                else None
+            )
+            if isinstance(col_meta, dict):
+                result["geometry_types"] = col_meta.get("geometry_types")
+                state_edges(result, edges_of(col_meta))
+                result["orientation"] = col_meta.get("orientation")
 
-                    # Check for covering/bbox info
-                    covering = col_meta.get("covering")
-                    if covering:
-                        result["covering"] = covering
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                result["geo_metadata"] = None
+                # Check for covering/bbox info
+                covering = col_meta.get("covering")
+                if covering:
+                    result["covering"] = covering
 
         # Optionally include raw Parquet schema metadata
         if include_parquet_metadata and schema_metadata:
@@ -3116,17 +2931,15 @@ class Table:
         Returns:
             Result from func
         """
-        import tempfile
-        import uuid
         from pathlib import Path
 
-        temp_path = Path(tempfile.gettempdir()) / f"gpio_check_{uuid.uuid4()}.parquet"
+        temp_path = Path(scratch_path(prefix="gpio_check_"))
         try:
             # The bytes write() would produce with its defaults, so a
             # prospective verdict describes the file the caller would get.
             self._write_geoparquet(
                 temp_path,
-                compression="ZSTD",
+                compression=None,
                 compression_level=None,
                 row_group_size_mb=None,
                 row_group_rows=None,
@@ -3136,7 +2949,7 @@ class Table:
             )
             return func(str(temp_path), *args, **kwargs)
         finally:
-            _safe_unlink(temp_path)
+            unlink_released_file(temp_path)
 
     def _check_file(
         self, func: Callable[..., Any], *args: Any, **kwargs: Any
@@ -3173,12 +2986,10 @@ class Table:
         Returns:
             PyArrow Table from the output file
         """
-        import tempfile
-        import uuid
         from pathlib import Path
 
-        temp_input = Path(tempfile.gettempdir()) / f"gpio_in_{uuid.uuid4()}.parquet"
-        temp_output = Path(tempfile.gettempdir()) / f"gpio_out_{uuid.uuid4()}.parquet"
+        temp_input = Path(scratch_path(prefix="gpio_in_"))
+        temp_output = Path(scratch_path(prefix="gpio_out_"))
 
         try:
             # Write table to temp input file
@@ -3198,8 +3009,8 @@ class Table:
             # Read the output file
             return pq.read_table(str(temp_output))
         finally:
-            _safe_unlink(temp_input)
-            _safe_unlink(temp_output)
+            unlink_released_file(temp_input)
+            unlink_released_file(temp_output)
 
     def check(self) -> CheckResult:
         """
@@ -3662,7 +3473,7 @@ class Table:
         chars: int | None = None,
         hive: bool = False,
         overwrite: bool = False,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         compression_level: int | None = None,
     ) -> dict:
         """
@@ -3723,7 +3534,7 @@ class Table:
         hive: bool = False,
         keep_kdtree_column: bool | None = None,
         overwrite: bool = False,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         compression_level: int | None = None,
     ) -> dict:
         """
@@ -3784,12 +3595,7 @@ class Table:
 
                 raise InvalidParameterError("auto", ITERATIONS_CONFLICT)
         else:
-            _require_auto_or_resolution(
-                auto,
-                {"iterations": iterations},
-                conflict=ITERATIONS_CONFLICT,
-                missing=ITERATIONS_MISSING,
-            )
+            require_iterations_or_auto(iterations, ("rows", target_rows) if auto else None)
 
         return _run_partition_with_temp_file(
             self._table,
@@ -3817,7 +3623,7 @@ class Table:
         hive: bool = False,
         overwrite: bool = False,
         vecorel: bool = False,
-        compression: str = "ZSTD",
+        compression: str | None = None,
         compression_level: int | None = None,
     ) -> dict:
         """
@@ -3894,8 +3700,9 @@ class Table:
 
         Args:
             file_path: Path to the input Parquet file.
-            query: Optional SQL query. Use {file} as placeholder for the file path.
-                   Defaults to SELECT * FROM read_parquet('{file}').
+            query: Optional SQL query. ``{file}`` is replaced by the file path
+                   as a quoted, escaped SQL string literal (``'{file}'`` means
+                   the same). Defaults to SELECT * FROM read_parquet({file}).
 
         Returns:
             Dictionary with operators, timing, and analysis results.

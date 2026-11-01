@@ -4,8 +4,8 @@ DuckDB can write native ``GEOMETRY``/``GEOGRAPHY`` logical types and per-row-gro
 statistics while writing no ``geo`` key at all. This module reads those two back
 off the finished file -- the logical type string, and the column statistics
 pyarrow exposes -- reconstructs the ``geo`` block they imply (geometry types from
-the type codes, bbox from the stats, CRS and ``edges`` from the logical type),
-and rewrites the file's key-value metadata in place.
+the type codes, bbox from the stats, CRS and ``edges`` from the logical type).
+Writing it into the file is the funnel's (``parquet_footer.patch_or_rewrite``).
 
 Reading a *written file* is the whole job, which is what separates it from
 ``core/arrow_geo_metadata.py``, whose subject is an in-memory table that has not
@@ -14,56 +14,49 @@ imports is still importable from there. The type-code tables it reads are the
 single copies in ``geo_metadata``.
 """
 
-import json
-import os
-import re
 from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from geoparquet_io.core.crs_utils import NULL_CRS_HINT, is_default_crs, is_unknown_type_crs
+from geoparquet_io.core.crs_utils import (
+    NULL_CRS_HINT,
+    is_default_crs,
+    is_geographic,
+    is_unknown_type_crs,
+)
 from geoparquet_io.core.duckdb_metadata import (
-    get_geo_metadata,
     get_schema_info,
+    native_geo_type,
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
-from geoparquet_io.core.geo_metadata import _DIMENSION_SUFFIXES, _GEOMETRY_TYPE_CODES
+from geoparquet_io.core.edges import declares_edges, edges_of, logical_type_edges, set_edges
+from geoparquet_io.core.geo_metadata import (
+    KEEP_CRS,
+    GeoBlockOptions,
+    SchemaSource,
+    compose_geo_block,
+    read_raw_geo,
+    row_group_geometry_stats,
+    sanitized_carried_geo_of_file,
+)
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
-from geoparquet_io.core.parquet_writer import without_geometry_dictionary
-
-
-def _geo_code_to_type_name(code: int) -> str | None:
-    """Map a Parquet geospatial type code (e.g. 3002) to 'LineString ZM'.
-
-    Reads the one WKB type-code table in ``geo_metadata``. Base 0 is refused
-    on purpose: the table maps it to the placeholder ``"Unknown"``, which is
-    not a GeoParquet ``geometry_types`` value, and a derived block names only
-    the types it can actually read off the file. An unrecognised base or
-    dimension falls through to ``None`` and :func:`_geo_col_meta_from_stats`
-    drops it.
-    """
-    dim, base = divmod(code, 1000)
-    name = _GEOMETRY_TYPE_CODES.get(base)
-    suffix = _DIMENSION_SUFFIXES.get(dim)
-    if base == 0 or name is None or suffix is None:
-        return None
-    return name + suffix
 
 
 def _geography_edges_from_logical(logical: str) -> str | None:
     """Edges value implied by a native Geography logical type string.
 
     Returns the declared algorithm (e.g. "spherical", "vincenty"), defaulting
-    to "spherical" (the Parquet spec default) when none is spelled out.
-    Returns None for non-Geography logical types.
+    to "spherical" (the Parquet spec default) when none is spelled out
+    (:func:`~geoparquet_io.core.edges.logical_type_edges`). Returns None for
+    non-Geography logical types.
     """
-    if not logical.startswith("Geography"):
+    if native_geo_type(logical) != "GEOGRAPHY":
         return None
-    match = re.search(r"algorithm=([A-Za-z_]+)", logical)
-    return match.group(1).lower() if match else "spherical"
+    return logical_type_edges(parse_geometry_logical_type(logical))
 
 
 def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, Any]:
@@ -97,62 +90,49 @@ def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, Any]:
 
 def _geo_col_meta_from_stats(pf, col_index: int, logical: str, parquet_file: str) -> dict:
     """Build one geo column metadata dict from a column's native geo statistics."""
-    codes: set[int] = set()
-    bbox = None
-    zrange = None
+    chunks = []
     for rg in range(pf.metadata.num_row_groups):
         stats = pf.metadata.row_group(rg).column(col_index).geo_statistics
         if stats is None:
             continue
-        codes.update(stats.geospatial_types or [])
-        if stats.xmin is not None:
-            # Limitation: min/max-merging row-group extents assumes planar
-            # edges; geography data crossing the antimeridian can yield an
-            # over-wide (though never under-covering) bbox here.
-            if bbox is None:
-                bbox = [stats.xmin, stats.ymin, stats.xmax, stats.ymax]
-            else:
-                bbox = [
-                    min(bbox[0], stats.xmin),
-                    min(bbox[1], stats.ymin),
-                    max(bbox[2], stats.xmax),
-                    max(bbox[3], stats.ymax),
-                ]
-        if stats.zmin is not None:
-            if zrange is None:
-                zrange = [stats.zmin, stats.zmax]
-            else:
-                zrange = [min(zrange[0], stats.zmin), max(zrange[1], stats.zmax)]
-
-    geometry_types = sorted(t for t in (_geo_code_to_type_name(c) for c in codes) if t is not None)
-    col_meta: dict = {"encoding": "WKB", "geometry_types": geometry_types}
-    if bbox is not None:
-        # RFC 7946 order; 6 values when a Z range exists (M is never
-        # part of bbox per spec).
-        if zrange is not None:
-            col_meta["bbox"] = [bbox[0], bbox[1], zrange[0], bbox[2], bbox[3], zrange[1]]
-        else:
-            col_meta["bbox"] = bbox
+        chunks.append(
+            {
+                "xmin": stats.xmin,
+                "ymin": stats.ymin,
+                "xmax": stats.xmax,
+                "ymax": stats.ymax,
+                "zmin": stats.zmin,
+                "zmax": stats.zmax,
+                "geometry_types": list(stats.geospatial_types or []),
+            }
+        )
+    # The one fold (geo_metadata): X merged on the circle, Z over the row
+    # groups that carry an extent, the spec's interleaved bbox (M is never part
+    # of a bbox), spec type names only.
     # The rebuilt block is the file's only geo metadata, so a CRS left behind
     # here is not merely missing: an absent `crs` *means* OGC:CRS84, which
     # relabels projected coordinates as lon/lat while the Parquet logical type
     # still names the real CRS (#785). Mirror the logical type, which is the
-    # authority at 2.0.
+    # authority at 2.0; it also decides how the extents fold.
     crs_present, crs = _crs_from_geo_logical(logical, parquet_file)
+    folded = row_group_geometry_stats(chunks, geographic=is_geographic(crs))
+    col_meta: dict = {"encoding": "WKB", "geometry_types": folded.geometry_types}
+    if folded.bbox is not None:
+        col_meta["bbox"] = folded.bbox
     if crs_present:
         col_meta["crs"] = crs
     # A Geography logical type carries edge semantics the geo metadata must
     # not drop: synthesize the matching edges declaration (#588).
     edges = _geography_edges_from_logical(logical)
     if edges:
-        col_meta["edges"] = edges
+        set_edges(col_meta, edges)
     return col_meta
 
 
 def _secondary_geometry_names(input_file: str) -> tuple[dict[str, str], dict[str, dict]]:
     """(top-level native columns by logical type string, declared geo-block entries) of an input.
 
-    Read through ``get_schema_info`` and ``get_geo_metadata`` -- the pair
+    Read through ``get_schema_info`` and ``sanitized_carried_geo_of_file`` -- the pair
     ``write_funnels.collect_nonplanar_edges`` already asks this same question of,
     and the pair that resolves a remote URL, a ``dir/*.parquet`` glob and a hive
     directory (taking the first file's footer for a multi-file input, as every
@@ -169,15 +149,15 @@ def _secondary_geometry_names(input_file: str) -> tuple[dict[str, str], dict[str
     native: dict[str, str] = {}
     for column in root_schema_columns(get_schema_info(input_file)):
         logical = column.get("logical_type") or ""
-        if logical.startswith(("Geometry", "Geography")):
+        if native_geo_type(logical) is not None:
             native[column["name"]] = logical
     declared: dict[str, dict] = {}
     try:
-        geo_meta = get_geo_metadata(input_file)
+        geo_meta = sanitized_carried_geo_of_file(input_file)
     except Exception as e:  # noqa: BLE001 - an unreadable `geo` key leaves the native half
         debug(f"Could not read the geo block of {input_file}: {e}")
         geo_meta = None
-    columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
+    columns = geo_meta.get("columns") if geo_meta else None
     if isinstance(columns, dict):
         declared = {name: meta for name, meta in columns.items() if isinstance(meta, dict)}
     return native, declared
@@ -207,10 +187,10 @@ def _native_secondary_meta(logical: str, declared: dict | None, input_file: str)
             crs_present, crs = True, None
         if crs_present:
             col_meta["crs"] = crs
-    if "edges" not in declared:
+    if not declares_edges(declared):
         edges = _geography_edges_from_logical(logical)
         if edges:
-            col_meta["edges"] = edges
+            set_edges(col_meta, edges)
     return col_meta
 
 
@@ -226,7 +206,7 @@ def derive_secondary_geometry_info(
     Every geometry column the input carries beyond ``primary_column`` — native
     Parquet ``GEOMETRY``/``GEOGRAPHY`` logical types, plus anything the input's
     own ``geo`` block declares — becomes a secondary, so
-    ``merge_secondary_geometry_metadata`` finally learns it exists (#1000). What
+    the composer's secondary steps finally learn it exists (#1000). What
     a native column's type adds is described in :func:`_native_secondary_meta`.
     Derived stats are otherwise absent: for a declared column they flow through
     ``original_metadata``, where the caller's invalidation (#934) has already
@@ -236,7 +216,7 @@ def derive_secondary_geometry_info(
     ``output_columns`` limits the answer to columns the write actually emits, so
     a projection cannot come out declaring a column it dropped. Best-effort: an
     unreadable input derives nothing rather than failing the write. The input is
-    read through ``get_schema_info``/``get_geo_metadata``, so a remote URL, a
+    read through ``get_schema_info``/``sanitized_carried_geo_of_file``, so a remote URL, a
     glob and a hive directory all answer (#1175).
 
     ``native_types`` is the same ``{column: logical type string}`` map read from
@@ -280,22 +260,31 @@ def derive_secondary_geometry_info(
     return {"primary": primary_column, "secondary": secondary, "metadata": metadata}
 
 
-def _with_primary_column(raw_geo: bytes, primary_column: str | None) -> dict | None:
-    """``raw_geo`` relabelled to name ``primary_column``, or None if it already does.
+def _with_primary_column(
+    raw_geo: bytes, primary_column: str | None, schema: pa.Schema
+) -> dict | None:
+    """``raw_geo`` composed to name ``primary_column``, or None if it already does.
 
     None too when the block cannot be read or does not describe
     ``primary_column``: naming a column the block has no entry for would make it
     invalid, and a block this cannot parse is not this repair's to rewrite.
+    DuckDB's stats are kept as written; the composer only takes the caller's
+    primary (step 2) and runs its gates.
     """
-    try:
-        geo = json.loads(raw_geo)
-    except ValueError:
-        return None
-    if not isinstance(geo, dict) or not isinstance(geo.get("columns"), dict):
+    geo = read_raw_geo({b"geo": raw_geo}).block
+    if geo is None or not isinstance(geo.get("columns"), dict):
         return None
     if primary_column not in geo["columns"] or geo.get("primary_column") == primary_column:
         return None
-    return {**geo, "primary_column": primary_column}
+    return compose_geo_block(
+        SchemaSource(schema, {b"geo": raw_geo}),
+        GeoBlockOptions(
+            geometry_column=primary_column,
+            primary_column=primary_column,
+            version="2.0",
+            covering=None,
+        ),
+    )
 
 
 def derive_v2_geo_metadata(
@@ -308,7 +297,8 @@ def derive_v2_geo_metadata(
     the block has to be rebuilt from the file's native geospatial statistics and
     logical types, mirroring the shape DuckDB writes for XY/XYZ data (#589).
     ``primary_column`` names the real geometry column for multi-geometry files;
-    without it the fallback is "geometry", then alphabetical.
+    without it ``geometry_detection.primary_geometry_column`` picks among the
+    native columns (a standard geometry name, then the alphabetically first).
 
     When the file does carry a ``geo`` key, the one thing checked is its
     ``primary_column``. DuckDB's generated block names the FIRST geometry column
@@ -330,12 +320,12 @@ def derive_v2_geo_metadata(
     try:
         kv = pf.metadata.metadata or {}
         if b"geo" in kv:
-            return _with_primary_column(kv[b"geo"], primary_column)
+            return _with_primary_column(kv[b"geo"], primary_column, pf.schema_arrow)
         schema = pf.metadata.schema
         geo_cols: dict[int, tuple[str, str]] = {}
         for i in range(len(schema)):
             logical = str(schema.column(i).logical_type)
-            if logical.startswith(("Geometry", "Geography")):
+            if native_geo_type(logical) is not None:
                 geo_cols[i] = (schema.column(i).name, logical)
         if not geo_cols:
             return None
@@ -344,99 +334,35 @@ def derive_v2_geo_metadata(
             name: _geo_col_meta_from_stats(pf, i, logical, output_path)
             for i, (name, logical) in geo_cols.items()
         }
+        geo_cols_logical = dict(geo_cols.values())
 
-        if primary_column and primary_column in columns:
-            primary = primary_column
-        elif "geometry" in columns:
-            primary = "geometry"
-        else:
-            primary = sorted(columns)[0]
-        return {"version": "2.0.0", "primary_column": primary, "columns": columns}
+        # Every described column is native, so the resolver's last step (the
+        # first native-typed column) always answers; the columns go in sorted so
+        # that step stays the alphabetical tie-break it has always been.
+        primary = primary_geometry_column(
+            [(name, geo_cols_logical[name]) for name in sorted(columns)],
+            geo={"primary_column": primary_column} if primary_column else None,
+        )
+        # Each column's entry is what its logical type and statistics say: the
+        # primary's goes in as the composer's crs and stats and as the data's
+        # edges (``column_edges``: a fact, not a request, so no orientation);
+        # the secondaries' as their declared metadata. No covering: none is
+        # derivable from a logical type.
+        declared = columns[primary]
+        secondary = [name for name in columns if name != primary]
+        return compose_geo_block(
+            SchemaSource(pf.schema_arrow),
+            GeoBlockOptions(
+                geometry_column=primary,
+                version="2.0",
+                covering=None,
+                column_edges={primary: edges_of(declared)} if declares_edges(declared) else None,
+                crs=declared["crs"] if "crs" in declared else KEEP_CRS,
+                stats={primary: {k: declared.get(k) for k in ("bbox", "geometry_types")}},
+                geometry_info={"secondary": secondary, "metadata": columns},
+            ),
+        )
     finally:
         # Release the read handle before the caller writes to the file (Windows
         # refuses to replace a file that is still open).
         pf.close()
-
-
-def _rewrite_writer_kwargs(compression: str, compression_level: int | None) -> dict:
-    """ParquetWriter kwargs mirroring the codec the original writer used."""
-    # Keys cover every normalized name callers can pass (DuckDB COPY names
-    # from _plain_copy_to's compression_map plus pyarrow-style variants).
-    codec_map = {
-        "ZSTD": "zstd",
-        "GZIP": "gzip",
-        "BROTLI": "brotli",
-        "SNAPPY": "snappy",
-        "UNCOMPRESSED": "none",
-        "NONE": "none",
-        "LZ4": "lz4",
-        "LZ4_RAW": "lz4",
-    }
-    write_kwargs: dict = {"compression": codec_map.get(compression.upper(), "zstd")}
-    if compression_level is not None and write_kwargs["compression"] in ("zstd", "gzip", "brotli"):
-        write_kwargs["compression_level"] = compression_level
-    return write_kwargs
-
-
-def _copy_row_groups(
-    pf: pq.ParquetFile, writer: pq.ParquetWriter, row_group_rows: int | None
-) -> None:
-    """Copy ``pf`` into ``writer`` one bounded piece at a time.
-
-    An explicit ``row_group_rows`` re-chunks to that size (one group per
-    piece, matching what ``write_table(row_group_size=...)`` produced);
-    otherwise each existing row group is copied as-is, so the file keeps its
-    own layout instead of pyarrow's ~1Mi-row default collapsing the groups.
-    The pieces' own schema metadata is irrelevant: the footer's key/value
-    metadata (``geo`` included) comes from the schema ``writer`` was opened
-    with, and ``write_table`` compares schemas without metadata.
-    """
-    if row_group_rows:
-        for batch in pf.iter_batches(batch_size=row_group_rows):
-            writer.write_table(pa.Table.from_batches([batch]), row_group_size=row_group_rows)
-        return
-    for rg in range(pf.metadata.num_row_groups):
-        piece = pf.read_row_group(rg)
-        writer.write_table(piece, row_group_size=piece.num_rows or None)
-
-
-def _rewrite_file_with_geo_metadata(
-    output_path: str,
-    geo_meta: dict,
-    compression: str = "ZSTD",
-    compression_level: int | None = None,
-    row_group_rows: int | None = None,
-) -> None:
-    """Rewrite a parquet file in place with the given geo metadata attached.
-
-    Streams row group by row group into a staged file, so memory is bounded
-    by one row group — never the whole file (#1155): this runs right after
-    the memory-bounded COPY of an XYM/XYZM 2.0 convert, which may be far
-    larger than RAM.
-    """
-    # geoarrow registration makes pyarrow round-trip the native GEOMETRY/
-    # GEOGRAPHY logical types (and their CRS) instead of demoting to binary.
-    import geoarrow.pyarrow  # noqa: F401
-
-    write_kwargs = _rewrite_writer_kwargs(compression, compression_level)
-    tmp_path = f"{output_path}.geometa.tmp"
-    try:
-        # Both handles are closed (`with`) before os.replace runs — Windows
-        # refuses to replace/unlink a file that is still open. pre_buffer is
-        # off because pyarrow's pre-buffer cache keeps every column chunk
-        # `iter_batches` has read until the file closes: with it on, the
-        # explicit-row_group_rows branch (the default convert path) grew to
-        # roughly the whole compressed file instead of one row group.
-        with pq.ParquetFile(output_path, pre_buffer=False) as pf:
-            new_meta = dict(pf.schema_arrow.metadata or {})
-            new_meta[b"geo"] = json.dumps(geo_meta).encode()
-            schema = pf.schema_arrow.with_metadata(new_meta)
-            with pq.ParquetWriter(
-                tmp_path, schema, **without_geometry_dictionary(write_kwargs, schema)
-            ) as writer:
-                _copy_row_groups(pf, writer, row_group_rows)
-        os.replace(tmp_path, output_path)
-    finally:
-        # os.replace consumes the tmp file on success; clean it up on failure.
-        if os.path.exists(tmp_path):
-            os.remove(tmp_path)

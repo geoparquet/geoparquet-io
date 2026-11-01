@@ -32,8 +32,8 @@ The `add` commands enhance GeoParquet files with spatial indices, geometry metri
 
 !!! warning "Spherical edges and planar math"
     The values these commands compute treat edges as straight lines on the
-    plane. That covers `bbox`, the cell keys (`h3`, `s2`, `a5`, `quadkey`) and
-    `kdtree`, and also `simplify`, `reproject` and the `aggregate` commands. On
+    plane. That covers `bbox` and `kdtree`, and also `simplify`, `reproject`
+    and an `aggregate` keyed from a bbox column (`--bucket-point bbox`). On
     a column with spherical edges they still run, and the values they add are
     the planar ones. The output keeps the column's edges, and each command or
     Python call logs one warning. A CLI input read from stdin is not checked.
@@ -42,6 +42,16 @@ The `add` commands enhance GeoParquet files with spatial indices, geometry metri
     [#1289](https://github.com/geoparquet/geoparquet-io/issues/1289).
     Operations that only pass the geometry through, such as `sort` or
     `extract`, keep the edges and do not warn.
+
+    The cell keys (`h3`, `s2`, `a5`, `quadkey`) do not warn: on a column with
+    spherical or ellipsoidal edges each geometry is keyed from a point on the
+    sphere, not its planar centroid, so a line keys from its great-circle
+    midpoint and a polar cap from the pole
+    ([#1293](https://github.com/geoparquet/geoparquet-io/issues/1293)).
+    `quadkey` uses that point rather than the bbox column's midpoint. A CLI
+    input read from stdin is keyed from the edges its own `geo` block states.
+    The `aggregate` commands and `partition --auto`'s resolution probe key
+    from the same point.
 
     === "CLI"
 
@@ -113,6 +123,8 @@ The command automatically checks for existing bbox columns:
 - **If bbox exists without metadata**: Same copy, plus a suggestion to use `gpio add bbox-metadata`
 - **If `--bbox-name` asks for a different name**: That column is computed and added alongside the existing one, with a warning that the file will have two bbox columns
 - **If a write option is asked for explicitly** (`--geoparquet-version`, `--compression`, `--compression-level`, `--row-group-size`): the column is recomputed instead of copied, because a verbatim copy reproduces the input's settings and cannot honour the requested ones
+- **If the input is GeoParquet 1.0**: the column is recomputed and the output written at 1.1, the version every gpio command writes for a 1.x input when `--geoparquet-version` is not given; a copy would keep 1.0. This holds for a piped (stdin) input too
+- **If the input has native geometry but no `geo` key** (parquet-geo-only): likewise recomputed and written at 2.0, the version auto mode writes for such a file; a copy would keep it keyless.
 - **Use `--force`**: Replace existing bbox column with a freshly computed one
 - **If the name is taken by something that is not a bbox struct** (a string tile id called `bbox`, or the same name spelled `BBOX`): that column is the input's own data, so it is kept as it is and the computed bbox is written under the next free name (`bbox_1`, `bbox_2`, …) with the covering declared over that column; a warning names both. `gpio convert` and the Python API's `Table.add_bbox()` take the same decision, so one collision means one thing whichever path writes the column ([#1176](https://github.com/geoparquet/geoparquet-io/issues/1176))
 
@@ -177,8 +189,13 @@ If your file already has a bbox column but lacks covering metadata (e.g., from e
         `COPY`, which had no level to carry over and fell back to DuckDB's default
         of 3: a file written at zstd 15 came back 11.6% bigger on the reported
         fixture and 36% bigger on a real one. A footer gpio cannot read — an
-        encrypted one, or a thrift structure it does not recognise — falls back to
-        that rewrite, with a warning saying so.
+        encrypted one, or a thrift structure it does not recognise — still falls
+        back to a rewrite, with a warning saying so. It is the same metadata-only
+        rewrite every footer write in gpio falls back to, and it is a write like
+        any other: the data is re-encoded at gpio's own codec and row groups
+        (zstd 15, 49,152 rows per group), not at the file's, and every footer key
+        the file carries survives except its `pandas` and `ARROW:schema` blocks.
+        This holds for the CLI and for `gpio.add_bbox_metadata()` alike.
 
     !!! note "Requires GeoParquet 1.1+"
 
@@ -333,11 +350,13 @@ The value written is:
     Like `gpio add bbox-metadata`, this rewrites the footer and copies every
     page below it byte for byte, so the compression codec *and its level*, the
     encodings, the bloom filters, the page index, the row-group boundaries and
-    the row order all come out as they went in. Unlike `add bbox-metadata`
-    there is no rewrite behind it: a footer gpio cannot patch is reported
-    rather than re-encoded, since re-encoding a whole file to add one key
-    would cost its compression level to buy nothing. The file is still copied
-    once, so the command needs room for a second copy beside it.
+    the row order all come out as they went in. A footer gpio cannot patch (an
+    encrypted one, or a thrift structure it does not recognise) falls back,
+    with a warning, to the same metadata-only rewrite `add bbox-metadata`
+    uses: the data is re-encoded at gpio's own codec and row groups (zstd 15,
+    49,152 rows per group), not at the file's. The CLI and
+    `gpio.add_stac_metadata()` behave the same. The file is still copied once,
+    so the command needs room for a second copy beside it.
 
     Remote URLs are not supported — download the file, add the key, upload it.
 
@@ -485,6 +504,18 @@ maximum portability across systems.
 ## A5 Cells
 
 Add [A5](https://a5geo.org/) spatial cell IDs based on geometry centroids.
+A5 cells are computed by the `a5` DuckDB extension, which gpio installs on
+first use: from the [community repository](https://community-extensions.duckdb.org/extensions/a5.html)
+on DuckDB 1.5, and from its maintainers' [Query.Farm repository](https://duckdb-extensions.query.farm)
+on DuckDB 2.0 and later, where the community registry carries only a stub.
+Either way gpio opts out of the extension's load-time telemetry (it sets
+`QUERY_FARM_TELEMETRY_OPT_OUT` before loading, leaving any value you set
+yourself alone), and extension signature checks stay on.
+
+Note that A5 cell IDs are not stable across a5 builds: the Query.Farm build
+for DuckDB 2.0 numbers cells differently from the 1.5-era community build
+(the cell geometries are identical), so IDs added under one DuckDB major
+will not join against IDs computed under the other.
 
 === "CLI"
 
@@ -662,7 +693,7 @@ Input in a non-CRS84 CRS is reprojected to the boundaries' CRS (OGC:CRS84) befor
 
 For native-geometry inputs (GeoParquet 2.0 and GeoParquet 1.1 with geoarrow encoding), the spatial join relies on native Parquet column statistics to skip irrelevant data, but this is not quite working yet, so expect those to be a bit slower until [#462](https://github.com/geoparquet/geoparquet-io/issues/462) is implemented. For non-native inputs (GeoParquet 1.x that carry a `bbox` column), a cheap bbox-overlap test is applied before `ST_Intersects` to prune candidates, and using it will be 5-10x faster.
 
-The join is a streaming `LEFT JOIN` so it scales to very large inputs (hundreds of millions of features) with bounded memory. A feature is attributed to the admin polygon(s) it intersects; because the per-level caches are non-overlapping, this is normally exactly one polygon per level. A feature straddling overlapping polygons at a border is emitted once per match. De-duplicating such border overlaps is intentionally left to a future dedicated operation rather than folded into this join, as including it greatly degraded performance.
+The join is a `LEFT JOIN` whose every step can spill to disk, so it scales to very large inputs (hundreds of millions of features) with bounded memory. Each input feature comes out exactly once, in input order. A feature is attributed to the admin polygon it intersects; where it intersects more than one at a level (a polygon straddling a border, or a sliver where the independently simplified caches overlap), it is assigned to the one with the smallest admin code. `gpio partition admin` and `gpio process aggregate admin` use the same rule, so a feature is never written to two partitions or counted in two regions.
 
 ### Quick Start
 

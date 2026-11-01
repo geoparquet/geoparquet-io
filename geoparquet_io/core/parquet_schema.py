@@ -107,6 +107,23 @@ def root_schema_index(schema_info: list, name: str) -> int | None:
     return None
 
 
+def nested_schema_index(schema_info: list, name: str) -> int | None:
+    """Index of the first *non-root* schema entry called ``name``, else ``None``.
+
+    The other half of :func:`root_schema_index`: the answer to "the file has a
+    field of that name, but only inside a struct".
+    """
+    roots = set()
+    index = schema_root_offset(schema_info)
+    while index < len(schema_info):
+        roots.add(index)
+        index = schema_subtree_end(schema_info, index)
+    return next(
+        (i for i, col in enumerate(schema_info) if i not in roots and col.get("name") == name),
+        None,
+    )
+
+
 def schema_direct_children(schema_info: list, index: int) -> list[dict]:
     """Direct children of ``schema_info[index]``, grandchildren excluded."""
     children = []

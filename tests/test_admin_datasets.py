@@ -21,7 +21,7 @@ from geoparquet_io.core.admin_datasets import (
     get_cached_path,
     get_or_cache_dataset,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 
 TEST_DATA_DIR = Path(__file__).parent / "data"
 
@@ -639,18 +639,20 @@ class TestOvertureAdminDataset:
         assert countries == ["CA", "US"]
 
         pt = "ST_GeomFromText('POINT(0.5 0.5)')"
-        n_land = con.execute(
-            f"SELECT count(*) FROM land WHERE ST_Intersects(geometry, {pt})"
-        ).fetchone()[0]
+        n_land = fetch_one(
+            con.execute(f"SELECT count(*) FROM land WHERE ST_Intersects(geometry, {pt})")
+        )[0]
         assert n_land == 1, "land-only cache must match each feature exactly once"
 
         # Sanity: against the unfiltered source the point matches both polygons.
-        n_all = con.execute(
-            f"""
+        n_all = fetch_one(
+            con.execute(
+                f"""
             SELECT count(*) FROM read_parquet('{src}')
             WHERE subtype='country' AND ST_Intersects(geometry, {pt})
             """
-        ).fetchone()[0]
+            )
+        )[0]
         assert n_all == 2
 
 
@@ -920,8 +922,8 @@ class TestAdminDatasetVersion:
         original_cached = overture_mod._cached_release
         try:
             dataset = OvertureAdminDataset()
-            with patch("geoparquet_io.core.overture._fetch_latest_release") as mock:
-                mock.return_value = "2099-01-01.0"
+            with patch("geoparquet_io.core.overture.make_request_with_retry") as mock:
+                mock.return_value = {"latest": "2099-01-01.0"}
                 overture_mod._cached_release = None
                 version = dataset.get_version()
                 assert version == "2099-01-01.0"
@@ -937,8 +939,8 @@ class TestAdminDatasetVersion:
         original_cached = overture_mod._cached_release
         try:
             dataset = OvertureAdminDataset()
-            with patch("geoparquet_io.core.overture._fetch_latest_release") as mock:
-                mock.return_value = "malicious-input; DROP TABLE"
+            with patch("geoparquet_io.core.overture.make_request_with_retry") as mock:
+                mock.return_value = {"latest": "malicious-input; DROP TABLE"}
                 overture_mod._cached_release = None
                 version = dataset.get_version()
                 assert version == OvertureAdminDataset.VERSION
@@ -960,6 +962,7 @@ class TestGetCacheDir:
         """Test that get_cache_dir returns a Path object."""
         cache_dir = get_cache_dir()
         assert isinstance(cache_dir, Path)
+        assert cache_dir == Path.home() / ".geoparquet-io" / "cache" / "admin"
 
     def test_cache_dir_in_user_home(self):
         """Test that cache directory is in user's home directory."""
@@ -1249,7 +1252,7 @@ class TestGetOrCacheDataset:
                     expected_path = cache_dir / f"gaul-{dataset.get_version()}.parquet"
                     mock_download.return_value = expected_path
 
-                    get_or_cache_dataset(dataset)
+                    assert get_or_cache_dataset(dataset) == str(expected_path)
 
                     mock_download.assert_called_once()
 
@@ -1371,22 +1374,7 @@ class TestCacheMessaging:
                     get_or_cache_dataset(dataset, verbose=True)
 
                     # Should show cache hit message
-                    mock_debug.assert_called()
-
-
-class TestCacheCLIIntegration:
-    """Test CLI flag integration for caching."""
-
-    def test_no_cache_flag_exists(self):
-        """Test that --no-cache flag will be available on add admin-divisions."""
-        # This test documents the expected CLI interface
-        # Implementation will add the flag to main.py
-        pass  # Placeholder - actual CLI test in test_cli.py
-
-    def test_clear_cache_flag_exists(self):
-        """Test that --clear-cache flag will be available on add admin-divisions."""
-        # This test documents the expected CLI interface
-        pass  # Placeholder - actual CLI test in test_cli.py
+                    assert "Using cached dataset" in str(mock_debug.call_args)
 
 
 class TestCacheEdgeCases:
@@ -1440,22 +1428,17 @@ class TestCacheEdgeCases:
                 with patch.object(dataset, "_download_to_cache") as mock_download:
                     fresh_path = cache_dir / f"gaul-{dataset.get_version()}.parquet"
 
-                    def redownload():
+                    def redownload(cache_path):
+                        assert cache_path == fresh_path
                         fresh_path.write_bytes(b"fresh data")
                         return fresh_path
 
                     mock_download.side_effect = redownload
 
-                    get_or_cache_dataset(dataset)
+                    assert get_or_cache_dataset(dataset) == str(fresh_path)
 
                     # Should re-download when cache is corrupted
                     mock_download.assert_called_once()
-
-    def test_concurrent_cache_access(self):
-        """Test that concurrent access to cache is handled safely."""
-        # This is a placeholder for thread-safety testing
-        # The implementation should use atomic file operations
-        pass
 
 
 class TestDownloadToCache:
@@ -1480,7 +1463,7 @@ class TestDownloadToCache:
 
         con = get_duckdb_connection(load_spatial=True)
         try:
-            count = con.execute(f"SELECT COUNT(*) FROM {sql_path(str(cache_path))}").fetchone()[0]
+            count = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(str(cache_path))}"))[0]
         finally:
             con.close()
         assert count > 0
@@ -1503,110 +1486,40 @@ class TestDownloadToCache:
         assert cache_path.exists()
 
 
-class TestPrepareDataSource:
-    """Test AdminDataset.prepare_data_source() -- returns a SQL table reference (#802)."""
+class TestTableReference:
+    """AdminDataset.table_reference() -- the one admin relation builder (#802, #1367)."""
 
     def test_remote_source_returns_sql_path_literal(self):
         """A remote (s3://) source is quoted/escaped via sql_path, not verified on disk."""
         dataset = GAULAdminDataset(verbose=True)
-        con = get_duckdb_connection()
-        try:
-            result = dataset.prepare_data_source(con)
-        finally:
-            con.close()
 
-        assert result == sql_path(dataset.get_default_source())
+        assert dataset.table_reference() == sql_path(dataset.get_default_source())
 
     def test_local_source_returns_sql_path_literal(self, tmp_path):
         """A local source is verified to exist, then also returned via sql_path."""
         local_file = tmp_path / "local_admin.parquet"
         local_file.write_bytes(b"not a real parquet file, just needs to exist")
         dataset = GAULAdminDataset(source_path=str(local_file))
-        con = get_duckdb_connection()
-        try:
-            result = dataset.prepare_data_source(con)
-        finally:
-            con.close()
 
-        assert result == sql_path(str(local_file))
+        assert dataset.table_reference() == sql_path(str(local_file))
 
     def test_local_source_missing_raises(self):
         """A local source that does not exist raises FileNotFoundGeoParquetError."""
         from geoparquet_io.core.exceptions import FileNotFoundGeoParquetError
 
         dataset = GAULAdminDataset(source_path="/nonexistent/admin-source.parquet")
-        con = get_duckdb_connection()
-        try:
-            with pytest.raises(FileNotFoundGeoParquetError):
-                dataset.prepare_data_source(con)
-        finally:
-            con.close()
+        with pytest.raises(FileNotFoundGeoParquetError):
+            dataset.table_reference()
 
+    def test_read_options_go_on_every_source(self, tmp_path):
+        """Overture's hive_partitioning goes on a per-level cache read too, which
+        aggregate admin used to read without it."""
+        cache = str(tmp_path / "o'brien-country.parquet")
+        dataset = OvertureAdminDataset(source_path=cache)
 
-class TestPerLevelJoinRowCountGuard:
-    """Runtime guard for the join-multiplication class of bugs.
-
-    The per-level caches are built to be non-overlapping so a plain LEFT JOIN
-    preserves the row count (see ``_build_level_cache_query``). When that
-    invariant breaks — a maritime polygon slipping back in, an overlapping
-    dependency, a custom ``--admin-source`` — the failure is silent duplication.
-    A cheap count comparison after the join names it instead.
-    """
-
-    def test_warns_when_the_join_changed_the_row_count(self, monkeypatch):
-        from geoparquet_io.core.add import admin_divisions
-
-        messages = []
-        monkeypatch.setattr(admin_divisions, "warn", messages.append)
-
-        admin_divisions._warn_if_row_count_changed(1000, 2600)
-
-        assert len(messages) == 1
-        assert "1000" in messages[0] and "2600" in messages[0]
-
-    def test_silent_when_the_row_count_is_preserved(self, monkeypatch):
-        from geoparquet_io.core.add import admin_divisions
-
-        messages = []
-        monkeypatch.setattr(admin_divisions, "warn", messages.append)
-
-        admin_divisions._warn_if_row_count_changed(1000, 1000)
-        admin_divisions._warn_if_row_count_changed(None, 1000)
-        admin_divisions._warn_if_row_count_changed(1000, None)
-
-        assert messages == []
-
-    def test_count_rows_returns_the_count_for_a_readable_source(self, tmp_path):
-        """The happy path: a metadata-only ``COUNT(*)`` against a real file."""
-        duckdb = pytest.importorskip("duckdb")
-        from geoparquet_io.core.add.admin_divisions import _count_rows
-
-        con = duckdb.connect()
-        src = tmp_path / "rows.parquet"
-        con.execute(f"COPY (SELECT * FROM range(7) AS t(i)) TO '{src}' (FORMAT PARQUET)")
-
-        assert _count_rows(con, str(src)) == 7
-
-    def test_count_rows_returns_the_count_for_a_table_ref(self, tmp_path):
-        """``is_table_ref=True`` emits the source bare, not single-quoted, so a
-        chained per-level temp table (not a file path) can be counted too."""
-        duckdb = pytest.importorskip("duckdb")
-        from geoparquet_io.core.add.admin_divisions import _count_rows
-
-        con = duckdb.connect()
-        con.execute("CREATE TEMP TABLE _gpio_admin_step_0 AS SELECT * FROM range(3) AS t(i)")
-
-        assert _count_rows(con, "_gpio_admin_step_0", is_table_ref=True) == 3
-
-    def test_count_rows_returns_none_when_the_source_cannot_be_read(self, tmp_path):
-        """A missing/unreadable source must not raise — the row-count guard is
-        a best-effort diagnostic, not something that should break the join."""
-        duckdb = pytest.importorskip("duckdb")
-        from geoparquet_io.core.add.admin_divisions import _count_rows
-
-        con = duckdb.connect()
-
-        assert _count_rows(con, str(tmp_path / "does-not-exist.parquet")) is None
+        assert dataset.table_reference(cache) == (
+            f"read_parquet({sql_path(cache)}, hive_partitioning=1)"
+        )
 
 
 def _write_country_admin_fixture(con, tmp_path, polygons, name="admin.parquet"):
@@ -1640,22 +1553,18 @@ def _write_points_fixture(con, tmp_path, points, name="input.parquet"):
     return src
 
 
-class TestPerLevelJoinRowCountGuardEndToEnd:
-    """``add admin-divisions`` runs the row-count guard on the real per-level
-    join path (``_execute_per_level_joins``), not just the standalone helper.
+class TestPerLevelJoinKeepsEveryFeatureOnce:
+    """``add admin-divisions`` on the real per-level join path
+    (``run_admin_join``) emits each input feature exactly once.
 
     Uses a local, offline ``--admin-source`` (Overture-shaped, per #819) so no
     network access or real cache is involved.
     """
 
-    def test_row_count_preserved_stays_silent(self, tmp_path, monkeypatch):
+    def test_row_count_preserved(self, tmp_path):
         import duckdb
 
-        from geoparquet_io.core.add import admin_divisions
         from geoparquet_io.core.add.admin_divisions import add_admin_divisions_multi
-
-        messages = []
-        monkeypatch.setattr(admin_divisions, "warn", messages.append)
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
@@ -1681,22 +1590,16 @@ class TestPerLevelJoinRowCountGuardEndToEnd:
         )
 
         con = duckdb.connect()
-        assert con.execute(f"SELECT COUNT(*) FROM '{out}'").fetchone()[0] == 2
-        # Other warnings (e.g. bbox-optimization advice) may fire; the row-count
-        # guard itself must stay silent.
-        assert [m for m in messages if "Admin join" in m] == []
+        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM '{out}'"))[0] == 2
 
-    def test_overlapping_admin_polygons_duplicate_rows_and_warn(self, tmp_path, monkeypatch):
-        """Two overlapping country polygons make one input point match twice —
-        exactly the join-multiplication bug the guard exists to name.
+    def test_overlapping_admin_polygons_keep_each_feature_once(self, tmp_path):
+        """Two overlapping country polygons both cover one input point. The join
+        keeps one match per feature (#543), the smaller code, so the row count
+        is preserved.
         """
         import duckdb
 
-        from geoparquet_io.core.add import admin_divisions
         from geoparquet_io.core.add.admin_divisions import add_admin_divisions_multi
-
-        messages = []
-        monkeypatch.setattr(admin_divisions, "warn", messages.append)
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
@@ -1724,13 +1627,8 @@ class TestPerLevelJoinRowCountGuardEndToEnd:
         )
 
         con = duckdb.connect()
-        # Duplicated: 1 input point matched 2 polygons, the other matched 1.
-        assert con.execute(f"SELECT COUNT(*) FROM '{out}'").fetchone()[0] == 3
-        guard_messages = [m for m in messages if "Admin join" in m]
-        assert len(guard_messages) == 1
-        assert "duplicated" in guard_messages[0]
-        assert "2 input features" in guard_messages[0]
-        assert "3 in the" in guard_messages[0]
+        rows = con.execute(f"SELECT overture_country FROM '{out}'").fetchall()
+        assert sorted(r[0] for r in rows) == ["AA", "CC"]
 
 
 class TestOvertureLevelPredicates:

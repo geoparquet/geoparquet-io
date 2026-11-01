@@ -448,7 +448,10 @@ _DETERMINISM_SCRIPT = textwrap.dedent(
 )
 
 
-@pytest.mark.parametrize("strategy", STRATEGIES)
+# ``duckdb-kv`` writes the column with DuckDB's ``COPY``: no Arrow extension
+# type is built, so the process's geoarrow registration cannot reach it. Its
+# carrier is ``TestSecondaryCarrierMatchesTheTargetVersion``'s.
+@pytest.mark.parametrize("strategy", [s for s in STRATEGIES if s != "duckdb-kv"])
 @pytest.mark.parametrize("version", ["1.1", "2.0"])
 def test_secondary_carrier_is_independent_of_geoarrow_import(
     strategy, version, two_geometry_source, tmp_path
@@ -522,17 +525,17 @@ class TestResolveGeometryColumns:
 class TestCarrierHelperDefensivePaths:
     """The error and empty-input branches of the helpers this PR adds or fixes."""
 
-    def test_parse_geo_metadata_quietly_handles_every_absent_shape(self):
-        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
+    def test_sanitized_carried_geo_handles_every_absent_shape(self):
+        from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 
-        assert _parse_geo_metadata_quietly(None) == {}
-        assert _parse_geo_metadata_quietly({}) == {}
-        assert _parse_geo_metadata_quietly({b"other": b"x"}) == {}
+        assert sanitized_carried_geo(None) == {}
+        assert sanitized_carried_geo({}) == {}
+        assert sanitized_carried_geo({b"other": b"x"}) == {}
 
-    def test_parse_geo_metadata_quietly_accepts_a_str_key(self):
-        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
+    def test_sanitized_carried_geo_accepts_a_str_key(self):
+        from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 
-        assert _parse_geo_metadata_quietly({"geo": json.dumps(_geo_dict())})["primary_column"] == (
+        assert sanitized_carried_geo({"geo": json.dumps(_geo_dict())})["primary_column"] == (
             "geometry"
         )
 
@@ -541,11 +544,11 @@ class TestCarrierHelperDefensivePaths:
         [b"{not json", b"\xff\xfe not utf8", b'"a string, not an object"', b"[1, 2]"],
         ids=["bad_json", "bad_utf8", "json_string", "json_list"],
     )
-    def test_parse_geo_metadata_quietly_swallows_unreadable_values(self, raw):
-        """An unreadable geo key must not break a write; it just names no columns."""
-        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
+    def test_sanitized_carried_geo_swallows_unreadable_values(self, raw):
+        """An unreadable geo key must not break a write; it just names no columns (it warns, #1367 change 6)."""
+        from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 
-        assert _parse_geo_metadata_quietly({b"geo": raw}) == {}
+        assert sanitized_carried_geo({b"geo": raw}) == {}
 
     def test_strip_geoarrow_returns_the_table_when_conversion_fails(self, monkeypatch):
         """A conversion failure must leave the table alone, not raise mid-write."""
@@ -643,7 +646,7 @@ class TestNonGeometryColumnsNamedAsGeometry:
         for untouched in ("already_wkb", "not_geometry", "text_col"):
             assert f'ST_AsWKB("{untouched}")' not in query
 
-        result = con.execute(query).arrow().read_all()
+        result = con.sql(query).arrow().read_all()
         assert result.column("already_wkb").to_pylist() == [b"x"]
         assert result.column("not_geometry").to_pylist() == [42]
         assert result.column("text_col").to_pylist() == ["POINT(3 4)"]
@@ -693,10 +696,10 @@ class TestMalformedCarriedColumns:
         ids=["null", "list", "string", "dict_of_non_dict"],
     )
     def test_a_malformed_columns_value_does_not_reach_the_carrier_logic(self, columns):
-        from geoparquet_io.core.arrow_geo_metadata import _parse_geo_metadata_quietly
+        from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 
         raw = {"version": "1.1.0", "primary_column": "geometry", "columns": columns}
-        parsed = _parse_geo_metadata_quietly({b"geo": json.dumps(raw).encode()})
+        parsed = sanitized_carried_geo({b"geo": json.dumps(raw).encode()})
 
         # Either dropped entirely or reduced to the dict-valued entries, so that
         # `columns[name]["crs"]` downstream cannot raise.

@@ -20,7 +20,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import format_writers
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.exceptions import InvalidParameterError, ValidationError
 from geoparquet_io.core.format_writers import write_csv, write_flatgeobuf, write_geopackage
 
@@ -39,7 +39,7 @@ BBOX_AS_WKT = "POLYGON((-0.5 10.0, 0.5 10.0, 0.5 11.0, -0.5 11.0, -0.5 10.0))"
 
 def _gpkg_table(db):
     """The one layer's table name (DuckDB's GDAL writer names it after the file)."""
-    return db.execute("SELECT table_name FROM gpkg_contents").fetchone()[0]
+    return fetch_one(db.execute("SELECT table_name FROM gpkg_contents"))[0]
 
 
 def _gpkg_values(path, column="fsq_place_id"):
@@ -57,7 +57,7 @@ def _gpkg_columns(path):
 def _read_layer_count(path):
     con = get_duckdb_connection(load_spatial=True)
     try:
-        return con.execute(f"SELECT count(*) FROM ST_Read('{path}')").fetchone()[0]
+        return fetch_one(con.execute(f"SELECT count(*) FROM ST_Read('{path}')"))[0]
     finally:
         con.close()
 
@@ -236,7 +236,7 @@ class TestFilterSemantics:
 
     def test_reversed_bbox_is_rejected(self, tmp_path):
         with pytest.raises(InvalidParameterError, match="reversed"):
-            write_geopackage(PLACES, str(tmp_path / "out.gpkg"), bbox="0.5,10.0,-0.5,11.0")
+            write_geopackage(PLACES, str(tmp_path / "out.gpkg"), bbox="500000,10.0,400000,11.0")
 
     def test_non_numeric_bbox_sequence_is_rejected(self, tmp_path):
         with pytest.raises(InvalidParameterError, match="numeric"):
@@ -312,8 +312,8 @@ class TestDonorRegressions:
         out = tmp_path / "table.gpkg"
         write_geopackage(plain_parquet, str(out))
         with closing(sqlite3.connect(out)) as db:
-            data_type = db.execute("SELECT data_type FROM gpkg_contents").fetchone()[0]
-            geometry_rows = db.execute("SELECT count(*) FROM gpkg_geometry_columns").fetchone()[0]
+            data_type = fetch_one(db.execute("SELECT data_type FROM gpkg_contents"))[0]
+            geometry_rows = fetch_one(db.execute("SELECT count(*) FROM gpkg_geometry_columns"))[0]
         assert data_type == "attributes"
         assert geometry_rows == 0
         assert "geom" not in _gpkg_columns(out)
@@ -330,7 +330,7 @@ class TestDonorRegressions:
         out = tmp_path / "tags.gpkg"
         write_geopackage(str(source), str(out), bbox=BBOX)
         columns = _gpkg_columns(out)
-        assert "tags" not in columns  # GDAL cannot hold it; dropped as before
+        assert "tags" in columns  # GDAL cannot hold it natively; JSON text since #1333
         assert "name" in columns  # the columns after it still arrive
         assert len(_gpkg_values(out)) == BBOX_ROWS
 
@@ -521,7 +521,7 @@ class TestFiltersOnUnsupportedFormats:
 class TestWriteFormatRouter:
     def test_the_csv_branch_forwards_the_filters(self, tmp_path):
         out = tmp_path / "routed.csv"
-        format_writers.write_format(PLACES, str(out), "csv", bbox=BBOX)
+        format_writers.write_csv(PLACES, str(out), bbox=BBOX)
         assert len(Path(out).read_text(encoding="utf-8").strip().splitlines()) == BBOX_ROWS + 1
 
 

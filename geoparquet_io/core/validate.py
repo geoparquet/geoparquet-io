@@ -17,61 +17,96 @@ from typing import Any
 from rich.console import Console
 from rich.markup import escape
 
+from geoparquet_io.core.bbox_parse import BBox, within_wrapped_x_sql
 from geoparquet_io.core.check_verdict import validation_verdict
-from geoparquet_io.core.common import split_zm_suffix, zm_suffix_sql
+from geoparquet_io.core.column_selection import fold
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
+    DEFAULT_CRS_LABEL,
     NULL_CRS_HINT,
     PARQUET_UNKNOWN_CRS,
     PROJJSON_CRS_TYPES,
     _is_crs84_equivalent,
     _is_ogc_crs84,
     _parse_crs_value,
+    column_is_geographic,
+    crs_equal,
     crs_from_column_meta,
-    entry_crs_is_unknown,
+    crs_of,
     get_crs_display_name,
-    is_geographic_crs,
+    is_geographic,
     is_unknown_type_crs,
+    load_crs,
+    source_crs_is_unknown,
 )
 from geoparquet_io.core.duckdb_metadata import (
     count_kv_key,
     is_geometry_column,
+    is_native_geo_column,
+    native_geo_type,
     parse_geometry_logical_type,
     resolve_authority_code_crs,
     resolve_crs_reference,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
     _geoarrow_coord_exprs,
+    as_wkb_sql,
     disable_geoparquet_conversion,
+    fetch_one,
+    geom_from_wkb_sql,
     is_interrupt,
     quote_identifier,
     sql_path,
 )
-from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.edges import (
+    COUNTERCLOCKWISE,
+    GEOGRAPHY_EDGE_ALGORITHMS,
+    PLANAR,
+    SPHERICAL,
+    declared_edges,
+    edges_allowed,
+    edges_of,
+    is_ellipsoidal,
+    is_geodesic,
+    logical_type_edges,
+)
+from geoparquet_io.core.exceptions import GeometryError, GeoParquetError
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     BBOX_COVERING_FIELD_ORDERS,
     GEOARROW_ENCODINGS,
-    GEOGRAPHY_EDGE_ALGORITHMS,
+    GEOPARQUET_VERSIONS,
+    QuerySource,
+    bbox_xy,
+    bounds_of,
     covering_lacks_bbox,
+    declares_covering_member,
+    geometry_types_of,
     is_covering_path,
+    is_geoparquet_1x,
+    read_raw_geo,
+    row_group_geometry_stats,
+    split_zm_suffix,
 )
 from geoparquet_io.core.geometry_detection import (
     GeometryPresence,
     GeometryRead,
     count_geometry_presence,
+    resolve_geometry_read,
 )
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import configure_verbose, debug
 from geoparquet_io.core.optional_deps import load_module
 from geoparquet_io.core.parquet_footer import read_footer_kv
 from geoparquet_io.core.parquet_schema import (
+    nested_schema_index,
+    root_schema_columns,
     root_schema_index,
     schema_direct_children,
     schema_entry_is_group,
 )
+from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs
 
 
@@ -140,10 +175,7 @@ _GEOARROW_ENCODING_TYPE = {
     "multilinestring": "MultiLineString",
     "multipolygon": "MultiPolygon",
 }
-ORIENTATION_COUNTERCLOCKWISE = "counterclockwise"
-VALID_ORIENTATIONS = [ORIENTATION_COUNTERCLOCKWISE]
-VALID_EDGES_GEOPARQUET = ["planar", "spherical"]
-VALID_EDGES_PARQUET_GEO = list(GEOGRAPHY_EDGE_ALGORITHMS)
+VALID_ORIENTATIONS = [COUNTERCLOCKWISE]
 VALID_GEOMETRY_TYPES = [
     "Point",
     "LineString",
@@ -153,43 +185,6 @@ VALID_GEOMETRY_TYPES = [
     "MultiPolygon",
     "GeometryCollection",
 ]
-
-# WKB integer codes for Parquet native geo types
-WKB_TYPE_CODES = {
-    # XY
-    1: "Point",
-    2: "LineString",
-    3: "Polygon",
-    4: "MultiPoint",
-    5: "MultiLineString",
-    6: "MultiPolygon",
-    7: "GeometryCollection",
-    # XYZ (add 1000)
-    1001: "Point Z",
-    1002: "LineString Z",
-    1003: "Polygon Z",
-    1004: "MultiPoint Z",
-    1005: "MultiLineString Z",
-    1006: "MultiPolygon Z",
-    1007: "GeometryCollection Z",
-    # XYM (add 2000)
-    2001: "Point M",
-    2002: "LineString M",
-    2003: "Polygon M",
-    2004: "MultiPoint M",
-    2005: "MultiLineString M",
-    2006: "MultiPolygon M",
-    2007: "GeometryCollection M",
-    # XYZM (add 3000)
-    3001: "Point ZM",
-    3002: "LineString ZM",
-    3003: "Polygon ZM",
-    3004: "MultiPoint ZM",
-    3005: "MultiLineString ZM",
-    3006: "MultiPolygon ZM",
-    3007: "GeometryCollection ZM",
-}
-
 
 # =============================================================================
 # Core Metadata Checks (GeoParquet 1.0+)
@@ -571,7 +566,7 @@ def _check_edges_valid(
     GeoParquet 2.0 widened the vocabulary from planar/spherical to include the
     four ellipsoidal-geodesic algorithms; 1.x keeps the narrow set.
     """
-    edges = col_meta.get("edges")
+    edges = edges_of(col_meta)
 
     if edges is None:
         return ValidationCheck(
@@ -581,9 +576,7 @@ def _check_edges_valid(
             category="column_metadata",
         )
 
-    valid_edges = list(VALID_EDGES_GEOPARQUET)
-    if _version_at_least(geo_version, 2, 0):
-        valid_edges += [e for e in VALID_EDGES_PARQUET_GEO if e not in valid_edges]
+    valid_edges = list(edges_allowed(is_geoparquet_1x(geo_version)))
 
     is_valid = edges in valid_edges
     return ValidationCheck(
@@ -612,14 +605,14 @@ def _check_edges_spherical_on_projected_crs(
     geographic/unknown CRS), so conformant files gain no output line.
     """
 
-    edges = col_meta.get("edges")
-    if not edges or edges == "planar":
+    edges = edges_of(col_meta)
+    if not is_geodesic(edges):
         return None
 
     # An absent or null CRS means "OGC:CRS84 default" / "unknown"; neither is a
     # projected CRS, and _check_crs_valid is what reports a null.
     crs = resolve_crs_reference(parquet_file, col_meta.get("crs"))
-    if is_geographic_crs(crs):
+    if is_geographic(crs):
         return None
 
     return ValidationCheck(
@@ -695,23 +688,10 @@ def _check_bbox_valid(col_meta: dict, col_name: str, geo_version: str = "1.0.0")
 
 def _resolve_datum_type(crs: Any) -> str | None:
     """Resolve a CRS value's datum type name via pyproj; None when unresolvable."""
-    try:
-        from pyproj import CRS as PyprojCRS
-
-        if isinstance(crs, dict):
-            try:
-                pyproj_crs = PyprojCRS.from_json_dict(crs)
-            except Exception:
-                # Partial PROJJSON: resolve via its authority:code id instead
-                crs_id = crs.get("id") or {}
-                pyproj_crs = PyprojCRS.from_user_input(
-                    f"{crs_id.get('authority')}:{crs_id.get('code')}"
-                )
-        else:
-            pyproj_crs = PyprojCRS.from_user_input("OGC:CRS84")
-        return pyproj_crs.datum.type_name if pyproj_crs.datum else ""
-    except Exception:
+    loaded = load_crs(crs)
+    if loaded is None:
         return None
+    return loaded.datum.type_name if loaded.datum else ""
 
 
 def _check_epoch_valid(col_meta: dict, col_name: str) -> ValidationCheck:
@@ -742,7 +722,7 @@ def _check_epoch_valid(col_meta: dict, col_name: str) -> ValidationCheck:
             f'column "{col_name}" declares epoch {epoch} but CRS is null; cannot verify datum type',
         )
     if crs is CRS_ABSENT:
-        crs = None  # _resolve_datum_type reads a non-dict as the OGC:CRS84 default
+        crs = DEFAULT_CRS_LABEL
 
     datum_type = _resolve_datum_type(crs)
     if datum_type is None:
@@ -815,7 +795,7 @@ def _check_version_known(geo_meta: dict) -> ValidationCheck:
     )
 
 
-def _columns_declaring_covering(geo_meta: dict) -> list[str]:
+def _columns_declaring_cover(geo_meta: dict) -> list[str]:
     """Names of geometry columns whose metadata declares the 'covering' key (added in 1.1).
 
     A ``columns`` that is not an object declares no columns, so it declares no
@@ -851,7 +831,7 @@ def _check_version_features(parquet_file: str, geo_meta: dict) -> ValidationChec
         return _result(CheckStatus.SKIPPED, "version is not a string; feature check not applicable")
     if not version.startswith("1."):
         return _result(CheckStatus.PASSED, "version permits declared features")
-    covering_cols = _columns_declaring_covering(geo_meta)
+    covering_cols = _columns_declaring_cover(geo_meta)
     if covering_cols and not _version_at_least(version, 1, 1):
         return _result(
             CheckStatus.FAILED,
@@ -866,7 +846,7 @@ def _check_version_features(parquet_file: str, geo_meta: dict) -> ValidationChec
         native_cols = [
             schema.column(i).name
             for i in range(len(schema))
-            if str(schema.column(i).logical_type).startswith(("Geometry", "Geography"))
+            if native_geo_type(schema.column(i).logical_type) is not None
         ]
     except Exception as e:
         return _result(CheckStatus.SKIPPED, f"could not inspect Parquet schema: {e}")
@@ -896,33 +876,34 @@ def _check_geometry_not_grouped(
     that the column sits at the root of the schema.
     """
     # Find the geometry column in schema
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            if _is_geoarrow_encoding(encoding):
-                return ValidationCheck(
-                    name=f"geometry_not_grouped_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message=f'geometry column "{geom_col}" is a "{encoding}" GeoArrow '
-                    "group at the schema root",
-                    category="parquet_schema",
-                )
-            # A group field is one the listing renders as nested, whether or not
-            # it renders child rows: the pyarrow fast path gives a list or map
-            # column no children at all, so counting them would wave through a
-            # geometry column stored as a list under a declared "WKB" encoding.
-            if schema_entry_is_group(col):
-                return ValidationCheck(
-                    name=f"geometry_not_grouped_{geom_col}",
-                    status=CheckStatus.FAILED,
-                    message=f'geometry column "{geom_col}" must not be grouped',
-                    category="parquet_schema",
-                )
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
+        if _is_geoarrow_encoding(encoding):
             return ValidationCheck(
                 name=f"geometry_not_grouped_{geom_col}",
                 status=CheckStatus.PASSED,
-                message=f'geometry column "{geom_col}" is not grouped',
+                message=f'geometry column "{geom_col}" is a "{encoding}" GeoArrow '
+                "group at the schema root",
                 category="parquet_schema",
             )
+        # A group field is one the listing renders as nested, whether or not
+        # it renders child rows: the pyarrow fast path gives a list or map
+        # column no children at all, so counting them would wave through a
+        # geometry column stored as a list under a declared "WKB" encoding.
+        if schema_entry_is_group(col):
+            return ValidationCheck(
+                name=f"geometry_not_grouped_{geom_col}",
+                status=CheckStatus.FAILED,
+                message=f'geometry column "{geom_col}" must not be grouped',
+                category="parquet_schema",
+            )
+        return ValidationCheck(
+            name=f"geometry_not_grouped_{geom_col}",
+            status=CheckStatus.PASSED,
+            message=f'geometry column "{geom_col}" is not grouped',
+            category="parquet_schema",
+        )
 
     return ValidationCheck(
         name=f"geometry_not_grouped_{geom_col}",
@@ -994,7 +975,7 @@ _GEOARROW_FIELDS_ENCODING = {v: k for k, v in _GEOARROW_LIST_FIELDS.items()}
 # this set came from a source that does not use geoarrow's names (the generic
 # list<element: ...>, or DuckDB's typeless group node), and is not evidence of a
 # wrong encoding either way.
-_KNOWN_LIST_FIELDS = {name.upper() for names in _GEOARROW_LIST_FIELDS.values() for name in names}
+_KNOWN_LIST_FIELDS = {fold(name) for names in _GEOARROW_LIST_FIELDS.values() for name in names}
 
 
 def _list_field_names(physical_type: str) -> frozenset[str] | None:
@@ -1004,9 +985,9 @@ def _list_field_names(physical_type: str) -> frozenset[str] | None:
     must not be read as a mismatch.
     """
     found = re.findall(r"LIST<\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", physical_type)
-    if not found or any(name.upper() not in _KNOWN_LIST_FIELDS for name in found):
+    if not found or any(fold(name) not in _KNOWN_LIST_FIELDS for name in found):
         return None
-    return frozenset(name.lower() for name in found)
+    return frozenset(fold(name) for name in found)
 
 
 def _check_geoarrow_layout(physical_type: str, geom_col: str, encoding: str) -> ValidationCheck:
@@ -1075,27 +1056,28 @@ def _check_geometry_byte_array(
     schema_info: list, geom_col: str, encoding: Any = "WKB"
 ) -> ValidationCheck:
     """Check 15: WKB geometry columns must be stored using BYTE_ARRAY parquet type."""
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            # parquet_schema() reports a group node's type as an explicit None,
-            # so the "" default never applies: `or ""` is the guard, not `get`.
-            physical_type = (col.get("type") or "").upper()
-            if _is_geoarrow_encoding(encoding):
-                return _check_geoarrow_layout(physical_type, geom_col, encoding)
-            # BYTE_ARRAY is represented as BYTE_ARRAY or sometimes as a binary type
-            if "BYTE_ARRAY" in physical_type or physical_type == "BINARY":
-                return ValidationCheck(
-                    name=f"geometry_byte_array_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message=f'geometry column "{geom_col}" uses BYTE_ARRAY type',
-                    category="parquet_schema",
-                )
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
+        # parquet_schema() reports a group node's type as an explicit None,
+        # so the "" default never applies: `or ""` is the guard, not `get`.
+        physical_type = (col.get("type") or "").upper()
+        if _is_geoarrow_encoding(encoding):
+            return _check_geoarrow_layout(physical_type, geom_col, encoding)
+        # BYTE_ARRAY is represented as BYTE_ARRAY or sometimes as a binary type
+        if "BYTE_ARRAY" in physical_type or physical_type == "BINARY":
             return ValidationCheck(
                 name=f"geometry_byte_array_{geom_col}",
-                status=CheckStatus.FAILED,
-                message=f'geometry column "{geom_col}" must use BYTE_ARRAY (got {physical_type})',
+                status=CheckStatus.PASSED,
+                message=f'geometry column "{geom_col}" uses BYTE_ARRAY type',
                 category="parquet_schema",
             )
+        return ValidationCheck(
+            name=f"geometry_byte_array_{geom_col}",
+            status=CheckStatus.FAILED,
+            message=f'geometry column "{geom_col}" must use BYTE_ARRAY (got {physical_type})',
+            category="parquet_schema",
+        )
 
     return ValidationCheck(
         name=f"geometry_byte_array_{geom_col}",
@@ -1107,22 +1089,23 @@ def _check_geometry_byte_array(
 
 def _check_geometry_not_repeated(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check 16: geometry columns must be required or optional, not repeated."""
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            repetition = col.get("repetition_type", "").upper()
-            if repetition == "REPEATED":
-                return ValidationCheck(
-                    name=f"geometry_not_repeated_{geom_col}",
-                    status=CheckStatus.FAILED,
-                    message=f'geometry column "{geom_col}" must not be repeated',
-                    category="parquet_schema",
-                )
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
+        repetition = col.get("repetition_type", "").upper()
+        if repetition == "REPEATED":
             return ValidationCheck(
                 name=f"geometry_not_repeated_{geom_col}",
-                status=CheckStatus.PASSED,
-                message=f'geometry column "{geom_col}" is {repetition.lower() or "optional"}',
+                status=CheckStatus.FAILED,
+                message=f'geometry column "{geom_col}" must not be repeated',
                 category="parquet_schema",
             )
+        return ValidationCheck(
+            name=f"geometry_not_repeated_{geom_col}",
+            status=CheckStatus.PASSED,
+            message=f'geometry column "{geom_col}" is {repetition.lower() or "optional"}',
+            category="parquet_schema",
+        )
 
     return ValidationCheck(
         name=f"geometry_not_repeated_{geom_col}",
@@ -1137,15 +1120,6 @@ def _check_geometry_not_repeated(schema_info: list, geom_col: str) -> Validation
 # =============================================================================
 
 
-def _describe_geom_type(con, raw_url: str, geom_col: str) -> str:
-    """DuckDB's type string for a geometry column ('' when unavailable)."""
-    type_query = (
-        f"DESCRIBE SELECT {quote_identifier(geom_col)} FROM read_parquet({sql_path(raw_url)})"
-    )
-    type_result = con.execute(type_query).fetchone()
-    return type_result[1] if type_result else ""
-
-
 def _geoarrow_zm_suffix(col_type: str) -> str:
     """Dimension suffix implied by a GeoArrow coordinate struct's fields.
 
@@ -1155,7 +1129,7 @@ def _geoarrow_zm_suffix(col_type: str) -> str:
     match = re.search(r"STRUCT\(([^)]*)\)", col_type or "", re.IGNORECASE)
     if not match:
         return ""
-    fields = {field.strip().split(" ")[0].strip('"').lower() for field in match.group(1).split(",")}
+    fields = {fold(field.strip().split(" ")[0].strip('"')) for field in match.group(1).split(",")}
     has_z, has_m = "z" in fields, "m" in fields
     if has_z and has_m:
         return " ZM"
@@ -1169,17 +1143,20 @@ def _geoarrow_zm_suffix(col_type: str) -> str:
 def _geoarrow_bounds_subquery(raw_url: str, geom_col: str, encoding: str, limit_clause: str) -> str:
     """Per-row GeoArrow coordinate bounds, with empty geometries filtered out.
 
-    Empty GeoArrow values are either an empty coordinate list (NULL bounds) or,
-    for "point", NaN coordinates; neither has an extent to compare, so the
-    isfinite() guard drops both instead of poisoning MIN/MAX.
+    For the per-row contains-data comparison only; the column's bounds come from
+    ``geo_metadata.bounds_of``. Empty GeoArrow values are either an empty
+    coordinate list (NULL bounds) or, for "point", NaN coordinates; neither has
+    an extent to compare, so the isfinite() guard drops both.
     """
-    quoted_geom = quote_identifier(geom_col)
-    xmin, ymin, xmax, ymax, _, _ = _geoarrow_coord_exprs(quoted_geom, encoding)
+    from geoparquet_io.core.geo_metadata import _envelope_columns, _finite_sql, _located_sql
+    from geoparquet_io.core.geometry_detection import GeometryRead
+
+    _, envelope = _envelope_columns(GeometryRead.for_geoarrow(geom_col, encoding))
+    xmin, ymin, xmax, ymax = envelope
     return f"""
         SELECT {xmin} AS xmin, {ymin} AS ymin, {xmax} AS xmax, {ymax} AS ymax
         FROM read_parquet({sql_path(raw_url)})
-        WHERE {quoted_geom} IS NOT NULL
-          AND isfinite({xmin}) AND isfinite({ymin})
+        WHERE {_located_sql(*envelope)} AND {_finite_sql(*envelope)}
         {limit_clause}
     """
 
@@ -1220,7 +1197,7 @@ def _check_geoarrow_encoding_matches_data(
     """
 
     try:
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
     except Exception as e:
         return _geoarrow_layout_error(name, encoding, "geometry coordinates", e)
 
@@ -1328,35 +1305,13 @@ def _bad_wkb_message(geom_col: str, encoding: Any, presence: GeometryPresence, p
 
 
 def _geometry_read(con, raw_url: str, geom_col: str) -> GeometryRead:
-    """How the data checks read ``geom_col``, raising when it cannot be read."""
-    read = GeometryRead.for_type(geom_col, _describe_geom_type(con, raw_url, geom_col))
+    """How the data checks read ``geom_col``, raising when it cannot be read.
+
+    The owner describes the file and decides the read (#1367 concept 7)."""
+    read = resolve_geometry_read(con, raw_url, geom_col)
     if not read.readable:
         raise ValueError(read.problem)
     return read
-
-
-# Uppercase DuckDB geometry type names -> expected GeoParquet casing.
-_GEOM_TYPE_DISPLAY = {
-    "POINT": "Point",
-    "LINESTRING": "LineString",
-    "POLYGON": "Polygon",
-    "MULTIPOINT": "MultiPoint",
-    "MULTILINESTRING": "MultiLineString",
-    "MULTIPOLYGON": "MultiPolygon",
-    "GEOMETRYCOLLECTION": "GeometryCollection",
-}
-
-
-def _normalize_found_geometry_type(raw: str) -> str:
-    """Map a DuckDB type + dimension suffix ("MULTIPOINT Z") to spec casing.
-
-    Strips any ST_ prefix, splits off the Z/M/ZM suffix, maps the base name,
-    then re-appends the suffix ("MultiPoint Z"). Unmapped base names keep the
-    uppercase base (never the raw string, which still carries the suffix and
-    would double it: "TRIANGLE Z Z").
-    """
-    base, suffix = split_zm_suffix(raw.replace("ST_", "").upper())
-    return _GEOM_TYPE_DISPLAY.get(base, base) + suffix
 
 
 def _compare_geometry_types(
@@ -1413,13 +1368,13 @@ def _check_geoarrow_geometry_types(
     """
     quoted_geom = quote_identifier(geom_col)
     found = _GEOARROW_ENCODING_TYPE[encoding] + _geoarrow_zm_suffix(
-        _describe_geom_type(con, raw_url, geom_col)
+        resolve_geometry_read(con, raw_url, geom_col).duckdb_type
     )
     count_query = f"""
         SELECT COUNT(*) FROM read_parquet({sql_path(raw_url)})
         WHERE {quoted_geom} IS NOT NULL {limit_clause}
     """
-    count_result = con.execute(count_query).fetchone()
+    count_result = fetch_one(con.execute(count_query))
     total_count = count_result[0] if count_result else 0
     return _compare_geometry_types({found}, declared_types, total_count, geom_col)
 
@@ -1434,6 +1389,18 @@ def _check_geometry_types_match_data(
 ) -> ValidationCheck:
     """Check 18: all geometry types must be included in 'geometry_types' metadata."""
 
+    # A `geometry_types` that is not a list is one defect, and
+    # `geometry_types_list` already FAILs it. Comparing it anyway read the
+    # string "Point" as the set of its letters and FAILed a second time (#1080).
+    if not isinstance(declared_types, list):
+        return ValidationCheck(
+            name=f"geometry_types_match_data_{geom_col}",
+            status=CheckStatus.SKIPPED,
+            message=f"geometry_types is not a list (see geometry_types_list_{geom_col}); "
+            "data not checked against it",
+            category="data_validation",
+        )
+
     raw_url = resolve_file_url(parquet_file, verbose=False)
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 
@@ -1444,34 +1411,19 @@ def _check_geometry_types_match_data(
             )
 
         read = _geometry_read(con, raw_url, geom_col)
-        geom_expr = read.expr
-
-        # Get both distinct types and total count in one query. The dimension
-        # suffix matters: "LineString" and "LineString ZM" are distinct
-        # geometry_types per spec, so the scan must not collapse them.
-        typed_expr = f"ST_GeometryType({geom_expr}) || {zm_suffix_sql(geom_expr)}"
-        query = f"""
-            SELECT {typed_expr} as geom_type, COUNT(*) as cnt
-            FROM (
-                SELECT {read.quoted}
-                FROM read_parquet({sql_path(raw_url)})
-                WHERE {read.present_sql}
-                {limit_clause}
-            )
-            GROUP BY {typed_expr}
+        sample = f"""
+            SELECT {read.quoted}
+            FROM read_parquet({sql_path(raw_url)})
+            WHERE {read.present_sql}
+            {limit_clause}
         """
-
-        result = con.execute(query).fetchall()
-        found_types = {}
-        total_count = 0
-        for row in result:
-            if row[0]:
-                found_types[row[0]] = row[1]
-                total_count += row[1]
-
-        normalized_found = {_normalize_found_geometry_type(t) for t in found_types.keys() if t}
-
-        return _compare_geometry_types(normalized_found, declared_types, total_count, geom_col)
+        # The owner's types (dimension suffix included: "LineString" and
+        # "LineString ZM" are distinct geometry_types per spec), under the one
+        # degenerate-geometry policy the writers use: an EMPTY geometry has no
+        # type to declare, so it cannot be an undeclared one either.
+        found = set(geometry_types_of(QuerySource(con, sample), geom_col))
+        total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sample})"))[0]
+        return _compare_geometry_types(found, declared_types, total_count, geom_col)
     except Exception as e:
         check_name = f"geometry_types_match_data_{geom_col}"
         if _is_geoarrow_encoding(encoding):
@@ -1526,7 +1478,7 @@ def _check_orientation_matches_data(
     con,
     sample_size: int,
     encoding: Any = "WKB",
-    edges: Any = "planar",
+    edges: Any = PLANAR,
 ) -> ValidationCheck:
     """Check 19: all polygon geometries must follow 'orientation' metadata."""
     name = f"orientation_matches_data_{geom_col}"
@@ -1538,7 +1490,7 @@ def _check_orientation_matches_data(
 
     if orientation is None:
         return _result(CheckStatus.SKIPPED, "no orientation specified, skipping check")
-    if orientation != ORIENTATION_COUNTERCLOCKWISE:
+    if orientation != COUNTERCLOCKWISE:
         return _result(CheckStatus.SKIPPED, f'unknown orientation "{orientation}", skipping check')
     if _is_geoarrow_encoding(encoding):
         return _result(
@@ -1547,7 +1499,7 @@ def _check_orientation_matches_data(
 
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
     try:
-        # RAW, like every sibling caller: _describe_geom_type and sql_path each
+        # RAW, like every sibling caller: resolve_geometry_read and sql_path each
         # escape their own argument, so handing them a pre-escaped
         # safe_file_url() value escaped it twice and failed this check on any
         # valid file whose path contains an apostrophe (#937, the #718 class).
@@ -1556,7 +1508,7 @@ def _check_orientation_matches_data(
         raw_url = resolve_file_url(parquet_file, verbose=False)
         read = _geometry_read(con, raw_url, geom_col)
         rows = con.execute(f"""
-            SELECT ST_AsWKB(ST_Force2D(part.geom))
+            SELECT {as_wkb_sql("ST_Force2D(part.geom)")}
             FROM (
                 SELECT {read.expr} AS g
                 FROM read_parquet({sql_path(raw_url)})
@@ -1568,7 +1520,7 @@ def _check_orientation_matches_data(
         if not rows:
             return _result(CheckStatus.SKIPPED, "no polygons to check against declared orientation")
         violations, checked = _polygon_orientation_violations(
-            [bytes(r[0]) for r in rows], geodesic=edges != "planar"
+            [bytes(r[0]) for r in rows], geodesic=is_geodesic(edges)
         )
     except Exception as e:
         return _result(CheckStatus.FAILED, f"failed to validate orientation: {e}")
@@ -1609,8 +1561,7 @@ def _bbox_xy(bbox: Any) -> tuple[float, float, float, float] | None:
         return None
     if not all(_is_finite_number(value) for value in bbox):
         return None
-    half = len(bbox) // 2
-    return float(bbox[0]), float(bbox[1]), float(bbox[half]), float(bbox[half + 1])
+    return bbox_xy(bbox)
 
 
 def _sql_float(value: Any) -> str:
@@ -1636,10 +1587,8 @@ def _x_within_sql(geom_expr: str, xmin, xmax) -> str:
     lo, hi = _sql_float(xmin), _sql_float(xmax)
     if xmin <= xmax:
         return f"ST_XMin({geom_expr}) >= {lo} AND ST_XMax({geom_expr}) <= {hi}"
-    return (
-        f"list_bool_and([ST_X(p.geom) <= {hi} OR ST_X(p.geom) >= {lo} "
-        f"FOR p IN ST_Dump(ST_Points({geom_expr}))])"
-    )
+    inside = within_wrapped_x_sql("ST_X(p.geom)", lo, hi)
+    return f"list_bool_and([{inside} FOR p IN ST_Dump(ST_Points({geom_expr}))])"
 
 
 def _build_bbox_query(
@@ -1744,6 +1693,15 @@ def _interpret_bbox_result(result: tuple | None, geom_col: str) -> ValidationChe
     )
 
 
+def _wrap_refusal(crs, subject: str = "this bbox is") -> str:
+    """Why an xmin > xmax extent is not the wrap (BBox.crosses_antimeridian said no)."""
+    if not is_geographic(crs):
+        return (
+            f"applies only to geographic CRS, so {subject} invalid for the declared projected CRS"
+        )
+    return f"applies only to longitudes in [-180, 180], so {subject} invalid"
+
+
 def _check_bbox_contains_data(
     parquet_file: str,
     geom_col: str,
@@ -1780,15 +1738,14 @@ def _check_bbox_contains_data(
             ),
             category="data_validation",
         )
-    wrapped = xy[0] > xy[2]
-    if wrapped and not is_geographic_crs(crs):
+    wrapped = BBox(xy[0], xy[1], xy[2], xy[3]).crosses_antimeridian(is_geographic(crs))
+    if xy[0] > xy[2] and not wrapped:
         return ValidationCheck(
             name=f"bbox_contains_data_{geom_col}",
             status=CheckStatus.FAILED,
             message=(
                 "declared bbox has xmin > xmax; the antimeridian wrap-around reading "
-                "(RFC 7946, 5.2) applies only to geographic CRS, so this bbox is "
-                "invalid for the declared projected CRS"
+                f"(RFC 7946, 5.2) {_wrap_refusal(crs)}"
             ),
             category="data_validation",
         )
@@ -1801,9 +1758,9 @@ def _check_bbox_contains_data(
         )
 
     try:
-        col_type = _describe_geom_type(con, raw_url, geom_col)
+        col_type = resolve_geometry_read(con, raw_url, geom_col).duckdb_type
         query = _build_bbox_query(raw_url, geom_col, col_type, xy, limit_clause, encoding)
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
         check = _interpret_bbox_result(result, geom_col)
         if wrapped and check.status != CheckStatus.SKIPPED:
             # The wrap reading must never be invisible in the check output.
@@ -1849,26 +1806,15 @@ def _short(value: Any) -> str:
     return _CONTROL_CHARS.sub("", _SHORT.repr(value))
 
 
-def _covering_verdict(check_name: str, status: CheckStatus, message: str) -> ValidationCheck:
+def _cover_verdict(check_name: str, status: CheckStatus, message: str) -> ValidationCheck:
     """A ``geoparquet_1_1`` verdict for one of the four covering.bbox checks."""
     return ValidationCheck(
         name=check_name, status=status, message=message, category="geoparquet_1_1"
     )
 
 
-def _declares_bbox_covering(col_meta: dict) -> bool:
-    """``covering`` is an object with a ``bbox`` key.
-
-    A string ``covering`` satisfies ``"bbox" in covering`` too (#1062);
-    ``covering_is_object`` reports it, every other covering check treats the
-    column as declaring none.
-    """
-    covering = col_meta.get("covering")
-    return isinstance(covering, dict) and "bbox" in covering
-
-
 @dataclass(frozen=True)
-class _BboxCoveringRef:
+class _BboxCoverRef:
     """What a column's ``covering.bbox`` says, parsed once for the four checks."""
 
     declared: bool
@@ -1879,18 +1825,18 @@ class _BboxCoveringRef:
     problem: str | None = None
 
 
-def _resolve_bbox_covering(col_meta: dict) -> _BboxCoveringRef:
+def _resolve_bbox_cover(col_meta: dict) -> _BboxCoverRef:
     """Parse ``covering.bbox`` without indexing anything whose shape is unproven.
 
     A value whose *type* is wrong is recorded as a problem and never indexed:
     a string path passes every length test and reads character-wise, which is
     how a verdict once named a column ``"b"`` the file never mentions (#1062).
     """
-    if not _declares_bbox_covering(col_meta):
-        return _BboxCoveringRef(declared=False)
+    if not declares_covering_member(col_meta, "bbox"):
+        return _BboxCoverRef(declared=False)
     paths = col_meta["covering"]["bbox"]
     if not isinstance(paths, dict):
-        return _BboxCoveringRef(
+        return _BboxCoverRef(
             declared=True,
             problem=f"covering bbox must be an object of [column, field] paths "
             f"(found: {_short(paths)})",
@@ -1902,15 +1848,15 @@ def _resolve_bbox_covering(col_meta: dict) -> _BboxCoveringRef:
             if "xmin" not in paths
             else f"its xmin must be a path array [column, field] (found: {_short(xmin)})"
         )
-        return _BboxCoveringRef(
+        return _BboxCoverRef(
             declared=True,
             paths=paths,
             problem=f"cannot determine bbox column name from covering: {detail}",
         )
-    return _BboxCoveringRef(declared=True, paths=paths, column=xmin[0])
+    return _BboxCoverRef(declared=True, paths=paths, column=xmin[0])
 
 
-def _covering_bbox_column(
+def _cover_bbox_column(
     col_meta: dict, check_name: str, schema_info: list
 ) -> tuple[str, int] | ValidationCheck:
     """``(column, root schema index)`` the covering points at, or the verdict that stops the check.
@@ -1918,18 +1864,18 @@ def _covering_bbox_column(
     The three column-resolving checks share this prologue so a shape guard
     cannot be dropped from one of them.
     """
-    ref = _resolve_bbox_covering(col_meta)
+    ref = _resolve_bbox_cover(col_meta)
     if not ref.declared:
-        return _covering_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
+        return _cover_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
     if ref.problem is not None or ref.column is None:
-        return _covering_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
+        return _cover_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
     index = root_schema_index(schema_info, ref.column)
     if index is None:
         return _bbox_column_missing(check_name, ref.column, schema_info)
     return ref.column, index
 
 
-def _check_covering_is_object(col_meta: dict, col_name: str) -> ValidationCheck:
+def _check_cover_is_object(col_meta: dict, col_name: str) -> ValidationCheck:
     """Check 1.1-1: optional 'covering' must be an object if present."""
     covering = col_meta.get("covering")
 
@@ -1952,7 +1898,7 @@ def _check_covering_is_object(col_meta: dict, col_name: str) -> ValidationCheck:
     )
 
 
-def _check_covering_has_bbox(col_meta: dict, col_name: str) -> ValidationCheck:
+def _check_cover_has_bbox(col_meta: dict, col_name: str) -> ValidationCheck:
     """Check 1.1-1b: a 'covering' object must carry the 'bbox' encoding.
 
     GeoParquet 1.1, ``covering``: "The keys of the 'covering' object MUST be a
@@ -1973,24 +1919,24 @@ def _check_covering_has_bbox(col_meta: dict, col_name: str) -> ValidationCheck:
     The test itself is ``geo_metadata.covering_lacks_bbox``, the one definition
     of the illegal shape, shared with the write gate
     (``strip_bboxless_covering``) and the ``--fix`` repair
-    (``check_fixes.fix_bboxless_covering``) so that what gpio refuses to write,
+    (``check_fixes.fix_bboxless_cover``) so that what gpio refuses to write,
     what it fails here, and what it repairs cannot drift apart.
     """
     check_name = f"covering_has_bbox_{col_name}"
     covering = col_meta.get("covering")
 
     if covering is None:
-        return _covering_verdict(check_name, CheckStatus.SKIPPED, "no covering defined")
+        return _cover_verdict(check_name, CheckStatus.SKIPPED, "no covering defined")
     if not isinstance(covering, dict):
         # covering_is_object reports a covering of the wrong type; one defect
         # gets one verdict.
-        return _covering_verdict(check_name, CheckStatus.SKIPPED, "covering is not an object")
+        return _cover_verdict(check_name, CheckStatus.SKIPPED, "covering is not an object")
     if not covering_lacks_bbox(col_meta):
-        return _covering_verdict(
+        return _cover_verdict(
             check_name, CheckStatus.PASSED, 'covering declares the "bbox" encoding'
         )
 
-    return _covering_verdict(
+    return _cover_verdict(
         check_name,
         CheckStatus.FAILED,
         f'column "{col_name}" covering has no "bbox" member, the only encoding the spec '
@@ -1999,26 +1945,26 @@ def _check_covering_has_bbox(col_meta: dict, col_name: str) -> ValidationCheck:
     )
 
 
-def _check_covering_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck:
+def _check_cover_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck:
     """Check 1.1-2: covering 'bbox' encoding must have valid xmin/ymin/xmax/ymax paths."""
     check_name = f"covering_bbox_paths_{col_name}"
-    ref = _resolve_bbox_covering(col_meta)
+    ref = _resolve_bbox_cover(col_meta)
     if not ref.declared:
-        return _covering_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
+        return _cover_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
     if ref.paths is None:
-        return _covering_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
+        return _cover_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
 
     required_keys = ["xmin", "ymin", "xmax", "ymax"]
     missing = [k for k in required_keys if k not in ref.paths]
     if missing:
-        return _covering_verdict(
+        return _cover_verdict(
             check_name, CheckStatus.FAILED, f"covering bbox missing required paths: {missing}"
         )
 
     for key in required_keys:
         path = ref.paths[key]
         if not is_covering_path(path):
-            return _covering_verdict(
+            return _cover_verdict(
                 check_name,
                 CheckStatus.FAILED,
                 f"covering bbox {key} must be a path array [column, field] (found: {_short(path)})",
@@ -2026,7 +1972,7 @@ def _check_covering_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck
 
     wrong_field = [k for k in required_keys if ref.paths[k][1] != k]
     if wrong_field:
-        return _covering_verdict(
+        return _cover_verdict(
             check_name,
             CheckStatus.FAILED,
             f"covering bbox path field must equal its key: {wrong_field}",
@@ -2034,20 +1980,20 @@ def _check_covering_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck
 
     columns = sorted({ref.paths[k][0] for k in required_keys})
     if len(columns) > 1:
-        return _covering_verdict(
+        return _cover_verdict(
             check_name,
             CheckStatus.FAILED,
             f"covering bbox paths must name a single column (found: {columns})",
         )
 
-    return _covering_verdict(
+    return _cover_verdict(
         check_name, CheckStatus.PASSED, "covering bbox has valid xmin/ymin/xmax/ymax paths"
     )
 
 
 def _bbox_column_missing(check_name: str, bbox_col_name: str, schema_info: list) -> ValidationCheck:
     """FAILED for a covering bbox column that is not a root-level column."""
-    nested = any(col.get("name") == bbox_col_name for col in schema_info)
+    nested = nested_schema_index(schema_info, bbox_col_name) is not None
     detail = (
         "it exists only as a nested field; GeoParquet 1.1 requires the bounding "
         "box column at the root of the schema"
@@ -2062,17 +2008,17 @@ def _bbox_column_missing(check_name: str, bbox_col_name: str, schema_info: list)
     )
 
 
-def _check_covering_bbox_column_exists(
+def _check_cover_bbox_column_exists(
     col_meta: dict, col_name: str, schema_info: list
 ) -> ValidationCheck:
     """Check 1.1-3: covering bbox column must exist at root of schema."""
     check_name = f"covering_bbox_column_exists_{col_name}"
-    resolved = _covering_bbox_column(col_meta, check_name, schema_info)
+    resolved = _cover_bbox_column(col_meta, check_name, schema_info)
     if isinstance(resolved, ValidationCheck):
         return resolved
     bbox_col_name, _ = resolved
 
-    return _covering_verdict(
+    return _cover_verdict(
         check_name, CheckStatus.PASSED, f'bbox column "{bbox_col_name}" exists at schema root'
     )
 
@@ -2087,13 +2033,13 @@ def _check_covering_bbox_column_exists(
 _BBOX_FIELDS = {len(order): list(order) for order in BBOX_COVERING_FIELD_ORDERS}
 
 
-def _check_covering_bbox_structure(
+def _check_cover_bbox_structure(
     col_meta: dict, col_name: str, schema_info: list
 ) -> ValidationCheck:
     """Check 1.1-4/5: covering bbox column is a struct of xmin/ymin/xmax/ymax or
     xmin/ymin/zmin/xmax/ymax/zmax, in that order."""
     check_name = f"covering_bbox_structure_{col_name}"
-    resolved = _covering_bbox_column(col_meta, check_name, schema_info)
+    resolved = _cover_bbox_column(col_meta, check_name, schema_info)
     if isinstance(resolved, ValidationCheck):
         return resolved
     _, index = resolved
@@ -2101,26 +2047,26 @@ def _check_covering_bbox_structure(
     found_fields = [c.get("name") for c in schema_direct_children(schema_info, index)]
 
     if found_fields != _BBOX_FIELDS.get(len(found_fields)):
-        return _covering_verdict(
+        return _cover_verdict(
             check_name,
             CheckStatus.FAILED,
             f"bbox column fields must be {_BBOX_FIELDS[4]} or {_BBOX_FIELDS[6]}, "
             f"in that order (found: {found_fields})",
         )
 
-    return _covering_verdict(
+    return _cover_verdict(
         check_name,
         CheckStatus.PASSED,
         f"bbox column has valid structure with {'/'.join(found_fields)}",
     )
 
 
-def _check_covering_bbox_field_types(
+def _check_cover_bbox_field_types(
     col_meta: dict, col_name: str, schema_info: list
 ) -> ValidationCheck:
     """Check 1.1-6/7: covering bbox fields must be FLOAT or DOUBLE and same type."""
     check_name = f"covering_bbox_field_types_{col_name}"
-    resolved = _covering_bbox_column(col_meta, check_name, schema_info)
+    resolved = _cover_bbox_column(col_meta, check_name, schema_info)
     if isinstance(resolved, ValidationCheck):
         return resolved
     _, index = resolved
@@ -2135,20 +2081,20 @@ def _check_covering_bbox_field_types(
     # Check if all types are valid
     invalid_types = field_types - valid_types
     if invalid_types:
-        return _covering_verdict(
+        return _cover_verdict(
             check_name,
             CheckStatus.FAILED,
             f"bbox fields must be FLOAT or DOUBLE (found: {invalid_types})",
         )
 
     if len(field_types) > 1:
-        return _covering_verdict(
+        return _cover_verdict(
             check_name,
             CheckStatus.FAILED,
             f"bbox fields must all use the same type (found: {field_types})",
         )
 
-    return _covering_verdict(
+    return _cover_verdict(
         check_name, CheckStatus.PASSED, f"bbox fields have valid type: {field_types}"
     )
 
@@ -2189,23 +2135,24 @@ def _check_file_extension(file_path: str) -> ValidationCheck:
 def _check_native_geo_type_present(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check PGO-1: GEOMETRY/GEOGRAPHY logical type must be present."""
 
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            logical_type = col.get("logical_type") or ""
-            if is_geometry_column(logical_type):
-                geo_type = "GEOMETRY" if "GeometryType" in logical_type else "GEOGRAPHY"
-                return ValidationCheck(
-                    name=f"native_geo_type_present_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message=f'column "{geom_col}" uses Parquet {geo_type} logical type',
-                    category="parquet_geo_types",
-                )
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
+        logical_type = col.get("logical_type") or ""
+        if is_geometry_column(logical_type):
+            geo_type = native_geo_type(logical_type)
             return ValidationCheck(
                 name=f"native_geo_type_present_{geom_col}",
-                status=CheckStatus.FAILED,
-                message=f'column "{geom_col}" does not have GEOMETRY/GEOGRAPHY logical type',
+                status=CheckStatus.PASSED,
+                message=f'column "{geom_col}" uses Parquet {geo_type} logical type',
                 category="parquet_geo_types",
             )
+        return ValidationCheck(
+            name=f"native_geo_type_present_{geom_col}",
+            status=CheckStatus.FAILED,
+            message=f'column "{geom_col}" does not have GEOMETRY/GEOGRAPHY logical type',
+            category="parquet_geo_types",
+        )
 
     return ValidationCheck(
         name=f"native_geo_type_present_{geom_col}",
@@ -2218,54 +2165,55 @@ def _check_native_geo_type_present(schema_info: list, geom_col: str) -> Validati
 def _check_native_crs_format(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check PGO-3: optional CRS must be in valid format (srid:XXXX or inline PROJJSON)."""
 
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            logical_type = col.get("logical_type") or ""
-            parsed = parse_geometry_logical_type(logical_type)
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
+        logical_type = col.get("logical_type") or ""
+        parsed = parse_geometry_logical_type(logical_type)
 
-            if not parsed:
-                return ValidationCheck(
-                    name=f"native_crs_format_{geom_col}",
-                    status=CheckStatus.SKIPPED,
-                    message="no logical type to parse",
-                    category="parquet_geo_types",
-                )
-
-            crs = parsed.get("crs")
-            if crs is None:
-                return ValidationCheck(
-                    name=f"native_crs_format_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message=f'column "{geom_col}" has no CRS (defaults to OGC:CRS84)',
-                    category="parquet_geo_types",
-                )
-
-            # Check if it's PROJJSON (dict with schema or type)
-            if isinstance(crs, dict):
-                if "$schema" in crs or "type" in crs:
-                    return ValidationCheck(
-                        name=f"native_crs_format_{geom_col}",
-                        status=CheckStatus.PASSED,
-                        message=f'column "{geom_col}" has valid inline PROJJSON CRS',
-                        category="parquet_geo_types",
-                    )
-
-            # Check if it's srid:XXXX format
-            if isinstance(crs, str) and crs.startswith("srid:"):
-                return ValidationCheck(
-                    name=f"native_crs_format_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message=f'column "{geom_col}" has valid srid CRS: {crs}',
-                    category="parquet_geo_types",
-                )
-
+        if not parsed:
             return ValidationCheck(
                 name=f"native_crs_format_{geom_col}",
-                status=CheckStatus.WARNING,
-                message=f'column "{geom_col}" CRS format may not be widely recognized',
-                details=f"CRS: {crs}. Use 'gpio convert --geoparquet-version 2.0' to standardize.",
+                status=CheckStatus.SKIPPED,
+                message="no logical type to parse",
                 category="parquet_geo_types",
             )
+
+        crs = parsed.get("crs")
+        if crs is None:
+            return ValidationCheck(
+                name=f"native_crs_format_{geom_col}",
+                status=CheckStatus.PASSED,
+                message=f'column "{geom_col}" has no CRS (defaults to OGC:CRS84)',
+                category="parquet_geo_types",
+            )
+
+        # Check if it's PROJJSON (dict with schema or type)
+        if isinstance(crs, dict):
+            if "$schema" in crs or "type" in crs:
+                return ValidationCheck(
+                    name=f"native_crs_format_{geom_col}",
+                    status=CheckStatus.PASSED,
+                    message=f'column "{geom_col}" has valid inline PROJJSON CRS',
+                    category="parquet_geo_types",
+                )
+
+        # Check if it's srid:XXXX format
+        if isinstance(crs, str) and crs.startswith("srid:"):
+            return ValidationCheck(
+                name=f"native_crs_format_{geom_col}",
+                status=CheckStatus.PASSED,
+                message=f'column "{geom_col}" has valid srid CRS: {crs}',
+                category="parquet_geo_types",
+            )
+
+        return ValidationCheck(
+            name=f"native_crs_format_{geom_col}",
+            status=CheckStatus.WARNING,
+            message=f'column "{geom_col}" CRS format may not be widely recognized',
+            details=f"CRS: {crs}. Use 'gpio convert --geoparquet-version 2.0' to standardize.",
+            category="parquet_geo_types",
+        )
 
     return ValidationCheck(
         name=f"native_crs_format_{geom_col}",
@@ -2278,43 +2226,44 @@ def _check_native_crs_format(schema_info: list, geom_col: str) -> ValidationChec
 def _check_geography_edges_valid(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check PGO-4: for GEOGRAPHY, edges must be valid algorithm."""
 
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            logical_type = col.get("logical_type") or ""
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
+        logical_type = col.get("logical_type") or ""
 
-            if "GeographyType" not in logical_type:
-                return ValidationCheck(
-                    name=f"geography_edges_valid_{geom_col}",
-                    status=CheckStatus.SKIPPED,
-                    message="not a GEOGRAPHY type, edges check not applicable",
-                    category="parquet_geo_types",
-                )
+        if native_geo_type(logical_type) != "GEOGRAPHY":
+            return ValidationCheck(
+                name=f"geography_edges_valid_{geom_col}",
+                status=CheckStatus.SKIPPED,
+                message="not a GEOGRAPHY type, edges check not applicable",
+                category="parquet_geo_types",
+            )
 
-            parsed = parse_geometry_logical_type(logical_type)
-            if not parsed:
-                return ValidationCheck(
-                    name=f"geography_edges_valid_{geom_col}",
-                    status=CheckStatus.FAILED,
-                    message="failed to parse GEOGRAPHY logical type",
-                    category="parquet_geo_types",
-                )
-
-            algorithm = parsed.get("algorithm", "spherical")  # Default is spherical
-            if algorithm in VALID_EDGES_PARQUET_GEO:
-                return ValidationCheck(
-                    name=f"geography_edges_valid_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message=f"GEOGRAPHY column has valid edges algorithm: {algorithm}",
-                    category="parquet_geo_types",
-                )
-
+        parsed = parse_geometry_logical_type(logical_type)
+        if not parsed:
             return ValidationCheck(
                 name=f"geography_edges_valid_{geom_col}",
                 status=CheckStatus.FAILED,
-                message=f"GEOGRAPHY edges must be one of {VALID_EDGES_PARQUET_GEO}",
-                details=f"Found: {algorithm}",
+                message="failed to parse GEOGRAPHY logical type",
                 category="parquet_geo_types",
             )
+
+        algorithm = logical_type_edges(parsed)
+        if algorithm in GEOGRAPHY_EDGE_ALGORITHMS:
+            return ValidationCheck(
+                name=f"geography_edges_valid_{geom_col}",
+                status=CheckStatus.PASSED,
+                message=f"GEOGRAPHY column has valid edges algorithm: {algorithm}",
+                category="parquet_geo_types",
+            )
+
+        return ValidationCheck(
+            name=f"geography_edges_valid_{geom_col}",
+            status=CheckStatus.FAILED,
+            message=f"GEOGRAPHY edges must be one of {list(GEOGRAPHY_EDGE_ALGORITHMS)}",
+            details=f"Found: {algorithm}",
+            category="parquet_geo_types",
+        )
 
     return ValidationCheck(
         name=f"geography_edges_valid_{geom_col}",
@@ -2322,15 +2271,6 @@ def _check_geography_edges_valid(schema_info: list, geom_col: str) -> Validation
         message=f'column "{geom_col}" not found',
         category="parquet_geo_types",
     )
-
-
-def _is_geography_column(schema_info: list, geom_col: str) -> bool:
-    """Check if a geometry column is a GEOGRAPHY type."""
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            logical_type = col.get("logical_type") or ""
-            return "GeographyType" in logical_type
-    return False
 
 
 def _validate_geography_bounds(min_x, max_x, min_y, max_y) -> list[str]:
@@ -2361,7 +2301,7 @@ def _check_geography_coordinate_bounds(
     parquet_file: str, geom_col: str, schema_info: list, con, sample_size: int
 ) -> ValidationCheck:
     """Check PGO-7: for GEOGRAPHY, X bounded [-180, 180], Y bounded [-90, 90]."""
-    if not _is_geography_column(schema_info, geom_col):
+    if is_native_geo_column(schema_info, geom_col) != "GEOGRAPHY":
         return ValidationCheck(
             name=f"geography_coordinate_bounds_{geom_col}",
             status=CheckStatus.SKIPPED,
@@ -2373,7 +2313,16 @@ def _check_geography_coordinate_bounds(
     limit_clause = f"LIMIT {sample_size}" if sample_size > 0 else ""
 
     try:
-        result = _execute_bounds_query(con, raw_url, geom_col, limit_clause)
+        try:
+            result = _execute_bounds_query(con, raw_url, geom_col, limit_clause)
+        except GeometryError as e:  # an infinite coordinate: the owner refuses to measure it
+            return ValidationCheck(
+                name=f"geography_coordinate_bounds_{geom_col}",
+                status=CheckStatus.FAILED,
+                message="GEOGRAPHY coordinates exceed valid bounds",
+                details=str(e),
+                category="parquet_geo_types",
+            )
         if not result:
             return ValidationCheck(
                 name=f"geography_coordinate_bounds_{geom_col}",
@@ -2410,24 +2359,16 @@ def _check_geography_coordinate_bounds(
 
 
 def _execute_bounds_query(con, raw_url: str, geom_col: str, limit_clause: str):
-    """Execute query to get coordinate bounds for a geometry column."""
+    """``(min_x, max_x, min_y, max_y)`` of the sampled geometries, or None (the owner's bounds)."""
     read = _geometry_read(con, raw_url, geom_col)
-    geom_expr = read.expr
-
-    query = f"""
-        SELECT
-            MIN(ST_XMin({geom_expr})) as min_x,
-            MAX(ST_XMax({geom_expr})) as max_x,
-            MIN(ST_YMin({geom_expr})) as min_y,
-            MAX(ST_YMax({geom_expr})) as max_y
-        FROM (
-            SELECT {read.quoted}
-            FROM read_parquet({sql_path(raw_url)})
-            WHERE {read.present_sql}
-            {limit_clause}
-        )
+    sample = f"""
+        SELECT {read.quoted}
+        FROM read_parquet({sql_path(raw_url)})
+        WHERE {read.present_sql}
+        {limit_clause}
     """
-    return con.execute(query).fetchone()
+    bbox = bounds_of(QuerySource(con, sample), geom_col)
+    return None if bbox is None else (bbox[0], bbox[2], bbox[1], bbox[3])
 
 
 # =============================================================================
@@ -2466,7 +2407,7 @@ def _geography_stats_gate(
             name=name, status=CheckStatus.SKIPPED, message=message, category="parquet_geo_types"
         )
 
-    if not _is_geography_column(schema_info or [], geom_col):
+    if is_native_geo_column(schema_info, geom_col) != "GEOGRAPHY":
         return None, skipped("not a GEOGRAPHY column, geodesic bbox checks not applicable")
     if is_remote_url(parquet_file):
         return None, skipped("GEOGRAPHY bbox check skipped for remote files")
@@ -2507,7 +2448,10 @@ def _check_geography_stats_bbox(
             details="; ".join(issues),
             category="parquet_geo_types",
         )
-    wrapped = any(c["xmin"] > c["xmax"] for c in chunks)
+    wrapped = any(
+        BBox(c["xmin"], c["ymin"], c["xmax"], c["ymax"]).crosses_antimeridian(geographic=True)
+        for c in chunks
+    )
     wrap_note = " (xmin > xmax read as the antimeridian wrap, RFC 7946 5.2)" if wrapped else ""
     return ValidationCheck(
         name=name,
@@ -2521,11 +2465,12 @@ def _geography_edge_algorithm(schema_info: list | None, geom_col: str) -> str:
     """The column's edge algorithm, read from its GEOGRAPHY logical type."""
     from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
 
-    for col in schema_info or []:
-        if col.get("name") == geom_col:
-            parsed = parse_geometry_logical_type(col.get("logical_type") or "") or {}
-            return parsed.get("algorithm") or "spherical"
-    return "spherical"
+    index = root_schema_index(schema_info or [], geom_col)
+    if index is not None:
+        col = schema_info[index]
+        parsed = parse_geometry_logical_type(col.get("logical_type") or "") or {}
+        return logical_type_edges(parsed)
+    return SPHERICAL
 
 
 #: Points sampled along each edge by the geodesic-containment oracle.
@@ -2551,12 +2496,13 @@ def _geography_geod(schema_info: list | None, geom_col: str, algorithm: str):
     from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
     from geoparquet_io.core.geodesic_bbox import ellipsoid_for_crs
 
-    if algorithm == "spherical":
+    if not is_ellipsoidal(algorithm):
         return Geod(a=6371008.8, f=0.0)
     crs = None
-    for col in schema_info or []:
-        if col.get("name") == geom_col:
-            crs = (parse_geometry_logical_type(col.get("logical_type") or "") or {}).get("crs")
+    index = root_schema_index(schema_info or [], geom_col)
+    if index is not None:
+        col = schema_info[index]
+        crs = (parse_geometry_logical_type(col.get("logical_type") or "") or {}).get("crs")
     semi_major, flattening = ellipsoid_for_crs(crs)
     return Geod(a=semi_major, f=flattening)
 
@@ -2660,7 +2606,7 @@ def _geojson_of(con, wkb):
     import json
 
     rows = con.execute(
-        "SELECT ST_AsGeoJSON(TRY(ST_GeomFromWKB(w))) FROM (SELECT UNNEST(?::BLOB[]) AS w)",
+        f"SELECT ST_AsGeoJSON(TRY({geom_from_wkb_sql('w')})) FROM (SELECT UNNEST(?::BLOB[]) AS w)",
         [[value for value in wkb.to_pylist() if value is not None]],
     ).fetchall()
     for (text,) in rows:
@@ -2841,15 +2787,10 @@ def _is_bbox_valid(geo_bbox: dict) -> bool:
     return True
 
 
-def _is_geography_column(schema_info: list | None, geom_col: str) -> bool:
-    return any(
-        col.get("name") == geom_col and "GeographyType" in (col.get("logical_type") or "")
-        for col in schema_info or []
-    )
-
-
 def _check_native_geo_statistics(
-    parquet_file: str, geom_col: str, schema_info: list | None = None
+    parquet_file: str,
+    geom_col: str,
+    schema_info: list | None = None,
 ) -> ValidationCheck:
     """Check that geometry column has native Parquet GeospatialStatistics (geo_bbox).
 
@@ -2859,6 +2800,10 @@ def _check_native_geo_statistics(
     the edges, with the drop kept as the fallback when nothing can bound a
     column; ``geography_stats_bbox_*`` and ``geography_stats_cover_edges_*``
     validate the box when there is one.
+
+    ``crs`` is the column's declared CRS, the one the sibling
+    ``native_geo_stats_contains_data`` check is given, so a validation run
+    decides "geographic" once per column; without it the file's CRS is read.
     """
     from geoparquet_io.core.duckdb_metadata import (
         aggregate_native_geo_stats,
@@ -2886,10 +2831,11 @@ def _check_native_geo_statistics(
             )
 
         # The whole file's bounds, not whichever row group comes first.
-        bbox = aggregate_native_geo_stats(chunks).get("bbox")
+        geographic = column_is_geographic(parquet_file, geom_col)
+        bbox = aggregate_native_geo_stats(chunks, geographic=geographic).get("bbox")
 
         if bbox:
-            geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox[:4], strict=True))
+            geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox_xy(bbox), strict=True))
             # Validate that bbox values are reasonable (not garbage from parsing errors)
             if not _is_bbox_valid(geo_bbox):
                 return ValidationCheck(
@@ -2906,10 +2852,11 @@ def _check_native_geo_statistics(
             )
             # These values may now wrap the antimeridian (#886), and a bare
             # xmin > xmax reads as corrupt metadata; say which it is.
+            wraps = BBox(
+                geo_bbox["xmin"], geo_bbox["ymin"], geo_bbox["xmax"], geo_bbox["ymax"]
+            ).crosses_antimeridian(geographic)
             wrap_note = (
-                " (statistics interpreted as antimeridian-crossing, RFC 7946 5.2)"
-                if geo_bbox["xmin"] > geo_bbox["xmax"]
-                else ""
+                " (statistics interpreted as antimeridian-crossing, RFC 7946 5.2)" if wraps else ""
             )
             return ValidationCheck(
                 name=f"native_geo_stats_{geom_col}",
@@ -2917,7 +2864,7 @@ def _check_native_geo_statistics(
                 message=f"geometry column has geospatial statistics: {bbox_str}{wrap_note}",
                 category="parquet_geo_types",
             )
-        elif _is_geography_column(schema_info, geom_col):
+        elif is_native_geo_column(schema_info, geom_col) == "GEOGRAPHY":
             return ValidationCheck(
                 name=f"native_geo_stats_{geom_col}",
                 status=CheckStatus.SKIPPED,
@@ -2944,6 +2891,34 @@ def _check_native_geo_statistics(
         )
 
 
+def _projected_inverted_row_group(chunks: list[dict], crs) -> int | None:
+    """The first row group whose statistics have xmin > xmax under a projected CRS, or None.
+
+    The one arm for a projected wrap: the fold of a projected extent is plain
+    min/max, so it is never inverted unless a chunk is.
+    """
+    if is_geographic(crs):
+        return None
+    for chunk in chunks:
+        xmin, xmax = chunk.get("xmin"), chunk.get("xmax")
+        if xmin is not None and xmax is not None and xmin > xmax:
+            return chunk.get("row_group_id")
+    return None
+
+
+def _projected_wrap_failure(geom_col: str, where: str) -> ValidationCheck:
+    return ValidationCheck(
+        name=f"native_geo_stats_contains_data_{geom_col}",
+        status=CheckStatus.FAILED,
+        message=(
+            f"geospatial statistics have xmin > xmax{where}; the antimeridian wrap-around "
+            "reading (RFC 7946, 5.2) applies only to geographic CRS, so these "
+            "statistics are invalid for the declared projected CRS"
+        ),
+        category="parquet_geo_types",
+    )
+
+
 def _check_native_geo_stats_contains_data(
     parquet_file: str, geom_col: str, con, sample_size: int, crs: Any = None
 ) -> ValidationCheck:
@@ -2957,7 +2932,10 @@ def _check_native_geo_stats_contains_data(
     "this wraparound occurs only when the corresponding bounding box crosses the
     antimeridian line".
     """
-    from geoparquet_io.core.duckdb_metadata import get_aggregated_native_geo_stats
+    from geoparquet_io.core.duckdb_metadata import (
+        aggregate_native_geo_stats,
+        get_native_geo_stats_by_row_group,
+    )
 
     try:
         # For remote files, skip (may be slow)
@@ -2971,10 +2949,23 @@ def _check_native_geo_stats_contains_data(
 
         raw_url = resolve_file_url(parquet_file, verbose=False)
 
+        # One read of the row-group statistics feeds both questions below.
+        # Unreadable statistics are "none to validate against", as before.
+        try:
+            chunks = get_native_geo_stats_by_row_group(parquet_file, geom_col, con) or []
+        except Exception:
+            chunks = []
+
+        # A projected extent folds plainly, which can hide one row group's
+        # xmin > xmax behind a wider one; each chunk is checked on its own.
+        inverted = _projected_inverted_row_group(chunks, crs)
+        if inverted is not None:
+            return _projected_wrap_failure(geom_col, f" (row group {inverted})")
+
         # The sample below spans the whole file, so it is judged against the
         # whole file's statistics -- the union over every row group, not the
         # bounds of whichever one happens to come first.
-        stats = get_aggregated_native_geo_stats(parquet_file, geom_col, con)
+        stats = aggregate_native_geo_stats(chunks, geographic=is_geographic(crs))
 
         if not stats:
             return ValidationCheck(
@@ -2993,10 +2984,7 @@ def _check_native_geo_stats_contains_data(
                 category="parquet_geo_types",
             )
 
-        # Native statistics order Z after XY ([xmin, ymin, xmax, ymax, zmin,
-        # zmax]), unlike GeoParquet's interleaved metadata bbox -- so the first
-        # four values are the X/Y bounds here and _bbox_xy does not apply.
-        geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox[:4], strict=True))
+        geo_bbox = dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox_xy(bbox), strict=True))
 
         # Validate that bbox values are reasonable (not garbage from parsing errors)
         if not _is_bbox_valid(geo_bbox):
@@ -3023,16 +3011,16 @@ def _check_native_geo_stats_contains_data(
         ymax = geo_bbox["ymax"]
         # Parquet's geospatial statistics may legally wrap the antimeridian
         # (xmin > xmax), the same reading _check_bbox_contains_data applies --
-        # and, like there, only for a geographic CRS.
-        wrapped = xmin > xmax
-        if wrapped and not is_geographic_crs(crs):
+        # and, like there, only for a geographic CRS (a projected wrap was
+        # refused per row group above); BBox.crosses_antimeridian is the rule.
+        wrapped = BBox(xmin, ymin, xmax, ymax).crosses_antimeridian(is_geographic(crs))
+        if xmin > xmax and not wrapped:
             return ValidationCheck(
                 name=f"native_geo_stats_contains_data_{geom_col}",
                 status=CheckStatus.FAILED,
                 message=(
                     "geospatial statistics have xmin > xmax; the antimeridian wrap-around "
-                    "reading (RFC 7946, 5.2) applies only to geographic CRS, so these "
-                    "statistics are invalid for the declared projected CRS"
+                    f"reading (RFC 7946, 5.2) {_wrap_refusal(crs, 'these statistics are')}"
                 ),
                 category="parquet_geo_types",
             )
@@ -3055,7 +3043,7 @@ def _check_native_geo_stats_contains_data(
                 {limit_clause}
             )
         """
-        result = con.execute(query).fetchone()
+        result = fetch_one(con.execute(query))
 
         if result:
             total, within = result
@@ -3114,16 +3102,12 @@ def _check_native_geo_types_match(
     try:
         raw_url = resolve_file_url(parquet_file, verbose=False)
 
-        # Get declared geo_types from parquet metadata
-        escaped_geom_col = _escape_sql_string(geom_col)
-        meta_result = con.execute(f"""
-            SELECT DISTINCT unnest(geo_types) as geo_type
-            FROM parquet_metadata({sql_path(raw_url)})
-            WHERE path_in_schema = '{escaped_geom_col}'
-              AND geo_types IS NOT NULL
-        """).fetchall()
+        from geoparquet_io.core.duckdb_metadata import get_native_geo_stats_by_row_group
 
-        declared_types = {row[0].lower() for row in meta_result if row[0]}
+        # Declared geo_types from parquet metadata, folded and named by the owner.
+        chunks = get_native_geo_stats_by_row_group(parquet_file, geom_col, con) or []
+        # Types only: the CRS decides how extents fold, never which types there are.
+        declared_types = set(row_group_geometry_stats(chunks, geographic=True).geometry_types)
 
         # Empty list means "not known" - this is valid per spec
         if not declared_types:
@@ -3134,31 +3118,15 @@ def _check_native_geo_types_match(
                 category="parquet_geo_types",
             )
 
-        # Sample actual geometry types from the data. DuckDB's geo_types
-        # naming is dimension-aware ("linestring_m"), so append the matching
-        # suffix from ST_HasZ/ST_HasM instead of comparing base names only.
+        # Sample actual geometry types from the data, in the same spec names
+        # ("LineString M"), so the comparison covers the suffix too.
         quoted_col = quote_identifier(geom_col)
-        typed_expr = f"ST_GeometryType({quoted_col}) || {zm_suffix_sql(quoted_col, sep='_')}"
-        if sample_size == 0:
-            # Check all rows
-            actual_result = con.execute(f"""
-                SELECT DISTINCT {typed_expr} as geom_type
-                FROM read_parquet({sql_path(raw_url)})
-                WHERE {quote_identifier(geom_col)} IS NOT NULL
-            """).fetchall()
-        else:
-            # Sample rows
-            actual_result = con.execute(f"""
-                SELECT DISTINCT {typed_expr} as geom_type
-                FROM (
-                    SELECT {quote_identifier(geom_col)}
-                    FROM read_parquet({sql_path(raw_url)})
-                    WHERE {quote_identifier(geom_col)} IS NOT NULL
-                    LIMIT {sample_size}
-                )
-            """).fetchall()
-
-        actual_types = {row[0].lower() for row in actual_result if row[0]}
+        limit = f"LIMIT {sample_size}" if sample_size else ""
+        sample = f"""
+            SELECT {quoted_col} FROM read_parquet({sql_path(raw_url)})
+            WHERE {quoted_col} IS NOT NULL {limit}
+        """
+        actual_types = set(geometry_types_of(QuerySource(con, sample), geom_col))
 
         # Check if actual types are a subset of declared types
         undeclared = actual_types - declared_types
@@ -3204,7 +3172,7 @@ def _check_native_columns_in_metadata(schema_info: list, columns: dict) -> Valid
 
     missing = [
         col["name"]
-        for col in schema_info
+        for col in root_schema_columns(schema_info)
         if is_geometry_column(col.get("logical_type") or "") and col["name"] not in columns
     ]
     if missing:
@@ -3220,13 +3188,6 @@ def _check_native_columns_in_metadata(schema_info: list, columns: dict) -> Valid
         message="all GEOMETRY/GEOGRAPHY columns are described in geo metadata",
         category="geoparquet_2_0",
     )
-
-
-def _stats_geometry_type_name(raw) -> str:
-    """'point_z' / 1001 from parquet_metadata().geo_types -> 'Point Z'."""
-    if isinstance(raw, int):
-        return WKB_TYPE_CODES.get(raw, str(raw))
-    return _normalize_found_geometry_type(str(raw).replace("_", " "))
 
 
 def _check_geometry_types_match_stats(
@@ -3261,7 +3222,8 @@ def _check_geometry_types_match_stats(
             message=f"could not check geospatial statistics: {e}",
             category="geoparquet_2_0",
         )
-    found = {_stats_geometry_type_name(t) for c in chunks for t in c["geometry_types"]}
+    # Named and folded by the owner: a value that is no spec type is dropped.
+    found = set(row_group_geometry_stats(chunks, geographic=True).geometry_types)
     if not found:
         return ValidationCheck(
             name=name,
@@ -3288,23 +3250,24 @@ def _check_geometry_types_match_stats(
 def _check_v2_uses_native_types(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check V2-1: geometry columns MUST use Parquet GEOMETRY or GEOGRAPHY types."""
 
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            logical_type = col.get("logical_type") or ""
-            if is_geometry_column(logical_type):
-                return ValidationCheck(
-                    name=f"v2_native_types_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message=f'column "{geom_col}" uses required Parquet native geo type',
-                    category="geoparquet_2_0",
-                )
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
+        logical_type = col.get("logical_type") or ""
+        if is_geometry_column(logical_type):
             return ValidationCheck(
                 name=f"v2_native_types_{geom_col}",
-                status=CheckStatus.FAILED,
-                message="GeoParquet 2.0 requires native Parquet GEOMETRY/GEOGRAPHY type",
-                details=f'Column "{geom_col}" does not use native geo type',
+                status=CheckStatus.PASSED,
+                message=f'column "{geom_col}" uses required Parquet native geo type',
                 category="geoparquet_2_0",
             )
+        return ValidationCheck(
+            name=f"v2_native_types_{geom_col}",
+            status=CheckStatus.FAILED,
+            message="GeoParquet 2.0 requires native Parquet GEOMETRY/GEOGRAPHY type",
+            details=f'Column "{geom_col}" does not use native geo type',
+            category="geoparquet_2_0",
+        )
 
     return ValidationCheck(
         name=f"v2_native_types_{geom_col}",
@@ -3353,26 +3316,27 @@ def _check_v2_crs_in_parquet_type(
         )
 
     # Find the Parquet schema CRS
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            logical_type = col.get("logical_type") or ""
-            parsed = parse_geometry_logical_type(logical_type)
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
+        logical_type = col.get("logical_type") or ""
+        parsed = parse_geometry_logical_type(logical_type)
 
-            if parsed and parsed.get("crs"):
-                return ValidationCheck(
-                    name=f"v2_crs_in_parquet_type_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message="non-default CRS is inline in Parquet geo type",
-                    category="geoparquet_2_0",
-                )
-
+        if parsed and parsed.get("crs"):
             return ValidationCheck(
                 name=f"v2_crs_in_parquet_type_{geom_col}",
-                status=CheckStatus.FAILED,
-                message="non-default CRS must be inline PROJJSON in Parquet geo type",
-                details="GeoParquet 2.0 requires CRS in Parquet schema, not just metadata",
+                status=CheckStatus.PASSED,
+                message="non-default CRS is inline in Parquet geo type",
                 category="geoparquet_2_0",
             )
+
+        return ValidationCheck(
+            name=f"v2_crs_in_parquet_type_{geom_col}",
+            status=CheckStatus.FAILED,
+            message="non-default CRS must be inline PROJJSON in Parquet geo type",
+            details="GeoParquet 2.0 requires CRS in Parquet schema, not just metadata",
+            category="geoparquet_2_0",
+        )
 
     return ValidationCheck(
         name=f"v2_crs_in_parquet_type_{geom_col}",
@@ -3411,9 +3375,9 @@ def _schema_crs_for_consistency(schema_info: list, geom_col: str) -> Any:
     Conservative, but never a silent false PASS.
     """
 
-    for col in schema_info:
-        if col.get("name") != geom_col:
-            continue
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
         parsed = parse_geometry_logical_type(col.get("logical_type") or "")
         if not (parsed and "crs" in parsed):
             return CRS_ABSENT
@@ -3450,7 +3414,7 @@ def _check_v2_crs_consistency(geo_meta: dict, schema_info: list, geom_col: str) 
 
     # Both sides unknown (metadata null, Parquet srid:0) lands here and matches,
     # as does every ordinary pair of named CRSs.
-    if _crs_equals(metadata_crs, schema_crs):
+    if crs_equal(metadata_crs, schema_crs):
         return ValidationCheck(
             name=f"v2_crs_consistency_{geom_col}",
             status=CheckStatus.PASSED,
@@ -3486,15 +3450,16 @@ def _schema_crs_display(schema_crs: Any) -> str:
 def _edges_schema_facts(schema_info: list, geom_col: str) -> tuple[bool, bool, str | None]:
     """Return (is_geography, is_planar_geometry, schema_algorithm) for a column."""
 
-    for col in schema_info:
-        if col.get("name") != geom_col:
-            continue
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
         logical_type = col.get("logical_type") or ""
-        if "GeographyType" in logical_type:
+        kind = native_geo_type(logical_type)
+        if kind == "GEOGRAPHY":
             parsed = parse_geometry_logical_type(logical_type)
-            algorithm = parsed.get("algorithm", "spherical") if parsed else None
+            algorithm = logical_type_edges(parsed) if parsed else None
             return True, False, algorithm
-        return False, "GeometryType" in logical_type, None
+        return False, kind == "GEOMETRY", None
     return False, False, None
 
 
@@ -3503,7 +3468,7 @@ def _check_v2_edges_consistency(
 ) -> ValidationCheck:
     """Check V2-5: edges in metadata must match algorithm in Parquet GEOGRAPHY type."""
     col_meta = geo_meta.get("columns", {}).get(geom_col, {})
-    metadata_edges = col_meta.get("edges", "planar")  # Default is planar
+    metadata_edges = declared_edges(col_meta)
 
     is_geography, is_planar_geometry, schema_algorithm = _edges_schema_facts(schema_info, geom_col)
 
@@ -3514,7 +3479,7 @@ def _check_v2_edges_consistency(
         # this shape (most writers cannot emit the GEOGRAPHY logical type and
         # carry edges in geo metadata instead — gpio's own convert does), so
         # this is an interoperability warning, not a spec violation.
-        if is_planar_geometry and metadata_edges != "planar":
+        if is_planar_geometry and is_geodesic(metadata_edges):
             return ValidationCheck(
                 name=f"v2_edges_consistency_{geom_col}",
                 status=CheckStatus.WARNING,
@@ -3559,90 +3524,91 @@ def _check_parquet_geo_only_crs(
 ) -> ValidationCheck:
     """Check CRS for parquet-geo-only files (no GeoParquet metadata)."""
 
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            logical_type = col.get("logical_type") or ""
-            parsed = parse_geometry_logical_type(logical_type)
+    index = root_schema_index(schema_info, geom_col)
+    if index is not None:
+        col = schema_info[index]
+        logical_type = col.get("logical_type") or ""
+        parsed = parse_geometry_logical_type(logical_type)
 
-            if not parsed:
-                return ValidationCheck(
-                    name=f"parquet_geo_only_crs_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message="no CRS specified (defaults to OGC:CRS84)",
-                    category="parquet_geo_types",
-                )
+        if not parsed:
+            return ValidationCheck(
+                name=f"parquet_geo_only_crs_{geom_col}",
+                status=CheckStatus.PASSED,
+                message="no CRS specified (defaults to OGC:CRS84)",
+                category="parquet_geo_types",
+            )
 
-            raw_crs = parsed.get("crs")
+        raw_crs = parsed.get("crs")
 
-            # No CRS = default OGC:CRS84 = pass
-            if raw_crs is None:
-                return ValidationCheck(
-                    name=f"parquet_geo_only_crs_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message="no CRS specified (defaults to OGC:CRS84)",
-                    category="parquet_geo_types",
-                )
+        # No CRS = default OGC:CRS84 = pass
+        if raw_crs is None:
+            return ValidationCheck(
+                name=f"parquet_geo_only_crs_{geom_col}",
+                status=CheckStatus.PASSED,
+                message="no CRS specified (defaults to OGC:CRS84)",
+                category="parquet_geo_types",
+            )
 
-            # Check if CRS uses reference format - warn about compatibility
-            # Both projjson: and srid: formats are not widely recognized
-            if isinstance(raw_crs, str) and (
-                raw_crs.startswith("projjson:") or raw_crs.startswith("srid:")
-            ):
-                return ValidationCheck(
-                    name=f"parquet_geo_only_crs_{geom_col}",
-                    status=CheckStatus.WARNING,
-                    message=f'column "{geom_col}" CRS format may not be widely recognized',
-                    details=f"CRS: {raw_crs}. "
-                    "Use 'gpio convert --geoparquet-version 2.0' to standardize.",
-                    category="parquet_geo_types",
-                )
-
-            # Resolve CRS reference if needed for further checks
-            crs = resolve_crs_reference(parquet_file, raw_crs)
-
-            # Still a string means nothing resolved it: the Parquet crs property
-            # is free-form, so this is a value like "4326" or "WGS 84" that no
-            # reader can be relied on to interpret. Report it before the
-            # is_geographic_crs heuristic below, which pattern-matches "4326"
-            # into a confident "CRS is geographic" gpio cannot back (#866).
-            if isinstance(crs, str):
-                return ValidationCheck(
-                    name=f"parquet_geo_only_crs_{geom_col}",
-                    status=CheckStatus.WARNING,
-                    message=f'column "{geom_col}" CRS format may not be widely recognized',
-                    details=f"CRS: {crs}. This is not inline PROJJSON, srid:<id>, "
-                    "projjson:<key> or a resolvable <authority>:<code>. "
-                    "Use 'gpio convert --geoparquet-version 2.0' to standardize.",
-                    category="parquet_geo_types",
-                )
-
-            # Check if CRS is geographic (WGS84, EPSG:4326, OGC:CRS84)
-            if is_geographic_crs(crs):
-                return ValidationCheck(
-                    name=f"parquet_geo_only_crs_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message="CRS is geographic (widely supported)",
-                    category="parquet_geo_types",
-                )
-
-            # Check if CRS uses Parquet spec format (inline PROJJSON)
-            if isinstance(crs, dict) and ("$schema" in crs or "type" in crs):
-                return ValidationCheck(
-                    name=f"parquet_geo_only_crs_{geom_col}",
-                    status=CheckStatus.PASSED,
-                    message="CRS uses valid PROJJSON format",
-                    category="parquet_geo_types",
-                )
-
-            # Other CRS format - warning
+        # Check if CRS uses reference format - warn about compatibility
+        # Both projjson: and srid: formats are not widely recognized
+        if isinstance(raw_crs, str) and (
+            raw_crs.startswith("projjson:") or raw_crs.startswith("srid:")
+        ):
             return ValidationCheck(
                 name=f"parquet_geo_only_crs_{geom_col}",
                 status=CheckStatus.WARNING,
-                message="CRS format may not be widely recognized by geospatial tools",
-                details=f"CRS: {get_crs_display_name(crs)}. "
-                "Use 'gpio convert --geoparquet-version 2.0' to add standardized metadata.",
+                message=f'column "{geom_col}" CRS format may not be widely recognized',
+                details=f"CRS: {raw_crs}. "
+                "Use 'gpio convert --geoparquet-version 2.0' to standardize.",
                 category="parquet_geo_types",
             )
+
+        # Resolve CRS reference if needed for further checks
+        crs = resolve_crs_reference(parquet_file, raw_crs)
+
+        # Still a string means nothing resolved it: the Parquet crs property
+        # is free-form, so this is a value like "4326" or "WGS 84" that no
+        # reader can be relied on to interpret. Report it before the
+        # geographic classification below; unsupported metadata must still be
+        # reported even when pyproj can interpret the free-form label (#866).
+        if isinstance(crs, str):
+            return ValidationCheck(
+                name=f"parquet_geo_only_crs_{geom_col}",
+                status=CheckStatus.WARNING,
+                message=f'column "{geom_col}" CRS format may not be widely recognized',
+                details=f"CRS: {crs}. This is not inline PROJJSON, srid:<id>, "
+                "projjson:<key> or a resolvable <authority>:<code>. "
+                "Use 'gpio convert --geoparquet-version 2.0' to standardize.",
+                category="parquet_geo_types",
+            )
+
+        # Check if CRS is geographic (WGS84, EPSG:4326, OGC:CRS84)
+        if is_geographic(crs):
+            return ValidationCheck(
+                name=f"parquet_geo_only_crs_{geom_col}",
+                status=CheckStatus.PASSED,
+                message="CRS is geographic (widely supported)",
+                category="parquet_geo_types",
+            )
+
+        # Check if CRS uses Parquet spec format (inline PROJJSON)
+        if isinstance(crs, dict) and ("$schema" in crs or "type" in crs):
+            return ValidationCheck(
+                name=f"parquet_geo_only_crs_{geom_col}",
+                status=CheckStatus.PASSED,
+                message="CRS uses valid PROJJSON format",
+                category="parquet_geo_types",
+            )
+
+        # Other CRS format - warning
+        return ValidationCheck(
+            name=f"parquet_geo_only_crs_{geom_col}",
+            status=CheckStatus.WARNING,
+            message="CRS format may not be widely recognized by geospatial tools",
+            details=f"CRS: {get_crs_display_name(crs)}. "
+            "Use 'gpio convert --geoparquet-version 2.0' to add standardized metadata.",
+            category="parquet_geo_types",
+        )
 
     return ValidationCheck(
         name=f"parquet_geo_only_crs_{geom_col}",
@@ -3696,14 +3662,18 @@ def _extract_epsg_code(crs: Any) -> int | None:
 def _get_bounds_from_pyproj(epsg_code: int) -> tuple[float, float, float, float] | None:
     """Get CRS bounds from pyproj."""
     try:
-        from pyproj import CRS as PyprojCRS
-
-        pyproj_crs = PyprojCRS.from_epsg(epsg_code)
-        area = pyproj_crs.area_of_use
+        pyproj_crs = load_crs(f"EPSG:{epsg_code}")
+        area = pyproj_crs.area_of_use if pyproj_crs is not None else None
         if not area:
             return None
 
-        if pyproj_crs.is_geographic:
+        if is_geographic(pyproj_crs):
+            if area.west > area.east:
+                # The area of use crosses the antimeridian (EPSG:4269 NAD83 runs
+                # 167.65 east to -40.73 west): the valid longitudes are the union
+                # [west, 180] U [-180, east], which a min/max sample cannot test
+                # against. Keep the latitude test and let any longitude through (#906).
+                return (-180.0, area.south, 180.0, area.north)
             return (area.west, area.south, area.east, area.north)
 
         # For projected CRS, transform geographic bounds to projected coordinates
@@ -3717,10 +3687,9 @@ def _transform_bounds_to_projected(
 ) -> tuple[float, float, float, float] | None:
     """Transform geographic bounds to projected CRS coordinates."""
     try:
-        from pyproj import CRS as PyprojCRS
         from pyproj import Transformer
 
-        transformer = Transformer.from_crs(PyprojCRS.from_epsg(4326), pyproj_crs, always_xy=True)
+        transformer = Transformer.from_crs("EPSG:4326", pyproj_crs, always_xy=True)
         corners = [
             (area.west, area.south),
             (area.west, area.north),
@@ -3848,42 +3817,30 @@ def _detect_geographic_in_projected(
 def _get_geometry_bounds(
     con, raw_url: str, geom_col: str, limit_clause: str, encoding: Any = "WKB"
 ) -> tuple[float, float, float, float, int] | None:
-    """Query actual coordinate bounds from geometry data."""
+    """``(min_x, max_x, min_y, max_y, rows checked)`` of the sampled geometries, or None."""
     if _is_geoarrow_encoding(encoding):
-        query = f"""
-            SELECT MIN(xmin) as min_x, MAX(xmax) as max_x,
-                   MIN(ymin) as min_y, MAX(ymax) as max_y,
-                   COUNT(*) as total
-            FROM ({_geoarrow_bounds_subquery(raw_url, geom_col, encoding, limit_clause)})
+        # The owner reads a GeoArrow coordinate struct itself: an EMPTY (NaN or
+        # no coordinates) is skipped and an infinite coordinate raises, as on
+        # every other path.
+        quoted = quote_identifier(geom_col)
+        sample = f"""
+            SELECT {quoted} FROM read_parquet({sql_path(raw_url)})
+            WHERE {quoted} IS NOT NULL
+            {limit_clause}
         """
-        result = con.execute(query).fetchone()
-        if result is None or result[0] is None:
-            return None
-        return result[0], result[1], result[2], result[3], result[4]
-
-    read = _geometry_read(con, raw_url, geom_col)
-    geom_expr = read.expr
-
-    query = f"""
-        SELECT
-            MIN(ST_XMin({geom_expr})) as min_x,
-            MAX(ST_XMax({geom_expr})) as max_x,
-            MIN(ST_YMin({geom_expr})) as min_y,
-            MAX(ST_YMax({geom_expr})) as max_y,
-            COUNT(*) as total
-        FROM (
+    else:
+        read = _geometry_read(con, raw_url, geom_col)
+        sample = f"""
             SELECT {read.quoted}
             FROM read_parquet({sql_path(raw_url)})
             WHERE {read.present_sql}
             {limit_clause}
-        )
-    """
-    result = con.execute(query).fetchone()
-
-    if result is None or result[0] is None:
+        """
+    bbox = bounds_of(QuerySource(con, sample), geom_col)
+    if bbox is None:
         return None
-
-    return result[0], result[1], result[2], result[3], result[4]
+    total = fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sample})"))[0]
+    return bbox[0], bbox[2], bbox[1], bbox[3], total
 
 
 def _check_coordinates_valid_for_crs(
@@ -3933,7 +3890,7 @@ def _check_coordinates_valid_for_crs(
 
         actual_xmin, actual_xmax, actual_ymin, actual_ymax, total = bounds_result
         actual = (actual_xmin, actual_xmax, actual_ymin, actual_ymax)
-        is_geo = is_geographic_crs(crs)
+        is_geo = is_geographic(crs)
 
         # Check bounds based on CRS type
         geo_warning = None
@@ -3975,6 +3932,15 @@ def _check_coordinates_valid_for_crs(
             category="data_validation",
         )
 
+    except GeometryError as e:
+        # The bounds owner's refusal: an infinite coordinate has no bounds.
+        return ValidationCheck(
+            name=check_name,
+            status=CheckStatus.FAILED,
+            message="coordinates are not finite",
+            details=str(e),
+            category="data_validation",
+        )
     except Exception as e:
         if _is_geoarrow_encoding(encoding):
             return _geoarrow_layout_error(check_name, encoding, "geometry coordinates", e)
@@ -3989,88 +3955,6 @@ def _check_coordinates_valid_for_crs(
 # =============================================================================
 # Helper Functions
 # =============================================================================
-
-
-def _get_crs_from_schema(schema_info: list, geom_col: str) -> Any:
-    """Extract CRS from schema logical type for a geometry column."""
-
-    for col in schema_info:
-        if col.get("name") == geom_col:
-            logical_type = col.get("logical_type") or ""
-            parsed = parse_geometry_logical_type(logical_type)
-            if parsed:
-                return parsed.get("crs")
-            return None
-    return None
-
-
-def _complete_crs_id(crs: dict) -> tuple[str, str] | None:
-    """Normalized (authority, code) when both are present and non-empty, else None."""
-    crs_id = crs.get("id")
-    if not isinstance(crs_id, dict):
-        return None
-    authority = str(crs_id.get("authority") or "").upper()
-    code = str(crs_id.get("code") or "").upper()
-    if authority and code:
-        return (authority, code)
-    return None
-
-
-def _crs_equals(crs1: Any, crs2: Any) -> bool:
-    """Compare two CRS values for equality.
-
-    Pass :data:`CRS_ABSENT` for a column with no ``crs`` key and ``None`` for an
-    explicit ``"crs": null``; the spec gives them different meanings (default
-    OGC:CRS84 vs unknown CRS) and this helper resolves them accordingly. Use
-    :func:`~geoparquet_io.core.crs_utils.crs_from_column_meta` to extract them.
-    """
-    # An omitted crs key means the OGC:CRS84 default, so it equals anything
-    # CRS84-equivalent -- and, being a *known* CRS, differs from an explicit null.
-    if crs1 is CRS_ABSENT or crs2 is CRS_ABSENT:
-        if crs1 is CRS_ABSENT and crs2 is CRS_ABSENT:
-            return True
-        return _is_crs84_equivalent(crs2 if crs1 is CRS_ABSENT else crs1)
-
-    # An explicit null means the CRS is unknown: it matches only another
-    # unknown, never a CRS the other side actually names.
-    if crs1 is None or crs2 is None:
-        return crs1 is None and crs2 is None
-
-    # OGC:CRS84 and EPSG:4326 differ only in axis order, and GeoParquet fixes
-    # the stored order to (x, y). They describe the same coordinates in every
-    # GeoParquet file, in every spelling -- id stub, authority string, URN or
-    # full PROJJSON -- so resolve them before the id fast path below, which
-    # would otherwise report the single most common equivalent pair as unequal.
-    if _is_crs84_equivalent(crs1) and _is_crs84_equivalent(crs2):
-        return True
-
-    if not (isinstance(crs1, dict) and isinstance(crs2, dict)):
-        # Direct comparison for strings
-        return crs1 == crs2
-
-    # When both sides carry a complete authority:code id, trust it (the spec
-    # treats the id as authoritative).
-    id1 = _complete_crs_id(crs1)
-    id2 = _complete_crs_id(crs2)
-    if id1 and id2:
-        return id1 == id2
-
-    # Structurally identical PROJJSON is equal even if pyproj can't parse it.
-    if crs1 == crs2:
-        return True
-
-    # At least one side lacks a usable id: compare semantically. Axis order is
-    # ignored because GeoParquet fixes coordinate order to (x, y). Fail closed
-    # on pyproj errors — an unverifiable CRS must not satisfy a consistency
-    # check.
-    try:
-        from pyproj import CRS as PyprojCRS
-
-        return PyprojCRS.from_json_dict(crs1).equals(
-            PyprojCRS.from_json_dict(crs2), ignore_axis_order=True
-        )
-    except Exception:
-        return False
 
 
 # =============================================================================
@@ -4088,9 +3972,8 @@ def _is_read_failure(exc: BaseException | None) -> bool:
     """
     import duckdb
 
+    # duckdb.HTTPException is an IOException on every supported client.
     io_types: tuple[type, ...] = (OSError, duckdb.IOException)
-    if hasattr(duckdb, "HTTPException"):
-        io_types = (*io_types, duckdb.HTTPException)
     seen: set[int] = set()
     while exc is not None and id(exc) not in seen:
         seen.add(id(exc))
@@ -4190,7 +4073,6 @@ def validate_geoparquet(
     """
     from geoparquet_io.core.duckdb_metadata import (
         detect_geometry_columns,
-        get_geo_metadata,
         get_kv_metadata,
         get_schema_info,
     )
@@ -4249,8 +4131,11 @@ def validate_geoparquet(
     try:
         kv_metadata = get_kv_metadata(parquet_file)
         # The dict above collapses a repeated key, so count the raw entries.
-        geo_entry_count = _geo_entry_count(parquet_file) if b"geo" in kv_metadata else None
-        geo_meta = get_geo_metadata(parquet_file)
+        # The raw diagnostic decoder: what the key literally holds, and why
+        # it could not be decoded when it could not.
+        raw_geo = read_raw_geo(kv_metadata)
+        geo_entry_count = _geo_entry_count(parquet_file) if raw_geo.present else None
+        geo_meta = raw_geo.value
         schema_info = get_schema_info(parquet_file)
         geo_columns = detect_geometry_columns(parquet_file)
     except (GeoParquetError, UnicodeDecodeError, ValueError) as e:
@@ -4279,12 +4164,13 @@ def validate_geoparquet(
     # ANY mode; without this, auto-detect classifies the file as plain
     # parquet-geo-only and a corrupt file passes validation — and valid-JSON
     # non-object values (list, string, number) would crash downstream checks.
-    if not isinstance(geo_meta, dict) and kv_metadata and b"geo" in kv_metadata:
+    if raw_geo.present and raw_geo.block is None:
         result.checks.append(
             ValidationCheck(
                 name="geo_metadata_parse",
                 status=CheckStatus.FAILED,
                 message="'geo' metadata key exists but is not a valid JSON object",
+                details=raw_geo.error,
                 category="core_metadata",
             )
         )
@@ -4345,14 +4231,16 @@ def _determine_version(file_type_info: dict) -> str:
     file_type = file_type_info.get("file_type", "unknown")
     geo_version = file_type_info.get("geo_version")
 
-    if file_type == "parquet_geo_only":
-        return "parquet-geo-only"
-    elif file_type == "geoparquet_v1":
+    if file_type == "geoparquet_v1":
         return geo_version or "1.x"
-    elif file_type == "geoparquet_v2":
-        return geo_version or "2.0"
-    else:
-        return "unknown"
+    if file_type == "geoparquet_v2" and geo_version:
+        return geo_version
+    if file_type in ("geoparquet_v2", "parquet_geo_only"):
+        # The label is the version a repair would keep: the facade's preserve policy.
+        return resolve_output_geoparquet_version(
+            None, file_type=file_type_info, preserve_input=True
+        )
+    return "unknown"
 
 
 def _versions_match(detected: str, target: str, file_type_info: dict) -> bool:
@@ -4456,6 +4344,10 @@ def _run_parquet_geo_only_checks(
         # was written for it once, never registered, and removed in #1038).
         checks.append(_check_native_geo_type_present(schema_info, geom_col))
         checks.append(_check_geography_edges_valid(schema_info, geom_col))
+        # The declared CRS decides whether xmin > xmax in the statistics is an
+        # antimeridian wrap or broken metadata; here it comes from the Parquet
+        # logical type, the only place a geo-only file declares it.
+        crs = crs_of(parquet_file, geometry_column=geom_col, quiet=True)
         checks.append(_check_native_geo_statistics(parquet_file, geom_col, schema_info))
         checks.append(_check_geography_stats_bbox(parquet_file, geom_col, schema_info))
 
@@ -4464,10 +4356,6 @@ def _run_parquet_geo_only_checks(
 
         # Data validation if requested
         if validate_data and con:
-            # The declared CRS decides whether xmin > xmax in the statistics is
-            # an antimeridian wrap or broken metadata; here it comes from the
-            # Parquet logical type, the only place a geo-only file declares it.
-            crs = _get_crs_from_schema(schema_info, geom_col)
             checks.append(_check_native_geo_types_match(parquet_file, geom_col, sample_size, con))
             checks.append(
                 _check_native_geo_stats_contains_data(parquet_file, geom_col, con, sample_size, crs)
@@ -4483,9 +4371,14 @@ def _run_parquet_geo_only_checks(
                 )
             )
 
-            # Check coordinates are valid for declared CRS
+            # Unknown is distinct from the absent/default CRS for range validation.
+            range_crs = (
+                PARQUET_UNKNOWN_CRS if source_crs_is_unknown(parquet_file, geom_col) else crs
+            )
             checks.append(
-                _check_coordinates_valid_for_crs(parquet_file, geom_col, crs, con, sample_size)
+                _check_coordinates_valid_for_crs(
+                    parquet_file, geom_col, range_crs, con, sample_size
+                )
             )
 
     return checks
@@ -4537,7 +4430,9 @@ def _run_geoparquet_checks(
 
     # A missing version is reported by _check_version_present above; guard the
     # string comparisons below against None so validation never crashes on it.
-    geo_version = file_type_info.get("geo_version") or "1.0.0"
+    geo_version = (
+        file_type_info.get("geo_version") or GEOPARQUET_VERSIONS["1.0"]["metadata_version"]
+    )
 
     # Column metadata checks for each geometry column
     for col_name, col_meta in columns.items():
@@ -4589,7 +4484,7 @@ def _run_geoparquet_checks(
                     con,
                     sample_size,
                     encoding,
-                    col_meta.get("edges") or "planar",
+                    declared_edges(col_meta),
                 )
             )
 
@@ -4605,7 +4500,7 @@ def _run_geoparquet_checks(
             # null or empty crs, or no crs key over a srid:0 type) is spelled
             # the way the Parquet type spells it, so the check skips it rather
             # than reading it as the lon/lat default.
-            unknown = entry_crs_is_unknown(col_meta, _get_crs_from_schema(schema_info, col_name))
+            unknown = source_crs_is_unknown(parquet_file, col_name)
             range_crs = PARQUET_UNKNOWN_CRS if unknown else crs
             checks.append(
                 _check_coordinates_valid_for_crs(
@@ -4624,19 +4519,19 @@ def _run_geoparquet_checks(
     covering_checks_apply = _version_at_least(geo_version, 1, 1)
     if covering_checks_apply:
         for col_name, col_meta in columns.items():
-            checks.append(_check_covering_is_object(col_meta, col_name))
+            checks.append(_check_cover_is_object(col_meta, col_name))
             # A covering that is an object but has no `bbox` member is the one
             # defect the four path/column/struct/type checks below cannot see:
             # they skip a column that declares no bbox covering, so the file
             # passed clean while geopandas could not open it (#1173).
-            checks.append(_check_covering_has_bbox(col_meta, col_name))
+            checks.append(_check_cover_has_bbox(col_meta, col_name))
 
             # Only run bbox covering checks if covering is defined
-            if _declares_bbox_covering(col_meta):
-                checks.append(_check_covering_bbox_paths(col_meta, col_name))
-                checks.append(_check_covering_bbox_column_exists(col_meta, col_name, schema_info))
-                checks.append(_check_covering_bbox_structure(col_meta, col_name, schema_info))
-                checks.append(_check_covering_bbox_field_types(col_meta, col_name, schema_info))
+            if declares_covering_member(col_meta, "bbox"):
+                checks.append(_check_cover_bbox_paths(col_meta, col_name))
+                checks.append(_check_cover_bbox_column_exists(col_meta, col_name, schema_info))
+                checks.append(_check_cover_bbox_structure(col_meta, col_name, schema_info))
+                checks.append(_check_cover_bbox_field_types(col_meta, col_name, schema_info))
 
     # File extension check applies to 1.1+
     if _version_at_least(geo_version, 1, 1):
@@ -4647,6 +4542,10 @@ def _run_geoparquet_checks(
         checks.append(_check_native_columns_in_metadata(schema_info, columns))
         # Parquet native geo type checks (run first for 2.0)
         for col_name, col_meta in columns.items():
+            # A 2.0 column may declare its CRS in the GeoParquet metadata, in the
+            # Parquet logical type, or both; either one rules out reading
+            # xmin > xmax as an antimeridian wrap when it is projected.
+            stats_crs = crs_of(parquet_file, geometry_column=col_name, quiet=True)
             checks.append(_check_native_geo_type_present(schema_info, col_name))
             checks.append(_check_native_crs_format(schema_info, col_name))
             checks.append(_check_geography_edges_valid(schema_info, col_name))
@@ -4663,10 +4562,6 @@ def _run_geoparquet_checks(
                 checks.append(
                     _check_native_geo_types_match(parquet_file, col_name, sample_size, con)
                 )
-                # A 2.0 column may declare its CRS in the GeoParquet metadata,
-                # in the Parquet logical type, or both; either one rules out
-                # reading xmin > xmax as an antimeridian wrap when it is projected.
-                stats_crs = col_meta.get("crs") or _get_crs_from_schema(schema_info, col_name)
                 checks.append(
                     _check_native_geo_stats_contains_data(
                         parquet_file, col_name, con, sample_size, stats_crs

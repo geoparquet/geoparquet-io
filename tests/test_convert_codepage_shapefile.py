@@ -34,6 +34,9 @@ from geoparquet_io.core.source_text import (
     plan_source_text,
 )
 
+pytestmark = pytest.mark.fresh_duckdb
+
+
 DATA = Path(__file__).parent / "data"
 ROWS = struct.unpack("<I", (DATA / "buildings_test.dbf").read_bytes()[4:8])[0]
 
@@ -369,10 +372,16 @@ class TestCrsFromReadTypeFallback:
     @staticmethod
     def _con_with_type(type_string):
         class _Result:
-            description = [("id", "INTEGER"), ("geom", type_string)]
+            # DESCRIBE rows: name, type, null, key, default, extra.
+            @staticmethod
+            def fetchall():
+                return [
+                    ("id", "INTEGER", "YES", None, None, None),
+                    ("geom", type_string, "YES", None, None, None),
+                ]
 
         class _Con:
-            def execute(self, _sql):
+            def execute(self, _sql, _params=None):
                 return _Result()
 
         return _Con()
@@ -388,3 +397,27 @@ class TestCrsFromReadTypeFallback:
 
         con = self._con_with_type('GEOMETRY(\'{"id": {"authority": "EPSG", "code": 3857}}\')')
         assert _crs_from_read_type("in.shp", con) == {"id": {"authority": "EPSG", "code": 3857}}
+
+
+class TestColumnNameDecodeFailures:
+    """Each DuckDB client's way of failing on a column name that is not UTF-8."""
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            UnicodeDecodeError("utf-8", b"\x96\xbc", 0, 1, "invalid start byte"),
+            RuntimeError("nanobind::str(): conversion error!"),
+        ],
+        ids=["duckdb-1.5", "duckdb-2.0"],
+    )
+    def test_is_refused_with_the_encoding_hint(self, error):
+        from geoparquet_io.core.source_text import text_error
+
+        refused = text_error(error)
+        assert refused is not None
+        assert "column name" in str(refused) and "--encoding" in str(refused)
+
+    def test_an_unrelated_runtime_error_is_not_claimed(self):
+        from geoparquet_io.core.source_text import text_error
+
+        assert text_error(RuntimeError("something else")) is None

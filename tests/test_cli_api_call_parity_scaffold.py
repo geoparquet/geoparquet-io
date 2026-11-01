@@ -75,6 +75,7 @@ it in isolation; in the full suite it is a non-issue.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import inspect
 import json
 from collections.abc import Callable
@@ -114,7 +115,7 @@ from geoparquet_io.core import stac as core_stac
 from geoparquet_io.core import str_order as core_str
 from geoparquet_io.core import upload as core_upload
 from geoparquet_io.core import validate as core_validate
-from geoparquet_io.core import write_strategies as core_write_strategies
+from geoparquet_io.core import write_funnels as core_write_funnels
 from geoparquet_io.core.add import a5 as core_a5
 from geoparquet_io.core.add import bbox as core_bbox
 from geoparquet_io.core.add import h3 as core_h3
@@ -130,6 +131,7 @@ from geoparquet_io.core.process import overview as core_overview
 from geoparquet_io.core.process.aggregate import by_a5 as core_agg_a5
 from geoparquet_io.core.process.aggregate import by_admin as core_agg_admin
 from geoparquet_io.core.process.aggregate import by_h3 as core_agg_h3
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 # Sentinel: the recorder returns its first positional argument. The table-centric
 # core functions return a table that the API front ends immediately re-wrap, so a
@@ -163,16 +165,6 @@ class _Recorder:
         if self._result is ECHO_FIRST_ARG:
             return args[0] if args else next(iter(kwargs.values()))
         return self._result
-
-
-class _StrategyStub:
-    """Minimal write-strategy object whose `write_from_table` records its kwargs."""
-
-    def __init__(self, recorder: _Recorder):
-        self._recorder = recorder
-
-    def write_from_table(self, **kwargs):
-        return self._recorder(**kwargs)
 
 
 @dataclass(frozen=True)
@@ -299,20 +291,6 @@ def _table(
 # end, not on `ops`. That makes it constructed exactly like `_table`; the alias keeps
 # the call sites at the case list reading as "ops, via Table" without a duplicate body.
 _ops_via_table = _table
-
-
-def _install_write_strategy(_frontend, recorder: _Recorder):
-    """Patch the strategy factory so Table.write's core write call is recorded.
-
-    `get_strategy` is a `classmethod`; `patch.object` restores the descriptor
-    itself rather than the bound method `getattr` would hand back, so the class
-    is left exactly as it was found.
-    """
-    return patch.object(
-        core_write_strategies.WriteStrategyFactory,
-        "get_strategy",
-        lambda *_args, **_kwargs: _StrategyStub(recorder),
-    )
 
 
 # --------------------------------------------------------------------------
@@ -635,13 +613,12 @@ CASES: list[ParityCase] = [
             module=cli_convert,
         ),
         # `Table.write` has no core twin of `convert_to_geoparquet`: it resolves a
-        # write strategy and calls `strategy.write_from_table`. That call *is* the
-        # API's core write boundary, and is what the write facade will replace.
+        # write strategy and calls the shared table-write funnel. Capture that
+        # boundary before the funnel writes or repairs the output layout.
         table=Frontend(
-            patch_site=(core_write_strategies.WriteStrategyFactory, "get_strategy"),
+            patch_site=(core_write_funnels, "write_geoparquet_table"),
             reference=None,
             invoke=lambda c: c.gpio_table.write(c.output_file),
-            install=_install_write_strategy,
         ),
         normalize={
             "compression": ("compression", "compression"),
@@ -1324,24 +1301,25 @@ CASES_BY_ID = {case.id: case for case in CASES}
 KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
     (
         "sort hilbert",
-        "ops",
+        "table",
         "geometry_column",
-        "'geometry'",
         "None",
+        "'geometry'",
     ): (
-        "CLI --geometry-column defaults to the conventional name 'geometry'; ops.sort_hilbert "
-        "passes None so core auto-detects. Table.sort_hilbert does not have this gap because a "
-        "Table already knows its geometry column. Also listed in the #661 allowlist."
+        "CLI --geometry-column defaults to None, the file's primary geometry column "
+        "(geometry_detection.primary_geometry_column, #1367 T3c); Table.sort_hilbert passes the "
+        "column the Table already tracks. Same column, resolved where each front end knows it."
     ),
     (
         "sort str",
-        "ops",
+        "table",
         "geometry_column",
-        "'geometry'",
         "None",
+        "'geometry'",
     ): (
-        "CLI --geometry-column defaults to the conventional name 'geometry'; ops.sort_str "
-        "passes None so core auto-detects. Table.sort_str already knows its geometry column."
+        "CLI --geometry-column defaults to None, the file's primary geometry column "
+        "(geometry_detection.primary_geometry_column, #1367 T3c); Table.sort_str passes the "
+        "column the Table already tracks. Same column, resolved where each front end knows it."
     ),
     (
         "sort str",
@@ -1440,7 +1418,19 @@ def _capture(frontend: Frontend, ctx: Ctx) -> dict[str, Any]:
             f"expected exactly one call to {target.__name__ if hasattr(target, '__name__') else target}"
             f".{attribute}, recorded {len(recorder.calls)}{detail}"
         )
-    return recorder.calls[0]
+    return _flatten_options(recorder.calls[0])
+
+
+def _flatten_options(call: dict[str, Any]) -> dict[str, Any]:
+    """A call's ``options=AggregateOptions(...)`` as the keywords it carries.
+
+    The grid-aggregate layers hand core one options object; parity is about the
+    values, so the comparison reads them out by field name.
+    """
+    options = call.get("options")
+    if not isinstance(options, AggregateOptions):
+        return call
+    return {**{k: v for k, v in call.items() if k != "options"}, **dataclasses.asdict(options)}
 
 
 def _mismatches(

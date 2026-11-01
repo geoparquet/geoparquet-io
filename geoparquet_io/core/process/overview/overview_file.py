@@ -34,29 +34,30 @@ from __future__ import annotations
 import json
 import math
 import os
-import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import _apply_geoparquet_metadata
+from geoparquet_io.core.column_selection import matching_columns
+from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.crs_utils import crs_of
+from geoparquet_io.core.file_utils import atomic_write
 from geoparquet_io.core.geo_metadata import (
     OVERVIEW_LEVEL_COLUMN,
     OVERVIEWS_KEY,
-    carried_geometry_column,
     sanitized_carried_geo,
 )
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.parquet_writer import (
-    DEFAULT_ROW_GROUP_ROWS,
     apply_output_kv_metadata,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
-    without_geometry_dictionary,
 )
-from geoparquet_io.core.write_funnels import extract_preserved_kv_metadata
+from geoparquet_io.core.write_funnels import extract_preserved_kv_metadata, open_parquet_writer
 
 __all__ = [
     "OVERVIEWS_KEY",
@@ -152,7 +153,7 @@ def _check_level_schemas(files: list[pq.ParquetFile], levels: list[LevelInput]) 
                 f"{lv.path} has no rows; an overview file must not carry an empty level "
                 "(OVERVIEWS_SPEC 7.3)"
             )
-        collisions = [n for n in pf.schema_arrow.names if n.lower() == OVERVIEW_LEVEL_COLUMN]
+        collisions = matching_columns(OVERVIEW_LEVEL_COLUMN, pf.schema_arrow.names)
         if collisions:
             raise ValueError(
                 f"{lv.path} already has a column named {collisions[0]!r}; an overview file's "
@@ -273,25 +274,20 @@ def _output_schema(
     level_field = pa.field(OVERVIEW_LEVEL_COLUMN, pa.int32(), nullable=False)
     empty = _empty(data_schema.append(level_field))
 
-    geo_meta = sanitized_carried_geo(base_meta)
-    geometry_column = carried_geometry_column(geo_meta, data_schema.names)
+    geo_meta = sanitized_carried_geo(base_meta, source=str(base_path))
+    geometry_column = primary_geometry_column(data_schema, geo=geo_meta)
     if geometry_column is not None:
-        col_meta = geo_meta.get("columns", {}).get(geometry_column, {})
         bbox, types = _union_geo(files, geometry_column)
         empty = _apply_geoparquet_metadata(
             empty,
             geometry_column=geometry_column,
             geoparquet_version=version,
             original_metadata=base_meta,
-            input_crs=col_meta.get("crs") if isinstance(col_meta, dict) else None,
+            input_crs=crs_of(base_path, geometry_column=geometry_column, quiet=True),
             verbose=verbose,
             geo_bbox=bbox,
+            geo_types=types or None,
         )
-        meta = dict(empty.schema.metadata or {})
-        if b"geo" in meta and types:
-            geo = json.loads(meta[b"geo"])
-            geo["columns"][geometry_column]["geometry_types"] = types
-            empty = empty.replace_schema_metadata({**meta, b"geo": json.dumps(geo).encode()})
     else:
         empty = empty.replace_schema_metadata(base_meta)
 
@@ -314,7 +310,7 @@ def _slices(pf: pq.ParquetFile, rows: int) -> Iterator[pa.Table]:
 
 
 def _write_levels(
-    writer: pq.ParquetWriter,
+    write_table: Callable[..., None],
     files: list[pq.ParquetFile],
     data_schema: pa.Schema,
     schema: pa.Schema,
@@ -327,7 +323,7 @@ def _write_levels(
             piece = piece.select(data_schema.names).cast(data_schema)
             level = pa.repeat(pa.scalar(ordinal, pa.int32()), piece.num_rows)
             piece = piece.append_column(level_field, level).replace_schema_metadata(schema.metadata)
-            writer.write_table(piece, row_group_size=rows_per_group)
+            write_table(piece, row_group_size=rows_per_group)
             groups += 1
         debug(f"level {ordinal}: {pf.metadata.num_rows} rows, {groups} row group(s)")
 
@@ -337,7 +333,7 @@ def write_overview_file(
     output_path: str,
     *,
     geoparquet_version: str | None = None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     verbose: bool = False,
 ) -> str:
@@ -350,12 +346,13 @@ def write_overview_file(
     the output directory and moved into place, so a failure leaves nothing at
     ``output_path``. Returns the output path.
     """
+    codec = resolve_codec(compression, compression_level, context="process")
     _validate(levels, output_path)
     files = [pq.ParquetFile(lv.path) for lv in levels]
     try:
         _check_level_schemas(files, levels)
         data_schema = _cast_plan(files, levels)
-        rows_per_group = resolve_row_group_rows(None, None) or DEFAULT_ROW_GROUP_ROWS
+        rows_per_group = resolve_row_group_rows(None, None)
         ends = _row_group_ends([pf.metadata.num_rows for pf in files], rows_per_group)
         schema = _output_schema(
             files, levels[-1].path, data_schema, _footer(levels, ends), geoparquet_version, verbose
@@ -364,35 +361,23 @@ def write_overview_file(
             [schema.field(n) for n in data_schema.names]
         )  # the facade may have retyped the geometry for the output version
 
-        fd, tmp_path = tempfile.mkstemp(
-            prefix=".gpio-overview-",
-            suffix=".parquet",
-            dir=os.path.dirname(os.path.abspath(output_path)),
-        )
-        os.close(fd)
-        try:
-            geometry_column = carried_geometry_column(
-                sanitized_carried_geo(schema.metadata), schema.names
-            )
+        geometry_column = primary_geometry_column(schema)
+        # Staged beside the output and moved into place (file_utils.atomic_write).
+        with atomic_write(output_path) as staged:
             # OVERVIEWS_SPEC 4.5: no dictionary encoding on the geometry.
-            writer_kwargs = without_geometry_dictionary(
-                {"compression": compression, "compression_level": compression_level},
+            with open_parquet_writer(
+                staged,
                 schema,
-                [geometry_column] if geometry_column else (),
-            )
-            with pq.ParquetWriter(tmp_path, schema, **writer_kwargs) as writer:
-                _write_levels(writer, files, data_schema, schema, rows_per_group)
-            written = pq.read_metadata(tmp_path).num_row_groups
+                codec.pyarrow_kwargs(),
+                geometry_columns=[geometry_column] if geometry_column else (),
+            ) as writer:
+                _write_levels(writer.write_table, files, data_schema, schema, rows_per_group)
+            written = pq.read_metadata(staged).num_row_groups
             if written != ends[-1] + 1:
                 raise RuntimeError(
                     f"wrote {written} row groups but the footer describes {ends[-1] + 1}; "
                     "the level boundaries would be wrong, so nothing was kept"
                 )
-            os.replace(tmp_path, output_path)
-        except BaseException:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            raise
     finally:
         for pf in files:
             pf.close()

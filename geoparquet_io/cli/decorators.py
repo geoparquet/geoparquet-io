@@ -7,18 +7,31 @@ and reduce code duplication.
 
 import functools
 import math
+from typing import Any
 
 import click
+from click.core import ParameterSource
 
+from geoparquet_io.cli.exception_handler import click_error_for, error_boundary, error_text
+from geoparquet_io.core.compression import (
+    ACCEPTED_CODEC_NAMES,
+    ALLOWED_CODECS,
+    COMPRESSION_RANGES,
+    MAX_COMPRESSION_LEVEL,
+    WriteContext,
+    resolve_codec,
+)
+from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     SPATIAL_BAND_TOP_ROWS,
     WRITER_VECTOR_ROWS,
 )
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
 
 class ErrorBoundaryGroup(click.Group):
-    """Root group that turns a DuckDB failure into gpio's error line.
+    """Root group that turns a failure no gpio frame owned into gpio's error line.
 
     Failures reach this point with no gpio frame willing to own them, and used
     to leave a raw Python traceback on the terminal -- an out-of-spill-space
@@ -30,7 +43,7 @@ class ErrorBoundaryGroup(click.Group):
     :data:`~geoparquet_io.core.duckdb_utils.INPUT_FILE_DUCKDB_ERRORS`.
 
     This belongs on the *root* group rather than on a decorator, because every
-    command can hit those failures: ``handle_geoparquet_errors`` is applied to
+    command can hit those failures: a per-command decorator was applied to
     four command modules, and ``gpio sort hilbert`` -- the worked example in the
     docs -- is not one of them. ``Group.invoke`` is the single funnel every
     subcommand passes through, so a command added tomorrow inherits this, and
@@ -51,48 +64,8 @@ class ErrorBoundaryGroup(click.Group):
     """
 
     def invoke(self, ctx):
-        from geoparquet_io.cli.exception_handler import cli_error_for
-        from geoparquet_io.core.logging_config import get_logger
-
-        try:
+        with error_boundary():
             return super().invoke(ctx)
-        except Exception as exc:
-            error = cli_error_for(exc)
-            if error is None:
-                raise
-            # The traceback is hidden, not discarded: --verbose prints it, which
-            # is what a gpio bug that surfaces as a DuckDB error needs. That
-            # holds because `verbose_option` raises the package logger to DEBUG
-            # as the flag is parsed -- before the command body runs, so before
-            # anything can fail on the way to a core function's own
-            # `configure_verbose` call.
-            get_logger(__name__).debug(
-                "Converted a low-level failure to an error line", exc_info=exc
-            )
-            raise error from exc
-
-
-def handle_geoparquet_errors(func):
-    """
-    Decorator to convert GeoParquetError exceptions to user-friendly Click errors.
-
-    Catches GeoParquetError from core functions and converts them to
-    appropriate click exceptions (BadParameter for invalid params, ClickException
-    for general errors) for clean error display without stack traces.
-    """
-
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        # Import here to avoid circular imports
-        from geoparquet_io.cli.exception_handler import handle_core_exception
-        from geoparquet_io.core.exceptions import GeoParquetError
-
-        try:
-            return func(*args, **kwargs)
-        except GeoParquetError as e:
-            raise handle_core_exception(e) from None
-
-    return wrapper
 
 
 def parse_row_group_options(
@@ -117,27 +90,24 @@ def parse_row_group_options(
     Raises:
         click.UsageError: If both options are provided or if size string is invalid
     """
-    if row_group_size and row_group_size_mb:
-        raise click.UsageError("--row-group-size and --row-group-size-mb are mutually exclusive")
+    refuse_together(
+        ("--row-group-size", row_group_size), ("--row-group-size-mb", row_group_size_mb)
+    )
 
     if not row_group_size_mb:
         return None
 
-    from geoparquet_io.core.sizing import parse_size_string
+    from geoparquet_io.core.sizing import bytes_to_mb, parse_size_string
 
     try:
-        size_bytes = parse_size_string(row_group_size_mb)
-        return size_bytes / (1024 * 1024)
+        return bytes_to_mb(parse_size_string(row_group_size_mb))
     except ValueError as e:
-        raise click.UsageError(f"Invalid row group size: {e}") from e
+        raise click.UsageError(f"Invalid row group size: {error_text(e)}") from e
 
 
 # ``--approx``'s default. ``gpio add kdtree`` and ``gpio partition kdtree`` both
-# declare the option with this value, and exclusivity against ``--exact`` is
-# detected by comparing the received value against it (see the note in
-# ``resolve_kdtree_options``), so the declarations import it from here rather
-# than repeating the literal: a second copy that drifted would make a bare
-# ``--exact`` start reporting a conflict with an ``--approx`` nobody typed.
+# declare the option with this value, so the declarations import it from here
+# rather than repeating the literal.
 DEFAULT_KDTREE_APPROX = 100000
 
 # Rows per partition targeted when the user asks for neither ``--partitions``
@@ -146,11 +116,28 @@ DEFAULT_KDTREE_APPROX = 100000
 DEFAULT_KDTREE_TARGET_ROWS = 120000
 
 
+def refuse_together(first: tuple[str, Any], second: tuple[str, Any], *, end: str = "") -> None:
+    """Refuse two options given together, in the one wording every command uses.
+
+    Each argument is ``(flag, given)``; *given* is read for truth, so a caller
+    states what "given" means for its option (a set flag, a value that is not
+    ``None``, a source that is not ``ParameterSource.DEFAULT``).
+
+    Raises:
+        click.UsageError: ``"<first> and <second> are mutually exclusive<end>"``
+            when both were given.
+    """
+    (first_flag, first_given), (second_flag, second_given) = first, second
+    if first_given and second_given:
+        raise click.UsageError(f"{first_flag} and {second_flag} are mutually exclusive{end}")
+
+
 def resolve_kdtree_options(
     partitions: int | None,
     auto: int | None,
     approx: int,
     exact: bool,
+    approx_source: ParameterSource | None,
 ) -> tuple[int | None, int | None, tuple[str, int] | None]:
     """Resolve the four KD-tree sizing options into what the core layer takes.
 
@@ -166,6 +153,11 @@ def resolve_kdtree_options(
         auto: ``--auto``, a target row count per partition.
         approx: ``--approx``, the sample size for approximate medians.
         exact: ``--exact``, computing medians over the full dataset instead.
+        approx_source: where ``approx`` came from, as reported by
+            ``ctx.get_parameter_source("approx")``. Any source but
+            ``ParameterSource.DEFAULT`` counts as a supplied ``--approx`` --
+            ``None`` (unknown) included, so an unwired caller fails closed
+            rather than reviving the #951 quirk.
 
     Returns:
         ``(iterations, sample_size, auto_target)`` -- the recursion depth
@@ -174,20 +166,11 @@ def resolve_kdtree_options(
         when the partition count was explicit).
 
     Raises:
-        click.UsageError: ``--partitions`` with ``--auto``, ``--exact`` with a
-            non-default ``--approx``, or a ``--partitions`` value that is not a
-            power of two of at least 2.
-
-    Note:
-        The ``--approx``/``--exact`` check compares ``approx`` against its
-        declared default rather than asking Click whether the user typed it, so
-        ``--exact --approx 100000`` is accepted silently. That is preserved
-        verbatim from both call sites: correcting it with a
-        ``ctx.get_parameter_source`` check would change behaviour, and belongs in
-        its own change (#951).
+        click.UsageError: ``--partitions`` with ``--auto``, ``--exact`` with an
+            ``--approx`` the user supplied, or a ``--partitions`` value that is
+            not a power of two of at least 2.
     """
-    if sum([partitions is not None, auto is not None]) > 1:
-        raise click.UsageError("--partitions and --auto are mutually exclusive")
+    refuse_together(("--partitions", partitions is not None), ("--auto", auto is not None))
 
     if partitions is None and auto is None:
         auto = DEFAULT_KDTREE_TARGET_ROWS
@@ -195,8 +178,7 @@ def resolve_kdtree_options(
     if partitions is not None and (partitions < 2 or (partitions & (partitions - 1)) != 0):
         raise click.UsageError(f"Partitions must be a power of 2 (2, 4, 8, ...), got {partitions}")
 
-    if exact and approx != DEFAULT_KDTREE_APPROX:
-        raise click.UsageError("--approx and --exact are mutually exclusive")
+    refuse_together(("--approx", approx_source is not ParameterSource.DEFAULT), ("--exact", exact))
 
     sample_size = None if exact else approx
 
@@ -207,6 +189,63 @@ def resolve_kdtree_options(
     return None, sample_size, ("rows", target_rows)
 
 
+def _compression_level_help(context: WriteContext) -> str:
+    """The ``--compression-level`` help, naming each codec's default for *context*.
+
+    ``gpio process`` resolves an unset ZSTD level to ``PROCESS_ZSTD_LEVEL`` and
+    everything else to the global 15 (#1299). Each default is asked of the
+    owner, not typed or recomputed, so help text cannot drift from what the
+    writers actually do -- the mistake #967 made with the row-group number.
+    """
+    ranges = ", ".join(
+        f"{codec}: {low}-{high} (default: {resolve_codec(codec, None, context=context).level})"
+        for codec, (low, high, _) in COMPRESSION_RANGES.items()
+    )
+    levelless = "/".join(
+        codec
+        for codec in ALLOWED_CODECS
+        if codec not in COMPRESSION_RANGES and codec != "UNCOMPRESSED"
+    )
+    return f"Compression level - {ranges}. Ignored for {levelless}."
+
+
+def _check_codec_and_level(ctx, param, value):
+    """Check ``--compression`` and ``--compression-level`` together, in the owner.
+
+    Each option's callback runs once its own value is known; whichever of the
+    two Click processes second sees both, so the pair is checked before the
+    command runs, against the range of the codec actually chosen (GZIP 1-9,
+    ZSTD 1-22, BROTLI 1-11) rather than ZSTD's range for every codec.
+    """
+    other = "compression_level" if param.name == "compression" else "compression"
+    if other in ctx.params:
+        pair = {param.name: value, other: ctx.params[other]}
+        try:
+            resolve_codec(pair["compression"], pair["compression_level"], context="write")
+        except InvalidParameterError as exc:
+            raise click.BadParameter(
+                exc.reason, ctx=ctx, param_hint="'--compression-level'"
+            ) from exc
+    return value
+
+
+def _add_compression_options(func, level_help: str):
+    func = click.option(
+        "--compression",
+        default=None,
+        type=click.Choice(list(ACCEPTED_CODEC_NAMES), case_sensitive=False),
+        callback=_check_codec_and_level,
+        help="Compression type for output file (default: ZSTD; NONE is UNCOMPRESSED)",
+    )(func)
+    func = click.option(
+        "--compression-level",
+        type=click.IntRange(1, MAX_COMPRESSION_LEVEL),
+        callback=_check_codec_and_level,
+        help=level_help,
+    )(func)
+    return func
+
+
 def compression_options(func):
     """
     Add compression-related options to a command.
@@ -214,21 +253,23 @@ def compression_options(func):
     Adds:
     - --compression: Type of compression (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
     - --compression-level: Compression level for formats that support it
+
+    For a ``gpio process`` command use :func:`process_compression_options`
+    instead, so the help names that group's lower ZSTD default.
     """
-    func = click.option(
-        "--compression",
-        default="ZSTD",
-        type=click.Choice(
-            ["ZSTD", "GZIP", "BROTLI", "LZ4", "SNAPPY", "UNCOMPRESSED"], case_sensitive=False
-        ),
-        help="Compression type for output file (default: ZSTD)",
-    )(func)
-    func = click.option(
-        "--compression-level",
-        type=click.IntRange(1, 22),
-        help="Compression level - GZIP: 1-9 (default: 6), ZSTD: 1-22 (default: 15), BROTLI: 1-11 (default: 6). Ignored for LZ4/SNAPPY.",
-    )(func)
-    return func
+    return _add_compression_options(func, _compression_level_help("write"))
+
+
+def process_compression_options(func):
+    """``compression_options`` for the ``gpio process`` group.
+
+    Identical options; the help names ZSTD 9 instead of 15, because these
+    commands compute a whole table and then write it, and the write is a large
+    share of their wall clock. The resolution itself lives in the cores
+    (``core/compression.resolve_codec(..., context="process")``), so the Python API
+    gets it too -- this decorator only keeps ``--help`` honest.
+    """
+    return _add_compression_options(func, _compression_level_help("process"))
 
 
 # Help text for --row-group-size. One string, because there is now one rule.
@@ -257,6 +298,13 @@ _ROW_GROUP_SIZE_HELP = (
     f"{DEFAULT_ROW_GROUP_ROWS:,} if --row-group-size-mb not set)"
 )
 
+_ROW_GROUP_SIZE_MB_HELP = (
+    "Target row group size (e.g. '256MB', '1GB', '128' assumes MB). The rows' "
+    "average size is measured once and the target becomes a row count, snapped "
+    f"to a whole {WRITER_VECTOR_ROWS:,}-row writer vector and never below one "
+    "vector. Mutually exclusive with --row-group-size"
+)
+
 
 def row_group_options(func):
     """
@@ -279,9 +327,7 @@ def row_group_options(func):
         default=None,
         help=_ROW_GROUP_SIZE_HELP,
     )(func)
-    func = click.option(
-        "--row-group-size-mb", help="Target row group size (e.g. '256MB', '1GB', '128' assumes MB)"
-    )(func)
+    func = click.option("--row-group-size-mb", help=_ROW_GROUP_SIZE_MB_HELP)(func)
     return func
 
 
@@ -370,13 +416,53 @@ def show_sql_option(func):
     )(func)
 
 
-def overwrite_option(func):
+def overwrite_option(
+    func=None,
+    *,
+    help_text: str = "Overwrite existing files",
+    flag: str = "--overwrite",
+    short: str | None = None,
+):
     """
-    Add --overwrite option to a command.
+    Add the one overwrite switch to a command.
 
-    Allows overwriting existing files without prompting.
+    The switch every command hands to
+    :func:`~geoparquet_io.core.file_utils.handle_output_overwrite`, which owns
+    what an existing output means. Use it bare (``@overwrite_option``), or with
+    ``help_text=`` where the command names what it replaces. The tile and
+    overview commands spell it ``flag="--force", short="-f"``, after the
+    tippecanoe switch they pass it on to; the owner's refusal names *flag*.
     """
-    return click.option("--overwrite", is_flag=True, help="Overwrite existing files")(func)
+    decls = (flag, short) if short else (flag,)
+
+    def add(command):
+        return click.option(*decls, is_flag=True, help=help_text)(command)
+
+    return add(func) if func is not None else add
+
+
+def limit_option(*, help: str):
+    """``--limit``: the most rows (or features) a command returns, never negative.
+
+    Each extract command words its own help; the type is the one rule, so a
+    negative count is a usage error everywhere instead of reaching SQL as
+    ``LIMIT -1`` (#1367 G13).
+    """
+    return click.option("--limit", type=click.IntRange(0, None), help=help)
+
+
+def timeout_option(*, default: float, help: str, show_default: bool = False):
+    """``--timeout``: per-request seconds for a service extract, any positive number.
+
+    The default is the caller's: each service has its own budget (#1367 G13).
+    """
+    return click.option(
+        "--timeout",
+        type=click.FloatRange(min=0, min_open=True),
+        default=default,
+        show_default=show_default,
+        help=help,
+    )
 
 
 def strict_option(func):
@@ -447,7 +533,7 @@ def _validate_column_list(ctx, param, value):
 
     This layer owns blank entries only. Whether a non-blank name exists is a
     schema question, so it stays with whichever backend can see the schema
-    (``core.extract.validate_columns`` for parquet,
+    (``core.extract.build_column_selection`` for parquet,
     ``core.column_selection.resolve_columns_against_schema`` for BigQuery,
     Carto and ArcGIS), which reports it as ``InvalidParameterError`` -- also
     exit 2. Catching blanks here matters even so: ``--dry-run`` builds the same
@@ -550,7 +636,7 @@ def _validate_write_memory(ctx, param, value):
     try:
         validate_memory_limit(value)
     except ValueError as e:
-        raise click.BadParameter(str(e), ctx=ctx, param=param) from None
+        raise click.BadParameter(error_text(e), ctx=ctx, param=param) from None
     return value
 
 
@@ -704,9 +790,7 @@ def partition_options_base(func):
     func = click.option(
         "--hive", is_flag=True, help="Use Hive-style partitioning in output folder structure"
     )(func)
-    func = click.option("--overwrite", is_flag=True, help="Overwrite existing partition files")(
-        func
-    )
+    func = overwrite_option(func, help_text="Overwrite existing partition files")
     func = click.option(
         "--preview",
         is_flag=True,
@@ -852,7 +936,37 @@ def grid_aggregate_options(func):
     )(func)
     func = click.option("--auto", is_flag=True, help="Auto-select resolution from data size.")(func)
     func = aggregate_memory_option(func)
-    return func
+    return _pack_aggregate_options(func)
+
+
+#: The Click parameter feeding each ``AggregateOptions`` field.
+_AGGREGATE_OPTION_PARAMS = {
+    "metric": "metric",
+    "metric_nodata": "metric_nodata",
+    "breakdown": "breakdown",
+    "breakdown_limit": "breakdown_limit",
+    "breakdown_metric": "breakdown_metric",
+    "out_geometry": "out_geometry",
+    "where": "where",
+    "bucket_point": "bucket_point",
+    "bbox_column": "bbox_column",
+    "memory_limit": "write_memory",
+}
+
+
+def _pack_aggregate_options(func):
+    """Hand the command one ``aggregate_options`` instead of ten parameters.
+
+    The commands only forward these to the grid engine, so each took the ten
+    values by name and passed them on by name. The options travel whole now.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        fields = {name: kwargs.pop(param) for name, param in _AGGREGATE_OPTION_PARAMS.items()}
+        return func(*args, aggregate_options=AggregateOptions(**fields), **kwargs)
+
+    return wrapper
 
 
 #: ``--write-memory`` for the aggregate/overview commands. The value bounds the
@@ -963,8 +1077,8 @@ class GlobAwareCommand(click.Command):
     For commands that support glob patterns (like extract), it suggests quoting.
     For commands that don't (like convert), it suggests using gpio extract first.
 
-    This class also handles GeoParquetError exceptions from core functions,
-    converting them to user-friendly Click exceptions without stack traces.
+    Failures from core functions are translated here by ``error_boundary``, the
+    same boundary the root ``ErrorBoundaryGroup`` uses.
 
     Usage:
         @cli.command(cls=GlobAwareCommand)
@@ -989,16 +1103,22 @@ class GlobAwareCommand(click.Command):
         "inspect": "summary",
     }
 
-    def invoke(self, ctx):
-        """Invoke the command with user-friendly error handling."""
-        # Import here to avoid circular imports
-        from geoparquet_io.cli.exception_handler import handle_core_exception
-        from geoparquet_io.core.exceptions import GeoParquetError
+    #: The parameters that may name the input file; the first one the command has
+    #: is the file a non-Parquet answer names. Empty: the answer names no file.
+    input_params: tuple[str, ...] = ()
 
-        try:
+    def invoke(self, ctx):
+        """Invoke the command inside the same boundary the root group uses."""
+        path = next(
+            (
+                ctx.params[name]
+                for name in self.input_params
+                if isinstance(ctx.params.get(name), str)
+            ),
+            None,
+        )
+        with error_boundary(path=path):
             return super().invoke(ctx)
-        except GeoParquetError as e:
-            raise handle_core_exception(e) from None
 
     def make_context(self, info_name, args, parent=None, **extra):
         """Detect shell-expanded glob patterns and provide helpful errors."""
@@ -1057,6 +1177,16 @@ class GlobAwareCommand(click.Command):
         return " ".join(parts)
 
 
+class ParquetInputCommand(GlobAwareCommand):
+    """A :class:`GlobAwareCommand` whose input is the ``parquet_file`` (or ``input_file``) argument.
+
+    A file that is not Parquet is answered by name ("The file 'x.parquet' has a
+    .parquet extension but is not a valid Parquet file...").
+    """
+
+    input_params = ("parquet_file", "input_file")
+
+
 class SingleFileCommand(GlobAwareCommand):
     """
     Command that requires a single input file (no glob/partition support).
@@ -1095,24 +1225,11 @@ def handle_directory_sub_partition(
     input_parquet: str,
     partition_type: str,
     min_size: str | None,
-    resolution: int | None = None,
-    level: int | None = None,
-    partition_resolution: int | None = None,
-    use_centroid: bool = False,
-    in_place: bool = False,
-    hive: bool = False,
-    overwrite: bool = False,
-    verbose: bool = False,
-    force: bool = False,
-    skip_analysis: bool = True,
-    compression: str | None = None,
-    compression_level: int | None = None,
-    auto: bool = False,
-    target_rows: int = 100000,
-    max_partitions: int = 10000,
+    *,
     preview: bool = False,
     column_name: str | None = None,
     output_folder: str | None = None,
+    **run,
 ) -> bool:
     """
     Handle directory input with --min-size for partition commands.
@@ -1125,25 +1242,13 @@ def handle_directory_sub_partition(
         input_parquet: Path to input file or directory
         partition_type: Type of partition ("a5", "h3", "s2", "quadkey")
         min_size: Size threshold string (e.g., "100MB") or None
-        resolution: Resolution for A5/H3/quadkey
-        level: Level for S2
-        partition_resolution: Quadkey only -- the --partition-resolution the
-            directories are split on, required alongside --resolution (#854)
-        use_centroid: Quadkey only -- the --use-centroid flag
-        in_place: Delete originals after sub-partition
-        hive: Use Hive-style partitioning
-        overwrite: Overwrite existing output
-        verbose: Print verbose output
-        force: Force operation with warnings
-        skip_analysis: Skip partition analysis
-        compression: Compression codec
-        compression_level: Compression level
-        auto: Auto-calculate resolution
-        target_rows: Target rows per partition (auto mode)
-        max_partitions: Max partitions (auto mode)
         preview: List the files that would be processed and stop
         column_name: Index column name from the command's --<index>-name option
         output_folder: OUTPUT_FOLDER argument, if the user supplied one
+        run: Everything else ``core.sub_partition.sub_partition_directory`` takes
+            (the resolution or level, ``in_place``, ``hive``, ``overwrite``,
+            ``verbose``, ``force``, ``skip_analysis``, ``write``, the auto
+            options), forwarded as given
 
     Returns:
         True if directory was handled, False if it's a file (continue to single-file logic)
@@ -1165,13 +1270,13 @@ def handle_directory_sub_partition(
     _reject_single_file_only_options(partition_type, column_name, output_folder)
 
     from geoparquet_io.core.logging_config import info, progress, warn
-    from geoparquet_io.core.sizing import parse_size_string
+    from geoparquet_io.core.sizing import bytes_to_mb, parse_size_string
     from geoparquet_io.core.sub_partition import plan_sub_partition, sub_partition_directory
 
     try:
         min_size_bytes = parse_size_string(min_size)
     except ValueError as e:
-        raise click.UsageError(str(e)) from None
+        raise click.UsageError(error_text(e)) from None
 
     if preview:
         # --preview used to be accepted, ignored, and the originals deleted
@@ -1183,7 +1288,7 @@ def handle_directory_sub_partition(
 
         progress(f"Would sub-partition {len(candidates)} file(s) by {partition_type}:")
         for candidate in candidates:
-            size_mb = candidate["size_bytes"] / (1024 * 1024)
+            size_mb = bytes_to_mb(candidate["size_bytes"])
             info(f"  {candidate['path']} ({size_mb:.1f}MB) -> {candidate['output_dir']}/")
         info("Preview only: no files were partitioned or removed.")
         return True
@@ -1193,24 +1298,10 @@ def handle_directory_sub_partition(
             directory=input_parquet,
             partition_type=partition_type,
             min_size_bytes=min_size_bytes,
-            resolution=resolution,
-            level=level,
-            partition_resolution=partition_resolution,
-            use_centroid=use_centroid,
-            in_place=in_place,
-            hive=hive,
-            overwrite=overwrite,
-            verbose=verbose,
-            force=force,
-            skip_analysis=skip_analysis,
-            compression=compression.upper() if compression else "ZSTD",
-            compression_level=compression_level or 15,
-            auto=auto,
-            target_rows=target_rows,
-            max_partitions=max_partitions,
+            **run,
         )
     except ValueError as e:
-        raise click.UsageError(str(e)) from None
+        raise click_error_for(e) from None
 
     if result["errors"]:
         # Every per-file failure was caught and warned about, so without this the

@@ -16,8 +16,20 @@ from geoparquet_io.core.aws_credentials import (
     resolve_aws_credentials,
     resolve_aws_region,
 )
-from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
+from geoparquet_io.core.exceptions import (
+    InvalidParameterError,
+    RemoteAccessError,
+)
 from geoparquet_io.core.logging_config import error, progress, success
+from geoparquet_io.core.remote import (
+    canonical_store_url,
+    is_account_first_azure_url,
+    is_azure_url,
+    is_gcs_url,
+    is_http_url,
+    is_s3_url,
+)
+from geoparquet_io.core.sizing import bytes_to_mb
 
 
 def _try_infer_region_from_bucket(bucket: str) -> str | None:
@@ -197,11 +209,11 @@ def check_credentials(destination: str, profile: str | None = None) -> tuple[boo
     Returns:
         Tuple of (credentials_ok, hint_message)
     """
-    if destination.startswith("s3://"):
+    if is_s3_url(destination):
         return _check_s3_credentials(profile)
-    elif destination.startswith("gs://"):
+    elif is_gcs_url(destination):
         return _check_gcs_credentials()
-    elif destination.startswith("az://"):
+    elif is_account_first_azure_url(destination):
         return _check_azure_credentials()
     else:
         # HTTP or other - assume ok
@@ -245,7 +257,7 @@ def _print_directory_dry_run(
     for f in files[:10]:  # Show first 10 files
         rel_path = f.relative_to(source)
         target_key = f"{prefix.rstrip('/')}/{rel_path}" if prefix else str(rel_path)
-        size_mb = f.stat().st_size / (1024 * 1024)
+        size_mb = bytes_to_mb(f.stat().st_size)
         print(f"  • {f.name} ({size_mb:.2f} MB) → {target_key}")
     if len(files) > 10:
         print(f"  ... and {len(files) - 10} more file(s)")
@@ -277,7 +289,7 @@ def _split_azure_url(url: str) -> tuple[str, str, str]:
     Raises:
         InvalidParameterError: If the URL names no account or no container
     """
-    parts = url[len("az://") :].split("/", 2)
+    parts = url.partition("://")[2].split("/", 2)
     account = parts[0]
     container = parts[1] if len(parts) > 1 else ""
     if not account or not container:
@@ -330,8 +342,8 @@ def _setup_store_and_kwargs(
     environment keys, as it always has. When the chain finds nothing, no
     credential kwargs are passed and obstore resolves for itself.
     """
-    if bucket_url.startswith("s3://"):
-        bucket = bucket_url.replace("s3://", "").split("/")[0]
+    if is_s3_url(bucket_url):
+        bucket = bucket_url.partition("://")[2].split("/")[0]
 
         credentials = resolve_aws_credentials(profile)
 
@@ -353,11 +365,14 @@ def _setup_store_and_kwargs(
         if s3_endpoint:
             protocol = "https" if s3_use_ssl else "http"
             store_kwargs["endpoint"] = f"{protocol}://{s3_endpoint}"
+            if not s3_use_ssl:
+                # obstore refuses a plain-HTTP endpoint unless told to allow it.
+                store_kwargs["client_options"] = {"allow_http": True}
             if not region:
                 store_kwargs["region"] = "us-east-1"  # Default for custom endpoints
 
         store = S3Store(bucket, **store_kwargs)
-    elif bucket_url.startswith("az://"):
+    elif is_account_first_azure_url(bucket_url):
         # Azure is built explicitly: obstore reads az:// as container-first, so
         # from_url() cannot serve gpio's account-first URLs (#864).
         store = _build_azure_store(bucket_url)
@@ -374,7 +389,7 @@ def _setup_store_and_kwargs(
 def _upload_file_sync(store, source: Path, target_key: str, **kwargs) -> None:
     """Upload a single file synchronously and report progress."""
     file_size = source.stat().st_size
-    size_mb = file_size / (1024 * 1024)
+    size_mb = bytes_to_mb(file_size)
 
     progress(f"Uploading {source.name} ({size_mb:.2f} MB) → {target_key}")
 
@@ -400,6 +415,7 @@ def _upload_one_file(
     source: Path,
     prefix: str,
     stop_requested: threading.Event | None = None,
+    stop_on_error: bool = True,
     **kwargs,
 ) -> tuple[Path, Exception | None]:
     """Upload a single file and return result tuple for parallel processing.
@@ -417,7 +433,7 @@ def _upload_one_file(
     try:
         target_key = _build_target_key(file_path, source, prefix)
         file_size = file_path.stat().st_size
-        size_mb = file_size / (1024 * 1024)
+        size_mb = bytes_to_mb(file_size)
         start_time = time.time()
 
         progress(f"Uploading {file_path.name} ({size_mb:.2f} MB) → {target_key}")
@@ -434,7 +450,7 @@ def _upload_one_file(
         # own file is free to pick up the next one while this thread is still
         # inside error(), and everything it picks up in that window gets past
         # the guard above and is attempted after the run was meant to stop.
-        if stop_requested is not None:
+        if stop_requested is not None and stop_on_error:
             stop_requested.set()
         error(f"{file_path.name}: {e}")
         return file_path, e
@@ -470,31 +486,50 @@ def _upload_directory_sync(
     max_files = max(1, max_files)
 
     total_size = sum(f.stat().st_size for f in files)
-    total_size_mb = total_size / (1024 * 1024)
+    total_size_mb = bytes_to_mb(total_size)
     progress(f"Found {len(files)} file(s) to upload ({total_size_mb:.2f} MB total)")
 
-    stop_requested = threading.Event() if fail_fast else None
+    # Always present: a fail-fast error sets it, and so does Ctrl-C (#1031).
+    stop_requested = threading.Event()
     results: list[tuple[Path, Exception | None]] = []
     cancelled: list[Path] = []
+    interrupted = False
     with ThreadPoolExecutor(max_workers=max_files) as executor:
         futures = {
             executor.submit(
-                _upload_one_file, store, f, source, prefix, stop_requested=stop_requested, **kwargs
+                _upload_one_file,
+                store,
+                f,
+                source,
+                prefix,
+                stop_requested=stop_requested,
+                stop_on_error=fail_fast,
+                **kwargs,
             ): f
             for f in files
         }
         pending = set(futures)
 
-        for future in as_completed(futures):
-            pending.discard(future)
-            result = future.result()
-            results.append(result)
-            if fail_fast and result[1] is not None:
-                cancelled = _drain_remaining_uploads(futures, pending, results)
-                break
+        try:
+            for future in as_completed(futures):
+                pending.discard(future)
+                result = future.result()
+                results.append(result)
+                if fail_fast and result[1] is not None:
+                    cancelled = _drain_remaining_uploads(futures, pending, results)
+                    break
+        except KeyboardInterrupt:
+            # `with ThreadPoolExecutor` would otherwise wait for every queued
+            # file. In-flight uploads finish (their bytes cannot be recalled);
+            # nothing new starts. The summary still prints, then Ctrl-C goes on.
+            stop_requested.set()
+            cancelled = _drain_remaining_uploads(futures, pending, results)
+            interrupted = True
 
     counts = _classify_upload_results(results, cancelled)
     _print_upload_summary(counts, len(files))
+    if interrupted:
+        raise KeyboardInterrupt
     _raise_if_upload_incomplete(destination, counts, len(files))
 
 
@@ -559,7 +594,7 @@ def _upload_single_file(
     """Upload a single file."""
     target_key = _get_target_key(source, prefix, destination.endswith("/"))
     file_size = source.stat().st_size
-    size_mb = file_size / (1024 * 1024)
+    size_mb = bytes_to_mb(file_size)
 
     if dry_run:
         _print_single_file_dry_run(source, destination, target_key, size_mb, profile)
@@ -568,7 +603,12 @@ def _upload_single_file(
     store, kwargs = _setup_store_and_kwargs(
         bucket_url, profile, chunk_concurrency, chunk_size, s3_endpoint, s3_region, s3_use_ssl
     )
-    _upload_file_sync(store, source, target_key, **kwargs)
+    try:
+        _upload_file_sync(store, source, target_key, **kwargs)
+    except Exception as e:
+        # The directory path reports the same failure as an `Error:` line; a
+        # bare obstore RuntimeError would escape as a traceback (#1031).
+        raise RemoteAccessError(destination, f"upload of {source.name} failed: {e}") from e
 
 
 def _upload_directory(
@@ -592,7 +632,12 @@ def _upload_directory(
     Raises:
         RemoteAccessError: If any file failed or was never attempted
     """
-    files = list(source.rglob(pattern) if pattern else source.rglob("*"))
+    if pattern == "*.parquet":
+        from geoparquet_io.core.file_utils import get_all_parquet_files
+
+        files = [Path(p) for p in get_all_parquet_files(str(source))]
+    else:
+        files = list(source.rglob(pattern) if pattern else source.rglob("*"))
     files = [f for f in files if f.is_file()]
 
     if not files:
@@ -600,7 +645,7 @@ def _upload_directory(
         return
 
     total_size = sum(f.stat().st_size for f in files)
-    total_size_mb = total_size / (1024 * 1024)
+    total_size_mb = bytes_to_mb(total_size)
 
     if dry_run:
         _print_directory_dry_run(
@@ -621,6 +666,27 @@ def _upload_directory(
         fail_fast=fail_fast,
         **kwargs,
     )
+
+
+def _with_active_s3_config(
+    profile: str | None, s3_region: str | None, s3_use_ssl: bool
+) -> tuple[str | None, str | None, str | None, bool]:
+    """The upload's S3 settings when its caller named no endpoint (HANDOFFS row 43).
+
+    The ``--s3-endpoint``/``--s3-region``/``--s3-no-ssl``/``--aws-profile`` a
+    command runs under (``duckdb_utils.s3_config_scope``) configured its reads
+    but not its upload, so a MinIO or loopback destination was written to AWS.
+    One rule now, the one ``file_utils``' copy already follows: what the caller
+    passes wins, and what it leaves unset comes from the active config.
+    """
+    from geoparquet_io.core.duckdb_utils import get_active_s3_config
+
+    active = get_active_s3_config()
+    endpoint = active.get("s3_endpoint")
+    if endpoint is not None:
+        s3_region = s3_region or active.get("s3_region")
+        s3_use_ssl = active.get("s3_use_ssl", s3_use_ssl)
+    return profile or active.get("profile"), endpoint, s3_region, s3_use_ssl
 
 
 def upload(
@@ -676,6 +742,10 @@ def upload(
             s3_use_ssl=False,
         )
     """
+    if s3_endpoint is None:
+        profile, s3_endpoint, s3_region, s3_use_ssl = _with_active_s3_config(
+            profile, s3_region, s3_use_ssl
+        )
     bucket_url, prefix = parse_object_store_url(destination)
 
     if source.is_file():
@@ -809,28 +879,23 @@ def parse_object_store_url(url: str) -> tuple[str, str]:
             is malformed or uses a spelling gpio cannot parse account-first
             (``abfs://``, ``abfss://``, ``azure://``)
     """
-    if url.startswith("s3://"):
-        parts = url[5:].split("/", 1)
-        bucket = parts[0]
-        prefix = parts[1] if len(parts) > 1 else ""
-        return f"s3://{bucket}", prefix
+    if is_s3_url(url) or is_gcs_url(url):
+        # s3a:// and gcs:// are the same stores under their one spelling
+        store = canonical_store_url(url)
+        scheme, _, rest = store.partition("://")
+        bucket, _, prefix = rest.partition("/")
+        return f"{scheme}://{bucket}", prefix
 
-    elif url.startswith("gs://"):
-        parts = url[5:].split("/", 1)
-        bucket = parts[0]
-        prefix = parts[1] if len(parts) > 1 else ""
-        return f"gs://{bucket}", prefix
-
-    elif url.startswith("az://"):
+    elif is_account_first_azure_url(url):
         account, container, prefix = _split_azure_url(url)
         return f"az://{account}/{container}", prefix
 
-    elif url.startswith(("https://", "http://")):
+    elif is_http_url(url):
         # HTTP stores - may need different handling
         # For now, return as-is
         return url, ""
 
-    elif url.startswith(("abfs://", "abfss://", "azure://")):
+    elif is_azure_url(url):
         # These spellings put the account and container in a different order
         # (or in a host name), so parsing them account-first would target the
         # wrong place. Name the supported form instead of guessing.

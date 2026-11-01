@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import pyarrow as pa
 
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
+from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.logging_config import info
 from geoparquet_io.core.optional_deps import require_contourrs
 from geoparquet_io.core.process.raster.output import finalize_raster_table
@@ -25,14 +28,26 @@ def polygonize_array(
     values: list[float] | None = None,
     value_column: str = "value",
     connectivity: int = 4,
+    repair_geometry: bool = True,
     verbose: bool = False,
 ) -> pa.Table:
     """Polygonize a 2D array's classes into a GeoParquet-ready table.
 
     ``values`` keeps only the listed class values (default: every class that
     is not nodata/masked). ``mask`` is True-where-valid.
+
+    Where a class region pinches to a single shared pixel corner, contourrs
+    closes it as one self-touching ring, which is not OGC-valid -- 1.7-2.9% of
+    the output on the WorldCover crops measured in #1301, where rasterio and
+    GDAL emit the enclosed part as a hole and are 100% valid. The invalid count
+    is always reported; ``repair_geometry`` (the default, as in every command
+    that offers ``--repair-geometry``) rewrites those rows with
+    ``ST_MakeValid``, which preserves area and, under the 4-connectivity the
+    CLI and API always use, the ``Polygon`` type. It is the expensive half: the self-touching polygons are the large
+    sprawling regions, so repairing them can cost several times the
+    polygonization. ``repair_geometry=False`` keeps the count and skips the fix.
     """
-    if value_column == "geometry":
+    if value_column == BUILT_GEOMETRY_COLUMN:
         raise InvalidParameterError(
             "value_column", "collides with the output's geometry column name"
         )
@@ -48,6 +63,11 @@ def polygonize_array(
         table = table.filter(
             pc.is_in(table[value_column], value_set=pa.array(values, pa.float64()))
         )
+    # The one owner for invalid geometry (core/geometry_repair.py), the same
+    # one convert and extract use: one DuckDB scan over the geometry column
+    # that counts, warns, and patches only the broken rows, so every valid
+    # row's WKB and the table's metadata survive byte for byte.
+    table, _ = repair_arrow_table_geometry(table, BUILT_GEOMETRY_COLUMN, repair=repair_geometry)
     if verbose:
         info(f"Polygonized {table.num_rows} features")
     return table
@@ -62,6 +82,7 @@ def polygonize_raster(
     nodata: float | None = None,
     use_mask: bool = True,
     connectivity: int = 4,
+    repair_geometry: bool = True,
     verbose: bool = False,
 ) -> pa.Table:
     """Polygonize one raster band into a GeoParquet-ready table."""
@@ -75,6 +96,7 @@ def polygonize_raster(
         values=values,
         value_column=value_column,
         connectivity=connectivity,
+        repair_geometry=repair_geometry,
         verbose=verbose,
     )
 
@@ -89,7 +111,8 @@ def polygonize_file(
     nodata: float | None = None,
     use_mask: bool = True,
     connectivity: int = 4,
-    compression: str = "ZSTD",
+    repair_geometry: bool = True,
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -97,6 +120,7 @@ def polygonize_file(
     verbose: bool = False,
 ) -> None:
     """Polygonize one raster band into a GeoParquet file."""
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     table = polygonize_raster(
         input_raster,
         band=band,
@@ -105,6 +129,7 @@ def polygonize_file(
         nodata=nodata,
         use_mask=use_mask,
         connectivity=connectivity,
+        repair_geometry=repair_geometry,
         verbose=verbose,
     )
     write_geoparquet_table(

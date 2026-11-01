@@ -31,8 +31,6 @@ from functools import lru_cache
 from .base import (
     BaseWriteStrategy,
     WriteStrategy,
-    atomic_write,
-    build_geo_metadata,
     needs_metadata_rewrite,
 )
 
@@ -80,16 +78,6 @@ class WriteStrategyFactory:
         return cls._strategy_classes[strategy]()
 
     @classmethod
-    def list_strategies(cls) -> list[str]:
-        """
-        List available strategy names.
-
-        Returns:
-            List of strategy value strings
-        """
-        return [s.value for s in WriteStrategy]
-
-    @classmethod
     def clear_cache(cls) -> None:
         """
         Clear the strategy instance cache.
@@ -103,7 +91,5 @@ __all__ = [
     "WriteStrategy",
     "WriteStrategyFactory",
     "BaseWriteStrategy",
-    "atomic_write",
-    "build_geo_metadata",
     "needs_metadata_rewrite",
 ]

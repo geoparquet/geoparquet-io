@@ -92,4 +92,4 @@ The skill includes:
 - Remote file access patterns
 - Example sessions
 
-All generated sections stay in sync with the actual CLI via menard documentation tracking.
+All generated sections stay in sync with the actual CLI via `scripts/doc_sync.py`.

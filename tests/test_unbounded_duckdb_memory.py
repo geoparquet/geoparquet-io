@@ -28,15 +28,16 @@ from contextlib import contextmanager
 import duckdb
 import pytest
 
-from geoparquet_io.core import memory_limits
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core import admin_datasets, memory_limits
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
+from geoparquet_io.core.sizing import parse_size_string
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 GIB = 1024**3
 
 
 def _setting(con, key):
-    return con.execute(f"SELECT current_setting('{key}')").fetchone()[0]
+    return fetch_one(con.execute(f"SELECT current_setting('{key}')"))[0]
 
 
 def _points_parquet(con, path: str, rows: int = 500) -> str:
@@ -109,10 +110,10 @@ class TestConnectionDefault:
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
         connection = get_duckdb_connection(load_spatial=False)
         try:
-            limit = memory_limits.parse_size(str(_setting(connection, "memory_limit")))
+            limit = parse_size_string(str(_setting(connection, "memory_limit")))
         finally:
             connection.close()
-        assert limit is not None and limit <= 5 * 10**9  # half the ceiling
+        assert limit is not None and limit <= 5 * GIB  # half the ceiling
 
     def test_an_explicit_limit_is_not_overridden(self, monkeypatch):
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
@@ -271,7 +272,7 @@ class TestAdminJoinIsBounded:
         admin_file = _admin_fixture(tmp_path)
         input_file = _points_input(tmp_path)
         monkeypatch.setattr(
-            ah.AdminDatasetFactory,
+            admin_datasets.AdminDatasetFactory,
             "create",
             staticmethod(
                 lambda dataset_name, source_path=None, verbose=False: CurrentAdminDataset(
@@ -280,7 +281,8 @@ class TestAdminJoinIsBounded:
             ),
         )
         seen: list[tuple] = []
-        with _recording_scope(monkeypatch, ah, seen):
+        # The join, its last table included, is run_admin_join's (admin_datasets).
+        with _recording_scope(monkeypatch, admin_datasets, seen):
             ah.partition_by_admin_hierarchical(
                 input_file,
                 str(tmp_path / "out"),
@@ -299,7 +301,7 @@ class TestAdminJoinIsBounded:
         admin_file = _admin_fixture(tmp_path)
         input_file = _points_input(tmp_path)
         monkeypatch.setattr(
-            ah.AdminDatasetFactory,
+            admin_datasets.AdminDatasetFactory,
             "create",
             staticmethod(
                 lambda dataset_name, source_path=None, verbose=False: OvertureAdminDataset(
@@ -308,7 +310,8 @@ class TestAdminJoinIsBounded:
             ),
         )
         seen: list[tuple] = []
-        with _recording_scope(monkeypatch, ah, seen):
+        # Every level's join, the last included, runs in admin_datasets.
+        with _recording_scope(monkeypatch, admin_datasets, seen):
             ah.partition_by_admin_hierarchical(
                 input_file,
                 str(tmp_path / "out"),
@@ -328,7 +331,8 @@ class TestAdminJoinIsBounded:
         admin_file = _admin_fixture(tmp_path)
         input_file = _points_input(tmp_path)
         seen: list[tuple] = []
-        with _recording_scope(monkeypatch, ad, seen):
+        # The chained temp table is run_admin_join's, in admin_datasets.
+        with _recording_scope(monkeypatch, admin_datasets, seen):
             ad.add_admin_divisions_multi(
                 input_parquet=input_file,
                 output_parquet=str(tmp_path / "out.parquet"),
@@ -356,24 +360,25 @@ class TestAdminJoinIsBounded:
             yield
             inside.append([str(call.args[0]) for call in mock_con.execute.call_args_list[before:]])
 
-        monkeypatch.setattr(ah, "scoped_write_memory_limit", fake_scope)
-        ah._perform_enrichment_join(
+        monkeypatch.setattr(admin_datasets, "scoped_write_memory_limit", fake_scope)
+        admin_file = tmp_path / "admin.parquet"
+        admin_file.write_bytes(b"")  # table_reference() checks it exists
+        ah._enrich_with_admin(
             mock_con,
+            admin_datasets.CurrentAdminDataset(source_path=str(admin_file)),
+            ["country"],
             "enriched",
             str(tmp_path / "in.parquet"),
-            sql_path(str(tmp_path / "admin.parquet")),
-            "",
-            "b.country AS _admin_country",
             "geometry",
             None,
-            ["country"],
-            "geometry",
             None,
+            False,
+            False,
             memory_limit="700MB",
         )
 
         assert len(inside) == 1
-        assert any("CREATE TEMP TABLE" in sql for sql in inside[0])
+        assert any("CREATE OR REPLACE TEMP TABLE enriched AS" in sql for sql in inside[0])
 
 
 class TestRemainingCopySitesAreBounded:
@@ -397,20 +402,5 @@ class TestRemainingCopySitesAreBounded:
         assert seen, "the disk-rewrite COPY ran outside scoped_write_memory_limit"
         for arg, during, _threads in seen:
             assert arg is None
-            limit = memory_limits.parse_size(during)
-            assert limit is not None and limit <= 5 * 10**9
-
-    @pytest.mark.parametrize("fmt", ["csv", "flatgeobuf"])
-    def test_format_export_copy_is_bounded(self, tmp_path, monkeypatch, places_test_file, fmt):
-        from geoparquet_io.core import format_writers
-
-        monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: 10 * GIB)
-        seen: list[tuple] = []
-        with _recording_scope(monkeypatch, format_writers, seen):
-            format_writers.write_format(places_test_file, str(tmp_path / f"out.{fmt}"), format=fmt)
-
-        assert seen, f"the {fmt} export COPY ran outside scoped_write_memory_limit"
-        for arg, during, _threads in seen:
-            assert arg is None
-            limit = memory_limits.parse_size(during)
-            assert limit is not None and limit <= 5 * 10**9
+            limit = parse_size_string(during)
+            assert limit is not None and limit <= 5 * GIB

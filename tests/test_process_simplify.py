@@ -18,7 +18,6 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.simplify import (
     simplify_file,
     simplify_table,
-    strip_stale_geometry_stats,
 )
 
 requires_coarsen = pytest.mark.skipif(
@@ -51,12 +50,23 @@ def _wkb_table(geometries, names=None):
     return table.replace_schema_metadata({b"geo": json.dumps(_geo_block()).encode("utf-8")})
 
 
+def _strip(geo: dict) -> dict:
+    """What simplify strips: the simplified column's stats, through the owner."""
+    from geoparquet_io.core.geo_metadata import strip_derived_stats
+
+    return strip_derived_stats({"geo": geo}, columns=["geometry"], recomputed_columns=["geometry"])[
+        "geo"
+    ]
+
+
 class TestStripStaleGeometryStats:
+    """Simplify strips its column's stats with ``geo_metadata.strip_derived_stats``."""
+
     def test_drops_geometry_types_and_bbox_keeps_rest(self):
         geo = _geo_block(crs={"id": {"authority": "EPSG", "code": 4326}})
         geo["columns"]["geometry"]["bbox"] = [0, 0, 1, 1]
         geo["columns"]["geometry"]["edges"] = "planar"
-        stripped = strip_stale_geometry_stats(geo, "geometry")
+        stripped = _strip(geo)
         col = stripped["columns"]["geometry"]
         assert "geometry_types" not in col
         assert "bbox" not in col
@@ -65,8 +75,8 @@ class TestStripStaleGeometryStats:
         assert stripped["primary_column"] == "geometry"
 
     def test_tolerates_malformed_columns(self):
-        assert strip_stale_geometry_stats({"columns": None}, "geometry") == {"columns": None}
-        assert strip_stale_geometry_stats({}, "geometry") == {}
+        assert _strip({"columns": None}) == {"columns": None}
+        assert _strip({}) == {}
 
     def test_only_the_named_column_is_stripped(self):
         geo = {
@@ -75,10 +85,10 @@ class TestStripStaleGeometryStats:
                 "geom2": {"encoding": "WKB", "geometry_types": ["Point"], "bbox": [0, 0, 1, 1]},
             }
         }
-        strip_stale_geometry_stats(geo, "geometry")
-        assert "geometry_types" not in geo["columns"]["geometry"]
-        assert geo["columns"]["geom2"]["geometry_types"] == ["Point"]
-        assert geo["columns"]["geom2"]["bbox"] == [0, 0, 1, 1]
+        stripped = _strip(geo)
+        assert "geometry_types" not in stripped["columns"]["geometry"]
+        assert stripped["columns"]["geom2"]["geometry_types"] == ["Point"]
+        assert stripped["columns"]["geom2"]["bbox"] == [0, 0, 1, 1]
 
 
 class TestValidation:
@@ -476,6 +486,47 @@ class TestStreamingPlainMode:
         assert pq.ParquetFile(str(src)).metadata.num_row_groups == groups
         return src
 
+    def test_streaming_honours_row_group_size_mb(self, tmp_path, monkeypatch):
+        """--row-group-size-mb streams (bounded memory) and sizes the groups by
+        the facade's byte resolver on the simplified rows, as in memory."""
+        import geoparquet_io.core.process.simplify as simp
+        from geoparquet_io.core.parquet_writer import WriteOptions
+
+        src = self._many_group_file(tmp_path, groups=4, rows_per=4096)
+        streaming_runs = []
+        real_streaming = simp._simplify_file_streaming
+
+        def spy(*args, **kwargs):
+            streaming_runs.append(True)
+            return real_streaming(*args, **kwargs)
+
+        monkeypatch.setattr(simp, "_simplify_file_streaming", spy)
+        out = tmp_path / "out.parquet"
+        simplify_file(str(src), str(out), tolerance=0.05, row_group_size_mb=1)
+        assert streaming_runs, "--row-group-size-mb fell back to the in-memory path"
+        # The same --row-group-size-mb gives the in-memory path's rows per group:
+        # both measure the simplified rows through the facade.
+        reference = tmp_path / "reference.parquet"
+        simp._simplify_file_in_memory(
+            str(src),
+            str(reference),
+            0.05,
+            WriteOptions(row_group_size_mb=1),
+            coverage=False,
+            preserve_topology=True,
+            simplify_boundary=True,
+            threads=None,
+            geometry_column=None,
+            drop_empty=False,
+            simplify_crs=None,
+            verbose=False,
+        )
+        meta, ref = pq.ParquetFile(str(out)).metadata, pq.ParquetFile(str(reference)).metadata
+        assert meta.num_row_groups > 1
+        assert [meta.row_group(i).num_rows for i in range(meta.num_row_groups)] == [
+            ref.row_group(i).num_rows for i in range(ref.num_row_groups)
+        ]
+
     def test_streaming_matches_in_memory_reference(self, tmp_path, monkeypatch):
         """The streamed file is byte-equivalent in data and geo metadata to
         simplify_table + the write funnel on the same input.
@@ -586,6 +637,7 @@ print(json.dumps({{"writes": len(peaks), "growth": growth, "one_group": one_grou
         geo = json.loads(raw, parse_constant=reject_non_finite)
         col = geo["columns"]["geometry"]
         assert "bbox" not in col
+        # An EMPTY geometry contributes its type even though it has no bbox.
         assert col["geometry_types"] == ["Polygon"]
 
     def test_mid_stream_failure_leaves_no_output_file(self, tmp_path, monkeypatch):
@@ -1044,7 +1096,7 @@ class TestGeometryColumnResolution:
 
     def test_non_dict_column_metadata_is_tolerated(self):
         geo = {"columns": {"geometry": "not a dict"}}
-        assert strip_stale_geometry_stats(geo, "geometry") == geo
+        assert _strip(geo) == geo
 
 
 def _covering_table(geometries, *, bbox_type=pa.float64(), bbox_column="bbox"):

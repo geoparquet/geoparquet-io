@@ -47,6 +47,7 @@ from collections.abc import Mapping
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.duckdb_utils import fetch_one
 from tests.native_geo_probes import (
     DEFAULTED_CRS,
     SILENT_CRS,
@@ -271,7 +272,7 @@ def assert_bbox_column_matches_geometry(
     geom = quote_identifier(geometry_column)
     con = get_duckdb_connection(load_spatial=True)
     try:
-        kind = con.execute(f"SELECT typeof({geom}) FROM {sql_path(str(path))} LIMIT 1").fetchone()
+        kind = fetch_one(con.execute(f"SELECT typeof({geom}) FROM {sql_path(str(path))} LIMIT 1"))
         if kind and kind[0] == "BLOB":
             geom = f"ST_GeomFromWKB({geom})"
         checks = " AND ".join(
@@ -283,10 +284,12 @@ def assert_bbox_column_matches_geometry(
                 ("ymax", "ST_YMax"),
             )
         )
-        wrong = con.execute(
-            f"SELECT count(*) FROM {sql_path(str(path))} "
-            f"WHERE {geom} IS NOT NULL AND NOT ({checks})"
-        ).fetchone()[0]
+        wrong = fetch_one(
+            con.execute(
+                f"SELECT count(*) FROM {sql_path(str(path))} "
+                f"WHERE {geom} IS NOT NULL AND NOT ({checks})"
+            )
+        )[0]
     finally:
         con.close()
     assert wrong == 0, f"{path}: {wrong} rows whose bbox is not their geometry's envelope"

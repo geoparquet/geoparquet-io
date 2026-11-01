@@ -17,21 +17,19 @@ import pyarrow as pa
 import pyarrow.ipc as ipc
 import pytest
 
+from geoparquet_io.core.crs_utils import crs_of
+from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.geo_metadata import read_raw_geo, with_geo_block
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.streaming import (
     STREAM_MARKER,
     StreamingError,
     _rebatch_wkb_under_byte_limit,
     _split_array_under_byte_limit,
     _wkb_chunk_data_nbytes,
-    apply_geo_metadata,
     apply_geoarrow_extension_type,
     apply_metadata_to_table,
-    extract_crs_from_table,
-    extract_geo_metadata,
-    find_geometry_column_from_metadata,
-    find_geometry_column_from_table,
     is_stdin,
-    is_stdout,
     read_arrow_stream,
     should_stream_output,
     validate_output,
@@ -51,12 +49,6 @@ class TestStreamMarker:
 
     def test_is_stdin_with_none(self):
         assert is_stdin(None) is False
-
-    def test_is_stdout_with_marker(self):
-        assert is_stdout("-") is True
-
-    def test_is_stdout_with_file(self):
-        assert is_stdout("/path/to/file.parquet") is False
 
     def test_stream_marker_value(self):
         assert STREAM_MARKER == "-"
@@ -214,20 +206,20 @@ class TestMetadataHandling:
         metadata = {b"geo": json.dumps(geo_metadata).encode("utf-8")}
         return table.replace_schema_metadata(metadata)
 
-    def test_extract_geo_metadata(self, table_with_geo_metadata, geo_metadata):
+    def test_read_raw_geo_from_table(self, table_with_geo_metadata, geo_metadata):
         """Test extracting geo metadata from table."""
-        result = extract_geo_metadata(table_with_geo_metadata)
+        result = read_raw_geo(table_with_geo_metadata.schema.metadata).value
         assert result == geo_metadata
 
-    def test_extract_geo_metadata_returns_none_when_missing(self):
+    def test_read_raw_geo_returns_none_when_missing(self):
         """Test that missing metadata returns None."""
         table = pa.table({"id": [1, 2]})
-        assert extract_geo_metadata(table) is None
+        assert read_raw_geo(table.schema.metadata).value is None
 
-    def test_apply_geo_metadata(self, geo_metadata):
-        """Test applying geo metadata to table."""
+    def test_with_geo_block(self, geo_metadata):
+        """The one block attacher (``geo_metadata.with_geo_block``) keeps the block as given."""
         table = pa.table({"id": [1, 2]})
-        result = apply_geo_metadata(table, geo_metadata)
+        result = with_geo_block(table, geo_metadata)
 
         # Verify metadata was applied
         assert b"geo" in result.schema.metadata
@@ -254,7 +246,7 @@ class TestMetadataHandling:
         """Test that geo metadata survives Arrow IPC roundtrip."""
         # Create table with metadata
         table = pa.table({"id": [1, 2], "geometry": [b"wkb1", b"wkb2"]})
-        table = apply_geo_metadata(table, geo_metadata)
+        table = with_geo_block(table, geo_metadata)
 
         # Write to buffer
         buffer = io.BytesIO()
@@ -268,63 +260,47 @@ class TestMetadataHandling:
         result = reader.read_all()
 
         # Verify metadata survived
-        restored = extract_geo_metadata(result)
+        restored = read_raw_geo(result.schema.metadata).value
         assert restored == geo_metadata
 
 
 class TestGeometryColumnDetection:
     """Tests for geometry column detection."""
 
-    def test_find_geometry_column_from_metadata(self):
-        """Test finding geometry column from metadata."""
-        metadata = {b"geo": json.dumps({"primary_column": "geom"}).encode("utf-8")}
-        assert find_geometry_column_from_metadata(metadata) == "geom"
+    def test_primary_geometry_column_of_a_table_prefers_a_present_primary(self):
+        """A declared primary the table lacks does not win over the schema."""
+        table = pa.table({"id": [1], "geom": [b"wkb"]}).replace_schema_metadata(
+            {b"geo": json.dumps({"primary_column": "gone"}).encode("utf-8")}
+        )
+        assert primary_geometry_column(table) == "geom"
 
-    def test_find_geometry_column_from_metadata_names_nothing_it_cannot_read(self):
-        """A block that names no usable primary column names none (#968).
-
-        This used to answer with the literal ``"geometry"``, which is a guess:
-        on a file whose column is ``geom`` it names a column that does not
-        exist, and #945's review traced silently-wrong coordinates to exactly
-        that default. Every caller asks the file's schema when this reader says
-        nothing -- see ``test_find_geometry_column_from_table_common_names``.
-        """
-        assert find_geometry_column_from_metadata({b"geo": json.dumps({}).encode("utf-8")}) is None
-        malformed = {b"geo": json.dumps({"primary_column": 123}).encode("utf-8")}
-        assert find_geometry_column_from_metadata(malformed) is None
-
-    def test_find_geometry_column_from_metadata_missing(self):
-        """Test None when no geo metadata."""
-        assert find_geometry_column_from_metadata(None) is None
-        assert find_geometry_column_from_metadata({}) is None
-
-    def test_find_geometry_column_from_table_with_metadata(self):
+    def test_primary_geometry_column_of_a_table_with_metadata(self):
         """Test finding geometry from table with metadata."""
         geo_meta = {"primary_column": "geom"}
         table = pa.table({"id": [1], "geom": [b"wkb"]})
         metadata = {b"geo": json.dumps(geo_meta).encode("utf-8")}
         table = table.replace_schema_metadata(metadata)
 
-        assert find_geometry_column_from_table(table) == "geom"
+        assert primary_geometry_column(table) == "geom"
 
-    def test_find_geometry_column_from_table_common_names(self):
+    def test_primary_geometry_column_of_a_table_common_names(self):
         """Test finding geometry from common column names."""
         # Test 'geometry'
         table = pa.table({"id": [1], "geometry": [b"wkb"]})
-        assert find_geometry_column_from_table(table) == "geometry"
+        assert primary_geometry_column(table) == "geometry"
 
         # Test 'geom'
         table = pa.table({"id": [1], "geom": [b"wkb"]})
-        assert find_geometry_column_from_table(table) == "geom"
+        assert primary_geometry_column(table) == "geom"
 
         # Test 'the_geom'
         table = pa.table({"id": [1], "the_geom": [b"wkb"]})
-        assert find_geometry_column_from_table(table) == "the_geom"
+        assert primary_geometry_column(table) == "the_geom"
 
-    def test_find_geometry_column_from_table_no_match(self):
+    def test_primary_geometry_column_of_a_table_no_match(self):
         """Test None when no geometry column found."""
         table = pa.table({"id": [1], "name": ["test"]})
-        assert find_geometry_column_from_table(table) is None
+        assert primary_geometry_column(table) is None
 
 
 @pytest.mark.slow
@@ -353,18 +329,18 @@ class TestStreamIO:
 
     def test_wrap_query_with_wkb_conversion(self):
         """Test WKB wrapping of queries."""
-        from geoparquet_io.core.stream_io import _wrap_query_with_wkb_conversion
+        from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion
 
         query = "SELECT * FROM data"
         result = _wrap_query_with_wkb_conversion(query, "geometry")
         # The geometry column is an identifier and is quoted at every raw SQL
         # interpolation (see CLAUDE.md's DuckDB patterns; enforced since #662).
         assert 'ST_AsWKB("geometry")' in result
-        assert "__stream_source" in result
+        assert "REPLACE" in result
 
     def test_wrap_query_with_wkb_conversion_no_geom(self):
         """Test that None geometry skips wrapping."""
-        from geoparquet_io.core.stream_io import _wrap_query_with_wkb_conversion
+        from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion
 
         query = "SELECT * FROM data"
         result = _wrap_query_with_wkb_conversion(query, None)
@@ -548,117 +524,62 @@ class TestStreamIO:
 
 
 class TestVersionExtraction:
-    """Tests for GeoParquet version extraction and auto-detection."""
+    """The stream path's version witnesses, asked of the owner (#1367 concept 1)."""
 
-    def test_extract_version_from_metadata_v11(self):
-        """Test extracting version 1.1 from metadata."""
-        from geoparquet_io.core.streaming import extract_version_from_metadata
+    @pytest.mark.parametrize(
+        ("declared", "expected"), [("1.1.0", "1.1"), ("1.0.0", "1.1"), ("2.0.0", "2.0")]
+    )
+    def test_carried_version_normalizes(self, declared, expected):
+        """1.x reads as 1.1 (backwards compatible), 2.x as 2.0."""
+        from geoparquet_io.core.parquet_writer import carried_geoparquet_version
 
+        metadata = {b"geo": json.dumps({"version": declared}).encode("utf-8")}
+        assert carried_geoparquet_version(metadata) == expected
+
+    @pytest.mark.parametrize(
+        "metadata",
+        [
+            None,
+            {},
+            {b"other": b"data"},
+            {b"geo": json.dumps({"primary_column": "geometry"}).encode("utf-8")},
+        ],
+    )
+    def test_carried_version_absent(self, metadata):
+        from geoparquet_io.core.parquet_writer import carried_geoparquet_version
+
+        assert carried_geoparquet_version(metadata) is None
+
+    def test_a_geoarrow_table_with_no_geo_key_writes_2_0(self):
+        """No metadata, but geoarrow types: native data, so 2.0 (approved change 10)."""
+        import geoarrow.pyarrow as ga
+
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+
+        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+        table = pa.table({"id": [1, 2], "geometry": ga.as_wkb([wkb, wkb])})
+
+        assert resolve_output_geoparquet_version(None, table=table) == "2.0"
+        assert resolve_output_geoparquet_version(None, original_metadata={}, table=table) == "2.0"
+
+    def test_the_carried_version_takes_precedence_over_geoarrow_types(self):
+        import geoarrow.pyarrow as ga
+
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
+
+        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
         metadata = {b"geo": json.dumps({"version": "1.1.0"}).encode("utf-8")}
-        assert extract_version_from_metadata(metadata) == "1.1"
+        table = pa.table({"geometry": ga.as_wkb([wkb])}).replace_schema_metadata(metadata)
 
-    def test_extract_version_from_metadata_v10_upgrades_to_v11(self):
-        """Test that version 1.0 is upgraded to 1.1."""
-        from geoparquet_io.core.streaming import extract_version_from_metadata
+        assert resolve_output_geoparquet_version(None, table=table) == "1.1"
 
-        metadata = {b"geo": json.dumps({"version": "1.0.0"}).encode("utf-8")}
-        # 1.0 is upgraded to 1.1 since 1.1 is backwards compatible
-        assert extract_version_from_metadata(metadata) == "1.1"
+    def test_no_witness_is_the_default(self):
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
-    def test_extract_version_from_metadata_v20(self):
-        """Test extracting version 2.0 from metadata."""
-        from geoparquet_io.core.streaming import extract_version_from_metadata
-
-        metadata = {b"geo": json.dumps({"version": "2.0.0"}).encode("utf-8")}
-        assert extract_version_from_metadata(metadata) == "2.0"
-
-    def test_extract_version_from_metadata_none(self):
-        """Test None when no metadata."""
-        from geoparquet_io.core.streaming import extract_version_from_metadata
-
-        assert extract_version_from_metadata(None) is None
-        assert extract_version_from_metadata({}) is None
-
-    def test_extract_version_from_metadata_no_geo(self):
-        """Test None when no geo key in metadata."""
-        from geoparquet_io.core.streaming import extract_version_from_metadata
-
-        metadata = {b"other": b"data"}
-        assert extract_version_from_metadata(metadata) is None
-
-    def test_extract_version_from_metadata_no_version(self):
-        """Test None when geo metadata lacks version field."""
-        from geoparquet_io.core.streaming import extract_version_from_metadata
-
-        metadata = {b"geo": json.dumps({"primary_column": "geometry"}).encode("utf-8")}
-        assert extract_version_from_metadata(metadata) is None
-
-    def test_has_geoarrow_extension_in_table_true(self):
-        """Test detection of geoarrow extension type in table."""
-        import geoarrow.pyarrow as ga
-
-        from geoparquet_io.core.streaming import has_geoarrow_extension_in_table
-
-        # Create WKB geometry with geoarrow type
-        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
-        geom_arr = ga.as_wkb([wkb, wkb])
-        table = pa.table({"id": [1, 2], "geometry": geom_arr})
-
-        assert has_geoarrow_extension_in_table(table) is True
-
-    def test_has_geoarrow_extension_in_table_false(self):
-        """Test no geoarrow extension type in regular table."""
-        from geoparquet_io.core.streaming import has_geoarrow_extension_in_table
-
-        table = pa.table({"id": [1, 2], "geometry": [b"wkb1", b"wkb2"]})
-        assert has_geoarrow_extension_in_table(table) is False
-
-    def test_detect_version_for_output_from_metadata(self):
-        """Test version detection from metadata."""
-        from geoparquet_io.core.streaming import detect_version_for_output
-
-        metadata = {b"geo": json.dumps({"version": "2.0.0"}).encode("utf-8")}
-        assert detect_version_for_output(metadata) == "2.0"
-
-    def test_detect_version_for_output_from_geoarrow_table(self):
-        """Test version detection from geoarrow extension types."""
-        import geoarrow.pyarrow as ga
-
-        from geoparquet_io.core.streaming import detect_version_for_output
-
-        # Create table with geoarrow extension type but no geo metadata
-        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
-        geom_arr = ga.as_wkb([wkb, wkb])
-        table = pa.table({"id": [1, 2], "geometry": geom_arr})
-
-        # No metadata, but has geoarrow types -> should return "2.0"
-        assert detect_version_for_output(None, table) == "2.0"
-        assert detect_version_for_output({}, table) == "2.0"
-
-    def test_detect_version_for_output_prefers_metadata(self):
-        """Test that metadata version takes precedence over geoarrow type."""
-        import geoarrow.pyarrow as ga
-
-        from geoparquet_io.core.streaming import detect_version_for_output
-
-        # Create table with geoarrow extension type AND v1.1 metadata
-        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
-        geom_arr = ga.as_wkb([wkb, wkb])
-        table = pa.table({"id": [1, 2], "geometry": geom_arr})
-        metadata = {b"geo": json.dumps({"version": "1.1.0"}).encode("utf-8")}
-
-        # Metadata version should take precedence
-        assert detect_version_for_output(metadata, table) == "1.1"
-
-    def test_detect_version_for_output_returns_none(self):
-        """Test None returned when no version info available."""
-        from geoparquet_io.core.streaming import detect_version_for_output
-
-        # No metadata, no geoarrow types
         table = pa.table({"id": [1, 2], "name": ["a", "b"]})
-        assert detect_version_for_output(None, table) is None
-        assert detect_version_for_output({}, table) is None
-        assert detect_version_for_output(None, None) is None
+        assert resolve_output_geoparquet_version(None, table=table) == "1.1"
+        assert resolve_output_geoparquet_version(None, original_metadata={}) == "1.1"
+        assert resolve_output_geoparquet_version(None) == "1.1"
 
 
 def _wkb_polygon(npts: int) -> bytes:
@@ -927,7 +848,7 @@ class TestReadStdinToTempFile:
             # The whole point: DuckDB can now open the file.
             con = duckdb.connect()
             try:
-                assert con.execute(f"SELECT COUNT(*) FROM '{path}'").fetchone()[0] == 1
+                assert fetch_one(con.execute(f"SELECT COUNT(*) FROM '{path}'"))[0] == 1
             finally:
                 con.close()
         finally:
@@ -1028,7 +949,7 @@ _CRS_PAYLOADS: dict[bytes, object] = {}
 class _CrsCarrierType(pa.ExtensionType):
     """An Arrow extension type exposing an arbitrary value as ``.crs``.
 
-    Lets a test hand ``extract_crs_from_table`` exactly one CRS carrier shape
+    Lets a test hand ``crs_of`` exactly one CRS carrier shape
     with no dependence on import order or on what geoarrow chooses to wrap the
     value in -- the process state that made issue #816 intermittent.
     """
@@ -1076,7 +997,7 @@ def _geoarrow_typed_table(crs, nrows: int = 1) -> pa.Table:
 
 
 class TestExtractCrsFromGeoArrowType:
-    """`extract_crs_from_table` must read a geoarrow CRS object, not stringify it.
+    """`crs_of` must read a geoarrow CRS object, not stringify it.
 
     Regression guard for issue #816. Once ``geoarrow.pyarrow`` is imported
     anywhere in the process, PyArrow resolves ``geoarrow.wkb`` fields into real
@@ -1090,7 +1011,7 @@ class TestExtractCrsFromGeoArrowType:
         """A ProjJsonCrs object comes back as PROJJSON, not as its repr."""
         table = _geoarrow_typed_table(OGC_CRS84_PROJJSON)
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert not isinstance(crs, str), f"stringified the CRS object: {crs!r}"
         assert isinstance(crs, dict)
@@ -1100,7 +1021,7 @@ class TestExtractCrsFromGeoArrowType:
         """A StringCrs object ("EPSG:3857") resolves through its PROJJSON accessor."""
         table = _geoarrow_typed_table("EPSG:3857")
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert crs is not None
         parsed = crs if isinstance(crs, dict) else json.loads(crs)
@@ -1112,7 +1033,7 @@ class TestExtractCrsFromGeoArrowType:
 
         table = _geoarrow_typed_table(OGC_CRS84_PROJJSON)
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert pyproj.CRS(crs).to_authority() == ("OGC", "CRS84")
 
@@ -1150,7 +1071,7 @@ class TestExtractCrsFromGeoArrowType:
             [pa.array([1]), pa.array([_wkb_polygon(4)], type=pa.binary())], schema=schema
         )
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert crs == OGC_CRS84_PROJJSON
 
@@ -1163,7 +1084,7 @@ class TestExtractCrsFromGeoArrowType:
         table = _table_with_crs_carrier(_OpaqueCrs())
 
         with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-            crs = extract_crs_from_table(table, "geometry")
+            crs = crs_of(table, geometry_column="geometry")
 
         assert crs is None
         assert "_OpaqueCrs" in caplog.text
@@ -1173,7 +1094,7 @@ class TestExtractCrsFromGeoArrowType:
 class TestCrsCarrierShapes:
     """Every shape ``geom_type.crs`` can take, driven directly (#816).
 
-    These call ``extract_crs_from_table`` with one carrier shape each, with no
+    These call ``crs_of`` with one carrier shape each, with no
     dependence on whether ``geoarrow.pyarrow`` happened to be imported first --
     so each branch is exercised deterministically on every run.
     """
@@ -1184,7 +1105,7 @@ class TestCrsCarrierShapes:
 
         table = _table_with_crs_carrier(ProjJsonCrs(OGC_CRS84_PROJJSON))
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert isinstance(crs, dict)
         assert crs["id"] == {"authority": "OGC", "code": "CRS84"}
@@ -1195,7 +1116,7 @@ class TestCrsCarrierShapes:
 
         table = _table_with_crs_carrier(StringCrs("EPSG:3857"))
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert isinstance(crs, dict)
         assert crs["id"] == {"authority": "EPSG", "code": 3857}
@@ -1206,7 +1127,7 @@ class TestCrsCarrierShapes:
 
         table = _table_with_crs_carrier(pyproj.CRS("EPSG:4326"))
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert isinstance(crs, dict)
         assert crs["id"] == {"authority": "EPSG", "code": 4326}
@@ -1215,19 +1136,19 @@ class TestCrsCarrierShapes:
         """A type that already holds PROJJSON is returned unchanged."""
         table = _table_with_crs_carrier(OGC_CRS84_PROJJSON)
 
-        assert extract_crs_from_table(table, "geometry") == OGC_CRS84_PROJJSON
+        assert crs_of(table, geometry_column="geometry") == OGC_CRS84_PROJJSON
 
     def test_plain_string_identifier_passes_through(self):
         """A bare identifier string stays a string for the caller to normalise."""
         table = _table_with_crs_carrier("EPSG:3857")
 
-        assert extract_crs_from_table(table, "geometry") == "EPSG:3857"
+        assert crs_of(table, geometry_column="geometry") == "EPSG:3857"
 
     def test_utf8_bytes_are_decoded(self):
         """Bytes are decoded to text rather than stringified as ``b'...'``."""
         table = _table_with_crs_carrier(b"EPSG:3857")
 
-        crs = extract_crs_from_table(table, "geometry")
+        crs = crs_of(table, geometry_column="geometry")
 
         assert crs == "EPSG:3857"
         assert not str(crs).startswith("b'")
@@ -1236,14 +1157,14 @@ class TestCrsCarrierShapes:
         """Bytes that are not UTF-8 are not a CRS; return None, never a repr."""
         table = _table_with_crs_carrier(b"\xff\xfe not utf-8")
 
-        assert extract_crs_from_table(table, "geometry") is None
+        assert crs_of(table, geometry_column="geometry") is None
 
     def test_failing_projjson_accessor_warns_and_returns_none(self, caplog):
         """An accessor that raises is reported, and yields None -- not a repr."""
         table = _table_with_crs_carrier(_ExplodingCrs())
 
         with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-            crs = extract_crs_from_table(table, "geometry")
+            crs = crs_of(table, geometry_column="geometry")
 
         assert crs is None
         assert "_ExplodingCrs" in caplog.text
@@ -1262,7 +1183,7 @@ class TestCrsCarrierShapes:
         table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode("utf-8")})
 
         with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-            crs = extract_crs_from_table(table, "geometry")
+            crs = crs_of(table, geometry_column="geometry")
 
         assert crs == OGC_CRS84_PROJJSON
 

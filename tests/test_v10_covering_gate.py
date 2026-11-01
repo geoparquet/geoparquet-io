@@ -11,6 +11,7 @@ command still exited 0.
 
 import json
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
@@ -18,9 +19,8 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.convert import convert_to_geoparquet
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-from geoparquet_io.core.geo_metadata import create_geo_metadata
+from geoparquet_io.core.geo_metadata import GeoBlockOptions, SchemaSource, compose_geo_block
 from geoparquet_io.core.validate import validate_geoparquet
-from geoparquet_io.core.write_strategies.base import build_geo_metadata
 from tests.conftest import get_geo_metadata, get_geoparquet_version
 
 
@@ -195,8 +195,25 @@ def test_v10_downgrade_drops_covering_carried_from_source(points_input, tmp_path
     assert validate_geoparquet(str(out)).is_valid
 
 
-def test_build_geo_metadata_gates_covering_by_version():
-    """The shared assembly point drops covering for 1.0 and keeps it for 1.1/2.0."""
+_SCHEMA = pa.schema(
+    [
+        ("geometry", pa.binary()),
+        ("bbox", pa.struct([(n, pa.float64()) for n in ("xmin", "ymin", "xmax", "ymax")])),
+        ("h3", pa.string()),
+    ]
+)
+
+
+def _compose(version, metadata=None, custom=None, verbose=False):
+    """The one composer's block for a geometry+bbox+h3 schema at an output ``version`` key."""
+    return compose_geo_block(
+        SchemaSource(_SCHEMA, metadata),
+        GeoBlockOptions("geometry", version=version, custom_metadata=custom, verbose=verbose),
+    )
+
+
+def test_compose_gates_a_carried_covering_by_version():
+    """The one composer drops covering for 1.0 and keeps it for 1.1/2.0."""
     source = {
         "geo": json.dumps(
             {
@@ -219,30 +236,28 @@ def test_build_geo_metadata_gates_covering_by_version():
         )
     }
 
-    v10 = build_geo_metadata("geometry", "1.0", original_metadata=source)
+    v10 = _compose("1.0", source)
     assert "covering" not in v10["columns"]["geometry"]
 
     for version in ("1.1", "2.0"):
-        kept = build_geo_metadata("geometry", version, original_metadata=source)
+        kept = _compose(version, source)
         assert "covering" in kept["columns"]["geometry"], version
 
 
-def test_create_geo_metadata_gates_covering_by_version():
-    """The Arrow-table assembly point applies the same gate."""
-    bbox_info = {"has_bbox_column": True, "bbox_column_name": "bbox"}
-
-    v10 = create_geo_metadata(None, "geometry", bbox_info, version="1.0.0")
+def test_compose_gates_a_detected_covering_by_version():
+    """A detected bbox column gets the same gate as a carried covering."""
+    v10 = _compose("1.0")
     assert "covering" not in v10["columns"]["geometry"]
 
-    v11 = create_geo_metadata(None, "geometry", bbox_info, version="1.1.0")
+    v11 = _compose("1.1")
     assert v11["columns"]["geometry"]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
 
     # Verbose mode reports the drop rather than silently changing the output.
-    verbose_v10 = create_geo_metadata(None, "geometry", bbox_info, None, True, version="1.0.0")
+    verbose_v10 = _compose("1.0", verbose=True)
     assert "covering" not in verbose_v10["columns"]["geometry"]
 
 
-def test_create_geo_metadata_drops_custom_covering_for_v10():
+def test_compose_drops_custom_covering_for_v10():
     """Spatial-index coverings (h3/s2/...) are also 1.1-only.
 
     The 1.1 branch supplies a bbox column: since #954 an index entry is only
@@ -250,12 +265,11 @@ def test_create_geo_metadata_drops_custom_covering_for_v10():
     version and would make this gate test vacuous.
     """
     custom = {"covering": {"h3": {"column": "h3", "resolution": 8}}}
-    bbox_info = {"has_bbox_column": True, "bbox_column_name": "bbox"}
 
-    v10 = create_geo_metadata(None, "geometry", bbox_info, custom, version="1.0.0")
+    v10 = _compose("1.0", custom=custom)
     assert "covering" not in v10["columns"]["geometry"]
 
-    v11 = create_geo_metadata(None, "geometry", bbox_info, custom, version="1.1.0")
+    v11 = _compose("1.1", custom=custom)
     assert "h3" in v11["columns"]["geometry"]["covering"]
 
 
@@ -331,12 +345,12 @@ def test_api_add_bbox_metadata_still_works_on_v11_table(v11_with_bbox_column):
     assert columns[with_meta.geometry_column]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
 
 
-def test_build_geo_metadata_does_not_mutate_caller_metadata():
+def test_compose_does_not_mutate_caller_metadata():
     """The 1.0 gate must not strip covering out of the caller's own dict.
 
     Partition loops reuse one ``original_metadata`` dict across many writes
     (see the aliasing note at common.py:2362); popping through the shallow copy
-    in ``_initialize_geo_metadata`` would strip the shared dict permanently and
+    of the carried block would strip the shared dict permanently and
     silently cost later 1.1 writes their covering.
     """
     covering = {
@@ -354,12 +368,12 @@ def test_build_geo_metadata_does_not_mutate_caller_metadata():
     }
     source = {"geo": geo}
 
-    built = build_geo_metadata("geometry", "1.0", original_metadata=source)
+    built = _compose("1.0", source)
     assert "covering" not in built["columns"]["geometry"]
     assert "covering" in geo["columns"]["geometry"], "caller's metadata dict was mutated"
 
     # A later write from the same shared dict must still get its covering.
-    again = build_geo_metadata("geometry", "1.1", original_metadata=source)
+    again = _compose("1.1", source)
     assert again["columns"]["geometry"]["covering"] == covering
 
 

@@ -18,6 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import fetch_one, sql_literal
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate import by_admin
 from geoparquet_io.core.process.aggregate.common import (
@@ -26,7 +27,6 @@ from geoparquet_io.core.process.aggregate.common import (
     build_breakdown_pivot,
     parse_breakdown_metric,
     parse_metrics,
-    sql_literal,
     validate_agg_columns,
     validate_breakdown_metric,
     validate_metric_nodata,
@@ -167,21 +167,21 @@ def test_grid_engine_pivots_the_metric_per_category(spec, row):
         "count",
         *(f"{func}_peak_2026{m}" for m in "05 06 07".split()),
     ]
-    assert con.execute(sql).fetchone() == row
+    assert fetch_one(con.execute(sql)) == row
 
 
 def test_grid_engine_without_a_breakdown_metric_is_unchanged():
     con = duckdb.connect()
     sql = _grid_query(con)
     assert _columns(con, sql) == ["cell", "count", "count_202605", "count_202606", "count_202607"]
-    assert con.execute(sql).fetchone() == (1, 4, 2, 1, 1)
+    assert fetch_one(con.execute(sql)) == (1, 4, 2, 1, 1)
 
 
 def test_grid_engine_names_the_remainder_bucket_for_the_metric():
     con = duckdb.connect()
     sql = _grid_query(con, breakdown_limit=1, breakdown_spec=parse_breakdown_metric("sum:peak"))
     assert _columns(con, sql) == ["cell", "count", "sum_peak_202605", "sum_peak_other"]
-    assert con.execute(sql).fetchone() == (1, 4, 5.0, 8.0)  # the rest, summed
+    assert fetch_one(con.execute(sql)) == (1, 4, 5.0, 8.0)  # the rest, summed
 
 
 def test_grid_engine_keeps_a_pivot_off_a_metric_column_of_the_same_name():
@@ -200,7 +200,7 @@ def test_grid_engine_keeps_a_pivot_off_a_metric_column_of_the_same_name():
         "sum_peak_202605_2",  # the May pivot, not merged into it
         "sum_peak_202606",
     ]
-    assert con.execute(sql).fetchone() == (1, 2, 30.0, 2.0, 7.0)
+    assert fetch_one(con.execute(sql)) == (1, 2, 30.0, 2.0, 7.0)
 
 
 def test_the_remainder_bucket_keeps_off_a_metric_output_name_too():
@@ -230,7 +230,7 @@ def test_an_empty_or_all_null_bucket_is_null_like_the_per_cell_metric(func, empt
     sql = _grid_query(
         con, source, metric=f"{func}:peak", breakdown_spec=parse_breakdown_metric(f"{func}:peak")
     )
-    cell, count, per_cell, a, b = con.execute(sql).fetchone()
+    cell, count, per_cell, a, b = fetch_one(con.execute(sql))
     assert (per_cell, a, b) == (1.0, 1.0, empty)
 
 
@@ -241,7 +241,7 @@ def test_grid_engine_applies_nodata_sentinels_to_the_pivot():
         con, source, metric_nodata="-999", breakdown_spec=parse_breakdown_metric("sum:peak")
     )
     # -999 is a sentinel, not a magnitude: it must not be summed into May.
-    assert con.execute(sql).fetchone() == (1, 3, 2.0, 7.0)
+    assert fetch_one(con.execute(sql)) == (1, 3, 2.0, 7.0)
 
 
 @pytest.mark.parametrize("spelling", ["sum:peak", "sum:PEAK"])
@@ -255,7 +255,7 @@ def test_nodata_casts_a_real_breakdown_metric_column(spelling):
     sql = _grid_query(
         con, source, metric_nodata="-3.4028235e+38", breakdown_spec=parse_breakdown_metric(spelling)
     )
-    assert con.execute(sql).fetchone() == (1, 3, 2.0, 4.0)
+    assert fetch_one(con.execute(sql)) == (1, 3, 2.0, 4.0)
 
 
 def test_nodata_rejects_a_non_numeric_breakdown_metric_column():
@@ -276,7 +276,7 @@ def test_real_category_values_reach_their_pivot():
     sql = _grid_query(
         con, source, breakdown="cat", breakdown_spec=parse_breakdown_metric("sum:peak")
     )
-    assert con.execute(sql).fetchone() == (1, 2, 1.0, 8.0)
+    assert fetch_one(con.execute(sql)) == (1, 2, 1.0, 8.0)
 
 
 def test_a_blob_breakdown_column_is_refused():
@@ -292,7 +292,7 @@ def test_a_null_byte_in_a_category_still_matches():
     sql = _grid_query(
         con, source, breakdown="cat", breakdown_spec=parse_breakdown_metric("sum:peak")
     )
-    assert con.execute(sql).fetchone() == (1, 2, 1.0, 8.0)
+    assert fetch_one(con.execute(sql)) == (1, 2, 1.0, 8.0)
 
 
 def test_the_pivot_builder_is_the_one_both_engines_use():
@@ -338,8 +338,13 @@ class _SquareAdmin:
     def supports_per_level_sources(self):
         return True
 
-    def get_source_for_level(self, level):
+    def source_for_level(self, level, no_cache=False):
         return str(self._path)
+
+    def table_reference(self, source=None):
+        from geoparquet_io.core.duckdb_utils import sql_path
+
+        return sql_path(source or str(self._path))
 
 
 def test_admin_engine_pivots_and_keeps_off_a_metric_name(tmp_path, monkeypatch):
@@ -357,10 +362,10 @@ def test_admin_engine_pivots_and_keeps_off_a_metric_name(tmp_path, monkeypatch):
     con.close()
     monkeypatch.setattr(
         by_admin,
-        "_setup_admin_dataset",
-        lambda *a, **k: (_SquareAdmin(tmp_path / "admin.parquet"), []),
+        "resolve_admin_dataset",
+        lambda *a, **k: (_SquareAdmin(tmp_path / "admin.parquet"), [], None),
     )
-    monkeypatch.setattr(by_admin, "extract_crs_from_parquet", lambda *a, **k: None)
+    monkeypatch.setattr(by_admin, "crs_of", lambda *a, **k: None)
 
     out = tmp_path / "out.parquet"
     by_admin.aggregate_by_admin(

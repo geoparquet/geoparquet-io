@@ -12,15 +12,25 @@ import pytest
 from geoparquet_io.core.geo_metadata import (
     DEFAULT_GEOPARQUET_VERSION,
     GEOPARQUET_VERSIONS,
-    _add_bbox_covering,
-    _add_custom_covering,
-    _initialize_geo_metadata,
-    _parse_existing_geo_metadata,
-    compute_bbox_via_sql,
-    compute_geometry_types_via_sql,
-    create_geo_metadata,
-    parse_geo_metadata,
+    GeoBlockOptions,
+    QuerySource,
+    SchemaSource,
+    bounds_of,
+    compose_geo_block,
+    geometry_types_of,
+    read_raw_geo,
+    sanitized_carried_geo,
 )
+
+
+def _schema(*names):
+    """A schema with a WKB column per name (a bbox struct for ``bbox``, a string otherwise)."""
+    import pyarrow as pa
+
+    bbox = pa.struct([(n, pa.float64()) for n in ("xmin", "ymin", "xmax", "ymax")])
+    types = {"bbox": bbox, "h3": pa.string(), "s2": pa.string()}
+    return pa.schema([(n, types.get(n, pa.binary())) for n in names])
+
 
 # =============================================================================
 # Tests for Constants
@@ -59,11 +69,11 @@ class TestGeoParquetVersions:
 
 
 # =============================================================================
-# Tests for parse_geo_metadata()
+# Tests for read_raw_geo() (the raw diagnostic decoder)
 # =============================================================================
 
 
-class TestParseGeoMetadata:
+class TestReadRawGeo:
     """Test parsing geo metadata from Parquet file metadata."""
 
     def test_parses_valid_metadata(self):
@@ -75,7 +85,7 @@ class TestParseGeoMetadata:
         }
         metadata = {b"geo": json.dumps(geo_dict).encode("utf-8")}
 
-        result = parse_geo_metadata(metadata)
+        result = read_raw_geo(metadata).value
 
         assert result is not None
         assert result["version"] == "1.1.0"
@@ -83,41 +93,38 @@ class TestParseGeoMetadata:
 
     def test_returns_none_for_none_metadata(self):
         """Returns None for None input."""
-        assert parse_geo_metadata(None) is None
+        assert read_raw_geo(None).value is None
 
     def test_returns_none_for_missing_geo_key(self):
         """Returns None when 'geo' key is missing."""
         metadata = {b"other": b"data"}
-        assert parse_geo_metadata(metadata) is None
+        assert read_raw_geo(metadata).value is None
 
     def test_returns_none_for_invalid_json(self):
         """Returns None for invalid JSON in geo key."""
         metadata = {b"geo": b"not valid json"}
-        assert parse_geo_metadata(metadata) is None
+        assert read_raw_geo(metadata).value is None
 
-    def test_verbose_mode(self, capsys):
-        """Verbose mode logs parsing info."""
-        geo_dict = {"version": "1.1.0", "primary_column": "geometry", "columns": {}}
-        metadata = {b"geo": json.dumps(geo_dict).encode("utf-8")}
-
-        result = parse_geo_metadata(metadata, verbose=True)
-
-        assert result is not None
+    def test_invalid_json_carries_the_error(self):
+        """An undecodable value says why instead of raising."""
+        result = read_raw_geo({b"geo": b"not valid json"})
+        assert result.present and result.value is None
+        assert "not valid JSON" in result.error
 
     def test_handles_empty_geo_dict(self):
         """Handles empty geo dict."""
         metadata = {b"geo": b"{}"}
-        result = parse_geo_metadata(metadata)
+        result = read_raw_geo(metadata).value
 
         assert result == {}
 
 
 # =============================================================================
-# Tests for _parse_existing_geo_metadata()
+# Tests for sanitized_carried_geo() (the carried decoder compose_geo_block reads with)
 # =============================================================================
 
 
-class TestParseExistingGeoMetadata:
+class TestSanitizedCarriedGeo:
     """Test parsing existing geo metadata from original metadata."""
 
     def test_parses_valid_metadata(self):
@@ -125,271 +132,22 @@ class TestParseExistingGeoMetadata:
         geo_dict = {"version": "1.0.0", "primary_column": "geom"}
         metadata = {b"geo": json.dumps(geo_dict).encode("utf-8")}
 
-        result = _parse_existing_geo_metadata(metadata)
+        result = sanitized_carried_geo(metadata)
 
         assert result is not None
         assert result["version"] == "1.0.0"
 
     def test_returns_none_for_none(self):
-        """Returns None for None input."""
-        assert _parse_existing_geo_metadata(None) is None
+        """Reads as absent for None input."""
+        assert sanitized_carried_geo(None) == {}
 
     def test_returns_none_for_missing_key(self):
         """Returns None for missing geo key."""
-        assert _parse_existing_geo_metadata({b"other": b"data"}) is None
+        assert sanitized_carried_geo({b"other": b"data"}) == {}
 
     def test_returns_none_for_invalid_json(self):
         """Returns None for invalid JSON."""
-        assert _parse_existing_geo_metadata({b"geo": b"invalid"}) is None
-
-
-# =============================================================================
-# Tests for _initialize_geo_metadata()
-# =============================================================================
-
-
-class TestInitializeGeoMetadata:
-    """Test geo metadata initialization."""
-
-    def test_creates_minimal_structure(self):
-        """Creates minimal valid structure from None."""
-        result = _initialize_geo_metadata(None, "geometry")
-
-        assert result["version"] == "1.1.0"  # default version
-        assert result["primary_column"] == "geometry"
-        assert result["columns"]["geometry"] == {}
-
-    def test_custom_version(self):
-        """Respects custom version parameter."""
-        result = _initialize_geo_metadata(None, "geometry", version="2.0.0")
-
-        assert result["version"] == "2.0.0"
-
-    def test_upgrades_existing_metadata(self):
-        """Updates version in existing metadata."""
-        existing = {"version": "1.0.0", "primary_column": "geom", "columns": {"geom": {}}}
-
-        result = _initialize_geo_metadata(existing, "geom", version="1.1.0")
-
-        assert result["version"] == "1.1.0"
-        assert result["primary_column"] == "geom"
-
-    def test_adds_missing_columns(self):
-        """Adds missing columns dict."""
-        existing = {"version": "1.0.0", "primary_column": "geometry"}
-
-        result = _initialize_geo_metadata(existing, "geometry")
-
-        assert "columns" in result
-        assert "geometry" in result["columns"]
-
-    def test_adds_missing_geometry_column(self):
-        """Adds entry for geometry column if missing."""
-        existing = {"version": "1.0.0", "columns": {}}
-
-        result = _initialize_geo_metadata(existing, "new_geom")
-
-        assert "new_geom" in result["columns"]
-
-
-# =============================================================================
-# Tests for _add_bbox_covering()
-# =============================================================================
-
-
-class TestAddBboxCovering:
-    """Test adding bbox covering metadata."""
-
-    def test_adds_bbox_covering(self):
-        """Adds bbox covering to geo metadata."""
-        geo_meta = {"columns": {"geometry": {}}}
-        bbox_info = {"has_bbox_column": True, "bbox_column_name": "bbox"}
-
-        _add_bbox_covering(geo_meta, "geometry", bbox_info, verbose=False)
-
-        covering = geo_meta["columns"]["geometry"]["covering"]
-        assert covering["bbox"]["xmin"] == ["bbox", "xmin"]
-        assert covering["bbox"]["ymin"] == ["bbox", "ymin"]
-        assert covering["bbox"]["xmax"] == ["bbox", "xmax"]
-        assert covering["bbox"]["ymax"] == ["bbox", "ymax"]
-
-    def test_no_op_without_bbox(self):
-        """Does nothing when bbox_info is None."""
-        geo_meta = {"columns": {"geometry": {}}}
-
-        _add_bbox_covering(geo_meta, "geometry", None, verbose=False)
-
-        assert "covering" not in geo_meta["columns"]["geometry"]
-
-    def test_no_op_when_has_bbox_false(self):
-        """Does nothing when has_bbox_column is False."""
-        geo_meta = {"columns": {"geometry": {}}}
-        bbox_info = {"has_bbox_column": False}
-
-        _add_bbox_covering(geo_meta, "geometry", bbox_info, verbose=False)
-
-        assert "covering" not in geo_meta["columns"]["geometry"]
-
-    def test_custom_bbox_column_name(self):
-        """Uses custom bbox column name."""
-        geo_meta = {"columns": {"geometry": {}}}
-        bbox_info = {"has_bbox_column": True, "bbox_column_name": "geometry_bbox"}
-
-        _add_bbox_covering(geo_meta, "geometry", bbox_info, verbose=False)
-
-        covering = geo_meta["columns"]["geometry"]["covering"]
-        assert covering["bbox"]["xmin"] == ["geometry_bbox", "xmin"]
-
-
-# =============================================================================
-# Tests for _add_custom_covering()
-# =============================================================================
-
-
-class TestAddCustomCovering:
-    """Test adding custom covering metadata (H3, S2, etc.)."""
-
-    def test_adds_custom_covering(self):
-        """Adds custom covering to geo metadata."""
-        geo_meta = {"columns": {"geometry": {}}}
-        custom_metadata = {"covering": {"h3": {"column": "h3_index"}}}
-
-        _add_custom_covering(geo_meta, "geometry", custom_metadata, verbose=False)
-
-        assert geo_meta["columns"]["geometry"]["covering"]["h3"] == {"column": "h3_index"}
-
-    def test_no_op_without_covering(self):
-        """Does nothing when custom_metadata has no covering."""
-        geo_meta = {"columns": {"geometry": {}}}
-        custom_metadata = {"other_key": "value"}
-
-        _add_custom_covering(geo_meta, "geometry", custom_metadata, verbose=False)
-
-        assert "covering" not in geo_meta["columns"]["geometry"]
-
-    def test_no_op_for_none(self):
-        """Does nothing for None custom_metadata."""
-        geo_meta = {"columns": {"geometry": {}}}
-
-        _add_custom_covering(geo_meta, "geometry", None, verbose=False)
-
-        assert "covering" not in geo_meta["columns"]["geometry"]
-
-    def test_merges_with_existing_covering(self):
-        """Merges with existing covering metadata."""
-        geo_meta = {"columns": {"geometry": {"covering": {"bbox": {}}}}}
-        custom_metadata = {"covering": {"h3": {"column": "h3"}}}
-
-        _add_custom_covering(geo_meta, "geometry", custom_metadata, verbose=False)
-
-        assert "bbox" in geo_meta["columns"]["geometry"]["covering"]
-        assert "h3" in geo_meta["columns"]["geometry"]["covering"]
-
-
-# =============================================================================
-# Tests for create_geo_metadata()
-# =============================================================================
-
-
-class TestCreateGeoMetadata:
-    """Test creating complete geo metadata."""
-
-    def test_creates_basic_metadata(self):
-        """Creates basic geo metadata structure."""
-        result = create_geo_metadata(
-            original_metadata=None,
-            geom_col="geometry",
-            bbox_info=None,
-            verbose=False,
-        )
-
-        assert result["version"] == "1.1.0"
-        assert result["primary_column"] == "geometry"
-        assert result["columns"]["geometry"]["encoding"] == "WKB"
-
-    def test_custom_version(self):
-        """Respects version parameter."""
-        result = create_geo_metadata(
-            original_metadata=None,
-            geom_col="geometry",
-            bbox_info=None,
-            version="2.0.0",
-        )
-
-        assert result["version"] == "2.0.0"
-
-    def test_includes_bbox_covering(self):
-        """Includes bbox covering when provided."""
-        bbox_info = {"has_bbox_column": True, "bbox_column_name": "bbox"}
-
-        result = create_geo_metadata(
-            original_metadata=None,
-            geom_col="geometry",
-            bbox_info=bbox_info,
-            verbose=False,
-        )
-
-        assert "covering" in result["columns"]["geometry"]
-        assert "bbox" in result["columns"]["geometry"]["covering"]
-
-    def test_includes_spherical_edges(self):
-        """Adds edges and orientation for spherical data."""
-        result = create_geo_metadata(
-            original_metadata=None,
-            geom_col="geometry",
-            bbox_info=None,
-            edges="spherical",
-        )
-
-        assert result["columns"]["geometry"]["edges"] == "spherical"
-        assert result["columns"]["geometry"]["orientation"] == "counterclockwise"
-
-    def test_preserves_existing_metadata(self):
-        """Preserves data from original metadata."""
-        original = {
-            b"geo": json.dumps(
-                {
-                    "version": "1.0.0",
-                    "primary_column": "geometry",
-                    "columns": {"geometry": {"crs": {"id": {"authority": "EPSG", "code": 4326}}}},
-                }
-            ).encode()
-        }
-
-        result = create_geo_metadata(
-            original_metadata=original,
-            geom_col="geometry",
-            bbox_info=None,
-            version="1.1.0",
-        )
-
-        # Version should be updated
-        assert result["version"] == "1.1.0"
-        # CRS should be preserved
-        assert result["columns"]["geometry"]["crs"] is not None
-
-    def test_adds_top_level_custom_metadata(self):
-        """Adds top-level custom metadata keys."""
-        custom = {"custom_key": "custom_value", "covering": {}}
-
-        result = create_geo_metadata(
-            original_metadata=None,
-            geom_col="geometry",
-            bbox_info=None,
-            custom_metadata=custom,
-        )
-
-        assert result["custom_key"] == "custom_value"
-
-    def test_default_encoding_wkb(self):
-        """Default encoding is WKB."""
-        result = create_geo_metadata(
-            original_metadata=None,
-            geom_col="geometry",
-            bbox_info=None,
-        )
-
-        assert result["columns"]["geometry"]["encoding"] == "WKB"
+        assert sanitized_carried_geo({b"geo": b"invalid"}) == {}
 
 
 # =============================================================================
@@ -419,7 +177,7 @@ class TestComputeBboxViaSql:
         """)
 
         query = "SELECT * FROM test"
-        bbox = compute_bbox_via_sql(spatial_con, query, "geometry")
+        bbox = bounds_of(QuerySource(spatial_con, query), "geometry")
 
         assert bbox is not None
         assert len(bbox) == 4
@@ -437,7 +195,7 @@ class TestComputeBboxViaSql:
         """)
 
         query = "SELECT * FROM test"
-        bbox = compute_bbox_via_sql(spatial_con, query, "geometry")
+        bbox = bounds_of(QuerySource(spatial_con, query), "geometry")
 
         assert bbox is None
 
@@ -446,15 +204,16 @@ class TestComputeBboxViaSql:
         spatial_con.execute("CREATE TABLE test AS SELECT 1 as id")
 
         query = "SELECT * FROM test"
-        bbox = compute_bbox_via_sql(spatial_con, query, "geometry")
+        bbox = bounds_of(QuerySource(spatial_con, query), "geometry")
 
         assert bbox is None
 
-    def test_handles_invalid_query(self, spatial_con):
-        """Returns None for invalid query."""
-        bbox = compute_bbox_via_sql(spatial_con, "SELECT * FROM nonexistent", "geometry")
+    def test_an_invalid_query_raises(self, spatial_con):
+        """A query that cannot bind raises, as the write it measures for would."""
+        import duckdb
 
-        assert bbox is None
+        with pytest.raises(duckdb.Error):
+            bounds_of(QuerySource(spatial_con, "SELECT * FROM nonexistent"), "geometry")
 
 
 class TestComputeGeometryTypesViaSql:
@@ -478,7 +237,7 @@ class TestComputeGeometryTypesViaSql:
         """)
 
         query = "SELECT * FROM test"
-        types = compute_geometry_types_via_sql(spatial_con, query, "geometry")
+        types = geometry_types_of(QuerySource(spatial_con, query), "geometry")
 
         assert "Point" in types
 
@@ -492,7 +251,7 @@ class TestComputeGeometryTypesViaSql:
         """)
 
         query = "SELECT * FROM test"
-        types = compute_geometry_types_via_sql(spatial_con, query, "geometry")
+        types = geometry_types_of(QuerySource(spatial_con, query), "geometry")
 
         assert len(types) >= 2
 
@@ -513,7 +272,7 @@ class TestGeoMetadataIntegration:
         metadata = pf.schema_arrow.metadata
 
         if metadata:
-            result = parse_geo_metadata(metadata)
+            result = read_raw_geo(metadata).value
             if result:
                 assert "version" in result
                 assert "primary_column" in result
@@ -525,11 +284,9 @@ class TestGeoMetadataIntegration:
         pf = pq.ParquetFile(places_test_file)
         original_metadata = pf.schema_arrow.metadata
 
-        result = create_geo_metadata(
-            original_metadata=original_metadata,
-            geom_col="geometry",
-            bbox_info=None,
-            version="1.1.0",
+        result = compose_geo_block(
+            SchemaSource(pf.schema_arrow, original_metadata),
+            GeoBlockOptions("geometry", version="1.1", covering=None),
         )
 
         assert result["version"] == "1.1.0"
@@ -537,12 +294,11 @@ class TestGeoMetadataIntegration:
 
     def test_metadata_roundtrip(self, tmp_path):
         """Metadata survives JSON serialization roundtrip."""
-        geo_meta = create_geo_metadata(
-            original_metadata=None,
-            geom_col="geometry",
-            bbox_info={"has_bbox_column": True, "bbox_column_name": "bbox"},
-            edges="spherical",
+        geo_meta = compose_geo_block(
+            SchemaSource(_schema("geometry", "bbox")),
+            GeoBlockOptions("geometry", version="1.1", edges="spherical"),
         )
+        assert geo_meta["columns"]["geometry"]["covering"]
 
         # Serialize and deserialize
         json_str = json.dumps(geo_meta)
@@ -561,10 +317,9 @@ class TestGeoMetadataEdgeCases:
 
     def test_special_characters_in_column_name(self):
         """Handles special characters in geometry column name."""
-        result = create_geo_metadata(
-            original_metadata=None,
-            geom_col="my geometry",  # Space in name
-            bbox_info=None,
+        result = compose_geo_block(
+            SchemaSource(_schema("my geometry")),  # Space in name
+            GeoBlockOptions("my geometry", version="1.1"),
         )
 
         assert "my geometry" in result["columns"]
@@ -573,11 +328,9 @@ class TestGeoMetadataEdgeCases:
         """Handles Unicode in metadata."""
         custom = {"description": "Données géographiques"}
 
-        result = create_geo_metadata(
-            original_metadata=None,
-            geom_col="geometry",
-            bbox_info=None,
-            custom_metadata=custom,
+        result = compose_geo_block(
+            SchemaSource(_schema("geometry")),
+            GeoBlockOptions("geometry", version="1.1", custom_metadata=custom),
         )
 
         assert result["description"] == "Données géographiques"
@@ -591,11 +344,9 @@ class TestGeoMetadataEdgeCases:
             }
         }
 
-        result = create_geo_metadata(
-            original_metadata=None,
-            geom_col="geometry",
-            bbox_info={"has_bbox_column": True, "bbox_column_name": "bbox"},
-            custom_metadata=custom,
+        result = compose_geo_block(
+            SchemaSource(_schema("geometry", "bbox", "h3", "s2")),
+            GeoBlockOptions("geometry", version="1.1", custom_metadata=custom),
         )
 
         covering = result["columns"]["geometry"]["covering"]
@@ -606,10 +357,8 @@ class TestGeoMetadataEdgeCases:
         # Without a bbox column there is no spec-conformant member to write,
         # so the whole covering is omitted (geopandas indexes covering["bbox"]
         # unguarded).
-        bboxless = create_geo_metadata(
-            original_metadata=None,
-            geom_col="geometry",
-            bbox_info=None,
-            custom_metadata=custom,
+        bboxless = compose_geo_block(
+            SchemaSource(_schema("geometry", "h3", "s2")),
+            GeoBlockOptions("geometry", version="1.1", custom_metadata=custom),
         )
         assert "covering" not in bboxless["columns"]["geometry"]

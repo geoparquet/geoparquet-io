@@ -12,14 +12,14 @@ the probe's fallback warning (#778) and the verbose index-name output.
 """
 
 import logging
+from functools import partial
 
 import pytest
 
+from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.index_ops import calculate_index_resolution, get_index_spec
 from geoparquet_io.core.logging_config import get_logger
 from geoparquet_io.core.partition.auto_resolution import (
-    _calculate_a5_resolution,
-    _calculate_h3_resolution,
-    _calculate_quadkey_resolution,
     _probe_extent_resolution,
     calculate_auto_resolution,
 )
@@ -196,7 +196,9 @@ class TestAutoResolutionMath:
         target_rows = 100
         # This should give us ~1000 partitions
 
-        resolution = _calculate_h3_resolution(total_rows, target_rows)
+        resolution = partial(calculate_index_resolution, get_index_spec("h3"))(
+            total_rows, target_rows
+        )
 
         # Verify result is close to expected
         expected_partitions = 122 * (7**resolution)
@@ -216,7 +218,9 @@ class TestAutoResolutionMath:
         target_rows = 100
         # This should give us ~1024 partitions
 
-        resolution = _calculate_quadkey_resolution(total_rows, target_rows)
+        resolution = partial(calculate_index_resolution, get_index_spec("quadkey"))(
+            total_rows, target_rows
+        )
 
         # Verify result is close to expected
         expected_partitions = 4**resolution
@@ -280,10 +284,10 @@ class TestProbeFallbackIsAnnounced:
         module = "geoparquet_io.core.partition.auto_resolution"
         monkeypatch.setattr(f"{module}.resolve_file_url", lambda *a, **k: "u")
         monkeypatch.setattr(f"{module}.get_duckdb_connection", lambda **k: _NullConnection())
-        monkeypatch.setattr(f"{module}.find_primary_geometry_column", lambda *a, **k: "geometry")
+        monkeypatch.setattr(f"{module}.primary_geometry_column", lambda *a, **k: "geometry")
         monkeypatch.setattr(f"{module}.source_crs_string", lambda *a, **k: None)
         monkeypatch.setattr(f"{module}._geom_sql", lambda *a, **k: "geometry")
-        monkeypatch.setattr(f"{module}.transform_geom_sql", lambda *a, **k: "geometry")
+        monkeypatch.setattr(f"{module}.file_key_inputs", lambda *a, **k: (None, None, None))
         monkeypatch.setattr(f"{module}._probe_distinct_cell_counts", lambda *a, **k: [0, 0, 0])
 
         with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
@@ -323,29 +327,27 @@ class TestVerboseOutput:
     def test_s2_verbose_output_uses_s2_name(self, caplog):
         """Verbose output should show 'S2' for S2 index type."""
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            _calculate_a5_resolution(
+            partial(calculate_index_resolution, get_index_spec("s2"))(
                 total_rows=100000,
                 target_rows_per_partition=1000,
                 verbose=True,
-                index_name="S2",
             )
         assert "S2 auto-resolution" in caplog.text
 
     def test_a5_verbose_output_uses_a5_name(self, caplog):
         """Verbose output should show 'A5' for A5 index type."""
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            _calculate_a5_resolution(
+            partial(calculate_index_resolution, get_index_spec("a5"))(
                 total_rows=100000,
                 target_rows_per_partition=1000,
                 verbose=True,
-                index_name="A5",
             )
         assert "A5 auto-resolution" in caplog.text
 
     def test_h3_verbose_output_uses_h3_name(self, caplog):
         """Verbose output should show 'H3' for H3 index type."""
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            _calculate_h3_resolution(
+            partial(calculate_index_resolution, get_index_spec("h3"))(
                 total_rows=100000,
                 target_rows_per_partition=1000,
                 verbose=True,
@@ -355,7 +357,7 @@ class TestVerboseOutput:
     def test_quadkey_verbose_output_uses_quadkey_name(self, caplog):
         """Verbose output should show 'Quadkey' for Quadkey index type."""
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            _calculate_quadkey_resolution(
+            partial(calculate_index_resolution, get_index_spec("quadkey"))(
                 total_rows=100000,
                 target_rows_per_partition=1000,
                 verbose=True,
@@ -426,7 +428,7 @@ def _count_distinct_cells(parquet_file, index_type, resolution):
             expr = f"lat_lon_to_quadkey({lat}, {lon}, {resolution})"
         else:
             raise ValueError(index_type)
-        row = con.execute(f"SELECT COUNT(DISTINCT {expr}) FROM '{parquet_file}'").fetchone()
+        row = fetch_one(con.execute(f"SELECT COUNT(DISTINCT {expr}) FROM '{parquet_file}'"))
         return row[0]
     finally:
         con.close()
@@ -459,11 +461,17 @@ class TestExtentAwareResolution:
         target_rows = 80  # ~100 target partitions
 
         if index_type in ("a5", "s2"):
-            global_res = _calculate_a5_resolution(total_rows, target_rows)
+            global_res = partial(calculate_index_resolution, get_index_spec("a5"))(
+                total_rows, target_rows
+            )
         elif index_type == "h3":
-            global_res = _calculate_h3_resolution(total_rows, target_rows)
+            global_res = partial(calculate_index_resolution, get_index_spec("h3"))(
+                total_rows, target_rows
+            )
         else:
-            global_res = _calculate_quadkey_resolution(total_rows, target_rows)
+            global_res = partial(calculate_index_resolution, get_index_spec("quadkey"))(
+                total_rows, target_rows
+            )
 
         extent_res = calculate_auto_resolution(
             input_parquet=clustered_file,
@@ -534,7 +542,7 @@ class TestExtentAwareResolution:
             target_rows_per_partition=80,
         )
         # Falls back to the pure-math global formula for the same row count.
-        expected = _calculate_a5_resolution(8000, 80)
+        expected = partial(calculate_index_resolution, get_index_spec("a5"))(8000, 80)
         assert res == expected
 
     def test_sampling_path_for_large_file(self, tmp_path):
@@ -582,6 +590,66 @@ class TestExtentAwareResolution:
         )
         # The probe finds no non-empty cells, so the global formula is used
         # instead of silently collapsing to the coarsest (min) resolution.
-        expected = _calculate_a5_resolution(8000, 80)
+        expected = partial(calculate_index_resolution, get_index_spec("a5"))(8000, 80)
         assert res == expected
         assert res > 0
+
+
+def _bbox_far_from_geometry(path):
+    """Two points on one spot whose (planar) bbox columns sit an ocean apart.
+
+    The driver keys a quadkey from a planar bbox column's midpoint, so the cells
+    ``add quadkey`` writes here are the bbox's, not the points'.
+    """
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import shapely
+
+    point = shapely.to_wkb(shapely.Point(5.0, 5.0))
+    boxes = [(10.0, 50.0, 10.0, 50.0), (-120.0, 40.0, -120.0, 40.0)]
+    table = pa.table(
+        {
+            "geometry": pa.array([point, point], pa.binary()),
+            "bbox": pa.array(
+                [dict(zip(("xmin", "ymin", "xmax", "ymax"), b, strict=True)) for b in boxes]
+            ),
+        }
+    )
+    covering = {"bbox": {k: ["bbox", k] for k in ("xmin", "ymin", "xmax", "ymax")}}
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": [], "covering": covering}},
+    }
+    pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), path)
+
+
+@pytest.mark.parametrize("use_centroid", [False, True])
+def test_the_probe_counts_the_cells_the_partition_writes(tmp_path, use_centroid):
+    """The --auto probe keys each row the way the IndexSpec driver writes it:
+    from a planar bbox column's midpoint, or the geometry when told to."""
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.add.quadkey import add_quadkey_column
+
+    src = tmp_path / "far.parquet"
+    _bbox_far_from_geometry(src)
+    out = tmp_path / "keyed.parquet"
+    add_quadkey_column(str(src), str(out), resolution=1, use_centroid=use_centroid)
+    written = len(set(pq.read_table(out).column("quadkey").to_pylist()))
+
+    resolution = _probe_extent_resolution(
+        input_parquet=str(src),
+        spatial_index_type="quadkey",
+        target_partitions=2.0,
+        min_resolution=0,
+        max_resolution=1,
+        total_rows=2,
+        use_centroid=use_centroid,
+    )
+    # Two written cells at level 1 is what the probe must see to pick level 1;
+    # one cell (the points' own spot) keeps it at the coarsest level.
+    assert written == (1 if use_centroid else 2)
+    assert resolution == (0 if use_centroid else 1)

@@ -31,13 +31,13 @@ import textwrap
 import pyarrow as pa
 import pytest
 
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 
 BOWTIE_WKT = "POLYGON((0 0, 1 1, 1 0, 0 1, 0 0))"
 
 
 def _wkb(con, wkt: str) -> bytes:
-    return bytes(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()[0])
+    return bytes(fetch_one(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))"))[0])
 
 
 @pytest.fixture
@@ -143,8 +143,9 @@ class TestAddBboxTableFidelity:
         )
         result = add_bbox_table(table, geometry_column="geometry")
         assert result.num_rows == 2
-        box = result.column("bbox").to_pylist()[1]
-        assert box == {"xmin": None, "ymin": None, "xmax": None, "ymax": None}
+        # The stats owner's rule (#1367): a NULL geometry has no bbox, so the
+        # row is a NULL struct, as every other bbox writer now says it.
+        assert result.column("bbox").to_pylist()[1] is None
 
 
 class TestRepairSingleScan:
@@ -170,7 +171,7 @@ class TestRepairSingleScan:
         assert geoms[3] == valid
         # The invalid row was repaired in place and is now valid.
         assert geoms[1] != invalid
-        ok = con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [geoms[1]]).fetchone()[0]
+        ok = fetch_one(con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [geoms[1]]))[0]
         assert ok is True
         # Encoding and column order survive.
         assert repaired.schema.field("geometry").type == pa.binary()
@@ -265,11 +266,14 @@ class TestNoWholeTableRoundTrip:
 
     def test_bbox_registers_only_geometry_and_keeps_buffers(self, rich_table, register_spy):
         import geoparquet_io.core.add.bbox as mod
+        import geoparquet_io.core.duckdb_utils as duckdb_utils
 
-        spies = register_spy(mod)
+        spies = register_spy(duckdb_utils)
         result = mod.add_bbox_table(rich_table, geometry_column="geometry")
 
-        assert _registered_columns(spies) == {"geometry"}
+        # The bbox comes from the stats owner's Arrow kernel (#1367), so no
+        # attribute column is ever handed to DuckDB.
+        assert _registered_columns(spies) <= {"geometry"}
         # Zero-copy: every input column is the caller's own buffers, untouched.
         for name in rich_table.column_names:
             assert _buffer_addresses(result.column(name)) == _buffer_addresses(
@@ -459,7 +463,7 @@ class TestRepairEdgeCases:
         assert repaired.schema == table.schema
         fixed = repaired.column("geometry").to_pylist()
         assert fixed[0] == valid
-        assert con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [fixed[1]]).fetchone()[0]
+        assert fetch_one(con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [fixed[1]]))[0]
 
     def test_no_repaired_claim_when_patching_fails(self, con, caplog, monkeypatch):
         """A patch that cannot be applied raises; it never logs "Repaired" and returns 0."""
@@ -535,7 +539,7 @@ def test_repair_past_2_gib_patches_without_combining(con, caplog):
     chunks = repaired.column("geometry").chunks
     assert all(c.buffers()[2].address == big.buffers()[2].address for c in chunks[:11])
     last = chunks[-1].to_pylist()[-1]
-    assert con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [last]).fetchone()[0]
+    assert fetch_one(con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [last]))[0]
 
 
 @pytest.mark.slow
@@ -575,7 +579,7 @@ def test_repair_geoarrow_wkb_extension_column(con, caplog):
     assert repaired.schema == table.schema
     fixed = repaired.column("geometry").chunk(0).storage.to_pylist()
     assert fixed[0] == valid
-    assert con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [fixed[1]]).fetchone()[0]
+    assert fetch_one(con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [fixed[1]]))[0]
 
 
 def test_bbox_of_unreadable_wkb_is_null(con):
@@ -585,7 +589,7 @@ def test_bbox_of_unreadable_wkb_is_null(con):
     table = pa.table({"geometry": pa.array([_wkb(con, "POINT(1 2)"), b"\x01\x02"], pa.binary())})
     boxes = add_bbox_table(table, geometry_column="geometry").column("bbox").to_pylist()
     assert boxes[0] == {"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}
-    assert boxes[1] == {"xmin": None, "ymin": None, "xmax": None, "ymax": None}
+    assert boxes[1] is None
 
 
 def test_hilbert_multi_chunk_geoarrow_wkb_column(con):
@@ -627,7 +631,7 @@ def test_repair_halves_a_chunk_whose_patch_overflows(con, monkeypatch):
     column = repaired.column("geometry")
     assert column.num_chunks == 3
     assert column.to_pylist()[0] == column.to_pylist()[2] == valid
-    assert con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [column[1].as_py()]).fetchone()[0]
+    assert fetch_one(con.execute("SELECT ST_IsValid(ST_GeomFromWKB(?))", [column[1].as_py()]))[0]
 
 
 def test_registered_dictionary_geometry_reads_flat(con):

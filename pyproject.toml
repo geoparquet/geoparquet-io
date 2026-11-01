@@ -7,7 +7,7 @@ name = "geoparquet-io"
 version = "1.7.0"
 description = "Fast I/O and transformation tools for GeoParquet files"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [
     { name = "Chris Holmes", email = "cholmes@9eo.org" }
@@ -19,7 +19,6 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -49,7 +48,13 @@ dependencies = [
     # claim above hold: community extensions are built per DuckDB release, so
     # if 1.6 ships before 'geography' is published for it, an uncapped range
     # would let `uv sync` pull a DuckDB that silently breaks S2. Lift it in a
-    # deliberate step once 1.6 exists and the extension is published for it.
+    # deliberate step once the extension is published for the next release.
+    #
+    # That release is 2.0 (2026-10-21; 1.6 never left dev builds). The code
+    # runs on both 1.5.x and 2.0, and the `test-duckdb-2` CI job exercises 2.0
+    # on every push (not a required check yet)
+    # (#1345), but 'geography' is not published for 2.0 yet, so the cap stays
+    # until it is (#1346).
     "duckdb>=1.5.6,<1.6",
     "pandas>=1.0.0",
     "fsspec>=2023.9.0",
@@ -104,19 +109,17 @@ dev = [
     "ruff>=0.8.0",
     "pre-commit>=4.3.0",
     "mypy>=1.0.0",
-    "tomli>=2.0.0;python_version<'3.11'",
     "vulture>=2.14",
+    "pylint==4.1.3",
     "radon>=6.0.1",
     "xenon>=0.9.3",
     "commitizen>=4.0",
-    "mutmut>=3.0",
     "pyyaml>=6.0",
     "codespell>=2.2",
     "import-linter>=2.0",
     "bandit>=1.7",
     "pip>=26.2",  # CVE-2026-6357; PYSEC-2026-3721 (doubly-encoded index URLs)
     "pip-audit>=2.7",
-    "menard>=0.4.0",
     "deptry>=0.25.0",
 ]
 docs = [
@@ -134,7 +137,7 @@ simplify = [
 raster = [
     # contourrs ships wheels only for CPython 3.12-3.14; the marker keeps
     # `uv sync --all-extras` and `pip install 'geoparquet-io[raster]'` working on
-    # 3.10/3.11 (core/optional_deps.py explains the floor at runtime there).
+    # 3.11 (core/optional_deps.py explains the floor at runtime there).
     "contourrs>=0.8.0; python_version >= '3.12'",  # raster polygonize/contour (ADR-0007)
     "rasterio>=1.3",  # GeoTIFF input for gpio process polygonize/contour
 ]
@@ -158,6 +161,14 @@ pythonpath = ["."]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+# The fast lane's per-test cap; the slow, docs-examples and network jobs pass
+# their own --timeout in .github/workflows/tests.yml. timeout_method is left
+# unset on purpose: pytest-timeout then uses SIGALRM where it exists (an expiry
+# is a failing test with a traceback) and falls back to its thread method only
+# on Windows. Setting "signal" here would break Windows, where the plugin does
+# not fall back from an explicit method; "thread" calls os._exit and xdist
+# reports a dead worker with no traceback.
+timeout = 60
 # Coverage flags deliberately absent: a plain `uv run pytest` should be fast and
 # green. Instrumenting every run (including every spawned subprocess) cost 39-49%
 # on single-file dev runs, and a partial run can never clear the whole-suite floor,
@@ -178,6 +189,7 @@ addopts = [
     "--ignore=tests/data/geoparquet-testing",
 ]
 markers = [
+    "fresh_duckdb: requires an independent database to inspect connection initialization or extension state",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
     "network: marks tests requiring network access (deselect with '-m \"not network\"')",
     "integration: marks end-to-end integration tests; runs in the fast suite unless also marked slow/network (see tests/e2e/test_integration_lane.py)",
@@ -188,7 +200,7 @@ markers = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 select = [
@@ -199,6 +211,7 @@ select = [
     "B",   # flake8-bugbear
     "C4",  # flake8-comprehensions
     "UP",  # pyupgrade
+    "TID", # flake8-tidy-imports: TID251 banned-api is guard G1's import layer (#1367)
 ]
 ignore = [
     "E501",  # line too long (handled by formatter)
@@ -206,14 +219,61 @@ ignore = [
     "C901",  # too complex
 ]
 
+# Guard G1 of #1367, import layer: each concept below has one owner module, and
+# a call elsewhere is a second implementation of it. The owners, and the files
+# that still hold a copy, are exempted under [tool.ruff.lint.per-file-ignores];
+# every copy is listed with its reason in scripts/owner_exemptions.toml, and
+# tests/test_owner_guards.py fails if the two disagree.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"pyarrow.parquet.write_table".msg = "Write through core/write_funnels.py or core/parquet_writer.py; a private writer re-decides row groups, codec and the geo key (#1030, #1026, #1335)."
+"pyarrow.parquet.ParquetWriter".msg = "Write through core/write_funnels.py, core/parquet_writer.py or a core/write_strategies module (#1030, #1026, #1335)."
+"psutil".msg = "Memory and process facts come from core/memory_limits.py (#1156, #1174, #1179, #1330)."
+"os.sysconf".msg = "Memory facts come from core/memory_limits.py (#1156, #1174)."
+"requests".msg = "HTTP goes through core/http_retry.py, which owns retries, timeouts and Retry-After."
+"httpx".msg = "HTTP goes through core/http_retry.py, which owns retries, timeouts and Retry-After."
+"urllib.request".msg = "HTTP goes through core/http_retry.py, which owns retries, timeouts and Retry-After."
+"fsspec".msg = "Open a URL through core/remote.open_url; the scheme table in core/remote decides what is remote (#1367)."
+
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # unused imports in __init__.py
+# G1 owners: the modules the banned-api messages above point at.
+"geoparquet_io/core/write_funnels.py" = ["TID251"]
+"geoparquet_io/core/parquet_writer.py" = ["TID251"]
+"geoparquet_io/core/parquet_footer.py" = ["TID251"]
+"geoparquet_io/core/write_strategies/*.py" = ["TID251"]
+"geoparquet_io/core/memory_limits.py" = ["TID251"]
+"geoparquet_io/core/http_retry.py" = ["TID251"]
+"geoparquet_io/core/remote.py" = ["TID251"]
+"geoparquet_io/core/benchmark.py" = ["TID251"]
+"geoparquet_io/core/benchmark_suite.py" = ["TID251"]
+"geoparquet_io/benchmarks/*.py" = ["TID251"]
+# G1 is a rule about the package. Tests, scripts, docs and plugins write
+# fixtures with pyarrow directly, and that is not a second write path.
+"tests/**" = ["TID251"]
+"scripts/**" = ["TID251"]
+"docs/**" = ["TID251"]
+"plugins/**" = ["TID251"]
+"examples/**" = ["TID251"]
+"conftest.py" = ["TID251"]
+# vulture's whitelist format is bare names, never executed (guard G4).
+"scripts/vulture_whitelist.py" = ["F821", "B018"]
+"scripts/vulture_whitelist_tests.py" = ["F821", "B018"]
+# G1 copies that exist today, one line per file; each is listed with its
+# reason in scripts/owner_exemptions.toml ([[G1.tid251]]). Delete the line
+# with the copy.
+"geoparquet_io/api/ops.py" = ["TID251"]
+"geoparquet_io/core/add/kdtree.py" = ["TID251"]
+"geoparquet_io/core/arcgis.py" = ["TID251"]
+"geoparquet_io/core/carto.py" = ["TID251"]
+"geoparquet_io/core/duckdb_utils.py" = ["TID251"]
+"geoparquet_io/core/streaming.py" = ["TID251"]
+"geoparquet_io/core/wfs.py" = ["TID251"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["geoparquet_io"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
@@ -253,7 +313,6 @@ module = [
     "geoparquet_io.core.add.admin_divisions",
     "geoparquet_io.core.add.bbox",
     "geoparquet_io.core.add.bbox_metadata",
-    "geoparquet_io.core.add.country_codes",
     "geoparquet_io.core.add.h3",
     "geoparquet_io.core.add.kdtree",
     "geoparquet_io.core.add.quadkey",
@@ -341,7 +400,7 @@ module = [
 disable_error_code = ["arg-type", "index", "misc", "union-attr"]
 
 # contourrs pins numpy>=2.5.3, whose stubs use PEP 695 `type` statements that
-# mypy's python_version = "3.10" target refuses to parse — and duckdb's stubs
+# mypy's python_version = "3.11" target refuses to parse — and duckdb's stubs
 # import numpy, so on a Python >= 3.12 venv every mypy run loads them and dies
 # on numpy's own files (the 3.11 CI meta leg resolves numpy 2.4.6 and never
 # saw this). Skipping types numpy as Any, the same footing as any unstubbed
@@ -351,42 +410,6 @@ disable_error_code = ["arg-type", "index", "misc", "union-attr"]
 module = ["numpy"]
 follow_imports = "skip"
 follow_imports_for_stubs = true
-
-[tool.mutmut]
-source_paths = ["geoparquet_io/"]
-# Fast tests only: slow/network tests are nondeterministic (live third-party
-# servers) and far too slow to run once per mutant. --no-cov drops the coverage
-# overhead and stops [tool.coverage.report].fail_under from failing every mutant.
-# NOTE: mutmut 3 runs pytest in-process and IGNORES a `runner` setting;
-# extra args must go in pytest_add_cli_args.
-# `not meta` is what keeps the tooling meta-tests out: they spawn `uv run ...`
-# subprocesses against the project, and from mutmut's mutants/ cwd that would
-# resolve/install the MUTATED package — meaningless for mutation score and
-# fatal to the run. It replaces the per-file --ignore list those tests used to
-# need. test_import_linter.py is not in the meta lane (it is a fast unit test
-# of the contract config) but shells out the same way, so it keeps its ignore.
-pytest_add_cli_args = [
-    "--no-cov",
-    # --tb=short (not --tb=no): a failure in mutmut's single-process stats
-    # phase must show WHERE it failed. --tb=no once hid a cwd-related crash
-    # (tests that chdir break mutmut's trampoline) and made nightly red with
-    # no diagnosable reason. See the tests/ chdir guard in .pre-commit-config.
-    "--tb=short",
-    "-m", "not slow and not network and not meta",
-    "--ignore=tests/test_import_linter.py",
-]
-pytest_add_cli_args_test_selection = ["tests/"]
-# Everything the test suite reads relative to the repo root must also exist
-# inside mutmut's mutants/ tree (tests import scripts.*, and the meta-tests
-# validate ADRs, CLAUDE.md, workflows, and config files).
-also_copy = [
-    "scripts/",
-    "context/",
-    ".github/",
-    ".pre-commit-config.yaml",
-    ".pip-audit-ignores",
-    "CLAUDE.md",
-]
 
 [tool.bandit]
 exclude_dirs = ["tests", ".venv", "docs"]
@@ -418,16 +441,35 @@ update_changelog_on_bump = false
 changelog_file = "CHANGELOG.md"
 major_version_zero = true
 
+# Guard G3 of #1367, second layer: pylint runs only R0801 (duplicate-code),
+# 8 or more similar lines with comments, docstrings and imports ignored. The
+# pairs it reports today are pinned in scripts/owner_exemptions.toml [G3.pylint];
+# scripts/check_pylint_duplicates.py fails when the count differs.
+[tool.pylint.main]
+disable = ["all"]
+enable = ["R0801"]
+
+[tool.pylint.similarities]
+min-similarity-lines = 8
+ignore-comments = true
+ignore-docstrings = true
+ignore-imports = true
+
+# Guard G4 of #1367. At 80 vulture reports only unused imports and arguments;
+# unused functions score 60, so 80 let a function with no caller pass. The
+# findings that existed when the level dropped are the whitelist, whose entry
+# count tests/test_owner_guards.py pins (it can only go down). The package is
+# scanned alone, so a name only a test calls is still dead; the test tree has
+# its own run and whitelist (the vulture-tests pre-push hook).
 [tool.vulture]
-min_confidence = 80
-paths = ["geoparquet_io", "tests"]
+min_confidence = 60
+paths = ["geoparquet_io", "scripts/vulture_whitelist.py"]
 sort_by_size = true
 verbose = false
 
 [tool.codespell]
-# site/ (zensical build) and mutants/ (mutmut working tree) are gitignored
-# build artifacts; scanning them made test_codespell_passes fail on any
-# machine that had built docs or run mutation testing locally.
+# site/ (zensical build) is a gitignored build artifact; scanning it made
+# test_codespell_passes fail on any machine that had built docs locally.
 # *.csv and *.geojson are sample data, not prose: real-world place names and
 # addresses carry their own misspellings, which are data to be preserved
 # verbatim, not mistakes to be fixed.
@@ -441,7 +483,7 @@ verbose = false
 # extension also keeps prose that lives beside the data - notably
 # tests/data/canonical/README.md - checked, which a working directory skip
 # would have swallowed.
-skip = ".git,*.lock,*.parquet,*.json,*.csv,*.geojson,geoparquet-testing,.venv,uv.lock,site,mutants"
+skip = ".git,*.lock,*.parquet,*.json,*.csv,*.geojson,geoparquet-testing,.venv,uv.lock,site"
 ignore-words-list = "nd,ot,crs,inout,hel,bu"
 check-filenames = true
 
@@ -576,15 +618,21 @@ layers = [
     # construction (#1010): neither reaches the other.
     "geoparquet_io.core.arrow_geo_metadata | geoparquet_io.core.derive_geo_from_file",
     "geoparquet_io.core.bbox_structure",
-    # file_type: what kind of GeoParquet a file is. parquet_writer: the write
-    # facade's three decisions (#990). Neither needs the other.
-    "geoparquet_io.core.file_type | geoparquet_io.core.parquet_writer",
+    # parquet_writer: the write facade's decisions (#990), the output version
+    # among them, which asks file_type what kind of GeoParquet the input is
+    # (#1367 concept 1). file_type never needs the facade.
+    "geoparquet_io.core.parquet_writer",
+    "geoparquet_io.core.file_type",
     # The geo-metadata readers. geo_metadata owns the WKB type-code tables that
     # arrow_geo_metadata and derive_geo_from_file consume, which is why it sits
     # below both of them.
     "geoparquet_io.core.geo_metadata : geoparquet_io.core.crs_utils : geoparquet_io.core.duckdb_metadata : geoparquet_io.core.geometry_detection",
     # Leaves.
     "geoparquet_io.core.duckdb_utils : geoparquet_io.core.arrow_types : geoparquet_io.core.compression : geoparquet_io.core.sizing",
+    # The edges vocabulary and its rules (#1367 concept 6), below the leaves:
+    # duckdb_utils relabels GeoArrow edge types with it and geo_metadata gates
+    # a block's edges by version with it, so it imports nothing above.
+    "geoparquet_io.core.edges",
 ]
 # Each ignored edge is a deferred import of a stage-C resident that has not
 # moved out of common.py yet (#1010's "Stages C and D" table). Deleting the
@@ -592,12 +640,6 @@ layers = [
 # below then fails the build until its line here is deleted too -- the ignore
 # list is meant to shrink to nothing, never to grow.
 ignore_imports = [
-    # geometry_type_sql: compute_geometry_types_via_sql, zm_suffix_sql, ...
-    "geoparquet_io.core.geo_metadata -> geoparquet_io.core.common",
-    "geoparquet_io.core.write_strategies.arrow_streaming -> geoparquet_io.core.common",
-    "geoparquet_io.core.write_strategies.disk_rewrite -> geoparquet_io.core.common",
-    # version_resolution: _resolve_auto_version, resolve_geoparquet_version_from_file
-    "geoparquet_io.core.parquet_writer -> geoparquet_io.core.common",
     # add/computed_column: add_computed_column
     "geoparquet_io.core.constants -> geoparquet_io.core.common",
 ]
@@ -614,16 +656,6 @@ dev = [
 [tool.deptry]
 # DEP002: unused dependencies - skip because optional/benchmark extras aren't always used
 ignore = ["DEP002"]
-# Exclude virtual env, tests, benchmarks, plugin packages (own dependency
-# definitions), and mutmut's mutants/ working tree from analysis
-exclude = [".venv", "tests", "geoparquet_io/benchmarks", "plugins", "mutants"]
-# Known transitive dependencies that appear unused but are required
-per_rule_ignores = {DEP003 = ["tomli"]}
-
-[tool.menard]
-mode = "block"
-transitive_depth = 1
-enforce_symmetry = true
-require_links = ["geoparquet_io/**/*.py"]
-exempt = ["tests/**"]
-doc_paths = ["docs/**/*.md", "README.md", "CLAUDE.md", "geoparquet_io/skills/*.md"]
+# Exclude virtual env, tests, benchmarks and plugin packages (own dependency
+# definitions) from analysis
+exclude = [".venv", "tests", "geoparquet_io/benchmarks", "plugins"]

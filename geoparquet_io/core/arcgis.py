@@ -9,57 +9,74 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
-import uuid
 from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from pathlib import Path
+from typing import cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_types import _cast_table_to_schema
+from geoparquet_io.core.bbox_parse import parse_bbox, refuse_wrap
 from geoparquet_io.core.column_selection import (
+    exclude_columns,
     resolve_columns_against_schema,
+    same_column,
     split_column_list,
 )
 from geoparquet_io.core.crs_utils import (
+    UnresolvableCRSError,
     _extract_crs_identifier,
-    _projjson_from_authority,
-    parse_crs_string_to_projjson,
+    authority_of,
+    canonical_crs_code,
+    projjson_for_label,
     projjson_from_wkt,
 )
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path, uses_aws_profile
+from geoparquet_io.core.duckdb_utils import (
+    as_wkb_sql,
+    get_duckdb_connection,
+    quote_identifier,
+    sql_path,
+    uses_aws_profile,
+)
 from geoparquet_io.core.exceptions import (
     BatchTooLargeError,
     GeoParquetError,
     InvalidParameterError,
     RemoteAccessError,
 )
-from geoparquet_io.core.geo_metadata import (
-    _compute_geometry_types,
-    prune_geo_metadata_to_columns,
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    scratch_path,
+    unlink_released_file,
 )
+from geoparquet_io.core.geo_metadata import (
+    GeoBlockOptions,
+    SchemaSource,
+    compose_geo_block,
+    geometry_types_of,
+    prune_geo_metadata_to_columns,
+    with_geo_block,
+)
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
     DEFAULT_TIMEOUT,
     make_request_with_retry,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
+from geoparquet_io.core.parquet_writer import version_to_describe
 from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+# What a 401/403 tells the user to fix: the options that carry an ArcGIS credential.
+ARCGIS_CREDENTIALS_HINT = "Use --token or --username/--password."
 
 # ArcGIS Online token endpoint
 ARCGIS_ONLINE_TOKEN_URL = "https://www.arcgis.com/sharing/rest/generateToken"
 
 # Default page size for feature downloads (ArcGIS typical max is 2000)
 DEFAULT_PAGE_SIZE = 2000
-
-# Map ArcGIS WKID codes to EPSG codes for special cases
-WKID_TO_EPSG = {
-    102100: 3857,  # Web Mercator
-    102113: 3785,  # Legacy Web Mercator
-}
 
 
 @dataclass
@@ -270,52 +287,6 @@ def _get_reduced_batch_size(current_batch: int) -> int | None:
     return 1
 
 
-def _make_request(
-    method: str,
-    url: str,
-    params: dict | None = None,
-    data: dict | None = None,
-    max_retries: int = 3,
-    retry_delay: float = 1.0,
-    timeout: float = DEFAULT_TIMEOUT,
-    batch_size: int | None = None,
-) -> dict:
-    """
-    Make HTTP request with retry logic.
-
-    Delegates to shared http_retry module for connection pooling and error handling.
-
-    Args:
-        method: HTTP method ("GET" or "POST")
-        url: Request URL
-        params: Query parameters
-        data: POST data
-        max_retries: Number of retry attempts
-        retry_delay: Base delay between retries
-        timeout: Request timeout in seconds
-        batch_size: Current batch size (for BatchTooLargeError context)
-
-    Returns:
-        Parsed JSON response
-
-    Raises:
-        RemoteAccessError: For HTTP errors
-        BatchTooLargeError: On a paged request, when the server returns non-JSON
-            or a 5xx that survived every retry (batch too large)
-    """
-    return make_request_with_retry(
-        method=method,
-        url=url,
-        params=params,
-        data=data,
-        max_retries=max_retries,
-        retry_delay=retry_delay,
-        timeout=timeout,
-        parse_json=True,
-        batch_size=batch_size,
-    )
-
-
 def _handle_arcgis_response(data: dict, context: str, hint: str = "") -> dict:
     """Handle ArcGIS REST API response and check for errors.
 
@@ -372,7 +343,12 @@ def generate_token(
         "expiration": 60,  # 60 minutes
     }
 
-    result = _make_request("POST", token_url, data=data, timeout=timeout)
+    result = cast(
+        "dict",
+        make_request_with_retry(
+            "POST", token_url, data=data, timeout=timeout, credentials=ARCGIS_CREDENTIALS_HINT
+        ),
+    )
     result = _handle_arcgis_response(result, "Token generation")
 
     if "token" not in result:
@@ -418,9 +394,9 @@ def resolve_token(
         if verbose:
             debug(f"Reading token from file: {auth.token_file}")
         try:
-            import fsspec
+            from geoparquet_io.core.remote import open_url
 
-            with fsspec.open(auth.token_file, mode="rt") as f:
+            with open_url(auth.token_file, mode="rt") as f:
                 return f.read().strip()
         except OSError as e:
             raise GeoParquetError(f"Failed to read token file: {e}") from e
@@ -530,7 +506,12 @@ def get_layer_info(
         debug(f"Fetching layer info from {service_url}")
 
     params = _add_token_to_params({"f": "json"}, token)
-    data = _make_request("GET", service_url, params=params, timeout=timeout)
+    data = cast(
+        "dict",
+        make_request_with_retry(
+            "GET", service_url, params=params, timeout=timeout, credentials=ARCGIS_CREDENTIALS_HINT
+        ),
+    )
     data = _handle_arcgis_response(data, "Layer info")
 
     # Get feature count (using the WHERE and bbox filters)
@@ -598,7 +579,12 @@ def get_feature_count(
 
     params = _add_token_to_params(params, token)
 
-    data = _make_request("GET", query_url, params=params, timeout=timeout)
+    data = cast(
+        "dict",
+        make_request_with_retry(
+            "GET", query_url, params=params, timeout=timeout, credentials=ARCGIS_CREDENTIALS_HINT
+        ),
+    )
     data = _handle_arcgis_response(data, "Feature count")
 
     count = _checked_feature_count(data, query_url)
@@ -678,7 +664,17 @@ def fetch_features_page(
 
     params = _add_token_to_params(params, token)
 
-    data = _make_request("GET", query_url, params=params, timeout=timeout, batch_size=limit)
+    data = cast(
+        "dict",
+        make_request_with_retry(
+            "GET",
+            query_url,
+            params=params,
+            timeout=timeout,
+            credentials=ARCGIS_CREDENTIALS_HINT,
+            batch_size=limit,
+        ),
+    )
 
     # A successful page has no "error" key in either GeoJSON or EsriJSON. ArcGIS
     # reports a page it could not serialize as HTTP 200 + a JSON error envelope
@@ -953,11 +949,6 @@ def fetch_all_features(
             debug(f"Fetched {fetched} features total using {max_workers} workers")
 
 
-def _normalize_wkid(wkid: int) -> int:
-    """Map legacy Esri WKIDs to their EPSG equivalents (e.g. 102100 -> 3857)."""
-    return WKID_TO_EPSG.get(wkid, wkid)
-
-
 def _parse_crs_to_wkid(value: str) -> int:
     """Parse a CRS string to an integer WKID.
 
@@ -983,11 +974,12 @@ def _projjson_from_wkid(wkid: int) -> dict | None:
     Many layers advertise Esri-authority codes (102039) that are not EPSG codes;
     tagging those as EPSG would write a CRS no consumer can resolve.
     """
-    code = _normalize_wkid(wkid)
+    code = canonical_crs_code(wkid)
     for authority in ("EPSG", "ESRI"):
-        cached = _projjson_from_authority(authority, str(code))
-        if cached is not None:
-            return json.loads(cached)
+        try:
+            return projjson_for_label(f"{authority}:{code}")
+        except UnresolvableCRSError:
+            continue
     return None
 
 
@@ -1015,7 +1007,7 @@ def _wkid_candidates(spatial_ref: dict) -> list[int]:
         code = _coerce_wkid(spatial_ref.get(key))
         if code is None:
             continue
-        code = _normalize_wkid(code)
+        code = canonical_crs_code(code)
         if code not in candidates:
             candidates.append(code)
     return candidates
@@ -1031,7 +1023,7 @@ def _extract_crs_from_spatial_reference(spatial_ref: dict) -> dict | None:
     """
     if not spatial_ref:
         # ArcGIS's own default when a service says nothing is WGS84.
-        return parse_crs_string_to_projjson("EPSG:4326")
+        return projjson_for_label("EPSG:4326")
     for wkid in _wkid_candidates(spatial_ref):
         projjson = _projjson_from_wkid(wkid)
         if projjson is not None:
@@ -1061,9 +1053,7 @@ def _resolve_native_wkid(spatial_ref: dict) -> int:
     if code is not None:
         return code
 
-    from pyproj import CRS
-
-    authority = CRS.from_json_dict(projjson).to_authority()
+    authority = authority_of(projjson)
     if authority is None or not authority[1].isdigit():
         raise GeoParquetError(
             "--output-crs native could not match the layer's WKT spatial reference to an "
@@ -1105,7 +1095,7 @@ def _tag_output_crs(
     verbose: bool,
 ) -> pa.Table:
     """Attach the ``geo`` block: CRS84 on the GeoJSON path, the server's SR on the outSR path."""
-    if "geometry" not in table.column_names:
+    if BUILT_GEOMETRY_COLUMN not in table.column_names:
         # --exclude-cols dropped the geometry: an attribute table, with no CRS
         # to resolve (or warn about) and no geo block to attach. Any carried
         # block goes through the same pruner `gpio extract geoparquet` uses (#966).
@@ -1119,7 +1109,7 @@ def _tag_output_crs(
         )
     if output_wkid is None:
         # f=geojson is WGS84 per RFC 7946, whatever the layer advertises.
-        crs = parse_crs_string_to_projjson("OGC:CRS84")
+        crs = projjson_for_label("OGC:CRS84")
     else:
         # A server that omitted spatialReference on every page is taken at its
         # word for the WKID it was asked for; it cannot be checked.
@@ -1139,21 +1129,22 @@ def _tag_output_crs(
                 + _unresolvable_crs_message(returned_sr)
             )
 
-    geo_metadata = {
-        "version": "1.1.0",
-        "primary_column": "geometry",
-        "columns": {
-            "geometry": {
-                "encoding": "WKB",
-                "crs": crs,
-                "geometry_types": _resolve_geometry_types(table, geometry_type, verbose),
-            }
-        },
-    }
-    existing_metadata = table.schema.metadata or {}
-    return table.replace_schema_metadata(
-        {**existing_metadata, b"geo": json.dumps(geo_metadata).encode("utf-8")}
+    geo_metadata = compose_geo_block(
+        SchemaSource(table.schema),
+        GeoBlockOptions(
+            geometry_column=BUILT_GEOMETRY_COLUMN,
+            version=version_to_describe(table.schema),
+            describe=True,
+            covering=None,
+            crs=crs,
+            stats={
+                BUILT_GEOMETRY_COLUMN: {
+                    "geometry_types": _resolve_geometry_types(table, geometry_type, verbose)
+                }
+            },
+        ),
     )
+    return with_geo_block(table, geo_metadata)
 
 
 def _resolve_field_selection(
@@ -1178,7 +1169,7 @@ def _resolve_field_selection(
     if include_list != ["*"]:
         include_list = resolve_columns_against_schema(include_list, field_names, "--include-cols")
     exclude_list = resolve_columns_against_schema(
-        exclude_list, ["geometry", *field_names], "--exclude-cols"
+        exclude_list, [BUILT_GEOMETRY_COLUMN, *field_names], "--exclude-cols"
     )
     return include_list, exclude_list
 
@@ -1220,7 +1211,7 @@ def _build_schema_from_layer_info(layer_info: ArcGISLayerInfo) -> pa.Schema:
 
     # Geometry column always comes first (WKB binary)
     # Some features may have null geometries (attributes without spatial data)
-    fields.append(pa.field("geometry", pa.binary(), nullable=True))
+    fields.append(pa.field(BUILT_GEOMETRY_COLUMN, pa.binary(), nullable=True))
 
     # Add attribute fields based on layer metadata
     for field_info in layer_info.fields:
@@ -1253,30 +1244,14 @@ def _target_schema(layer_info: ArcGISLayerInfo, out_fields: str) -> pa.Schema:
     schema = _build_schema_from_layer_info(layer_info)
     if out_fields == "*":
         return schema
-    requested = {f.strip().lower() for f in out_fields.split(",")}
+    requested = [f.strip() for f in out_fields.split(",")]
     return pa.schema(
-        [field for field in schema if field.name == "geometry" or field.name.lower() in requested]
-    )
-
-
-def _require_columns_remain(column_names, exclude_list: list[str] | None) -> None:
-    """Refuse an ``--exclude-cols`` that would leave the table with no columns.
-
-    The guard used to be ``if cols_to_keep:``, which silently ignored the whole
-    option -- so ``--exclude-cols geometry`` on a geometry-only layer wrote full
-    GeoParquet including the column the user asked to drop (#1176). An empty
-    table is not what was asked for either; the request is a typo and the only
-    useful answer is to name it.
-    """
-    if not exclude_list:
-        return
-    excluded = set(exclude_list)
-    if any(name not in excluded for name in column_names):
-        return
-    raise InvalidParameterError(
-        "--exclude-cols",
-        f"excluding {', '.join(sorted(excluded))} would leave the output with no "
-        f"columns at all (the layer has: {', '.join(column_names)})",
+        [
+            field
+            for field in schema
+            if field.name == BUILT_GEOMETRY_COLUMN
+            or any(same_column(field.name, name) for name in requested)
+        ]
     )
 
 
@@ -1284,11 +1259,9 @@ def _exclude_columns(table: pa.Table, exclude_list: list[str] | None) -> pa.Tabl
     """Drop the ``--exclude-cols`` names from a fetched table (client-side)."""
     if not exclude_list:
         return table
-    _require_columns_remain(table.column_names, exclude_list)
-    cols_to_exclude = set(exclude_list)
-    cols_to_keep = [name for name in table.column_names if name not in cols_to_exclude]
-    debug(f"Excluded columns: {cols_to_exclude}")
-    return table.select(cols_to_keep)
+    keep = exclude_columns(table.column_names, exclude_list, strict=False)
+    debug(f"Excluded columns: {exclude_list}")
+    return table.select(keep)
 
 
 def _json_doc_to_table(doc: dict, exclude: str, suffix: str, con=None) -> pa.Table:
@@ -1310,7 +1283,7 @@ def _json_doc_to_table(doc: dict, exclude: str, suffix: str, con=None) -> pa.Tab
     owns_con = con is None
     if owns_con:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-    temp_file = tempfile.gettempdir() + f"/arcgis_page_{uuid.uuid4()}{suffix}"
+    temp_file = scratch_path(suffix, prefix="arcgis_page_")
 
     try:
         with open(temp_file, "w") as f:
@@ -1318,7 +1291,7 @@ def _json_doc_to_table(doc: dict, exclude: str, suffix: str, con=None) -> pa.Tab
 
         query = f"""
             SELECT
-                ST_AsWKB(geom) as geometry,
+                {as_wkb_sql("geom")} as {quote_identifier(BUILT_GEOMETRY_COLUMN)},
                 * EXCLUDE ({exclude})
             FROM ST_Read({sql_path(temp_file)})
         """
@@ -1326,13 +1299,12 @@ def _json_doc_to_table(doc: dict, exclude: str, suffix: str, con=None) -> pa.Tab
         # Allow arbitrarily large/complex single features through GDAL's parser
         # (issue #517) — must be in effect while ST_Read reads the temp file.
         with _gdal_geojson_size_limit_lifted():
-            return con.execute(query).arrow().read_all()
+            return con.sql(query).arrow().read_all()
 
     finally:
         if owns_con:
             con.close()
-        if os.path.exists(temp_file):
-            os.unlink(temp_file)
+        unlink_released_file(temp_file)
 
 
 def _geojson_page_to_table(features: list[dict], con=None) -> pa.Table | None:
@@ -1578,12 +1550,12 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
     The two ways of arriving at ``[]`` are still worth telling apart for the
     user: unreadable geometry is a data-quality problem worth chasing, an empty
     column is not. They cannot be told apart by catching, because
-    ``_compute_geometry_types`` swallows the geoarrow error itself, so the
+    ``geometry_types_of`` swallows the geoarrow error itself, so the
     non-NULL geometries are counted first.
     """
     # Only reached with a geometry column: an excluded one (--exclude-cols) never
     # gets a geo block at all (#966, see _tag_output_crs).
-    geometry = table.column("geometry")
+    geometry = table.column(BUILT_GEOMETRY_COLUMN)
     if len(geometry) == 0:
         # An empty layer or filter result: already reported, nothing to describe.
         return []
@@ -1591,7 +1563,7 @@ def _resolve_geometry_types(table: pa.Table, esri_geometry_type: str, verbose: b
         warn("Fetched data holds no geometries; declaring geometry_types as [] (types not known).")
         return []
 
-    computed = _compute_geometry_types(table, "geometry", verbose)
+    computed = geometry_types_of(table, BUILT_GEOMETRY_COLUMN, verbose=verbose)
     if not computed:
         warn(
             "Fetched geometry could not be read, so geometry_types is declared as [] "
@@ -1657,6 +1629,10 @@ def arcgis_to_table(
         PyArrow Table with WKB geometry column
     """
     configure_verbose(verbose)
+    # The one bbox verdict (bbox_parse), before any request. An Esri envelope
+    # has no wrapped form, so an antimeridian-crossing bbox is refused by name.
+    if bbox is not None:
+        bbox = refuse_wrap(parse_bbox(bbox), "ArcGIS")
 
     # Resolve and validate the requested output CRS before any network work
     # so a bad value fails fast with a clean error. "native" needs the layer
@@ -1664,7 +1640,7 @@ def arcgis_to_table(
     output_wkid: int | None = None
     if output_crs is not None and output_crs != "native":
         try:
-            output_wkid = _normalize_wkid(_parse_crs_to_wkid(output_crs))
+            output_wkid = canonical_crs_code(_parse_crs_to_wkid(output_crs))
         except ValueError as e:
             raise InvalidParameterError("output_crs", str(e)) from e
         # Parseable is not resolvable; checked before any request so a large
@@ -1699,7 +1675,7 @@ def arcgis_to_table(
     exclude_list = split_column_list(exclude_cols, "--exclude-cols")
 
     # Validate URL
-    service_url, layer_id = validate_arcgis_url(service_url)
+    service_url, _ = validate_arcgis_url(service_url)
 
     # Resolve authentication
     token = resolve_token(auth, service_url, verbose, timeout=timeout) if auth else None
@@ -1728,7 +1704,7 @@ def arcgis_to_table(
 
     # The layer's advertised fields are enough to see an --exclude-cols that
     # would leave nothing, so say so before a single feature is downloaded.
-    _require_columns_remain(_target_schema(layer_info, out_fields).names, exclude_list)
+    exclude_columns(_target_schema(layer_info, out_fields).names, exclude_list, strict=False)
 
     if layer_info.total_count == 0:
         filters_applied = where != "1=1" or bbox is not None
@@ -1759,7 +1735,7 @@ def arcgis_to_table(
         debug(f"Requesting fields: {out_fields}")
 
     # Pass 1: Stream features to temp parquet file (memory-efficient)
-    temp_parquet = tempfile.gettempdir() + f"/arcgis_stream_{uuid.uuid4()}.parquet"
+    temp_parquet = scratch_path(prefix="arcgis_stream_")
 
     try:
         progress("Streaming features to temp file...")
@@ -1796,7 +1772,9 @@ def arcgis_to_table(
         # that is actually written. The helper preserves schema metadata, so it
         # is equally safe on either side of the block.
         if table.num_rows > 0:
-            table, _ = repair_arrow_table_geometry(table, "geometry", repair=repair_geometry)
+            table, _ = repair_arrow_table_geometry(
+                table, BUILT_GEOMETRY_COLUMN, repair=repair_geometry
+            )
 
         table = _tag_output_crs(table, detected_sr, output_wkid, layer_info.geometry_type, verbose)
 
@@ -1804,13 +1782,9 @@ def arcgis_to_table(
         return table
 
     finally:
-        # Clean up temp file (best-effort: on Windows pyarrow may still hold
-        # the file handle after read_table, raising PermissionError on unlink)
-        if os.path.exists(temp_parquet):
-            try:
-                os.unlink(temp_parquet)
-            except OSError:
-                debug(f"Could not remove temp file {temp_parquet}")
+        # Best-effort: on Windows pyarrow may still hold the file handle after
+        # read_table; the owner retries, then gives up quietly.
+        unlink_released_file(temp_parquet)
 
 
 @uses_aws_profile
@@ -1833,8 +1807,8 @@ def convert_arcgis_to_geoparquet(
     skip_bbox: bool = False,
     max_workers: int = 1,
     batch_size: int | None = None,
-    compression: str = "ZSTD",
-    compression_level: int = 15,
+    compression: str | None = None,
+    compression_level: int | None = None,
     verbose: bool = False,
     geoparquet_version: str | None = None,
     profile: str | None = None,
@@ -1889,11 +1863,7 @@ def convert_arcgis_to_geoparquet(
     """
     configure_verbose(verbose)
 
-    # Check if output file exists and overwrite is False
-    if not overwrite and Path(output_file).exists():
-        raise GeoParquetError(
-            f"Output file already exists: {output_file}. Use --overwrite to replace it."
-        )
+    handle_output_overwrite(output_file, overwrite, remove=False)
 
     # Build auth config
     auth = None
@@ -1926,7 +1896,7 @@ def convert_arcgis_to_geoparquet(
 
     # --exclude-cols geometry leaves an attribute table: nothing to Hilbert-sort
     # or bbox, and the write below is plain Parquet with no geo block (#966).
-    has_geometry = "geometry" in table.column_names
+    has_geometry = BUILT_GEOMETRY_COLUMN in table.column_names
 
     # Apply Hilbert ordering if not skipped
     if not skip_hilbert and table.num_rows > 0 and has_geometry:
@@ -1940,14 +1910,16 @@ def convert_arcgis_to_geoparquet(
         progress("Adding bbox column for spatial query optimization...")
         from geoparquet_io.core.add.bbox import add_bbox_table
 
-        table = add_bbox_table(table, bbox_column_name="bbox", geometry_column="geometry")
+        table = add_bbox_table(
+            table, bbox_column_name="bbox", geometry_column=BUILT_GEOMETRY_COLUMN
+        )
 
     # Write to GeoParquet
     progress(f"Writing to {output_file}...")
     write_geoparquet_table(
         table,
         output_file,
-        geometry_column="geometry",
+        geometry_column=BUILT_GEOMETRY_COLUMN,
         compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_size_mb,

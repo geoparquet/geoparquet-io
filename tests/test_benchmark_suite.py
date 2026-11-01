@@ -11,23 +11,35 @@ from geoparquet_io.benchmarks.config import (
     BENCHMARK_FILES,
     CHAIN_OPERATIONS,
     CORE_OPERATIONS,
-    DEFAULT_THRESHOLDS,
     FULL_OPERATIONS,
-    RegressionThresholds,
 )
 from geoparquet_io.core.benchmark_report import (
-    format_comparison_table,
     format_table,
 )
 from geoparquet_io.core.benchmark_suite import (
     BenchmarkResult,
-    ComparisonResult,
-    RegressionStatus,
     SuiteResult,
-    compare_results,
     run_benchmark_suite,
     run_single_operation,
 )
+
+
+@pytest.fixture
+def test_parquet():
+    """Create a small test parquet file."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "test.parquet"
+        table = pa.table(
+            {
+                "id": [1, 2, 3],
+                "geometry": [b"point1", b"point2", b"point3"],
+            }
+        )
+        pq.write_table(table, path)
+        yield path
 
 
 class TestBenchmarkConfig:
@@ -44,17 +56,6 @@ class TestBenchmarkConfig:
         """Test that full operations includes all core operations."""
         for op in CORE_OPERATIONS:
             assert op in FULL_OPERATIONS
-
-    def test_default_thresholds(self):
-        """Test default regression thresholds."""
-        assert DEFAULT_THRESHOLDS.time_warning == 0.10
-        assert DEFAULT_THRESHOLDS.time_failure == 0.25
-        assert DEFAULT_THRESHOLDS.memory_warning == 0.20
-        assert DEFAULT_THRESHOLDS.memory_failure == 0.50
-
-    def test_thresholds_are_dataclass(self):
-        """Test that thresholds use dataclass pattern."""
-        assert isinstance(DEFAULT_THRESHOLDS, RegressionThresholds)
 
     def test_benchmark_data_url_defined(self):
         """Test that benchmark data URL points to source.coop."""
@@ -106,26 +107,38 @@ class TestOperationRegistry:
         with pytest.raises(KeyError):
             get_operation("nonexistent-operation")
 
-
-class TestBenchmarkRunner:
-    """Tests for benchmark runner."""
-
-    @pytest.fixture
-    def test_parquet(self):
-        """Create a small test parquet file."""
+    def test_add_country_runs_admin_divisions_country_level(self, monkeypatch, tmp_path):
+        """``add-country`` benchmarks the one admin join: ``add admin-divisions``
+        at the country level on Overture (the separate country_codes module is
+        gone, #1367)."""
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "test.parquet"
-            table = pa.table(
-                {
-                    "id": [1, 2, 3],
-                    "geometry": [b"point1", b"point2", b"point3"],
-                }
-            )
-            pq.write_table(table, path)
-            yield path
+        from geoparquet_io.benchmarks.operations import get_operation
+        from geoparquet_io.core.add import admin_divisions
+
+        calls = []
+
+        def fake(**kwargs):
+            calls.append(kwargs)
+            pq.write_table(pa.table({"id": [1, 2]}), kwargs["output_parquet"])
+
+        monkeypatch.setattr(admin_divisions, "add_admin_divisions_multi", fake)
+        result = get_operation("add-country")["run"](tmp_path / "in.parquet", tmp_path)
+
+        assert calls == [
+            {
+                "input_parquet": str(tmp_path / "in.parquet"),
+                "output_parquet": str(tmp_path / "output.parquet"),
+                "dataset_name": "overture",
+                "levels": ["country"],
+            }
+        ]
+        assert result == {"rows_with_country": 2}
+
+
+class TestBenchmarkRunner:
+    """Tests for benchmark runner."""
 
     def test_run_single_operation_returns_result(self, test_parquet):
         """Test that run_single_operation returns BenchmarkResult."""
@@ -177,23 +190,6 @@ class TestBenchmarkRunner:
 class TestBenchmarkSuite:
     """Tests for full benchmark suite."""
 
-    @pytest.fixture
-    def test_parquet(self):
-        """Create a small test parquet file."""
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "test.parquet"
-            table = pa.table(
-                {
-                    "id": [1, 2, 3],
-                    "geometry": [b"point1", b"point2", b"point3"],
-                }
-            )
-            pq.write_table(table, path)
-            yield path
-
     def test_run_suite_returns_suite_result(self, test_parquet):
         """Test that run_benchmark_suite returns SuiteResult."""
         result = run_benchmark_suite(
@@ -222,74 +218,6 @@ class TestBenchmarkSuite:
         assert "environment" in json_str
 
 
-class TestRegressionComparison:
-    """Tests for regression comparison."""
-
-    def test_compare_results_no_regression(self):
-        """Test comparison with no regression."""
-        baseline = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.0,
-            peak_rss_memory_mb=100,
-            success=True,
-        )
-        current = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.05,  # 5% slower - within threshold
-            peak_rss_memory_mb=105,  # 5% more - within threshold
-            success=True,
-        )
-
-        comparison = compare_results(baseline, current)
-
-        assert comparison.status == RegressionStatus.OK
-        assert comparison.time_delta_pct == pytest.approx(0.05, rel=0.01)
-
-    def test_compare_results_warning(self):
-        """Test comparison with warning-level regression."""
-        baseline = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.0,
-            peak_rss_memory_mb=100,
-            success=True,
-        )
-        current = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.15,  # 15% slower - warning
-            peak_rss_memory_mb=100,
-            success=True,
-        )
-
-        comparison = compare_results(baseline, current)
-
-        assert comparison.status == RegressionStatus.WARNING
-
-    def test_compare_results_failure(self):
-        """Test comparison with failure-level regression."""
-        baseline = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.0,
-            peak_rss_memory_mb=100,
-            success=True,
-        )
-        current = BenchmarkResult(
-            operation="read",
-            file="test.parquet",
-            time_seconds=1.30,  # 30% slower - failure
-            peak_rss_memory_mb=100,
-            success=True,
-        )
-
-        comparison = compare_results(baseline, current)
-
-        assert comparison.status == RegressionStatus.FAILURE
-
-
 class TestBenchmarkReporting:
     """Tests for benchmark report formatting."""
 
@@ -310,28 +238,6 @@ class TestBenchmarkReporting:
         assert "read" in table
         assert "1.23" in table
         assert "45.6" in table  # RSS memory displayed
-
-    def test_format_comparison_table(self):
-        """Test comparison table formatting."""
-        comparisons = [
-            ComparisonResult(
-                operation="read",
-                file="test.parquet",
-                baseline_time=1.0,
-                current_time=1.1,
-                time_delta_pct=0.10,
-                baseline_rss_memory=100,
-                current_rss_memory=110,
-                memory_delta_pct=0.10,
-                status=RegressionStatus.WARNING,
-            ),
-        ]
-
-        table = format_comparison_table(comparisons)
-
-        assert "read" in table
-        assert "+10%" in table or "10%" in table
-        assert "WARNING" in table or "⚠" in table
 
 
 class TestChainOperations:
@@ -440,23 +346,6 @@ class TestChainOperationExecution:
 
 class TestProfilingIntegration:
     """Tests for profiling integration."""
-
-    @pytest.fixture
-    def test_parquet(self):
-        """Create a small test parquet file."""
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "test.parquet"
-            table = pa.table(
-                {
-                    "id": [1, 2, 3],
-                    "geometry": [b"point1", b"point2", b"point3"],
-                }
-            )
-            pq.write_table(table, path)
-            yield path
 
     def test_run_single_operation_without_profiling(self, test_parquet):
         """Test that profiling is disabled by default."""

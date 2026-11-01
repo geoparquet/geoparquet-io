@@ -4,8 +4,11 @@ Tests for the Python API (fluent Table class and ops module).
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
+import json
+import os
 import struct
 import tempfile
 import uuid
@@ -62,6 +65,7 @@ class TestRead:
 
         table = read(PLACES_PARQUET)
         assert isinstance(table, Table)
+        assert table.num_rows == pq.ParquetFile(PLACES_PARQUET).metadata.num_rows
 
     def test_read_preserves_rows(self):
         """Test that read() preserves row count."""
@@ -319,7 +323,16 @@ class _CallRecorder:
     def __call__(self, *args, **kwargs):
         bound = self._signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        self.delivered = {k: v for k, v in bound.arguments.items() if k != "table"}
+        delivered = {k: v for k, v in bound.arguments.items() if k != "table"}
+        options = delivered.get("options")
+        if dataclasses.is_dataclass(options):
+            # An options object stands for the keywords it holds: the doors are
+            # compared on the values core receives, not on how it is packed.
+            delivered = {
+                **{k: v for k, v in delivered.items() if k != "options"},
+                **dataclasses.asdict(options),
+            }
+        self.delivered = delivered
         return args[0]
 
 
@@ -1094,6 +1107,176 @@ class TestFrontDoorDelegation:
             f"entry with the reason): {sorted(shared - accounted_for)}\n"
             f"  listed here but no longer a twin: {sorted(accounted_for - shared)}"
         )
+
+
+# ---------------------------------------------------------------------------
+# G6 of #1367: the public-API snapshot
+# ---------------------------------------------------------------------------
+
+#: The front doors and every owner module of the #1367 concept table. A change
+#: to any of their public names is a diff to tests/data/snapshots/public_api.json,
+#: so nothing moves silently.
+PUBLIC_API_MODULES = (
+    "geoparquet_io.benchmarks",
+    "geoparquet_io.api",
+    "geoparquet_io.api.ops",
+    "geoparquet_io.api.table",
+    "geoparquet_io.core.parquet_writer",
+    "geoparquet_io.core.write_funnels",
+    "geoparquet_io.core.compression",
+    "geoparquet_io.core.parquet_footer",
+    "geoparquet_io.core.geo_metadata",
+    "geoparquet_io.core.geometry_detection",
+    "geoparquet_io.core.crs_utils",
+    "geoparquet_io.core.memory_limits",
+    "geoparquet_io.core.sizing",
+    "geoparquet_io.core.duckdb_utils",
+    "geoparquet_io.core.duckdb_metadata",
+    "geoparquet_io.core.remote",
+    "geoparquet_io.core.file_utils",
+    "geoparquet_io.core.column_selection",
+    "geoparquet_io.core.http_retry",
+    "geoparquet_io.core.exceptions",
+    "geoparquet_io.core.json_output",
+    "geoparquet_io.core.format_writers",
+    "geoparquet_io.cli.decorators",
+    "geoparquet_io.cli.exception_handler",
+    # Concept 15 (shared CLI behaviour): the owner of parse_bbox / BBox, and
+    # the check runner's module.
+    "geoparquet_io.core.bbox_parse",
+    "geoparquet_io.cli.commands.check",
+    "geoparquet_io.core.extract",
+    "geoparquet_io.core.edges",
+    "geoparquet_io.core.index_ops",
+    "geoparquet_io.core.process.aggregate.options",
+)
+PUBLIC_API_SNAPSHOT = Path(__file__).parent / "data" / "snapshots" / "public_api.json"
+
+
+def _module_level_assignments(module) -> set[str]:
+    """Names the module's own source assigns at module level (constants),
+    through module-level ``try``/``if`` blocks."""
+    import ast
+
+    source = inspect.getsource(module)
+    names: set[str] = set()
+
+    def visit(body):
+        for node in body:
+            if isinstance(node, ast.Assign):
+                names.update(
+                    n.id for t in node.targets for n in ast.walk(t) if isinstance(n, ast.Name)
+                )
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names.add(node.target.id)
+            elif isinstance(node, (ast.If, ast.Try)):
+                visit(node.body + node.orelse + getattr(node, "finalbody", []))
+                for handler in getattr(node, "handlers", []):
+                    visit(handler.body)
+
+    visit(ast.parse(source).body)
+    return names
+
+
+def public_names(module) -> list[str]:
+    """A module's public surface: ``__all__`` for a package that declares it;
+    otherwise every public function and class the module defines (by
+    ``__module__``, so an import is not counted) and every public constant its
+    own source assigns."""
+    if hasattr(module, "__path__") and hasattr(module, "__all__"):
+        return sorted(module.__all__)
+    constants = _module_level_assignments(module)
+    found = set()
+    for name, value in vars(module).items():
+        if name.startswith("_") or inspect.ismodule(value):
+            continue
+        if callable(value):  # functions, classes, lru_cache/click wrappers
+            if getattr(value, "__module__", None) == module.__name__:
+                found.add(name)
+        elif name in constants:
+            found.add(name)
+    return sorted(found)
+
+
+def public_api_surface() -> dict[str, list[str]]:
+    import importlib
+
+    surface = {}
+    for name in PUBLIC_API_MODULES:
+        try:
+            module = importlib.import_module(name)
+        except ModuleNotFoundError as exc:
+            if exc.name != name:
+                raise
+            continue  # a pending owner (see PUBLIC_API_MODULES)
+        surface[name] = public_names(module)
+    return surface
+
+
+def _public_api_diff(expected: dict, live: dict) -> list[str]:
+    lines = []
+    for module in sorted(set(expected) | set(live)):
+        have, want = set(live.get(module, [])), set(expected.get(module, []))
+        lines += [f"{module}: + {n}" for n in sorted(have - want)]
+        lines += [f"{module}: - {n}" for n in sorted(want - have)]
+    return lines
+
+
+def _check_public_api(snapshot: Path = PUBLIC_API_SNAPSHOT) -> list[str]:
+    expected = json.loads(snapshot.read_text(encoding="utf-8")) if snapshot.exists() else {}
+    return _public_api_diff(expected, public_api_surface())
+
+
+def test_public_api_matches_the_snapshot():
+    """G6: the public names of the front doors and the owner modules match the
+    committed snapshot. A rename, move or deletion during #1367 shows up here as a
+    diff to review, never silently. To accept an intentional change::
+
+        GPIO_UPDATE_SNAPSHOT=1 uv run pytest tests/test_api.py -k public_api_matches
+
+    (refused when ``CI`` is set, as in tests/test_cli_surface.py)."""
+    from tests.test_cli_surface import UPDATE_ENV_VAR, _env_flag
+
+    if _env_flag(UPDATE_ENV_VAR):
+        assert not os.environ.get("CI"), f"{UPDATE_ENV_VAR} must not be set in CI"
+        PUBLIC_API_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+        PUBLIC_API_SNAPSHOT.write_text(
+            json.dumps(public_api_surface(), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        pytest.skip(f"GPIO_UPDATE_SNAPSHOT set: refreshed {PUBLIC_API_SNAPSHOT.name}")
+    assert PUBLIC_API_SNAPSHOT.exists(), "create it with GPIO_UPDATE_SNAPSHOT=1"
+    diff = _check_public_api()
+    assert not diff, (
+        "the public API drifted from tests/data/snapshots/public_api.json:\n  "
+        + "\n  ".join(diff)
+        + "\nIf intentional, re-record with GPIO_UPDATE_SNAPSHOT=1 and review the diff."
+    )
+
+
+def test_g12_the_public_api_snapshot_fails_on_a_new_public_name(monkeypatch):
+    from geoparquet_io.core import sizing
+
+    def brand_new_helper():
+        return 1
+
+    brand_new_helper.__module__ = sizing.__name__
+    monkeypatch.setattr(sizing, "brand_new_helper", brand_new_helper, raising=False)
+    assert "geoparquet_io.core.sizing: + brand_new_helper" in _check_public_api()
+
+
+def test_g12_the_public_api_snapshot_fails_on_a_removed_name(monkeypatch):
+    from geoparquet_io.core import sizing
+
+    monkeypatch.delattr(sizing, "nudged_size")
+    assert "geoparquet_io.core.sizing: - nudged_size" in _check_public_api()
+
+
+def test_g12_an_empty_snapshot_fails(tmp_path):
+    empty = tmp_path / "public_api.json"
+    empty.write_text("{}", encoding="utf-8")
+    assert _check_public_api(empty)
 
 
 class TestOpsEndToEnd:
@@ -2141,7 +2324,7 @@ class TestTableStats:
     def test_stats_returns_dict(self, sample_table):
         """Test stats() returns a dictionary."""
         result = sample_table.stats()
-        assert isinstance(result, dict)
+        assert set(result) == set(sample_table.column_names)
 
     def test_stats_has_all_columns(self, sample_table):
         """Test stats() includes all columns."""
@@ -2176,11 +2359,6 @@ class TestTableMetadata:
         if not PLACES_PARQUET.exists():
             pytest.skip("Test data not available")
         return read(PLACES_PARQUET)
-
-    def test_metadata_returns_dict(self, sample_table):
-        """Test metadata() returns a dictionary."""
-        result = sample_table.metadata()
-        assert isinstance(result, dict)
 
     def test_metadata_has_basic_fields(self, sample_table):
         """Test metadata() includes basic fields."""
@@ -2492,7 +2670,7 @@ class TestTableCheck:
         """Test check() returns results dict."""
         result = sample_table.check()
         results_dict = result.to_dict()
-        assert isinstance(results_dict, dict)
+        assert "compression" in results_dict
 
     def test_check_compression_returns_check_result(self, sample_table):
         """Test check_compression() returns a CheckResult."""
@@ -2870,26 +3048,9 @@ class TestOpsPartition:
         return sorted(f.name for f in files)
 
     # -- each function writes partitions from a bare pa.Table ---------------
-
-    def test_partition_by_h3(self, arrow_table, tmp_path):
-        stats = ops.partition_by_h3(arrow_table, tmp_path / "out", resolution=2)
-
-        assert stats["file_count"] > 0
-        assert self._partition_names(tmp_path / "out")
-
-    def test_partition_by_a5(self, arrow_table, tmp_path):
-        stats = ops.partition_by_a5(arrow_table, tmp_path / "out", resolution=4)
-
-        assert stats["file_count"] > 0
-        assert self._partition_names(tmp_path / "out")
-
-    def test_partition_by_quadkey(self, arrow_table, tmp_path):
-        stats = ops.partition_by_quadkey(
-            arrow_table, tmp_path / "out", resolution=13, partition_resolution=3
-        )
-
-        assert stats["file_count"] > 0
-        assert self._partition_names(tmp_path / "out")
+    # h3, a5 and quadkey writing partitions from a bare table (with the same
+    # arguments) are ``test_every_partitioner_returns_the_same_stats_dict``'s
+    # cells, which also hold the ``Table`` method to the same count.
 
     def test_partition_by_kdtree(self, arrow_table, tmp_path):
         result = ops.partition_by_kdtree(arrow_table, tmp_path / "out", iterations=2)
@@ -3008,7 +3169,7 @@ class TestOpsPartition:
             return CurrentAdminDataset(source_path=admin, verbose=verbose)
 
         monkeypatch.setattr(
-            "geoparquet_io.core.partition.admin_hierarchical.AdminDatasetFactory.create",
+            "geoparquet_io.core.admin_datasets.AdminDatasetFactory.create",
             staticmethod(fake_create),
         )
 

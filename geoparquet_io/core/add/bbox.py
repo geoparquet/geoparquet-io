@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pyarrow as pa
 
 from geoparquet_io.core.bbox_structure import (
@@ -11,28 +9,51 @@ from geoparquet_io.core.bbox_structure import (
     check_bbox_structure,
     resolve_bbox_name,
 )
+from geoparquet_io.core.column_selection import find_column
 from geoparquet_io.core.common import add_computed_column
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_geo_metadata, get_schema_info
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
+from geoparquet_io.core.duckdb_metadata import get_schema_info, get_usable_column_names
+from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    get_duckdb_connection,
+    query_schema,
+    quote_identifier,
+)
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 from geoparquet_io.core.geo_metadata import (
+    GEOPARQUET_VERSIONS,
+    ArrowTableSource,
+    GeoBlockOptions,
     _bbox_claimed_by_another_column,
-    bbox_struct_child_names_match,
+    bbox_struct_array,
+    bbox_struct_sql,
+    bbox_struct_type,
     build_bbox_covering,
+    compose_geo_block,
     covering_supported,
+    declared_version,
+    is_bbox_struct_field,
+    sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
+    with_geo_block,
 )
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
-    register_geometry_column,
+    primary_geometry_column,
+    require_geometry_column,
+    resolve_geometry_column,
+    resolve_geometry_read,
 )
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.logging_config import debug, progress, success, warn
+from geoparquet_io.core.parquet_writer import (
+    WriteOptions,
+    resolve_output_geoparquet_version,
+    version_to_describe,
+)
 from geoparquet_io.core.partition.reader import require_single_file
+from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
 )
@@ -50,8 +71,7 @@ def _bbox_metadata_advice(parquet_file: str, declare_by_name: str | None = None)
     sending the user to a command that would report no bbox column at all.
     """
 
-    geo_meta = get_geo_metadata(parquet_file) or {}
-    version = geo_meta.get("version", "")
+    version = declared_version(sanitized_carried_geo_of_file(parquet_file))
     if covering_supported(version):
         if check_bbox_structure(parquet_file).get("covering_problem"):
             return "The existing column cannot carry a 'covering'; use --force to rewrite it."
@@ -82,7 +102,9 @@ def _explicitly_named_bbox_struct(input_parquet: str, bbox_column_name: str) -> 
     """
     if bbox_column_name not in bbox_shaped_struct_columns(get_schema_info(input_parquet)):
         return False
-    return not _bbox_claimed_by_another_column(get_geo_metadata(input_parquet), bbox_column_name)
+    return not _bbox_claimed_by_another_column(
+        sanitized_carried_geo_of_file(input_parquet), bbox_column_name
+    )
 
 
 def _note_bbox_structs_computed_beside(
@@ -122,10 +144,9 @@ def _has_bbox_struct_column(con, source: str, bbox_column_name: str) -> bool:
     ``covering`` may point at -- passed as gpio's own and the stream wrote
     nothing at all (#1176).
     """
-    schema = con.execute(f"SELECT * FROM {source} LIMIT 0").arrow().read_all().schema
-    if bbox_column_name not in schema.names:
-        return False
-    return _is_bbox_struct_field(schema.field(bbox_column_name))
+    schema = query_schema(con, f"SELECT * FROM {source}")
+    found = find_column(bbox_column_name, schema.names, option_name="bbox_column_name")
+    return found is not None and is_bbox_struct_field(schema.field(found))
 
 
 def add_bbox_table(
@@ -147,9 +168,7 @@ def add_bbox_table(
         New table with bbox column added
     """
     # Find geometry column
-    geom_col = geometry_column or find_geometry_column_from_table(table)
-    if not geom_col:
-        geom_col = "geometry"
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
     table, bbox_column_name = _prepare_table_bbox_column(table, bbox_column_name)
 
@@ -158,48 +177,13 @@ def add_bbox_table(
     # whole table (every attribute plus an ST_AsWKB re-encode of the geometry)
     # materialized a second full copy of the data for four doubles of new
     # information (#1268), and re-ordered the columns while doing it.
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-    try:
-        warn_planar_math("add_bbox", table, geom_col)
-        read = register_geometry_column(con, "__input_table", table, geom_col)
-        quoted_bbox_col = quote_identifier(bbox_column_name)
-        bbox_query = f"""
-            SELECT STRUCT_PACK(
-                xmin := ST_XMin(__g),
-                ymin := ST_YMin(__g),
-                xmax := ST_XMax(__g),
-                ymax := ST_YMax(__g)
-            ) AS {quoted_bbox_col}
-            FROM (SELECT {read.shape_expr} AS __g FROM __input_table)
-        """
-        bbox_column = con.execute(bbox_query).arrow().read_all().column(0)
-
-        # Append the computed column; everything else keeps its exact bytes,
-        # Arrow types and column order.
-        result = table.append_column(bbox_column_name, bbox_column)
-
-        # Preserve metadata, recording the column just computed as the
-        # geometry's covering bbox (see _declare_computed_bbox).
-        metadata = _declare_computed_bbox(table.schema.metadata, geom_col, bbox_column_name)
-        if metadata:
-            result = result.replace_schema_metadata(metadata)
-
-        return result
-    finally:
-        con.close()
-
-
-def _is_bbox_struct_field(field) -> bool:
-    """Whether an Arrow field is a bbox covering struct rather than a column of that name.
-
-    Child names are matched as spelled, which is what the file-based detector
-    (``bbox_structure``) does: a ``bbox`` struct whose children are
-    ``XMIN/YMIN/XMAX/YMAX`` is the user's own data -- the folded-case test read
-    it as gpio's own and *destroyed* it (#1176).
-    """
-    if not pa.types.is_struct(field.type):
-        return False
-    return bbox_struct_child_names_match({child.name for child in field.type})
+    # The stats owner's per-row kernel over the geometry column alone: four
+    # doubles a row and no copy of the attributes (#1268). Everything else
+    # keeps its exact bytes, Arrow types and column order.
+    warn_planar_math("add_bbox", table, geom_col)
+    bbox_column = bbox_struct_array(table, geom_col, bbox_struct_type())
+    result = table.append_column(bbox_column_name, bbox_column)
+    return _declare_computed_bbox(result, geom_col, bbox_column_name)
 
 
 def _prepare_table_bbox_column(table: pa.Table, bbox_column_name: str) -> tuple[pa.Table, str]:
@@ -213,110 +197,50 @@ def _prepare_table_bbox_column(table: pa.Table, bbox_column_name: str) -> tuple[
     Resolution is case-insensitive because the computed column is aliased in SQL,
     where ``BBOX`` and ``bbox`` are one name.
     """
-    if bbox_column_name in table.column_names and _is_bbox_struct_field(
-        table.schema.field(bbox_column_name)
-    ):
-        return table.remove_column(table.column_names.index(bbox_column_name)), bbox_column_name
+    found = find_column(bbox_column_name, table.column_names, option_name="bbox_column_name")
+    if found is not None and is_bbox_struct_field(table.schema.field(found)):
+        return table.remove_column(table.column_names.index(found)), bbox_column_name
     return table, resolve_bbox_name(table.column_names, None, requested=bbox_column_name)
 
 
-def _declare_computed_bbox(metadata, geometry_column: str, bbox_column_name: str):
-    """``metadata`` whose geo block declares ``bbox_column_name`` as ``geometry_column``'s bbox.
+def _declare_computed_bbox(table: pa.Table, geometry_column: str, bbox_column_name: str):
+    """``table`` whose geo block declares ``bbox_column_name`` as ``geometry_column``'s bbox.
 
     The column was computed from that geometry right here, which is the
     provenance a ``covering`` needs (#738). Recording it on the table's own
     block is what lets a writer declare a column not named exactly ``bbox``;
-    none will on name alone (#953). A 1.0 output drops it again at write time.
-    No geo block (or no entry for the column) means nothing to record.
+    none will on name alone (#953). The composer declares it, at the version
+    a write of this table declares (the facade's: a 1.0 block, which cannot
+    say a covering, is said as the 1.1 its write would be). No geo block (or
+    no entry for the column) means nothing to record.
     """
-    if not metadata or b"geo" not in metadata:
-        return metadata
-    try:
-        geo = json.loads(metadata[b"geo"])
-    except ValueError:
-        return metadata
-    columns = geo.get("columns") if isinstance(geo, dict) else None
-    col_meta = columns.get(geometry_column) if isinstance(columns, dict) else None
-    if not isinstance(col_meta, dict):
-        return metadata
-    covering = col_meta.get("covering")
-    covering = dict(covering) if isinstance(covering, dict) else {}
-    covering["bbox"] = build_bbox_covering(bbox_column_name)
-    columns = {**columns, geometry_column: {**col_meta, "covering": covering}}
-    return {**metadata, b"geo": json.dumps({**geo, "columns": columns}).encode("utf-8")}
-
-
-def _bbox_covering_metadata(bbox_column_name: str) -> dict:
-    """The GeoParquet 1.1+ ``covering`` block pointing at ``bbox_column_name``."""
-    return {
-        "covering": {
-            "bbox": {
-                "xmin": [bbox_column_name, "xmin"],
-                "ymin": [bbox_column_name, "ymin"],
-                "xmax": [bbox_column_name, "xmax"],
-                "ymax": [bbox_column_name, "ymax"],
-            }
-        }
-    }
-
-
-def _write_options_requested(
-    compression: str | None,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    geoparquet_version: str | None,
-) -> bool:
-    """Whether the caller explicitly asked for write settings the input may not have.
-
-    A verbatim copy of the input cannot honour ``--geoparquet-version``,
-    ``--compression``, ``--compression-level`` or ``--row-group-size``: it
-    reproduces whatever the input was written with. So when one of those is
-    explicitly requested, the copy shortcut is not an acceptable answer and the
-    column is recomputed instead. Every one of these arrives as ``None`` unless
-    the caller set it (the CLI passes ``compression=None`` when ``--compression``
-    was left at its default).
-    """
-    return any(
-        option is not None
-        for option in (
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            geoparquet_version,
-        )
+    geo = sanitized_carried_geo(table.schema.metadata)
+    if not isinstance((geo.get("columns") or {}).get(geometry_column), dict):
+        return table
+    block = compose_geo_block(
+        ArrowTableSource(table),
+        GeoBlockOptions(
+            geometry_column=geometry_column,
+            version=version_to_describe(table.schema),
+            covering=bbox_column_name,
+        ),
     )
+    return with_geo_block(table, block)
 
 
-def _passthrough_version(metadata: dict | None, geoparquet_version: str | None) -> str | None:
-    """The version to write for a stream that is being copied, not rewritten.
+def _version_a_copy_would_miss(input_parquet: str) -> str | None:
+    """The facade's version for this input, when a verbatim copy would declare another.
 
-    The normal streaming write upgrades a 1.0 input to 1.1, which is right for a
-    file gpio actually rewrote but wrong for a pass-through: nothing about the
-    data changed, so nothing about its declared version should either. An
-    explicitly requested version still wins.
+    A copy keeps whatever version the input declares, so it can answer this
+    run only where that already is the facade's answer: a 1.0 input writes
+    1.1, and a native-geo-only one (no ``geo`` key) writes 2.0, like every
+    other command (approved change 7 of #1367: the facade decides).
     """
-    if geoparquet_version is not None:
-        return geoparquet_version
-    if not metadata or b"geo" not in metadata:
+    target = resolve_output_geoparquet_version(None, input_file=input_parquet)
+    declared = declared_version(sanitized_carried_geo_of_file(input_parquet), default=None)
+    if GEOPARQUET_VERSIONS[target]["metadata_version"] == declared:
         return None
-
-    import json
-
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    if not isinstance(geo_meta, dict):
-        return None
-    version = geo_meta.get("version")
-    if not isinstance(version, str):
-        return None
-    parts = version.split(".")
-    if len(parts) < 2:
-        return None
-    return f"{parts[0]}.{parts[1]}"
+    return target
 
 
 def _make_add_bbox_query(
@@ -328,12 +252,7 @@ def _make_add_bbox_query(
     """Build query to add bbox column to a source."""
     quoted_geom_col = quote_identifier(geometry_column)
     quoted_bbox_col = quote_identifier(bbox_column_name)
-    bbox_expr = f"""STRUCT_PACK(
-        xmin := ST_XMin({quoted_geom_col}),
-        ymin := ST_YMin({quoted_geom_col}),
-        xmax := ST_XMax({quoted_geom_col}),
-        ymax := ST_YMax({quoted_geom_col})
-    )"""
+    bbox_expr = bbox_struct_sql(quoted_geom_col, geometry_column)
 
     if replace_existing:
         return (
@@ -402,12 +321,10 @@ def add_bbox_column(
         except for GeoParquet 1.0 output: 'covering' was introduced in 1.1, so a
         1.0 file gets the bbox column without the covering key.
     """
-    # Whether a copy of the input could satisfy this call at all, decided before
-    # 'compression' is defaulted -- None here means "the caller did not ask".
-    write_options_requested = _write_options_requested(
-        compression, compression_level, row_group_size_mb, row_group_rows, geoparquet_version
-    )
-    compression = compression or "ZSTD"
+    # Built before anything is defaulted: None means "the caller did not ask",
+    # which is what decides whether a copy of the input could satisfy the call.
+    write = WriteOptions.pick(locals())
+    write_options_requested = write.sets_output_layout()
 
     warn_planar_math_for_file("add_bbox", input_parquet)
 
@@ -420,14 +337,8 @@ def add_bbox_column(
             output_parquet,
             bbox_column_name,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
+            write,
             force,
-            geoparquet_version,
-            memory_limit=memory_limit,
         )
         return
 
@@ -438,15 +349,9 @@ def add_bbox_column(
         bbox_column_name,
         dry_run,
         verbose,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        profile,
+        write,
         force,
-        geoparquet_version,
         overwrite,
-        memory_limit=memory_limit,
         write_options_requested=write_options_requested,
     )
 
@@ -456,14 +361,8 @@ def _add_bbox_streaming(
     output_path: str | None,
     bbox_column_name: str,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
+    write: WriteOptions,
     force: bool,
-    geoparquet_version: str | None,
-    memory_limit: str | None,
 ) -> None:
     """Handle streaming input/output for add_bbox."""
     # Suppress verbose when streaming to stdout
@@ -476,7 +375,12 @@ def _add_bbox_streaming(
     # built. (add_bbox's query builder takes no source CRS, so nothing is lost.)
     with open_input(input_path, verbose=verbose) as (source, metadata, _is_stream, con):
         query, passed_through, bbox_column_name = _make_streaming_bbox_query(
-            source, con, bbox_column_name, force=force, geoparquet_version=geoparquet_version
+            source,
+            con,
+            bbox_column_name,
+            force=force,
+            geoparquet_version=write.geoparquet_version,
+            metadata=metadata,
         )
 
         write_output(
@@ -484,21 +388,14 @@ def _add_bbox_streaming(
             query,
             output_path,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            # A covering gpio did not compute must not be declared, and a copy is
-            # not a rewrite, so it does not upgrade the input's version either.
-            custom_metadata=None if passed_through else _bbox_covering_metadata(bbox_column_name),
-            geoparquet_version=(
-                _passthrough_version(metadata, geoparquet_version)
-                if passed_through
-                else geoparquet_version
-            ),
-            memory_limit=memory_limit,
+            # A covering gpio did not compute must not be declared. The version
+            # is the facade's, pass-through or not: a 1.0 stream writes 1.1 like
+            # every other command (approved change 7).
+            custom_metadata=None
+            if passed_through
+            else {"covering": {"bbox": build_bbox_covering(bbox_column_name)}},
+            **write.funnel_kwargs(),
         )
 
     if should_stream_output(output_path):
@@ -514,7 +411,12 @@ def _add_bbox_streaming(
 
 
 def _make_streaming_bbox_query(
-    source: str, con, bbox_column_name: str, force: bool, geoparquet_version: str | None = None
+    source: str,
+    con,
+    bbox_column_name: str,
+    force: bool,
+    geoparquet_version: str | None = None,
+    metadata: dict | None = None,
 ) -> tuple[str, bool, str]:
     """Build the add-bbox query for a streaming source.
 
@@ -538,17 +440,13 @@ def _make_streaming_bbox_query(
         return f"SELECT * FROM {source}", True, bbox_column_name
 
     # Get column names from query result (works with both table names and read_parquet)
-    sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-    col_names = [col[0] for col in sample]
-
-    # Find geometry column from common names
-    geom_col = None
-    for name in STANDARD_GEOMETRY_NAMES:
-        if name in col_names:
-            geom_col = name
-            break
-    if not geom_col:
-        geom_col = "geometry"
+    described = describe_query(con, f"SELECT * FROM {source}")
+    col_names = [name for name, _ in described]
+    # The owner over the typed columns and the stream's carried block (#1367).
+    geom_col = require_geometry_column(
+        primary_geometry_column(described, geo=sanitized_carried_geo(metadata)),
+        "the input stream",
+    )
 
     # --force over a real bbox struct replaces it in place; anything else of that
     # name is the user's own column and the computed one moves aside instead.
@@ -569,20 +467,14 @@ def _add_bbox_file_based(
     bbox_column_name: str,
     dry_run: bool,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
+    write: WriteOptions,
     force: bool,
-    geoparquet_version: str | None,
     overwrite: bool,
-    memory_limit: str | None,
     write_options_requested: bool = False,
 ) -> None:
     """Handle file-based add_bbox operation."""
     # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
 
     # Check for partition input (not supported)
     require_single_file(input_parquet, "add bbox")
@@ -610,6 +502,13 @@ def _add_bbox_file_based(
         # A copy cannot carry a write setting the input does not already have,
         # and with no OUTPUT_FILE there is nothing to write it to either.
         write_options_requested=write_options_requested and output_parquet is not None,
+        # Nor a version other than the one it declares: a 1.0 input writes 1.1
+        # like every other command (approved change 7 of #1367).
+        version_upgrade=(
+            _version_a_copy_would_miss(input_parquet)
+            if output_parquet is not None and not write_options_requested
+            else None
+        ),
         dry_run=dry_run,
     )
     if done:
@@ -622,7 +521,9 @@ def _add_bbox_file_based(
     # same file wrote `bbox_1` (#1176).
     if replace_column is None:
         bbox_column_name = resolve_bbox_name(
-            get_column_names(input_parquet), geoparquet_version, requested=bbox_column_name
+            get_usable_column_names(input_parquet),
+            write.geoparquet_version,
+            requested=bbox_column_name,
         )
 
     # A column is being computed. Say which bbox-shaped structs it will sit
@@ -630,19 +531,20 @@ def _add_bbox_file_based(
     _note_bbox_structs_computed_beside(input_parquet, bbox_column_name, verbose)
 
     # Get geometry column for the SQL expression
-    geom_col = find_primary_geometry_column(input_parquet, verbose)
+    geom_col = require_geometry_column(
+        primary_geometry_column(input_parquet, verbose=verbose), input_parquet
+    )
 
     # Define the SQL expression (the only unique part)
-    quoted_geom_col = quote_identifier(geom_col)
-    sql_expression = f"""STRUCT_PACK(
-        xmin := ST_XMin({quoted_geom_col}),
-        ymin := ST_YMin({quoted_geom_col}),
-        xmax := ST_XMax({quoted_geom_col}),
-        ymax := ST_YMax({quoted_geom_col})
-    )"""
+    con = get_duckdb_connection(load_httpfs=needs_httpfs(input_parquet))
+    try:
+        read = resolve_geometry_read(con, input_parquet, geom_col)
+    finally:
+        con.close()
+    sql_expression = bbox_struct_sql(read.shape_expr, geom_col, read)
 
     # Build covering metadata for the bbox column (GeoParquet 1.1+ spec)
-    covering_metadata = _bbox_covering_metadata(bbox_column_name)
+    covering_metadata = {"covering": {"bbox": build_bbox_covering(bbox_column_name)}}
 
     # Use the generic helper for all boilerplate
     add_computed_column(
@@ -653,16 +555,10 @@ def _add_bbox_file_based(
         extensions=None,
         dry_run=dry_run,
         verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
         dry_run_description="Bounding box struct (xmin, ymin, xmax, ymax)",
-        profile=profile,
         replace_column=replace_column,
-        geoparquet_version=geoparquet_version,
         custom_metadata=covering_metadata,
-        memory_limit=memory_limit,
+        **write.funnel_kwargs(),
     )
 
     if not dry_run:
@@ -678,6 +574,7 @@ def _handle_existing_bbox(
     verbose: bool,
     write_options_requested: bool = False,
     dry_run: bool = False,
+    version_upgrade: str | None = None,
 ) -> tuple[bool, str | None]:
     """Decide what a bbox column the input already has means for this run.
 
@@ -720,6 +617,16 @@ def _handle_existing_bbox(
         progress(
             f"File already has bbox column '{existing_bbox_col}', but the requested "
             "output settings need a rewrite, so it is recomputed rather than copied."
+        )
+        return False, existing_bbox_col
+
+    if version_upgrade:
+        # A verbatim copy keeps the version the input declares, and auto mode
+        # writes a different one (1.0 -> 1.1), so the copy cannot answer either.
+        progress(
+            f"File already has bbox column '{existing_bbox_col}', but the output is "
+            f"written at GeoParquet {version_upgrade}, a version the input does not "
+            "declare, so it is recomputed rather than copied."
         )
         return False, existing_bbox_col
 

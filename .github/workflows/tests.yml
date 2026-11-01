@@ -146,7 +146,7 @@ jobs:
 
   test:
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 70
     permissions:
       contents: read
       # Codecov uploads authenticate via OIDC (use_oidc on the upload step);
@@ -174,12 +174,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13']
-        exclude:
-          - os: macos-latest
-            python-version: '3.10'
-          - os: windows-latest
-            python-version: '3.10'
+        python-version: ['3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -210,7 +205,7 @@ jobs:
           # DuckDB extension downloads (extensions.duckdb.org) occasionally fail
           # with a transient network error, which broke otherwise-green builds.
           # Retry with backoff before giving up.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community'); con.execute('INSTALL a5 FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."
@@ -297,6 +292,63 @@ jobs:
           uv run diff-cover coverage.xml \
             --compare-branch "origin/$BASE_REF" --fail-under=90 --branch-coverage
 
+  # The fast suite on DuckDB 2.0, which the lock does not allow yet: pyproject
+  # caps duckdb <1.6 until the 'geography' community extension (S2) is published
+  # for 2.0. Installing 2.0 over the synced lock and running with --no-sync keeps
+  # the code working on both. S2 tests skip here: 'geography' is not built for
+  # 2.0. a5 runs for real: gpio installs it from the Query.Farm repository on
+  # 2.0+ at first use (#1347). DuckDB 2.0 wheels need Python 3.11+.
+  test-duckdb-2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies, then DuckDB 2.0 over the lock
+        run: |
+          uv sync --all-extras --python 3.12
+          uv pip install duckdb==2.0.0
+          uv run --no-sync python -c "import duckdb; assert duckdb.__version__ == '2.0.0', duckdb.__version__"
+
+      - name: Pre-install DuckDB extensions
+        shell: bash
+        run: |
+          # a5 on 2.0+ installs from the Query.Farm repository through gpio's
+          # own path (#1347); prewarming through require_community_extension
+          # exercises that flow under the same retry, and the CI canary test
+          # (tests/test_extension_probe_offline.py) then asserts a5 is usable.
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); from geoparquet_io.core.duckdb_utils import require_community_extension; require_community_extension('a5')"
+          for attempt in 1 2 3 4 5; do
+            if uv run --no-sync python -c "$install"; then
+              echo "DuckDB extensions installed (attempt $attempt)."
+              exit 0
+            fi
+            echo "Extension install failed (attempt $attempt). Retrying in $((attempt * 10))s..." >&2
+            sleep $((attempt * 10))
+          done
+          echo "Failed to install DuckDB extensions after 5 attempts." >&2
+          exit 1
+
+      - name: Install tippecanoe
+        run: sudo apt-get update && sudo apt-get install -y tippecanoe
+
+      - name: Run fast tests with pytest (parallel)
+        run: |
+          uv run --no-sync pytest -n 4 -m "not slow and not network and not meta" -v --tb=short --no-cov
+
   notebooks:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -328,18 +380,15 @@ jobs:
     # documented commands were therefore verified only after merge (#896).
     #
     # One runner, not the ten of the fast matrix: these assert that a documented
-    # command still works, which is not per-interpreter behaviour. The 57 blocks
-    # already in the fast lane keep their Windows and macOS coverage there; the
-    # rest stay Linux-only until slow-tests picks them up on merge. That is a real
-    # gap for the shell-quoting and path-encoding bugs this repo has seen only on
-    # Windows -- named here rather than glossed, and cheap to close later by adding
-    # an os matrix if it ever bites.
+    # command still works, which is not per-interpreter behaviour. All docs
+    # examples carry slow now; this PR job provides Linux coverage, and the
+    # slow matrix provides Windows and macOS coverage after merge.
     #
-    # Deliberately NOT in the required-checks list yet. #894 was this lane reading
-    # as flaky; its network blocks are excluded here, but the ~234 that execute all
-    # spawn CLI subprocesses, the same shape as the known xdist flakes in
-    # test_pipe_integration / test_geojson_stream / e2e/test_journeys. Let it report
-    # for a couple of weeks before promoting it to a gate.
+    # A gate through `all-checks` (#1367). #894 was this lane reading as flaky;
+    # its network blocks are excluded here, but the ~234 that execute all spawn
+    # CLI subprocesses, the same shape as the known xdist flakes in
+    # test_pipe_integration / test_geojson_stream / e2e/test_journeys. A flake
+    # here is fixed, not ignored.
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -371,7 +420,7 @@ jobs:
         run: |
           # Same transient-failure retry as the fast matrix: extensions.duckdb.org
           # occasionally drops a request and breaks an otherwise-green build.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community'); con.execute('INSTALL a5 FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."
@@ -397,7 +446,7 @@ jobs:
           # example -- add.md:L62 alone passes in 14.5s. The same selection run
           # serially was 235 passed / 0 failed in 271s. -n 4 matches what the
           # harness README and every other job here already use.
-          uv run pytest -n 4 -m "docs_example and not network" \
+          uv run pytest -n 4 -m "docs_example and not network" --timeout=600 \
             --no-cov --tb=short --durations=15 --durations-min=1.0
 
   slow-tests:
@@ -458,7 +507,7 @@ jobs:
           # DuckDB extension downloads (extensions.duckdb.org) occasionally fail
           # with a transient network error, which broke otherwise-green builds.
           # Retry with backoff before giving up.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community'); con.execute('INSTALL a5 FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."
@@ -493,7 +542,7 @@ jobs:
             || '--no-cov' }}
         run: |
           # The selection is "(slow or meta) and not network". `meta` is the
-          # repo-tooling lane (codespell, commitizen, doc-sync, mutmut, mypy,
+          # repo-tooling lane (codespell, commitizen, doc-sync, mypy,
           # validate-claude-md, the security-tool availability checks). Those
           # are excluded from the fast suite -- they spawn subprocesses and
           # caused its only flakes -- so this job is where they still run.
@@ -506,6 +555,10 @@ jobs:
           # in tests/test_security.py, which records why it must stay owned by
           # the dedicated `security` job and never come back as a pytest test.
 
+          # --timeout=600 is this lane's per-test cap. The 60 s default in
+          # pyproject.toml is the fast lane's; a slow test is whole-pipeline by
+          # definition, so the cap is set here for the lane, not per module.
+          #
           # word-splitting intended: COV_ARGS is a flag list (or --no-cov).
           # The directive binds to the NEXT command, so it has to sit here and
           # not at the top of the block (where it would bind to the assignment
@@ -513,11 +566,11 @@ jobs:
           # shellcheck disable=SC2086
           if [ "$RUNNER_OS" == "Windows" ]; then
             # Use loadfile distribution on Windows to reduce DuckDB extension conflicts
-            uv run pytest -n 4 --dist=loadfile -m "(slow or meta) and not network" -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
+            uv run pytest -n 4 --dist=loadfile -m "(slow or meta) and not network" --timeout=600 -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
           elif [ "$RUNNER_OS" == "macOS" ]; then
-            uv run pytest -n 3 -m "(slow or meta) and not network" -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
+            uv run pytest -n 3 -m "(slow or meta) and not network" --timeout=600 -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
           else
-            uv run pytest -n 4 -m "(slow or meta) and not network" -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
+            uv run pytest -n 4 -m "(slow or meta) and not network" --timeout=600 -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
           fi
 
       - name: Upload slow test coverage to Codecov
@@ -535,8 +588,9 @@ jobs:
     # server's flakiness is not something a PR author can fix, so this job is
     # non-blocking: the failing STEP is continue-on-error (workflow stays
     # green) and failures open/update a single tracking issue instead —
-    # mirroring the security-audit.yml pattern. It is intentionally NOT in the
-    # required-checks list.
+    # mirroring the security-audit.yml pattern. `all-checks` needs it, but a
+    # live-service failure leaves this job green; only a broken job (setup,
+    # cancellation) fails the gate.
     if: >-
       github.event_name == 'push' ||
       github.event_name == 'schedule' ||
@@ -571,7 +625,7 @@ jobs:
           # DuckDB extension downloads (extensions.duckdb.org) occasionally fail
           # with a transient network error, which broke otherwise-green builds.
           # Retry with backoff before giving up.
-          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community')"
+          install="import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs'); con.execute('INSTALL aws'); con.execute('INSTALL h3 FROM community'); con.execute('INSTALL geography FROM community'); con.execute('INSTALL a5 FROM community')"
           for attempt in 1 2 3 4 5; do
             if uv run python -c "$install"; then
               echo "DuckDB extensions installed (attempt $attempt)."
@@ -727,3 +781,71 @@ jobs:
                 body: '✅ Network tests passing again. Closing automatically.'
               });
             }
+
+  all-checks:
+    # The one context the branch ruleset requires from this workflow (with
+    # pr-title from its own). It needs every other job here, so a job added to
+    # this file is a merge gate the moment it lands, without anyone editing the
+    # ruleset; tests/test_ci_wiring.py fails if a job is left out of `needs`.
+    # Before this, the ruleset named 13 contexts one by one and every job added
+    # since (embeddable-import, test-duckdb-2, docs-examples) was advisory.
+    #
+    # `if: always()` is load-bearing: without it a failed dependency SKIPS this
+    # job, and GitHub counts a skipped required check as passed. The step then
+    # fails on any failure or cancellation, and on a skip from every job except
+    # the two that are conditional by design (slow-tests, network-tests).
+    if: always()
+    needs:
+      - lint
+      - security
+      - embeddable-import
+      - test
+      - test-duckdb-2
+      - notebooks
+      - docs-examples
+      - slow-tests
+      - network-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail unless every needed job passed
+        env:
+          LINT: ${{ needs.lint.result }}
+          SECURITY: ${{ needs.security.result }}
+          EMBEDDABLE_IMPORT: ${{ needs.embeddable-import.result }}
+          TEST: ${{ needs.test.result }}
+          TEST_DUCKDB_2: ${{ needs.test-duckdb-2.result }}
+          NOTEBOOKS: ${{ needs.notebooks.result }}
+          DOCS_EXAMPLES: ${{ needs.docs-examples.result }}
+          SLOW_TESTS: ${{ needs.slow-tests.result }}
+          NETWORK_TESTS: ${{ needs.network-tests.result }}
+        run: |
+          failed=0
+          # check <job> <result> <skip-ok|required>
+          check() {
+            local job="$1" result="$2" mode="$3"
+            case "$result" in
+              success) ;;
+              skipped)
+                if [ "$mode" != skip-ok ]; then
+                  echo "::error::$job was skipped but is required"
+                  failed=1
+                fi
+                ;;
+              *)
+                echo "::error::$job finished with result '$result'"
+                failed=1
+                ;;
+            esac
+            echo "$job: $result"
+          }
+          check lint "$LINT" required
+          check security "$SECURITY" required
+          check embeddable-import "$EMBEDDABLE_IMPORT" required
+          check test "$TEST" required
+          check test-duckdb-2 "$TEST_DUCKDB_2" required
+          check notebooks "$NOTEBOOKS" required
+          check docs-examples "$DOCS_EXAMPLES" required
+          check slow-tests "$SLOW_TESTS" skip-ok
+          check network-tests "$NETWORK_TESTS" skip-ok
+          exit "$failed"

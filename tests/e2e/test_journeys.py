@@ -6,7 +6,8 @@ assertions -- row conservation, expected columns, CRS, spatial-order metrics --
 rather than a bare exit-code check. See ``journey_support`` for why the exit
 code alone would be a vacuous oracle.
 
-Lanes (issue table): journeys 1-7 fast, 8 and 10 slow, 9 network. Journey 6
+Lane policy (#1402): all journeys are slow whole-pipeline checks; journey 9
+also requires the network. Journey 6
 skips without tippecanoe, which also covers the Windows CI leg. The module is
 ``integration``-marked; see ``test_integration_lane.py`` for how that marker is
 kept meaningful in CI.
@@ -42,7 +43,7 @@ from tests.e2e.journey_support import (
     total_rows,
 )
 
-pytestmark = [pytest.mark.integration, requires_gpio]
+pytestmark = [pytest.mark.integration, requires_gpio, pytest.mark.slow]
 
 # Public GeoParquet used by docs/guide/extract.md; journey 9 reads it remotely.
 REMOTE_PARQUET_URL = "https://data.source.coop/fiboa/data/si/si-2024.parquet"

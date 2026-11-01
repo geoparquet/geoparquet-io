@@ -48,6 +48,7 @@ from typing import TypedDict, cast
 
 import duckdb
 
+from geoparquet_io.core.bbox_parse import crosses_antimeridian_sql, within_wrapped_x_sql
 from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.check_verdict import (
     FAILURE_GLYPH,
@@ -59,23 +60,31 @@ from geoparquet_io.core.check_verdict import (
     could_not_run,
     worst,
 )
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet, is_geographic_crs
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_schema_info
+from geoparquet_io.core.column_selection import has_column
+from geoparquet_io.core.crs_utils import crs_of, is_geographic
+from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import (
     disable_geoparquet_conversion,
+    fetch_one,
     get_duckdb_connection,
     is_interrupt,
     quote_identifier,
     sql_path,
 )
+from geoparquet_io.core.edges import PLANAR, declared_edges, edges_of, is_geodesic, state_edges
 from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.geo_metadata import raw_geo_of_file
 from geoparquet_io.core.geometry_detection import (
     GeometryRead,
-    find_primary_geometry_column,
+    primary_geometry_column,
     resolve_geometry_read,
 )
 from geoparquet_io.core.logging_config import debug, error, info, progress, success, warn
-from geoparquet_io.core.parquet_schema import root_schema_columns, schema_direct_children
+from geoparquet_io.core.parquet_schema import (
+    root_schema_columns,
+    root_schema_index,
+    schema_direct_children,
+)
 from geoparquet_io.core.remote import needs_httpfs
 
 #: Rows compared when the caller does not say otherwise.
@@ -195,7 +204,7 @@ def _empty_report(skip_reason, bbox_column=None, geometry_column=None) -> dict:
         "skip_reason": skip_reason,
         "bbox_column_name": bbox_column,
         "geometry_column": geometry_column,
-        "edges": "planar",
+        "edges": PLANAR,
         "total_rows": 0,
         "checked_rows": 0,
         "sampled": False,
@@ -228,11 +237,11 @@ def _could_not_compare(reason, bbox_column, geometry_column) -> dict:
 
 def _bbox_field_types(schema_info, bbox_column: str) -> set[str]:
     """The lower-cased types of the bbox struct's direct children."""
+    index = root_schema_index(schema_info, bbox_column)
+    if index is None:
+        return set()
     return {
-        str(child.get("type", "")).lower()
-        for index, column in enumerate(schema_info)
-        if column.get("name") == bbox_column
-        for child in schema_direct_children(schema_info, index)
+        str(child.get("type", "")).lower() for child in schema_direct_children(schema_info, index)
     }
 
 
@@ -276,7 +285,7 @@ def _x_extent_sql(wrapped: str) -> tuple[str, str]:
     """
     xs = "[ST_X(p.geom) FOR p IN ST_Dump(ST_Points(geom))]"
     wrapped_short = (
-        "list_max([CASE WHEN x >= bxmin OR x <= bxmax THEN 0 "
+        f"list_max([CASE WHEN {within_wrapped_x_sql('x', 'bxmin', 'bxmax')} THEN 0 "
         f"ELSE least(bxmin - x, x - bxmax) END FOR x IN {xs}])"
     )
     shifted = f"[CASE WHEN x <= bxmax THEN x + 360 ELSE x END FOR x IN {xs}]"
@@ -311,8 +320,7 @@ def _classified_rows(read: GeometryRead, geographic: bool) -> str:
     return f"""
         SELECT {_ROW} AS row_index, geom, bad, absent, bbox_null, bbox_nan,
                NOT (bad OR absent OR bbox_null OR bbox_nan) AS comparable,
-               {"TRUE" if geographic else "FALSE"} AND bxmin > bxmax
-                   AND bxmin <= 180 AND bxmax >= -180 AS wrapped,
+               {crosses_antimeridian_sql("bxmin", "bxmax", geographic)} AS wrapped,
                bxmin, bymin, bxmax, bymax
         FROM (
             SELECT {_ROW}, geom, bad,
@@ -562,9 +570,9 @@ def _report_notes(report: dict) -> None:
             f"   {report['wrapped_rows']:,} bbox values cross the antimeridian (xmin > xmax), "
             "read as RFC 7946 5.2 wrap-around"
         )
-    if report["edges"] != "planar":
+    if is_geodesic(edges_of(report)):
         info(
-            f"   Edges are {report['edges']}: each bbox is compared with the planar envelope "
+            f"   Edges are {edges_of(report)}: each bbox is compared with the planar envelope "
             "of its geometry's vertices, which a geodesic edge can bulge past"
         )
 
@@ -649,7 +657,7 @@ def _check(
         return _empty_report("file has no bbox column to compare")
 
     if geo_meta is None:
-        geo_meta = get_geo_metadata(parquet_file) or {}
+        geo_meta = raw_geo_of_file(parquet_file).block or {}
     schema_info = get_schema_info(parquet_file)
     field_types = _bbox_field_types(schema_info, bbox_column)
     if not field_types <= _FLOAT_FIELD_TYPES:
@@ -657,21 +665,16 @@ def _check(
             f"bbox fields are {', '.join(sorted(field_types))}, not FLOAT or DOUBLE",
             bbox_column,
         )
-    geometry_column = geo_meta.get("primary_column") or find_primary_geometry_column(
-        parquet_file, verbose
-    )
-    # Presence, not just a name: the detector falls back to the conventional
-    # name, so a file with a bbox column and no geometry at all answers
-    # "geometry" and the query would fail to bind.
+    geometry_column = primary_geometry_column(parquet_file, geo=geo_meta, verbose=verbose)
+    # Presence, not just a name: the block's primary is taken as stated, and
+    # a file whose block names a column it lacks would fail to bind.
     if not geometry_column or geometry_column not in {
         column.get("name") for column in root_schema_columns(schema_info)
     }:
         return _empty_report("file has no geometry column to compare", bbox_column)
 
     column_meta = (geo_meta.get("columns") or {}).get(geometry_column) or {}
-    geographic = is_geographic_crs(
-        extract_crs_from_parquet(parquet_file, geometry_column=geometry_column)
-    )
+    geographic = is_geographic(crs_of(parquet_file, geometry_column=geometry_column))
     raw_url = resolve_file_url(parquet_file, verbose)
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
     try:
@@ -697,7 +700,7 @@ def _check(
         return _could_not_compare(str(e), bbox_column, geometry_column)
     finally:
         con.close()
-    report["edges"] = column_meta.get("edges") or "planar"
+    state_edges(report, declared_edges(column_meta))
     return report
 
 
@@ -711,7 +714,8 @@ def _row_source(schema_info, raw_url: str) -> tuple[str, str]:
     took the name.
     """
     path = sql_path(raw_url)
-    if any(column.get("name") == _ROW_NUMBER_COLUMN for column in schema_info):
+    root_names = [column["name"] for column in root_schema_columns(schema_info)]
+    if has_column(root_names, _ROW_NUMBER_COLUMN):
         return f"read_parquet({path})", "row_number() OVER () - 1"
     return f"read_parquet({path}, file_row_number=true)", quote_identifier(_ROW_NUMBER_COLUMN)
 
@@ -743,7 +747,7 @@ def _run_comparison(
         return _could_not_compare(read.problem, bbox_column, geometry_column)
 
     source, row_expr = _row_source(schema_info, raw_url)
-    (total_rows,) = con.execute(f"SELECT count(*) FROM {source}").fetchone()
+    (total_rows,) = fetch_one(con.execute(f"SELECT count(*) FROM {source}"))
     sampled = not all_rows and total_rows > sample_rows
     # Seeded, so the same file gets the same verdict every run.
     sample_clause = (
@@ -764,7 +768,7 @@ def _run_comparison(
         debug(f"Comparing bbox '{bbox_column}' against geometry '{geometry_column}'")
         debug(query)
 
-    row = con.execute(query).fetchone()
+    row = fetch_one(con.execute(query))
     report: dict = {
         **_empty_report(None, bbox_column, geometry_column),
         "checked": True,

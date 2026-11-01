@@ -6,6 +6,7 @@ from unittest import mock
 import duckdb
 import pytest
 
+from geoparquet_io.core import duckdb_utils
 from geoparquet_io.core.duckdb_utils import (
     SPATIAL_JOIN_BBOX_PREFILTER,
     SPATIAL_JOIN_NATIVE,
@@ -17,6 +18,7 @@ from geoparquet_io.core.duckdb_utils import (
     _install_and_load_extension,
     _wrap_query_with_blob_conversion,
     build_spatial_join_condition,
+    fetch_one,
     get_duckdb_connection,
     get_duckdb_connection_for_s3,
     load_community_extension,
@@ -198,14 +200,14 @@ class TestGetDuckdbConnection:
         """Basic connection can be created."""
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         assert con is not None
-        result = con.execute("SELECT 1").fetchone()
+        result = fetch_one(con.execute("SELECT 1"))
         assert result == (1,)
         con.close()
 
     def test_thread_limit(self):
         """Connection respects thread limit."""
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False, threads=1)
-        assert con is not None
+        assert fetch_one(con.execute("SELECT current_setting('threads')")) == (1,)
         con.close()
 
     def test_temp_directory_is_set(self, tmp_path):
@@ -213,7 +215,7 @@ class TestGetDuckdbConnection:
         spill = str(tmp_path / "spill")
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False, temp_directory=spill)
         try:
-            value = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+            value = fetch_one(con.execute("SELECT current_setting('temp_directory')"))[0]
             assert value == spill
         finally:
             con.close()
@@ -222,7 +224,7 @@ class TestGetDuckdbConnection:
         """memory_limit is applied when provided."""
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False, memory_limit="2GB")
         try:
-            value = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+            value = fetch_one(con.execute("SELECT current_setting('memory_limit')"))[0]
             # DuckDB normalises the units (e.g. "2.0 GiB"); just assert it changed.
             assert "GiB" in value or "GB" in value
         finally:
@@ -232,16 +234,19 @@ class TestGetDuckdbConnection:
         """No caller named one, so gpio picks one (see tests/test_spill_strategy.py).
 
         DuckDB's own default is the relative path ".tmp", which puts every spill
-        under the working directory. Nothing is created unless a query actually
-        spills, so small inputs behave exactly as before.
+        under the working directory. POSIX creates a locked ownership marker
+        before the first spill; Windows retains lazy directory creation.
         """
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         try:
-            value = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+            value = fetch_one(con.execute("SELECT current_setting('temp_directory')"))[0]
             assert value != ".tmp"
             assert os.path.isabs(value)
-            assert not os.path.exists(value)
-            assert con.execute("SELECT 1").fetchone() == (1,)
+            if os.name == "nt":
+                assert not os.path.exists(value)
+            else:
+                assert os.path.isfile(os.path.join(value, ".gpio-owner.lock"))
+            assert fetch_one(con.execute("SELECT 1")) == (1,)
         finally:
             con.close()
 
@@ -419,13 +424,13 @@ class TestGetDuckdbConnectionS3Config:
             s3_endpoint="data.source.coop",
             s3_use_ssl=True,
         )
-        result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
         assert result[0] == "data.source.coop"
 
-        result = con.execute("SELECT current_setting('s3_url_style')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_url_style')"))
         assert result[0] == "path"
 
-        result = con.execute("SELECT current_setting('s3_use_ssl')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_use_ssl')"))
         assert result[0] is True
         con.close()
 
@@ -436,7 +441,7 @@ class TestGetDuckdbConnectionS3Config:
             load_httpfs=True,
             s3_region="eu-west-1",
         )
-        result = con.execute("SELECT current_setting('s3_region')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_region')"))
         assert result[0] == "eu-west-1"
         con.close()
 
@@ -448,14 +453,14 @@ class TestGetDuckdbConnectionS3Config:
             s3_endpoint="minio.local:9000",
             s3_use_ssl=False,
         )
-        result = con.execute("SELECT current_setting('s3_use_ssl')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_use_ssl')"))
         assert result[0] is False
         con.close()
 
     def test_no_s3_params_no_set_statements(self):
         """Without S3 params, no custom SET statements are emitted."""
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
-        result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
         assert not result[0]
         con.close()
 
@@ -466,7 +471,7 @@ class TestGetDuckdbConnectionS3Config:
             load_spatial=False,
             s3_endpoint="data.source.coop",
         )
-        result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
         assert result[0] == "data.source.coop"
         con.close()
 
@@ -478,7 +483,7 @@ class TestAmbientS3Config:
         """get_duckdb_connection() reads ambient config when no explicit kwargs."""
         with s3_config_scope({"s3_endpoint": "ambient.example.com", "s3_use_ssl": True}):
             con = get_duckdb_connection(load_spatial=False, load_httpfs=True)
-            result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+            result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
             assert result[0] == "ambient.example.com"
             con.close()
 
@@ -490,7 +495,7 @@ class TestAmbientS3Config:
                 load_httpfs=True,
                 s3_endpoint="explicit.example.com",
             )
-            result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+            result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
             assert result[0] == "explicit.example.com"
             con.close()
 
@@ -499,7 +504,7 @@ class TestAmbientS3Config:
         with s3_config_scope({"s3_endpoint": "scoped.example.com"}):
             pass
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
-        result = con.execute("SELECT current_setting('s3_endpoint')").fetchone()
+        result = fetch_one(con.execute("SELECT current_setting('s3_endpoint')"))
         assert not result[0]
         con.close()
 
@@ -507,7 +512,7 @@ class TestAmbientS3Config:
         """Ambient s3_region is picked up by get_duckdb_connection()."""
         with s3_config_scope({"s3_region": "eu-west-1"}):
             con = get_duckdb_connection(load_spatial=False, load_httpfs=True)
-            result = con.execute("SELECT current_setting('s3_region')").fetchone()
+            result = fetch_one(con.execute("SELECT current_setting('s3_region')"))
             assert result[0] == "eu-west-1"
             con.close()
 
@@ -779,6 +784,202 @@ class TestWrapQueryWithBlobConversion:
         assert wrapped.count("ST_AsWKB") == 1
 
 
+class _RecordingConnection:
+    """A fake DuckDB connection that records statements; LOADs can be failed."""
+
+    def __init__(self, fail_loads: int = 0):
+        self.statements: list[str] = []
+        self._fail_loads = fail_loads
+
+    def execute(self, sql):
+        self.statements.append(sql)
+        if sql.upper().startswith("LOAD") and self._fail_loads > 0:
+            self._fail_loads -= 1
+            raise duckdb.IOException(f'Extension "a5" not found (simulated, for: {sql})')
+
+    def close(self):
+        self.statements.append("<closed>")
+
+
+class TestQueryFarmExtensionInstall:
+    """a5 for DuckDB 2.0+ installs from the Query.Farm repository (#1347).
+
+    The community registry's a5 build for DuckDB 2.0 is a stub whose init
+    refuses and points at Query.Farm, so on 2.0 ``load_community_extension``
+    installs a5 from ``https://duckdb-extensions.query.farm`` instead.
+    ``allow_extension_repositories`` is a one-way latch per database instance
+    (undecided -> allowed -> forbidden, never back), so the INSTALL runs on a
+    throwaway connection; ``LOAD a5 FROM query_farm`` on the caller's
+    connection reads the installed file and needs no setting at all.
+    """
+
+    def _on_duckdb(self, monkeypatch, version: str) -> None:
+        # The routing reads the owner (duckdb_capabilities), not duckdb.__version__.
+        caps = duckdb_utils._capabilities_for(version)
+        monkeypatch.setattr(duckdb_utils, "duckdb_capabilities", lambda: caps)
+
+    def test_a5_loads_from_query_farm_on_duckdb_2(self, monkeypatch):
+        """On 2.0 the community INSTALL (a stub) is never attempted for a5."""
+        self._on_duckdb(monkeypatch, "2.0.0")
+        installs: list[str] = []
+        monkeypatch.setattr(duckdb_utils, "_install_from_query_farm", installs.append)
+        con = _RecordingConnection()
+
+        load_community_extension(con, "a5")
+
+        assert con.statements == ["LOAD a5 FROM query_farm;"]
+        # Already installed (the LOAD succeeded), so no install round-trip.
+        assert installs == []
+
+    def test_a5_installs_from_query_farm_when_not_cached(self, monkeypatch):
+        """The first LOAD fails (nothing installed yet): install, then load."""
+        self._on_duckdb(monkeypatch, "2.0.0")
+        installs: list[str] = []
+        monkeypatch.setattr(duckdb_utils, "_install_from_query_farm", installs.append)
+        con = _RecordingConnection(fail_loads=1)
+
+        load_community_extension(con, "a5")
+
+        assert installs == ["a5"]
+        assert con.statements == ["LOAD a5 FROM query_farm;", "LOAD a5 FROM query_farm;"]
+
+    def test_a5_keeps_the_community_install_on_duckdb_1(self, monkeypatch):
+        """DuckDB 1.5 publishes a real a5 build from community; nothing changes."""
+        self._on_duckdb(monkeypatch, "1.5.6")
+        con = _RecordingConnection()
+
+        load_community_extension(con, "a5")
+
+        assert con.statements == ["INSTALL a5 FROM community;", "LOAD a5;"]
+
+    def test_other_extensions_keep_the_community_install_on_duckdb_2(self, monkeypatch):
+        """Only a5 moved; h3 stays a community install on 2.0."""
+        self._on_duckdb(monkeypatch, "2.0.0")
+        con = _RecordingConnection()
+
+        load_community_extension(con, "h3")
+
+        assert con.statements == ["INSTALL h3 FROM community;", "LOAD h3;"]
+
+    def test_install_runs_on_a_throwaway_connection(self, monkeypatch):
+        """The one-way allow_extension_repositories latch never touches the caller.
+
+        The repository flow also must not weaken extension signing: the
+        connect() call takes no arguments (so no config such as
+        allow_unsigned_extensions sneaks in) and no statement enables
+        allow_unsigned_extensions (the Query.Farm build is signed; a 'LOAD'
+        without that flag proves it stays so). FORCE INSTALL, not INSTALL:
+        plain INSTALL short-circuits on an existing file, so only FORCE lets
+        the load-failure retry actually repair a stale or corrupt cache.
+        """
+        throwaway = _RecordingConnection()
+        connect_calls: list[tuple[tuple, dict]] = []
+
+        def fake_connect(*args, **kwargs):
+            connect_calls.append((args, kwargs))
+            return throwaway
+
+        monkeypatch.setattr(duckdb, "connect", fake_connect)
+
+        duckdb_utils._install_from_query_farm("a5")
+
+        assert connect_calls == [((), {})]
+        assert throwaway.statements == [
+            "SET allow_extension_repositories = 'allowed';",
+            "CREATE EXTENSION REPOSITORY IF NOT EXISTS query_farm "
+            "WITH PREFIX 'https://duckdb-extensions.query.farm';",
+            "FORCE INSTALL a5 FROM query_farm;",
+            "<closed>",
+        ]
+        assert not any("unsigned" in sql.lower() for sql in throwaway.statements)
+
+    def test_throwaway_connection_is_closed_on_failure(self, monkeypatch):
+        """An install failure must not leak the throwaway connection."""
+
+        class _FailingConnection(_RecordingConnection):
+            def execute(self, sql):
+                super().execute(sql)
+                if "INSTALL" in sql.upper():
+                    raise duckdb.IOException("simulated download failure")
+
+        throwaway = _FailingConnection()
+        monkeypatch.setattr(duckdb, "connect", lambda *a, **k: throwaway)
+
+        with pytest.raises(duckdb.Error):
+            duckdb_utils._install_from_query_farm("a5")
+
+        assert throwaway.statements[-1] == "<closed>"
+
+    def test_query_farm_failure_names_the_repository(self, monkeypatch):
+        """A failed Query.Farm install says which registry failed, not community."""
+        self._on_duckdb(monkeypatch, "2.0.0")
+
+        def failing_install(name):
+            raise duckdb.IOException(
+                f'HTTP Error: Failed to download extension "{name}" at URL '
+                f'"https://duckdb-extensions.query.farm/v2.0.0/linux_amd64/'
+                f'{name}.duckdb_extension.gz" (HTTP 404)'
+            )
+
+        monkeypatch.setattr(duckdb_utils, "_install_from_query_farm", failing_install)
+        con = _RecordingConnection(fail_loads=2)
+
+        with pytest.raises(ExtensionUnavailableError) as exc_info:
+            load_community_extension(con, "a5", feature="gpio add a5")
+
+        message = str(exc_info.value)
+        assert "Query.Farm" in message
+        assert "https://duckdb-extensions.query.farm" in message
+        assert "gpio add a5" in message
+        # The 404 came from the registry, so it classifies as unpublished.
+        assert exc_info.value.unpublished
+
+    def test_query_farm_offline_failure_names_the_query_farm_host(self, monkeypatch):
+        """A cold offline start points at Query.Farm, not the community host.
+
+        With no persisted query_farm registration, DuckDB 2.0 offline fails
+        the repository-metadata fetch ("Failed to read the metadata file of
+        the extension repository ... Could not resolve hostname") -- no 404,
+        so the error takes the reachability branch, which must name the host
+        this install actually talks to.
+        """
+        self._on_duckdb(monkeypatch, "2.0.0")
+
+        def failing_install(name):
+            raise duckdb.IOException(
+                "IO Error: Failed to read the metadata file of the extension "
+                'repository "https://duckdb-extensions.query.farm": Could not '
+                'resolve hostname "duckdb-extensions.query.farm"'
+            )
+
+        monkeypatch.setattr(duckdb_utils, "_install_from_query_farm", failing_install)
+        con = _RecordingConnection(fail_loads=2)
+
+        with pytest.raises(ExtensionUnavailableError) as exc_info:
+            load_community_extension(con, "a5", feature="gpio add a5")
+
+        assert not exc_info.value.unpublished
+        message = str(exc_info.value)
+        assert "check that https://duckdb-extensions.query.farm is reachable" in message
+        assert "community-extensions.duckdb.org is reachable" not in message
+
+    def test_telemetry_opt_out_is_set_before_the_query_farm_load(self, monkeypatch):
+        """The Query.Farm a5 build reads the opt-out while LOAD initialises (#779)."""
+        self._on_duckdb(monkeypatch, "2.0.0")
+        monkeypatch.delenv("QUERY_FARM_TELEMETRY_OPT_OUT", raising=False)
+        seen: list[tuple[str, str | None]] = []
+
+        class _EnvRecordingConnection:
+            def execute(self, sql):
+                seen.append((sql, os.environ.get("QUERY_FARM_TELEMETRY_OPT_OUT")))
+
+        load_community_extension(_EnvRecordingConnection(), "a5")
+
+        load_sql = [entry for entry in seen if entry[0].upper().startswith("LOAD")]
+        assert load_sql, "expected a LOAD statement"
+        assert all(value is not None for _, value in load_sql)
+
+
 class TestCommunityExtensionTelemetry:
     """The a5 community extension phones home on LOAD from a detached thread.
 
@@ -826,19 +1027,31 @@ class TestNoCommunityExtensionBypass:
     # express.
     ALLOWED = {"duckdb_utils.py", "exceptions.py", "extract_bigquery.py"}
 
+    #: A direct install/load from either registry bypasses the telemetry
+    #: opt-out: "FROM community" (the community registry) and "FROM
+    #: query_farm" (the Query.Farm repository a5 uses on DuckDB 2.0+, #1347).
+    BYPASS_PATTERNS = ("FROM community", "FROM query_farm")
+
     def test_no_module_installs_a_community_extension_directly(self):
         from pathlib import Path
 
         package = Path(__file__).parent.parent / "geoparquet_io"
         offenders = [
-            path.relative_to(package.parent)
+            path.relative_to(package.parent).as_posix()
             for path in package.rglob("*.py")
             # encoding pinned: the default is cp1252 on Windows, and the
             # sources carry em dashes.
             if path.name not in self.ALLOWED
-            and "FROM community" in path.read_text(encoding="utf-8")
+            and any(pattern in path.read_text(encoding="utf-8") for pattern in self.BYPASS_PATTERNS)
         ]
         assert not offenders, (
             "these modules install a community extension directly instead of "
             f"calling load_community_extension(): {offenders}"
         )
+
+
+def test_integer_predicate_includes_huge_integers():
+    from geoparquet_io.core.duckdb_utils import duckdb_type_is_integer
+
+    assert duckdb_type_is_integer("HUGEINT")
+    assert duckdb_type_is_integer(" uhugeint ")

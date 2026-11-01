@@ -6,14 +6,16 @@ with appropriate extensions loaded for GeoParquet operations.
 
 ``import duckdb`` is deferred into the functions that touch it (#1307): the
 embeddable core modules (see docs/guide/embedding.md) import this module for
-``quote_identifier``/``_escape_sql_string``/``sql_path``-style helpers, and a
+``quote_identifier``/``sql_literal``/``sql_path``-style helpers, and a
 host application without DuckDB installed must be able to import them and fail
 only when a connection is actually asked for.
 """
 
 from __future__ import annotations
 
+import atexit
 import datetime
+import errno
 import functools
 import inspect
 import itertools
@@ -24,18 +26,29 @@ import shutil
 import tempfile
 import threading
 import uuid
+import weakref
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, TypeVar
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, BinaryIO, TypeVar
 
 if TYPE_CHECKING:
     import duckdb
+    import pyarrow as pa
 
+from geoparquet_io.core.edges import (
+    PLANAR,
+    geoarrow_edge_type,
+    geoarrow_type_edges,
+    is_geodesic,
+    without_edges,
+)
 from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationError
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.remote import is_s3_url, needs_httpfs
+from geoparquet_io.core.sizing import nudged_size
 
 # Per-bucket cache for S3 buckets that require authentication
 # Buckets not in this set are accessed without credentials (works for public buckets)
@@ -68,7 +81,7 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 
 
 def uses_aws_profile(func: _F) -> _F:
-    """Run ``func`` with its ``profile`` argument as the ambient AWS profile.
+    """Run ``func`` with its ``profile`` (or ``write.profile``) as the ambient AWS profile.
 
     The profile goes into :func:`s3_config_scope`, which DuckDB's
     ``credential_chain`` secret and the obstore store read explicitly. Nothing is
@@ -84,13 +97,15 @@ def uses_aws_profile(func: _F) -> _F:
     (``contextvars.copy_context().run``) if a worker opens an S3 connection.
     """
     signature = inspect.signature(func)
-    if "profile" not in signature.parameters:
-        raise TypeError(f"{func.__qualname__} has no 'profile' parameter")
+    if "profile" not in signature.parameters and "write" not in signature.parameters:
+        raise TypeError(f"{func.__qualname__} has no 'profile' or 'write' parameter")
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         arguments = signature.bind_partial(*args, **kwargs).arguments
-        profile = arguments.get("profile")
+        # A driver that takes the write options (parquet_writer.WriteOptions)
+        # carries the profile there instead of in a parameter of its own.
+        profile = arguments.get("profile") or getattr(arguments.get("write"), "profile", None)
         if not profile or not _any_s3_url(arguments.values()):
             return func(*args, **kwargs)
         with s3_config_scope({"profile": profile, "profile_from_env": False}):
@@ -161,15 +176,15 @@ def _s3_secret_sql(settings: Mapping[str, Any]) -> str:
     profile = settings.get("profile")
     if profile:
         params.append(f"CHAIN '{_NAMED_PROFILE_CHAIN}'")
-        params.append(f"PROFILE '{_escape_sql_string(profile)}'")
+        params.append(f"PROFILE {sql_literal(profile)}")
     endpoint = settings.get("endpoint")
     if endpoint:
-        params.append(f"ENDPOINT '{_escape_sql_string(endpoint)}'")
+        params.append(f"ENDPOINT {sql_literal(endpoint)}")
         params.append("URL_STYLE 'path'")
         params.append(f"USE_SSL {'false' if settings.get('use_ssl') is False else 'true'}")
     region = settings.get("region")
     if region:
-        params.append(f"REGION '{_escape_sql_string(region)}'")
+        params.append(f"REGION {sql_literal(region)}")
     body = ",\n    ".join(params)
     return f"CREATE OR REPLACE SECRET (\n    {body}\n);"
 
@@ -196,14 +211,14 @@ def _apply_s3_settings(con, settings: Mapping[str, Any]) -> None:
     """``SET`` the resolved endpoint and region for reads that use no secret."""
     endpoint = settings.get("endpoint")
     if endpoint:
-        con.execute(f"SET s3_endpoint='{_escape_sql_string(endpoint)}';")
+        con.execute(f"SET s3_endpoint={sql_literal(endpoint)};")
         con.execute("SET s3_url_style='path';")
         ssl_value = "false" if settings.get("use_ssl") is False else "true"
         con.execute(f"SET s3_use_ssl={ssl_value};")
 
     region = settings.get("region")
     if region:
-        con.execute(f"SET s3_region='{_escape_sql_string(region)}';")
+        con.execute(f"SET s3_region={sql_literal(region)};")
 
 
 def get_active_s3_config() -> dict:
@@ -226,10 +241,10 @@ def _extract_bucket_name(path: str) -> str:
 
 def _needs_s3_auth(exception: Exception) -> bool:
     """Detect if exception indicates S3 bucket requires authentication."""
-    error_str = str(exception).lower()
-    # 403 without credentials means we need to authenticate
-    auth_indicators = ["403", "forbidden", "access denied", "unauthorized"]
-    return any(ind in error_str for ind in auth_indicators)
+    from geoparquet_io.core.exceptions import classify_failure, is_auth_status
+
+    # 401/403 without credentials means we need to authenticate
+    return is_auth_status(classify_failure(exception).status)
 
 
 def _add_bucket_needing_auth(bucket: str) -> None:
@@ -267,42 +282,43 @@ def _escape_sql_string(value: str) -> str:
     return value.replace("'", "''")
 
 
+def _require_str(value: object) -> str:
+    """``value`` unchanged if it is a ``str``; a ``TypeError`` otherwise.
+
+    For the literal builders whose input must already be text: ``sql_literal``
+    renders anything through ``str()``, which would turn a ``bytes`` payload
+    into the characters ``b'...'`` instead of failing.
+    """
+    if not isinstance(value, str):
+        raise TypeError(f"expected str, got {type(value).__name__}")
+    return value
+
+
+def sql_literal(value: object) -> str:
+    """Render a Python value as a DuckDB SQL literal -- the one value-literal builder.
+
+    - ``bool`` -> ``TRUE``/``FALSE``; ``int`` -> its digits.
+    - ``float`` -> an explicit DOUBLE: a bare ``0.699999988079071`` is typed
+      DECIMAL by DuckDB and never equals the REAL column it came from, and
+      ``nan``/``inf`` need the cast to be literals at all.
+    - anything else -> ``str(value)`` as a single-quoted string, escaped by
+      :func:`_escape_sql_string`. A NUL byte is spliced in as ``chr(0)``:
+      DuckDB 1.5's lexer ends a quoted string at a NUL ("unterminated quoted
+      string"), while 2.0 accepts it; the splice reads the same on both.
+    """
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return f"CAST('{value!r}' AS DOUBLE)"
+    text = _escape_sql_string(str(value))
+    if "\x00" in text:
+        return " || chr(0) || ".join(f"'{piece}'" for piece in text.split("\x00"))
+    return f"'{text}'"
+
+
 _SETTING_KEY_RE = re.compile(r"[a-z_]+")
-# A size as current_setting() displays it: "2.7 GiB", "953.6 MiB".
-_DISPLAYED_SIZE_RE = re.compile(r"^(\d+)\.(\d+) ([KMGT]iB)$")
-
-
-def _nudged_size(displayed: str) -> str | None:
-    """A size that DuckDB displays back as ``displayed``; None if it is not a size.
-
-    ``current_setting`` truncates a size to one decimal, so writing the display
-    string back lands a step low ("2.7 GiB" reads back "2.6 GiB") and a loop of
-    save/restore drifts down. Half a displayed step up reads back unchanged.
-    """
-    match = _DISPLAYED_SIZE_RE.match(displayed)
-    if not match:
-        return None
-    whole, frac, unit = match.groups()
-    return f"{whole}.{frac}5{unit}"
-
-
-def _displayed_size_max(displayed: str) -> str | None:
-    """The largest size DuckDB would display as ``displayed``; None if it is not a size.
-
-    The same truncation seen from the other side: "7.4 GiB" is any size from
-    7.4 GiB up to 7.5 GiB, so a *comparison* against a number gpio itself set has
-    to use the top of that range. Against the bottom, the 8.0GB limit gpio puts
-    on a connection reads back as 7.4 GiB = 7.95e9 bytes and looks like a
-    stricter limit somebody else chose. :func:`_nudged_size` takes the middle of
-    the range instead, because a restore has to read back unchanged rather than
-    err high.
-    """
-    match = _DISPLAYED_SIZE_RE.match(displayed)
-    if not match:
-        return None
-    whole, frac, unit = match.groups()
-    step = 10 ** -len(frac)
-    return f"{float(f'{whole}.{frac}') + step:.{len(frac)}f}{unit}"
 
 
 def restore_duckdb_settings(
@@ -329,7 +345,7 @@ def restore_duckdb_settings(
             if _current_setting(con, key) == value:
                 continue
             con.execute(f"RESET {key}")
-            nudged = _nudged_size(value) if isinstance(value, str) else None
+            nudged = nudged_size(value) if isinstance(value, str) else None
             if _current_setting(con, key) != value and nudged:
                 _set_setting(con, key, nudged)
         except duckdb.Error as e:  # pragma: no cover - defensive
@@ -395,15 +411,167 @@ def disable_geoparquet_conversion(con: duckdb.DuckDBPyConnection) -> None:
     con.execute("SET enable_geoparquet_conversion = false")
 
 
+_VERSION_PARTS = re.compile(r"v?(\d+)(?:\.(\d+))?")
+
+
+def _parse_duckdb_version(version: str) -> tuple[int | None, int | None]:
+    """``(major, minor)`` from a DuckDB version string, ``None`` where unreadable.
+
+    Accepts ``"2.0.0"``, ``"2"``, ``"2.0.0-dev123"`` and ``"v2.0.0"``; anything
+    that does not start with a number (``"unknown"``, ``""``) is ``(None, None)``.
+    """
+    match = _VERSION_PARTS.match(version.strip()) if isinstance(version, str) else None
+    if match is None:
+        return None, None
+    major, minor = match.groups()
+    return int(major), (int(minor) if minor is not None else None)
+
+
+@dataclass(frozen=True)
+class DuckDBCapabilities:
+    """What the installed DuckDB can do, where 1.5 and 2.0 differ.
+
+    Built once by :func:`duckdb_capabilities`; every version-dependent branch
+    in gpio reads a field here instead of ``duckdb.__version__`` (#1367). An
+    unreadable version leaves ``major``/``minor`` ``None`` and every 2.0
+    feature ``False``: the 1.5 code paths are the conservative ones.
+
+    Attributes:
+        version: ``duckdb.__version__`` as installed (reported in
+            :class:`ExtensionUnavailableError` and the benchmark environment
+            block, ``core/benchmark.py:get_environment_info``).
+        major, minor: Parsed from ``version``; ``None`` when not numeric.
+        is_v2: ``major >= 2``.
+        core_geometry: DuckDB's core ships GEOMETRY and the serialize /
+            deserialize functions, so read-only inspect paths skip the spatial
+            extension (``get_duckdb_connection(load_spatial=None)``,
+            ``inspect_utils`` previews, #1353).
+        native_geojson_writer: ``COPY ... (FORMAT GEOJSON)`` exists
+            (the native fast path in ``geojson_stream``, #1349).
+        a5_from_query_farm: the community ``a5`` is a stub that points at the
+            Query.Farm repository, which publishes the real build for 2.0+
+            (#1360 routes ``load_community_extension`` there).
+            Read by ``_installs_from_query_farm``.
+    """
+
+    version: str
+    major: int | None
+    minor: int | None
+    is_v2: bool
+    core_geometry: bool
+    native_geojson_writer: bool
+    a5_from_query_farm: bool
+
+
+def _capabilities_for(version: str) -> DuckDBCapabilities:
+    """The capabilities a given version string implies (pure; no DuckDB call)."""
+    major, minor = _parse_duckdb_version(version)
+    is_v2 = major is not None and major >= 2
+    return DuckDBCapabilities(
+        version=version,
+        major=major,
+        minor=minor,
+        is_v2=is_v2,
+        core_geometry=is_v2,
+        native_geojson_writer=is_v2,
+        a5_from_query_farm=is_v2,
+    )
+
+
+@functools.cache
+def duckdb_capabilities() -> DuckDBCapabilities:
+    """The installed DuckDB's :class:`DuckDBCapabilities`, computed once per process.
+
+    The one reader of ``duckdb.__version__`` in gpio (``tests/
+    test_duckdb_capabilities.py`` fails on any other). Test hook: a test uses
+    ``pretend_duckdb_capabilities`` / ``pretend_duckdb_version`` from
+    ``tests/test_duckdb_capabilities.py``, which patch ``_capabilities_for`` and
+    call ``duckdb_capabilities.cache_clear()`` around the patch; it never
+    patches ``duckdb.__version__``.
+    """
+    import duckdb
+
+    return _capabilities_for(str(duckdb.__version__))
+
+
+def complete_without_fetch(result) -> None:
+    """Close an open ``execute()`` result without fetching a row from it.
+
+    On DuckDB 2.0 a result stays open until a fetch returns no rows, blocking
+    ``sql()``/``register()`` on the connection; ``complete()`` runs the rest
+    of the statement to completion (keeping a write's effect, unlike
+    ``abort()``) and discards the rows unconverted, so a probe whose rows
+    cannot be fetched (a GEOMETRY that fails to serialize on 1.5+) still
+    leaves nothing open. DuckDB 1.5 has no such method and needs none: the
+    next statement replaces the result there.
+
+    Decided per object, and this is the only place that asks: :func:`fetch_one`
+    (the result API guard's required spelling for a one-row read) is also
+    handed ``sqlite3`` cursors -- GeoPackage metadata in ``format_writers`` --
+    which have no ``complete()`` on any DuckDB, so a client-wide answer would
+    make every such read raise on 2.0. (A ``result_complete`` capability field
+    was tried and removed for exactly that reason.)
+    """
+    complete = getattr(result, "complete", None)
+    if complete is not None:
+        complete()
+
+
+def resolve_load_spatial(load_spatial: bool | None) -> bool:
+    """Whether a connection opened with ``load_spatial`` gets the spatial extension.
+
+    ``None`` is the auto mode: spatial only where DuckDB's own core lacks
+    GEOMETRY (``core_geometry``, #1353). :func:`get_duckdb_connection` decides
+    through this, and a caller that has to know what its auto-mode connection
+    carries resolves it here once and opens with the answer.
+    """
+    if load_spatial is None:
+        return not duckdb_capabilities().core_geometry
+    return load_spatial
+
+
+def fetch_one(result):
+    """``result.fetchone()`` for an ``execute()`` result, leaving nothing open.
+
+    On DuckDB 2.0 a result stays open until a fetch returns no rows, and while
+    it is open ``sql()``, ``register()``, ``create_function()`` and any
+    relation read on the connection raise ``ResourceInUseException``. A single
+    ``fetchone()`` on a one-row query (a count, a ``LIMIT 1``, a setting) gets
+    its row and never sees the end, so it leaves exactly that open result.
+
+    After a row comes back, the rest is run to completion with ``complete()``,
+    not cancelled with ``abort()``: ``abort()`` fails an open transaction when
+    the statement may write, and a ``COPY`` or ``INSERT ... RETURNING`` read
+    for its first row must keep its effect. DuckDB 1.5 has neither method
+    (the next statement replaced the result there), so nothing is called.
+    """
+    row = result.fetchone()
+    if row is not None:
+        complete_without_fetch(result)
+    return row
+
+
 def _current_setting(con: duckdb.DuckDBPyConnection, key: str) -> object:
-    return con.execute(f"SELECT current_setting('{key}')").fetchone()[0]
+    return fetch_one(con.execute(f"SELECT current_setting('{key}')"))[0]
 
 
 def _set_setting(con: duckdb.DuckDBPyConnection, key: str, value: object) -> None:
     if isinstance(value, str):
-        con.execute(f"SET {key} = '{_escape_sql_string(value)}'")
+        con.execute(f"SET {key} = {sql_literal(value)}")
     else:
         con.execute(f"SET {key} = {value}")
+
+
+def pin_duckdb_settings(con: duckdb.DuckDBPyConnection, settings: Mapping[str, int | bool]) -> None:
+    """SET settings a write needs for its duration; the caller restores them.
+
+    The pair of :func:`restore_duckdb_settings`: ``settings`` keys are names from
+    gpio's own code, never user input.
+    """
+    for key, value in settings.items():
+        if not _SETTING_KEY_RE.fullmatch(key):
+            raise ValueError(f"Not a DuckDB setting name: {key!r}")
+        _set_setting(con, key, str(value).lower() if isinstance(value, bool) else int(value))
 
 
 def sql_path(path: str | os.PathLike[str]) -> str:
@@ -418,17 +586,22 @@ def sql_path(path: str | os.PathLike[str]) -> str:
     it had already written the file (issue #718).
 
     The argument must be **RAW**: the path as the user typed it, or as
-    :func:`~geoparquet_io.core.file_utils.resolve_file_url` resolved it. It must
-    NOT be a :func:`~geoparquet_io.core.file_utils.safe_file_url` result, which
-    is already escaped; escaping is not idempotent, so a second pass doubles the
-    doubling. No guard can catch that automatically -- a filename may legally
-    contain two apostrophes in a row -- so the rule is structural: a path is
-    escaped exactly once, either by ``safe_file_url`` (which also resolves
-    remote URLs and checks existence, and whose bare result the caller quotes)
-    or by ``sql_path``, never by both.
+    :func:`~geoparquet_io.core.file_utils.resolve_file_url` resolved it -- never
+    an already-escaped value; escaping is not idempotent, so a second pass
+    doubles the doubling. No guard can catch that automatically -- a filename
+    may legally contain two apostrophes in a row -- so the rule is structural: a
+    path is escaped exactly once, here, and the result is used whole. Slicing
+    the quotes off it (``sql_path(p)[1:-1]``) to quote it again by hand is the
+    shape the ``sql_escape_hand_quote`` guard refuses: with a NUL byte the
+    literal is ``'a' || chr(0) || 'b'``, not one quoted span.
 
-    For a non-path SQL string literal use :func:`_escape_sql_string` and supply
-    your own quotes; for an identifier use :func:`quote_identifier`.
+    For a non-path SQL value use :func:`sql_literal`, which supplies the quotes
+    too; for an identifier use :func:`quote_identifier`. A path is a string
+    literal like any other, so this is ``sql_literal`` on its ``fspath``.
+
+    The bare escape under both, ``_escape_sql_string``, is private to this
+    module: a call site that adds its own quotes around it is one that can
+    forget them, and gets no NUL handling.
 
     A ``PathLike`` is accepted as well as a ``str``: callers hold ``Path``
     objects just as often, and ``str.replace`` on a ``Path`` is the completely
@@ -441,7 +614,7 @@ def sql_path(path: str | os.PathLike[str]) -> str:
     Returns:
         The path as a quoted, escaped SQL string literal.
     """
-    return f"'{_escape_sql_string(os.fspath(path))}'"
+    return sql_literal(_require_str(os.fspath(path)))
 
 
 def build_kv_metadata_clause(pairs: Mapping[str, str] | None) -> str | None:
@@ -462,44 +635,10 @@ def build_kv_metadata_clause(pairs: Mapping[str, str] | None) -> str | None:
     if not pairs:
         return None
     body = ", ".join(
-        f"'{_escape_sql_string(key)}': '{_escape_sql_string(value)}'"
+        f"{sql_literal(_require_str(key))}: {sql_literal(_require_str(value))}"
         for key, value in pairs.items()
     )
     return f"KV_METADATA {{{body}}}"
-
-
-def validate_compression_level(value: int) -> int:
-    """Validate a compression level before interpolating it into SQL.
-
-    ``COMPRESSION_LEVEL`` takes no parameter binding, so the value is formatted
-    straight into the ``COPY … (…)`` option list. The CLI constrains it with
-    ``click.IntRange(1, 22)``, but ``write_parquet_with_metadata`` and the write
-    strategies are public entry points that a Python caller reaches directly,
-    where nothing has checked it. DuckDB's ``execute`` runs multi-statement
-    strings, so an unvalidated value is an injection surface as well as a
-    confusing error.
-
-    ``bool`` is rejected explicitly: it is an ``int`` subclass, and
-    ``COMPRESSION_LEVEL True`` is not something a caller meant.
-
-    Args:
-        value: Candidate ZSTD compression level.
-
-    Returns:
-        The level as an ``int``.
-
-    Raises:
-        ValueError: If the value is not an integer in DuckDB's 1-22 range.
-    """
-    if isinstance(value, bool) or not isinstance(value, int):
-        raise ValueError(
-            f"Invalid compression_level {value!r}; expected an integer between 1 and 22."
-        )
-    if not 1 <= value <= 22:
-        raise ValueError(
-            f"Invalid compression_level {value}; expected an integer between 1 and 22."
-        )
-    return value
 
 
 def quote_identifier(name: str) -> str:
@@ -511,13 +650,13 @@ def quote_identifier(name: str) -> str:
     or uppercase letters that need to be preserved.
 
     The input must be a **bare** identifier, exactly as it appears in the file's
-    schema (e.g. from ``find_primary_geometry_column`` or ``table.column_names``).
+    schema (e.g. from ``primary_geometry_column`` or ``table.column_names``).
     The function is deliberately not idempotent: quoting an already-quoted name
     yields an identifier that literally contains double quotes, so never pass it
     something already quoted.
 
     For a SQL *string literal* (e.g. ``WHERE path_in_schema = '...'``) use
-    :func:`_escape_sql_string` instead; the two escapes are not interchangeable.
+    :func:`sql_literal` instead; the two escapes are not interchangeable.
 
     Args:
         name: The identifier (column name, table name, etc.) to quote
@@ -544,38 +683,6 @@ def quote_identifier(name: str) -> str:
         )
     escaped = name.replace('"', '""')
     return f'"{escaped}"'
-
-
-def free_column_name(base: str, column_names) -> str:
-    """``base``, or ``base_1``/``base_2``/... when ``column_names`` already takes it.
-
-    A computed column aliased ``AS base`` next to ``SELECT *`` does not fail
-    when the source already has that name: DuckDB silently renames one of the
-    two (``base_1``), and everything that goes on to say ``base`` then binds to
-    the *other* column. That is how a computed bbox came to be written under a
-    name its ``covering`` did not point at (#1079), and how the geometry built
-    from a CSV's WKT column came to be the source's own VARCHAR column of that
-    name (#1176). Picking the free name up front makes the alias and every later
-    reference one variable, agreeing by construction.
-
-    The comparison is case-insensitive because DuckDB binds identifiers that
-    way: a source column ``BBOX`` takes the name ``bbox`` just as surely, even
-    though Parquet itself would keep the two apart.
-
-    Args:
-        base: The name the computed column would like
-        column_names: The names it is emitted beside
-
-    Returns:
-        ``base`` when it is free, otherwise the first free ``base_<n>``
-    """
-    taken = {str(name).lower() for name in column_names}
-    candidate = base
-    suffix = 0
-    while candidate.lower() in taken:
-        suffix += 1
-        candidate = f"{base}_{suffix}"
-    return candidate
 
 
 # SQL keywords that could be dangerous in a user-supplied WHERE clause.
@@ -725,6 +832,7 @@ def build_spatial_join_condition(
     input_alias: str = "a",
     target_alias: str = "b",
     input_geom_sql: str | None = None,
+    input_is_point: bool = False,
 ) -> str:
     """Build the ON-clause condition for a spatial join between two tables.
 
@@ -775,11 +883,37 @@ def build_spatial_join_condition(
         target_bbox_col: Optional bbox covering column on the target table.
         input_alias: SQL alias for the input table (default "a").
         target_alias: SQL alias for the target table (default "b").
+        input_geom_sql: A pre-built input-geometry expression (e.g. an
+            ``ST_Transform`` reprojecting a non-CRS84 input, #525). It replaces
+            ``input_alias.input_geom_col`` and drops the bbox pre-filter, since
+            the stored input bbox is in the source CRS.
+        input_is_point: The input geometry is one POINT per row (the join point
+            ``gpio process aggregate admin`` builds). With a target bbox, the
+            pre-filter is then point-in-bbox on that point -- comparable even
+            when the input has no bbox of its own.
 
     Returns:
         A SQL boolean expression for use directly after ``ON``.
     """
     qt_geom = quote_identifier(target_geom_col)
+
+    if input_is_point:
+        point = input_geom_sql or f"{input_alias}.{quote_identifier(input_geom_col)}"
+        intersects = f"ST_Intersects({target_alias}.{qt_geom}, {point})"
+        if not target_bbox_col:
+            return intersects
+        qt_bbox = quote_identifier(target_bbox_col)
+        return (
+            "(\n"
+            "        -- Fast point-in-bbox pre-filter (cheap; eliminates most candidate pairs)\n"
+            f"        {target_alias}.{qt_bbox}.xmin <= ST_X({point}) AND\n"
+            f"        {target_alias}.{qt_bbox}.xmax >= ST_X({point}) AND\n"
+            f"        {target_alias}.{qt_bbox}.ymin <= ST_Y({point}) AND\n"
+            f"        {target_alias}.{qt_bbox}.ymax >= ST_Y({point})\n"
+            "    )\n"
+            "    -- Precise check only runs on the bbox matches\n"
+            f"    AND {intersects}"
+        )
 
     # ``input_geom_sql`` is a pre-built input-geometry expression (e.g. wrapped in
     # ST_Transform to reproject a non-CRS84 input, #525). When supplied, the
@@ -809,6 +943,86 @@ def build_spatial_join_condition(
         "    )\n"
         "    -- Precise check only runs on the bbox matches\n"
         f"    AND {intersects}"
+    )
+
+
+# The input-row id build_spatial_join_query carries through a one-match join.
+SPATIAL_JOIN_INPUT_ROW = "__gpio_input_row"
+
+
+def build_spatial_join_query(
+    *,
+    input_relation: str,
+    target_relation: str,
+    target_select: str,
+    condition: str,
+    match_order: Sequence[str],
+    input_alias: str = "a",
+    target_alias: str = "b",
+) -> str:
+    """Build the ``SELECT`` that LEFT JOINs every input row to one target it meets.
+
+    The query keeps every input column (``<input_alias>.*``), adds
+    ``target_select`` (target-side expressions, aliased by the caller), and
+    joins ``ON condition`` -- normally :func:`build_spatial_join_condition`.
+    An input row that meets no target is kept, with NULL target columns.
+
+    Exactly one output row per input row, in input order (#543): a feature
+    that intersects two target polygons is never emitted twice. Of the
+    targets a row meets, the one kept is the first by ``match_order`` -- SQL
+    expressions over the target alias, compared in order, ascending, NULLs
+    last. That is the tiebreak, and it is deterministic: rows that tie on
+    every ``match_order`` key carry the same target values, so which of them
+    survives cannot show in the output. The admin commands pass the admin code
+    columns, so a feature in the overlap of two admin polygons goes to the
+    smaller code. It is a cheap key on purpose: an intersection-area tiebreak
+    would run ``ST_Intersection`` on every matched row, and the admin join
+    point is a POINT with no area. Caveat for polygon inputs (``add
+    admin-divisions``, ``partition admin`` join the full geometry): a polygon
+    straddling a border goes to the smaller code, not to the region holding
+    most of its area.
+
+    The dedup is spill-safe at the scale the admin commands target. Input rows
+    are numbered with ``row_number() OVER ()`` -- a streaming window, with no
+    ``PARTITION BY`` to buffer -- and the survivor is picked with ``DISTINCT
+    ON``, which DuckDB plans as a hash aggregate (it spills) followed by a sort
+    on the row number (it spills). The ``QUALIFY row_number() OVER (PARTITION
+    BY ...)`` form that #461 retired buffers every row in a window that does
+    not spill, and is not used.
+
+    Args:
+        input_relation: The input side: a table name, ``read_parquet(...)``
+            call, or parenthesised subquery.
+        target_relation: The target side, in the same forms.
+        target_select: The target-side SELECT items, e.g. ``b."country" AS c``.
+        condition: The ON condition.
+        match_order: The tiebreak keys (at least one).
+        input_alias: SQL alias for the input (default "a").
+        target_alias: SQL alias for the target (default "b").
+
+    Returns:
+        A SELECT statement (no trailing semicolon).
+
+    Raises:
+        ValueError: An empty ``match_order``.
+    """
+    if not match_order:
+        raise ValueError("build_spatial_join_query needs a match_order to pick the kept match")
+
+    row = SPATIAL_JOIN_INPUT_ROW
+    keys = [f"__gpio_match_{i}" for i in range(len(match_order))]
+    key_select = ", ".join(f"{expr} AS {key}" for expr, key in zip(match_order, keys, strict=True))
+    key_order = ", ".join(f"{key} ASC NULLS LAST" for key in keys)
+    return (
+        f"SELECT * EXCLUDE ({row}, {', '.join(keys)}) FROM (\n"
+        f"    SELECT DISTINCT ON ({row}) * FROM (\n"
+        f"        SELECT {input_alias}.*, {target_select}, {key_select}\n"
+        f"        FROM (SELECT *, row_number() OVER () AS {row} FROM {input_relation}) {input_alias}\n"
+        f"        LEFT JOIN {target_relation} {target_alias}\n"
+        f"        ON {condition}\n"
+        "    )\n"
+        f"    ORDER BY {row}, {key_order}\n"
+        ")"
     )
 
 
@@ -864,6 +1078,35 @@ def spatial_join_strategy(
     return SPATIAL_JOIN_NO_BBOX
 
 
+_SPATIAL_JOIN_NOTES = {
+    SPATIAL_JOIN_NATIVE: "-- Using native geometry with DuckDB SPATIAL_JOIN",
+    SPATIAL_JOIN_BBOX_PREFILTER: "-- Using bbox columns for optimized spatial join",
+    SPATIAL_JOIN_NO_BBOX: "-- Using full geometry intersection (no bbox optimization)",
+}
+
+
+def print_spatial_join_dry_run(
+    strategy: str,
+    query: str,
+    output_parquet: str,
+    compression: str | None,
+    compression_level: int | None,
+    row_group_rows: int,
+) -> None:
+    """Print the dry run of a spatial-join ``COPY`` (``add admin-divisions``/``country-codes``).
+
+    The strategy note says which predicate runs (#538); the COPY itself is
+    printed by the one display body, ``core.compression.print_copy_dry_run``,
+    with the row-group count the caller's funnel resolves.
+    """
+    from geoparquet_io.core.compression import print_copy_dry_run
+    from geoparquet_io.core.logging_config import info
+
+    info(_SPATIAL_JOIN_NOTES[strategy])
+    print_copy_dry_run(query, output_parquet, compression, compression_level, row_group_rows)
+    info("-- Original metadata would also be preserved in the output file")
+
+
 def _install_and_load_extension(con, name: str) -> None:
     """INSTALL (best-effort) then LOAD a DuckDB extension.
 
@@ -900,6 +1143,70 @@ _SPILL_DIR_PREFIX = "gpio-spill-"
 _SPILL_DIR_RE = re.compile(rf"^{re.escape(_SPILL_DIR_PREFIX)}(\d+)-[0-9a-f]{{12}}$")
 
 
+# Keep the marker open for the owning process's lifetime. A lock is independent
+# of the pid namespace from which a sibling sweeps the shared volume.
+_SPILL_LOCK_NAME = ".gpio-owner.lock"
+_spill_locks: dict[str, BinaryIO] = {}
+_spill_locks_guard = threading.Lock()
+
+
+def _spill_lock(path: str) -> BinaryIO | None:
+    """Take a nonblocking ownership lock; None means Windows (no fcntl)."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    marker = open(os.path.join(path, _SPILL_LOCK_NAME), "a+b")
+    try:
+        fcntl.flock(marker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException:
+        marker.close()
+        raise
+    return marker
+
+
+@contextmanager
+def _spill_base_lock(base: str | os.PathLike):
+    """Serialize publishing a marker and sweeping on a shared spill volume."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    # Lock the base directory itself: a sidecar lock would outlive every spill
+    # and violate callers' scratch cleanup guarantees. This also works when
+    # the base is read-only (scanning it still must be best effort).
+    descriptor = os.open(base, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _release_spill_lock(path: str) -> None:
+    # Runs as a connection's weakref finalizer, so the cyclic GC can call it on
+    # any thread at any allocation -- including one inside spill_directory that
+    # holds _spill_locks_guard and the base flock. Taking a lock here would then
+    # wait on its own thread forever and stall every sibling process sharing the
+    # base (the CI matrix hang). So it takes none: the dict pop is atomic, and
+    # whoever pops a path owns its cleanup.
+    marker = _spill_locks.pop(path, None)
+    if marker is not None:
+        match = _SPILL_DIR_RE.match(os.path.basename(path))
+        if match is not None and int(match[1]) == os.getpid():
+            shutil.rmtree(path, ignore_errors=True)
+        marker.close()
+
+
+def _release_spill_locks() -> None:
+    for path in list(_spill_locks):
+        _release_spill_lock(path)
+
+
+atexit.register(_release_spill_locks)
+
+
 def _process_is_alive(pid: int) -> bool:
     """Whether ``pid`` is still running. Answers True whenever it cannot tell.
 
@@ -912,22 +1219,16 @@ def _process_is_alive(pid: int) -> bool:
         import psutil
 
         return psutil.pid_exists(pid)
-    except Exception:  # pragma: no cover - psutil is a hard dependency
+    except Exception:  # psutil is optional on vendored hosts (#1330): unsure means alive
         return True
 
 
 def orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
     """Spill directories under ``base_dir`` whose owning process has exited.
 
-    Ownership is decided by the pid in the name, never by age: a gpio run that
-    takes six hours must not have its scratch space swept out from under it.
-    Pid reuse can only make this *more* conservative -- a recycled pid reads as
-    alive, so the leftover simply survives another round.
-
-    The one case pids cannot decide is two *pid namespaces* sharing one spill
-    volume: point ``TMPDIR`` at the same bind-mounted directory from two
-    containers and each sees the other's pids as absent. Give each container its
-    own ``TMPDIR`` (the default already does) if you share a volume between them.
+    On POSIX, a held marker lock protects a live owner across pid namespaces.
+    Legacy leaves without a marker retain the conservative pid check. Windows
+    has no fcntl and always uses that check.
     """
     found: list[str] = []
     try:
@@ -943,9 +1244,17 @@ def orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
                 continue
         except OSError:  # pragma: no cover - raced with another sweeper
             continue
-        if _process_is_alive(int(match.group(1))):
-            continue
-        found.append(entry.path)
+        if os.path.isfile(os.path.join(entry.path, _SPILL_LOCK_NAME)):
+            try:
+                marker = _spill_lock(entry.path)
+            except OSError:
+                continue
+            if marker is not None:
+                marker.close()
+                found.append(entry.path)
+                continue
+        if not _process_is_alive(int(match.group(1))):
+            found.append(entry.path)
     return found
 
 
@@ -969,25 +1278,35 @@ def sweep_orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
         The paths actually removed, for callers that report what they freed.
     """
     removed: list[str] = []
-    for path in orphaned_spill_dirs(base_dir):
-        try:
-            shutil.rmtree(path)
-        except OSError:
-            continue
-        removed.append(path)
+    try:
+        with _spill_base_lock(base_dir):
+            for path in orphaned_spill_dirs(base_dir):
+                marker = None
+                try:
+                    # Reacquire and hold through removal: listing is a snapshot.
+                    marker = _spill_lock(path)
+                    match = _SPILL_DIR_RE.match(os.path.basename(path))
+                    if marker is None and (match is None or _process_is_alive(int(match[1]))):
+                        continue
+                    shutil.rmtree(path)
+                except OSError:
+                    continue
+                finally:
+                    if marker is not None:
+                        marker.close()
+                removed.append(path)
+    except OSError:
+        pass  # Missing/read-only base: sweeping must never fail the caller.
     return removed
 
 
 def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
     """Path to a private directory DuckDB may spill intermediate results into.
 
-    The path is *not* created. DuckDB creates its temp directory the first time
-    a query exceeds ``memory_limit``, and removes it again once the query
-    completes -- so a connection that never spills leaves nothing behind, and an
-    ordinary run, error or not, cleans up after itself. A run *killed* mid-spill
-    does not, which is why every call first sweeps ``base_dir`` for the leavings
-    of processes that are gone (see :func:`sweep_orphaned_spill_dirs`). The
-    sweep is best effort and never raises.
+    On POSIX the directory is created with a locked ownership marker before
+    returning. DuckDB may spill later; the lock already protects it from sibling
+    sweepers, including those in a different pid namespace. Empty directories
+    are removed at process exit. Windows keeps lazy creation and pid checks.
 
     Every call returns a fresh path, and that uniqueness is a correctness
     requirement rather than tidiness. DuckDB names its spill files after the
@@ -1002,18 +1321,47 @@ def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
     Args:
         base_dir: Volume to spill onto. Defaults to the OS temp directory, which
             follows ``TMPDIR``: that is the knob for a machine whose root volume
-            is too small to hold a large sort's spill. Not validated here --
-            DuckDB creates the leaf lazily, so a base that is missing, read-only
-            or not a directory surfaces as an ``IO Error`` naming the path at
-            the first spill rather than at this call. Callers that name a base
-            create it first.
+            is too small to hold a large sort's spill. On POSIX a missing base
+            is created. When permissions prevent creation, the uncreated path
+            is returned; DuckDB reports the unusable volume if it needs to spill.
+            Windows always creates its directory lazily.
 
     Returns:
         An absolute path, safe to hand to ``SET temp_directory``.
     """
     base = os.fspath(base_dir) if base_dir is not None else tempfile.gettempdir()
     sweep_orphaned_spill_dirs(base)
-    return os.path.join(base, f"{_SPILL_DIR_PREFIX}{os.getpid()}-{uuid.uuid4().hex[:12]}")
+    path = os.path.join(base, f"{_SPILL_DIR_PREFIX}{os.getpid()}-{uuid.uuid4().hex[:12]}")
+    try:
+        import fcntl  # noqa: F401 -- availability selects the Windows fallback
+    except ImportError:
+        return path
+    try:
+        os.makedirs(base, exist_ok=True)
+        with _spill_locks_guard, _spill_base_lock(base):
+            # DuckDB can remove a completed spill's directory. Close its obsolete
+            # descriptor before retaining another, so repeated connections stay bounded.
+            for old_path in list(_spill_locks):
+                if not os.path.exists(old_path):
+                    # A finalizer may pop it meanwhile; see _release_spill_lock.
+                    stale = _spill_locks.pop(old_path, None)
+                    if stale is not None:
+                        stale.close()
+            os.makedirs(path, mode=0o700, exist_ok=False)
+            try:
+                marker = _spill_lock(path)
+            except BaseException:
+                shutil.rmtree(path, ignore_errors=True)
+                raise
+            if marker is not None:
+                _spill_locks[path] = marker
+    except OSError as exc:
+        if exc.errno not in (errno.EACCES, errno.EROFS) or os.path.exists(path):
+            raise
+        # No directory could be created, hence no spill can be swept. Preserve
+        # the lazy factory contract: reads that never spill can still succeed;
+        # DuckDB reports the unusable volume only if it actually needs to spill.
+    return path
 
 
 #: The DuckDB failures whose cause is the *input*, not gpio.
@@ -1176,12 +1524,33 @@ def _apply_connection_limits(
     :func:`memory_limits.open_bounded_connection`, which passes both.
     """
     limit, cap = (memory_limit, None) if memory_limit is not None else _ceiling_based_limits()
+    _apply_memory_limit(con, limit, None if threads is not None else cap)
+
+
+def _apply_memory_limit(
+    con: duckdb.DuckDBPyConnection,
+    limit: str | None,
+    thread_cap: int | None,
+    verbose: bool = False,
+) -> None:
+    """SET ``memory_limit``, then lower ``threads`` to ``thread_cap`` -- the one place gpio does.
+
+    Every bounded connection goes through here: one freshly opened
+    (:func:`_apply_connection_limits`), one write scoped on a caller's
+    connection (``memory_limits.scoped_write_memory_limit``) and an already-open
+    connection held to a limit (``memory_limits.bound_open_connection``). Either
+    half is skipped when its value is ``None``. The cap only ever brings
+    ``threads`` *down* from what the session has: a thread count is never raised
+    to match a limit.
+    """
     if limit is not None:
-        con.execute(f"SET memory_limit = '{_escape_sql_string(str(limit))}';")
-    if cap is None or threads is not None:
-        return
-    if cap < int(str(_current_setting(con, "threads"))):
-        con.execute(f"SET threads = {cap}")
+        con.execute(f"SET memory_limit = {sql_literal(str(limit))};")
+        if verbose:
+            debug(f"DuckDB memory limit: {limit}")
+    if thread_cap is not None and thread_cap < int(str(_current_setting(con, "threads"))):
+        con.execute(f"SET threads = {thread_cap}")
+        if verbose:
+            debug(f"DuckDB threads: {thread_cap} (for the memory limit)")
 
 
 _PROFILE_ENV_VAR = "GPIO_DUCKDB_PROFILE"
@@ -1268,11 +1637,15 @@ class ProfiledConnection:
     What gets captured is decided by DuckDB, not by this wrapper: DuckDB
     writes a statement's profile only when its result is *fully consumed*
     (``fetchall()``, ``.arrow().read_all()``, a ``COPY``, a ``fetchone()``
-    read until it returns ``None``). A result read with a single
+    read until it returns ``None``). A result read with a single bare
     ``fetchone()``, or abandoned when the next statement runs, writes no
-    profile. DDL and ``SET`` write none either. So a command's profile
-    directory holds its result-draining queries — usually the heavy ones —
-    not every statement it ran.
+    profile. gpio reads single rows through :func:`fetch_one`, which on DuckDB
+    2.0 completes the result, so there those reads are profiled too. DDL and
+    ``SET`` write none either. So a command's profile directory holds its
+    result-draining queries — usually the heavy ones — not every statement it
+    ran. The profiled SQL is the file's ``query_name`` on DuckDB 1.x and its
+    ``query.sql`` on 2.0, which nests the rest under ``query``, ``operator``
+    and ``io``.
 
     A lazy relation from ``sql()`` executes when it is fetched, and DuckDB
     writes its profile to whichever file is current *then*: fetched straight
@@ -1330,7 +1703,7 @@ class ProfiledConnection:
             target = os.path.join(self._directory, name)
             if not os.path.exists(target):
                 break
-        self._con.execute(f"SET profiling_output = '{_escape_sql_string(target)}';")
+        self._con.execute(f"SET profiling_output = {sql_path(target)};")
 
     def execute(self, *args, **kwargs):
         self._rotate_profile_output()
@@ -1361,6 +1734,22 @@ class ProfiledConnection:
         return self._con.__exit__(*exc_info)
 
 
+def load_spatial_extension(con) -> None:
+    """INSTALL and LOAD spatial on ``con``, with gpio's session settings.
+
+    The one place that knows loading spatial also means setting
+    ``geometry_always_xy`` (the setting is registered by the extension, so it
+    cannot be set before the LOAD). Used by :func:`get_duckdb_connection` and
+    by paths that opened without spatial (``load_spatial=None`` where
+    ``duckdb_capabilities().core_geometry``) but then hit a function outside DuckDB's core
+    set and load it on demand.
+    """
+    _install_and_load_extension(con, "spatial")
+    # DuckDB 1.5+: ensure lon/lat = x/y axis order globally.
+    # Replaces per-call always_xy := true in ST_Transform.
+    con.execute("SET geometry_always_xy = true;")
+
+
 def get_duckdb_connection(
     load_spatial=True,
     load_httpfs=None,
@@ -1382,7 +1771,12 @@ def get_duckdb_connection(
     discovery for private S3 buckets.
 
     Args:
-        load_spatial: Whether to load spatial extension (default: True)
+        load_spatial: Whether to load spatial extension (default: True).
+                    If None, loads it only when DuckDB's core lacks the
+                    GEOMETRY type (``not duckdb_capabilities().core_geometry``, #1353): the
+                    auto mode for read-only paths that need nothing beyond
+                    DuckDB core's serialize/deserialize set, mirroring
+                    load_httpfs's None-means-auto convention.
         load_httpfs: Whether to load httpfs extension for S3/Azure/GCS.
                     If None (default), auto-detects based on usage.
         use_s3_auth: Whether to configure AWS credential chain for S3 (default: False).
@@ -1453,16 +1847,15 @@ def get_duckdb_connection(
     # so a per-write override cannot be applied to the connections gpio shares
     # across writes (a partition loop finalizes N files on one connection).
     effective_temp_dir = temp_directory if temp_directory is not None else spill_directory()
-    safe_temp_dir = _escape_sql_string(str(effective_temp_dir))
-    con.execute(f"SET temp_directory = '{safe_temp_dir}';")
+    if temp_directory is None and effective_temp_dir in _spill_locks:
+        weakref.finalize(con, _release_spill_lock, effective_temp_dir)
+    con.execute(f"SET temp_directory = {sql_path(effective_temp_dir)};")
     _apply_connection_limits(con, memory_limit, threads)
 
-    # Always load spatial extension by default (core use case)
-    if load_spatial:
-        _install_and_load_extension(con, "spatial")
-        # DuckDB 1.5+: ensure lon/lat = x/y axis order globally.
-        # Replaces per-call always_xy := true in ST_Transform.
-        con.execute("SET geometry_always_xy = true;")
+    # Always load spatial extension by default (core use case). None is the
+    # auto mode: spatial only where DuckDB's own core lacks GEOMETRY (#1353).
+    if resolve_load_spatial(load_spatial):
+        load_spatial_extension(con)
 
     # S3 config, resolved once (explicit kwargs over the ambient scope). The
     # SET statements and the secret below are both built from it.
@@ -1516,6 +1909,92 @@ def _opt_out_of_extension_telemetry() -> None:
     os.environ.setdefault(_TELEMETRY_OPT_OUT_VAR, "1")
 
 
+# a5 for DuckDB 2.0 and later is distributed from Query.Farm's own extension
+# repository; the community registry carries only a stub whose init refuses and
+# points there (#1347). gpio trusts that repository for a5. The trust anchor is
+# TLS to the hard-coded HTTPS host below: CREATE EXTENSION REPOSITORY fetches
+# the repository's OWN public keys from
+# <prefix>/.well-known/duckdb-extension-repo.json and persists them (in
+# ~/.duckdb/extension_repositories/query_farm.duckdb_extension.repo.json), so
+# every later install is signature-verified against whatever keys the domain
+# served at first registration -- trust-on-first-use, not DuckDB's community
+# key. Signature checks stay on (the LOAD runs with
+# allow_unsigned_extensions=false, pinned by tests), and the build honors the
+# same QUERY_FARM_TELEMETRY_OPT_OUT variable as the community builds (#779).
+# On DuckDB 1.5 the community a5 is the real extension and nothing changes.
+_QUERY_FARM_REPOSITORY = "query_farm"
+_QUERY_FARM_REPOSITORY_PREFIX = "https://duckdb-extensions.query.farm"
+_QUERY_FARM_EXTENSIONS = frozenset({"a5"})
+
+
+def _installs_from_query_farm(name: str) -> bool:
+    """True when ``name`` is distributed from Query.Farm for the running DuckDB.
+
+    The version question is the owner's (``DuckDBCapabilities.a5_from_query_farm``);
+    ``_QUERY_FARM_EXTENSIONS`` names the extensions it applies to.
+    """
+    if name not in _QUERY_FARM_EXTENSIONS:
+        return False
+    return duckdb_capabilities().a5_from_query_farm
+
+
+def _install_from_query_farm(name: str) -> None:
+    """INSTALL ``name`` from the Query.Farm repository, on a throwaway connection.
+
+    ``allow_extension_repositories`` is a one-way latch per database instance:
+    it moves 'undecided' -> 'allowed' -> 'forbidden' and never back, so it
+    cannot be restored after the INSTALL. A throwaway in-memory instance keeps
+    the 'allowed' state scoped to this one statement; the caller's connection
+    never changes. The downloaded file lands in DuckDB's shared extension
+    directory (under ``repositories/query_farm/``), where ``LOAD ... FROM
+    query_farm`` on any connection finds it without settings of its own.
+
+    FORCE INSTALL, not INSTALL: a plain INSTALL short-circuits on an existing
+    file, so it could never replace a stale or corrupt cached extension --
+    the exact case :func:`_load_from_query_farm`'s retry exists for. A cold
+    install downloads either way, so FORCE costs nothing there.
+
+    Deliberately NOT enabled: ``allow_unsigned_extensions``. The Query.Farm
+    build is signed and must stay loadable without weakening signature checks.
+    """
+    import duckdb
+
+    con = duckdb.connect()
+    try:
+        con.execute("SET allow_extension_repositories = 'allowed';")
+        con.execute(
+            f"CREATE EXTENSION REPOSITORY IF NOT EXISTS {_QUERY_FARM_REPOSITORY} "
+            f"WITH PREFIX '{_QUERY_FARM_REPOSITORY_PREFIX}';"
+        )
+        con.execute(f"FORCE INSTALL {name} FROM {_QUERY_FARM_REPOSITORY};")
+    finally:
+        con.close()
+
+
+def _load_from_query_farm(con, name: str) -> None:
+    """LOAD ``name`` from Query.Farm, installing it first when it is not cached.
+
+    ``LOAD ... FROM query_farm`` reads the already-installed file and needs no
+    repository registration or settings change on ``con``, so it is tried
+    first: after the one-time install every later load is offline and
+    setting-free.
+    """
+    import duckdb
+
+    load_sql = f"LOAD {name} FROM {_QUERY_FARM_REPOSITORY};"
+    try:
+        con.execute(load_sql)
+        return
+    except duckdb.Error:
+        # Not installed yet, or a stale/corrupt cached file: FORCE INSTALL a
+        # fresh copy (a plain INSTALL would keep the existing file), then load
+        # for real. A failure that is not fixed by reinstalling re-raises from
+        # the LOAD below, so nothing is swallowed.
+        pass
+    _install_from_query_farm(name)
+    con.execute(load_sql)
+
+
 def load_community_extension(con, name: str, feature: str | None = None) -> None:
     """INSTALL and LOAD a DuckDB community extension with a clear error message.
 
@@ -1525,6 +2004,11 @@ def load_community_extension(con, name: str, feature: str | None = None) -> None
     HTTP 404. Translate that into an actionable :class:`ExtensionUnavailableError`
     so users understand the extension simply isn't published for their DuckDB
     version yet.
+
+    Extensions that moved to the Query.Farm repository for DuckDB 2.0+ (a5,
+    see ``_QUERY_FARM_EXTENSIONS``) install from there instead; the error for
+    a failed Query.Farm install says so rather than blaming the community
+    registry.
 
     Args:
         con: An open DuckDB connection.
@@ -1539,10 +2023,26 @@ def load_community_extension(con, name: str, feature: str | None = None) -> None
 
     _opt_out_of_extension_telemetry()
     try:
-        con.execute(f"INSTALL {name} FROM community;")
-        con.execute(f"LOAD {name};")
+        if _installs_from_query_farm(name):
+            _load_from_query_farm(con, name)
+        else:
+            con.execute(f"INSTALL {name} FROM community;")
+            con.execute(f"LOAD {name};")
     except duckdb.Error as e:
-        raise ExtensionUnavailableError(name, duckdb.__version__, str(e), feature=feature) from e
+        detail = str(e)
+        from_query_farm = _installs_from_query_farm(name)
+        if from_query_farm:
+            detail = (
+                f"installing '{name}' from the Query.Farm repository "
+                f"({_QUERY_FARM_REPOSITORY_PREFIX}) failed: {detail}"
+            )
+        raise ExtensionUnavailableError(
+            name,
+            duckdb_capabilities().version,
+            detail,
+            feature=feature,
+            query_farm=from_query_farm,
+        ) from e
 
 
 def require_community_extension(name: str, feature: str | None = None) -> None:
@@ -1573,7 +2073,7 @@ def require_community_extension(name: str, feature: str | None = None) -> None:
 
 def get_duckdb_connection_for_s3(
     path: str,
-    load_spatial: bool = True,
+    load_spatial: bool | None = True,
     s3_endpoint: str | None = None,
     s3_region: str | None = None,
     s3_use_ssl: bool | None = None,
@@ -1587,7 +2087,9 @@ def get_duckdb_connection_for_s3(
 
     Args:
         path: S3 path to access (used to determine bucket and access mode)
-        load_spatial: Whether to load spatial extension (default: True)
+        load_spatial: Whether to load spatial extension (default: True; None
+            means only when DuckDB's core lacks GEOMETRY, resolved by
+            :func:`get_duckdb_connection`)
         s3_endpoint: Custom S3 endpoint (e.g., 'minio.local:9000')
         s3_region: S3 region for custom endpoints
         s3_use_ssl: Whether to use SSL for the S3 endpoint
@@ -1601,7 +2103,7 @@ def get_duckdb_connection_for_s3(
     s3_kwargs = {"s3_endpoint": s3_endpoint, "s3_region": s3_region, "s3_use_ssl": s3_use_ssl}
 
     # Non-S3 paths: use standard connection
-    if not path.startswith(("s3://", "s3a://")):
+    if not is_s3_url(path):
         return get_duckdb_connection(
             load_spatial=load_spatial, load_httpfs=needs_httpfs(path), **s3_kwargs
         )
@@ -1620,7 +2122,7 @@ def get_duckdb_connection_for_s3(
     )
     try:
         # Lightweight test query - DuckDB handles glob patterns natively
-        con.execute(f"SELECT 1 FROM read_parquet({sql_path(path)}) LIMIT 1").fetchone()
+        fetch_one(con.execute(f"SELECT 1 FROM read_parquet({sql_path(path)}) LIMIT 1"))
         return con
     except Exception as e:
         con.close()
@@ -1654,12 +2156,249 @@ class _DuckDBFieldWrapper:
 
 
 _TIMESTAMPTZ = "TIMESTAMP WITH TIME ZONE"
-_UTC = datetime.timezone.utc
+_UTC = datetime.UTC
+
+
+def _as_subquery(sql: str) -> str:
+    """``sql`` ready to sit inside parentheses: its own lines, no trailing ``;``.
+
+    On its own lines so a trailing ``--`` comment cannot swallow the closing
+    parenthesis.
+    """
+    return f"(\n{sql.rstrip().rstrip(';')}\n)"
+
+
+def describe_query(con, sql: str, params=None) -> list[tuple[str, str]]:
+    """``(name, DuckDB type)`` for each output column of ``sql``, without a scan.
+
+    The DuckDB-type view of :func:`query_schema`: for the questions only
+    DuckDB's own type names answer (GEOMETRY vs GEOGRAPHY vs BLOB, a GeoArrow
+    STRUCT's nesting depth, TIMESTAMP WITH TIME ZONE, an ENUM), which an Arrow
+    schema has already translated away. ``DESCRIBE`` binds the query and never
+    crosses Arrow, so no column type can make it fail. Raises whatever the
+    bind raises; a caller that tolerates a miss catches it itself.
+    """
+    rows = con.execute(f"DESCRIBE {_as_subquery(sql)}", params).fetchall()
+    return [(row[0], str(row[1])) for row in rows]
+
+
+def geom_from_wkb_sql(expr: str) -> str:
+    """SQL decoding the WKB bytes ``expr`` yields into a GEOMETRY.
+
+    The WKB codec is spelled here and nowhere else (#1367 concept 7). Whether a
+    column *needs* decoding is ``geometry_detection.resolve_geometry_read``'s
+    question; this is only the spelling, for a caller that already knows it
+    holds WKB. Malformed bytes raise; wrap the result in ``TRY(...)`` to read
+    them as NULL.
+    """
+    return f"ST_GeomFromWKB({expr})"
+
+
+def as_wkb_sql(expr: str) -> str:
+    """SQL encoding the GEOMETRY ``expr`` yields as WKB bytes (the 1.x carrier)."""
+    return f"ST_AsWKB({expr})"
+
+
+#: A DuckDB type name (``DESCRIBE`` / ``TYPEOF`` / a relation's ``.types``) that is
+#: a top-level GEOMETRY or GEOGRAPHY: bare, or ``GEOMETRY('EPSG:3857')`` once it
+#: carries a CRS. Anchored at both ends so a STRUCT or LIST type that merely
+#: mentions GEOMETRY is not matched. The CRS is a SQL string literal, so an
+#: embedded ``'`` arrives doubled (``O''Brien``).
+_DUCKDB_GEO_TYPE = re.compile(
+    r"^(GEOMETRY|GEOGRAPHY)(?:\(\s*'((?:[^']|'')*)'\s*\))?$", re.IGNORECASE | re.DOTALL
+)
+
+
+def parse_duckdb_geo_type(type_name: object) -> tuple[str, str | None] | None:
+    """``("GEOMETRY"|"GEOGRAPHY", crs or None)`` for a DuckDB type name, else None.
+
+    The DuckDB-type twin of :func:`native_geo_type` (which reads *Parquet*
+    logical types): the one answer to "is this DESCRIBE/TYPEOF type a geometry,
+    and with which CRS?" (#1367 concept 10).
+    """
+    match = _DUCKDB_GEO_TYPE.match(str(type_name or "").strip())
+    if match is None:
+        return None
+    crs = match.group(2).replace("''", "'") if match.group(2) else None
+    return match.group(1).upper(), crs
+
+
+def duckdb_type_is_geometry(type_name: object, *, allow_crs: bool = True) -> bool:
+    """Whether a DuckDB type name is GEOMETRY, with or without a CRS (not GEOGRAPHY).
+
+    ``allow_crs=False`` answers only for a CRS-less ``GEOMETRY``. It is for a
+    caller deciding whether to wrap the column in ``ST_AsWKB`` before an Arrow
+    export: a CRS-typed ``GEOMETRY('EPSG:4326')`` already crosses Arrow as
+    ``geoarrow.wkb`` carrying that CRS, and the wrap would drop it
+    (``api.table.read_partition``, the streaming write strategy).
+    """
+    parsed = parse_duckdb_geo_type(type_name)
+    if parsed is None or parsed[0] != "GEOMETRY":
+        return False
+    return allow_crs or parsed[1] is None
+
+
+#: DuckDB's signed and unsigned fixed-width integer type names.
+_DUCKDB_INTEGER_TYPES = frozenset(
+    {
+        "TINYINT",
+        "SMALLINT",
+        "INTEGER",
+        "BIGINT",
+        "HUGEINT",
+        "UTINYINT",
+        "USMALLINT",
+        "UINTEGER",
+        "UBIGINT",
+        "UHUGEINT",
+    }
+)
+#: Numeric names without parameters; REAL and NUMERIC alias FLOAT and DECIMAL.
+_DUCKDB_NUMERIC_TYPES = _DUCKDB_INTEGER_TYPES | {"FLOAT", "REAL", "DOUBLE", "DECIMAL", "NUMERIC"}
+
+
+def duckdb_type_is_integer(type_name: object) -> bool:
+    """Whether a type is a DuckDB fixed-width integer, including HUGEINT variants."""
+    base = str(type_name or "").strip().upper()
+    return base in _DUCKDB_INTEGER_TYPES
+
+
+def duckdb_type_is_numeric(type_name: object) -> bool:
+    """Whether a DuckDB type name (DESCRIBE / TYPEOF output) is a numeric type.
+
+    Case-insensitive, and a parameterized ``DECIMAL(18,3)`` counts. The one
+    answer for the coordinate-column test in ``convert`` and the metric-column
+    test in ``process aggregate``, which used to keep two lists that disagreed
+    (one lacked ``REAL``, the other ``DECIMAL`` without its prefix test).
+    """
+    base = str(type_name or "").split("(", 1)[0].strip().upper()
+    return base in _DUCKDB_NUMERIC_TYPES
+
+
+def duckdb_type_contains_geometry(type_name: object) -> bool:
+    """Whether a DuckDB type name mentions GEOMETRY at any depth (``STRUCT(g GEOMETRY)``, ``GEOMETRY[]``).
+
+    The nested question beside :func:`duckdb_type_is_geometry`: the GeoJSON
+    writers render a nested geometry property differently, so the native writer
+    declines any property type that holds one. A plain case-insensitive substring
+    test, as the native-writer gate has always used (a struct field merely named
+    ``geometry_x`` also counts, which only sends the write to the hand-built writer).
+    """
+    return "GEOMETRY" in str(type_name or "").upper()
+
+
+def file_relation(url: str) -> str:
+    """The one ``read_parquet`` spelling a whole-file read goes through.
+
+    ``hive_partitioning=false``: a file under a ``key=value`` directory is one
+    file, not a partition whose key would become a column of the rewrite.
+    """
+    return f"read_parquet({sql_path(url)}, hive_partitioning=false)"
+
+
+def file_schema(url: str, *, geoparquet_conversion: bool = True) -> pa.Schema:
+    """A Parquet file's Arrow schema, local or remote: :func:`query_schema` of
+    :func:`file_relation` (#1367 concept 17).
+
+    The one "what columns does this file have" probe in DuckDB terms, for a
+    caller that cannot use ``pq.read_schema`` (a URL). ``geoparquet_conversion
+    =False`` reads the columns as stored (geometry as a BLOB): DuckDB's
+    GeoParquet reader rejects a ``crs: null`` block outright, which is what the
+    null-CRS repair has to read past. ``url`` is RAW (#718).
+    """
+    con = get_duckdb_connection(load_spatial=geoparquet_conversion, load_httpfs=needs_httpfs(url))
+    try:
+        if not geoparquet_conversion:
+            con.execute("SET enable_geoparquet_conversion = false")
+        return query_schema(con, f"SELECT * FROM {file_relation(url)}")
+    finally:
+        con.close()
+
+
+def query_schema(con, sql: str, params=None) -> pa.Schema:
+    """The Arrow schema ``sql`` produces, without reading a row (#1367 concept 17).
+
+    The one schema probe: every "what does this query/relation output" question
+    gpio asks in Arrow terms comes here. Output names are the ones a written
+    file gets (duplicates de-duplicated as ``a``, ``a_1``), and the fields carry
+    their extension metadata (CRS, edges).
+
+    DuckDB 1.5 cannot export a VARIANT column over the Arrow C interface
+    (``OSError: Not implemented Error: Unsupported Arrow type VARIANT``), so a
+    file DuckDB wrote with VARIANT properties used to kill every write path at
+    this probe (#1352, #1362). On that one failure it is re-run with a sentinel
+    non-struct field standing in for each VARIANT column, so the bbox-covering
+    gates still see the column exists and judge a covering declared over it
+    exactly as 2.0's real export does. Any other failure raises.
+    """
+    try:
+        return _zero_row_schema(con, f"SELECT * FROM {_as_subquery(sql)} LIMIT 0", params)
+    except OSError as exc:
+        if "Unsupported Arrow type VARIANT" not in str(exc):
+            raise
+        return _query_schema_without_variant(con, sql, params)
+
+
+def _zero_row_schema(con, sql: str, params=None) -> pa.Schema:
+    # read_all() drains the (empty) reader, so the connection is free afterwards.
+    return con.sql(sql, params=params).arrow().read_all().schema
+
+
+_VARIANT_TYPE_KEYWORD = re.compile(r"\bVARIANT\b")
+
+
+def _type_contains_variant(type_str: str) -> bool:
+    """Whether a DESCRIBE-rendered DuckDB type carries the ``VARIANT`` keyword.
+
+    Case-sensitive and word-bounded on the uppercase keyword ``DESCRIBE``
+    renders. Nested matching is load-bearing — ``STRUCT(a VARIANT)`` and
+    ``VARIANT[]`` cannot cross Arrow on DuckDB 1.5 any more than a top-level
+    ``VARIANT`` — while a struct *field* merely named ``variant_id`` has no
+    word boundary before the ``_`` and a lowercase ``variant`` never matches.
+    Shared by the probe fallback below and ``inspect``'s preview: a substring
+    match here dropped such a struct from the fallback schema and rendered it
+    as JSON text in previews (#1352 review).
+    """
+    return _VARIANT_TYPE_KEYWORD.search(type_str) is not None
+
+
+def _query_schema_without_variant(con, sql: str, params=None) -> pa.Schema:
+    """The probe's schema with a sentinel standing in for every VARIANT column.
+
+    ``DESCRIBE`` never crosses Arrow, so it names the columns safely; a type
+    whose rendering carries the ``VARIANT`` keyword (top-level, or nested in a
+    STRUCT/LIST) is exactly the set DuckDB 1.5 refuses to export. Each such
+    column stays in the schema as a sentinel non-struct ``binary`` field rather
+    than being dropped: ``strip_illegal_bbox_covering`` treats a covering
+    naming a column *absent* from the schema as somebody else's question and
+    keeps it, so dropping the column let a ``covering.bbox`` declared over a
+    VARIANT column ship untouched on 1.5 while 2.0's real export strips it. The
+    sentinel gives both versions the same verdict. This path runs only after a
+    real VARIANT broke the export.
+    """
+    import pyarrow as pa
+
+    described = describe_query(con, f"SELECT * FROM {_as_subquery(sql)} LIMIT 0", params)
+    kept = [
+        quote_identifier(name) for name, type_ in described if not _type_contains_variant(type_)
+    ]
+    exported = (
+        _zero_row_schema(con, f"SELECT {', '.join(kept)} FROM {_as_subquery(sql)} LIMIT 0", params)
+        if kept
+        else pa.schema([])
+    )
+    exported_fields = iter(exported)
+    return pa.schema(
+        [
+            pa.field(name, pa.binary()) if _type_contains_variant(type_) else next(exported_fields)
+            for name, type_ in described
+        ]
+    )
 
 
 def _output_types(con, query: str, params=None) -> list[str]:
-    """The SQL type of each output column of ``query``. DESCRIBE binds it without a scan."""
-    return [column[1] for column in con.execute(f"DESCRIBE {query}", params).fetchall()]
+    """The SQL type of each output column of ``query`` (a view of :func:`describe_query`)."""
+    return [type_ for _, type_ in describe_query(con, query, params)]
 
 
 def _without_timestamptz(
@@ -1688,7 +2427,7 @@ def _session_zone(con) -> datetime.tzinfo:
     """The connection's TimeZone setting as a tzinfo, UTC when Python cannot resolve it."""
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-    (name,) = con.execute("SELECT current_setting('TimeZone')").fetchone()
+    (name,) = fetch_one(con.execute("SELECT current_setting('TimeZone')"))
     try:
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
@@ -1753,37 +2492,23 @@ def fetch_row(
     """The first row of ``query`` as :func:`fetch_rows` builds it, or None when it is empty."""
     rewritten, positions = _without_timestamptz(con, query, params, column_types)
     zone = _session_zone(con) if positions else None
-    row = con.execute(rewritten, params).fetchone()
+    row = fetch_one(con.execute(rewritten, params))
     if row is None:
         return None
     return _restore_zones([row], positions, zone)[0]
 
 
 def _get_query_columns(con, query: str) -> list[str]:
-    """
-    Get column names from a SQL query without executing it fully.
-
-    Args:
-        con: DuckDB connection
-        query: SQL query to analyze
-
-    Returns:
-        List of column names in the query result
-    """
-    result = con.execute(f"DESCRIBE ({query})").fetchall()
-    return [row[0] for row in result]
+    """Output column names of ``query`` (a view of :func:`describe_query`)."""
+    return [name for name, _ in describe_query(con, query)]
 
 
 def _get_query_column_type(con, query: str, column_name: str) -> str | None:
-    """Return the DuckDB type string for a named column in a query, or None."""
+    """The DuckDB type of one output column of ``query``, or None if absent or unbindable."""
     try:
-        rows = con.execute(f"DESCRIBE ({query})").fetchall()
-        for row in rows:
-            if row[0] == column_name:
-                return row[1]
+        return next((t for name, t in describe_query(con, query) if name == column_name), None)
     except Exception:
-        pass
-    return None
+        return None
 
 
 # Clauses that must not follow a trailing ORDER BY for it to be safely strippable
@@ -1900,8 +2625,8 @@ def _geoarrow_coord_exprs(quoted_geom: str, encoding: str) -> tuple:
     for _ in range(depth):
         flat = f"flatten({flat})"
 
-    x_arr = f"list_transform({flat}, p -> p.x)"
-    y_arr = f"list_transform({flat}, p -> p.y)"
+    x_arr = f"list_transform({flat}, lambda p: p.x)"
+    y_arr = f"list_transform({flat}, lambda p: p.y)"
     x_min = f"list_min({x_arr})"
     x_max = f"list_max({x_arr})"
     y_min = f"list_min({y_arr})"
@@ -1916,39 +2641,29 @@ def _geoarrow_coord_exprs(quoted_geom: str, encoding: str) -> tuple:
     )
 
 
-def _wrap_query_with_wkb_conversion(query: str, geometry_column: str, con=None) -> str:
-    """
-    Wrap a query to convert geometry column to WKB format.
+def _wrap_query_with_wkb_conversion(query: str, geometry_column: str | Iterable[str] | None) -> str:
+    """Wrap *query* so each named geometry column comes out as WKB, in place.
+
+    The one rule (#1367 HANDOFFS row 75): DuckDB's Arrow export hands geometry
+    over in its own format, so a write or a stream converts it with
+    ``ST_AsWKB``. ``SELECT * REPLACE`` keeps the query's column order and
+    needs no column discovery; the copy this replaces fell back to
+    ``EXCLUDE`` + append without a connection, moving the geometry last.
 
     Args:
         query: Original SQL query
-        geometry_column: Name of the geometry column
-        con: Optional DuckDB connection for column discovery
-
-    Returns:
-        Modified query with geometry converted to WKB
+        geometry_column: One geometry column, several, or ``None`` to leave
+            the query as it is
     """
-    quoted_geom = quote_identifier(geometry_column)
-
-    if con:
-        try:
-            columns = _get_query_columns(con, query)
-            # In the query's own order: appending the geometry moved a column
-            # after it (a bbox) ahead of it in the written file.
-            is_geom = [c.lower() == geometry_column.lower() for c in columns]
-            select = [
-                f"ST_AsWKB({quoted_geom}) AS {quoted_geom}" if geom else quote_identifier(c)
-                for c, geom in zip(columns, is_geom, strict=True)
-            ]
-            if any(is_geom) and not all(is_geom):
-                return f"SELECT {', '.join(select)} FROM ({query})"
-        except Exception:
-            pass
-
-    # Fallback: select all and convert geometry
-    return (
-        f"SELECT * EXCLUDE({quoted_geom}), ST_AsWKB({quoted_geom}) AS {quoted_geom} FROM ({query})"
+    if not geometry_column:
+        return query
+    columns = [geometry_column] if isinstance(geometry_column, str) else list(geometry_column)
+    if not columns:
+        return query
+    replacements = ", ".join(
+        f"{as_wkb_sql(quote_identifier(name))} AS {quote_identifier(name)}" for name in columns
     )
+    return f"SELECT * REPLACE ({replacements}) FROM ({query})"
 
 
 def _wrap_query_with_blob_conversion(
@@ -1989,8 +2704,7 @@ def _wrap_query_with_blob_conversion(
     col_info: dict[str, str] = {}
     if con is not None:
         try:
-            rows = con.execute(f"DESCRIBE ({query})").fetchall()
-            col_info = {row[0]: row[1] for row in rows}
+            col_info = dict(describe_query(con, query))
         except Exception:
             col_info = {}
 
@@ -2001,7 +2715,7 @@ def _wrap_query_with_blob_conversion(
         # already the correct 1.x carrier and ST_AsWKB(BLOB) does not bind, so
         # the whole write aborted; worse, ST_AsWKB(VARCHAR) *does* bind and
         # silently reinterprets the text as WKT.
-        if col_info.get(geometry_column, "").upper().startswith("GEOMETRY"):
+        if duckdb_type_is_geometry(col_info.get(geometry_column)):
             targets.append(geometry_column)
     else:
         # DESCRIBE failed, so we know nothing about the types. Convert the
@@ -2012,8 +2726,8 @@ def _wrap_query_with_blob_conversion(
     for name in secondary_columns or ():
         if name in targets or name == geometry_column:
             continue
-        # A STRUCT is a bbox-style column, not geometry: startswith() excludes it.
-        if col_info.get(name, "").upper().startswith("GEOMETRY"):
+        # A STRUCT is a bbox-style column, not geometry: the owner excludes it.
+        if duckdb_type_is_geometry(col_info.get(name)):
             targets.append(name)
 
     if not targets:
@@ -2022,7 +2736,7 @@ def _wrap_query_with_blob_conversion(
     # Cast to BLOB to produce plain binary without geoarrow extension type
     # Use SELECT * REPLACE to preserve column order
     replacements = ", ".join(
-        f"ST_AsWKB({quote_identifier(col)})::BLOB AS {quote_identifier(col)}" for col in targets
+        f"{as_wkb_sql(quote_identifier(col))}::BLOB AS {quote_identifier(col)}" for col in targets
     )
     return f"""
         WITH __arrow_source AS ({query})
@@ -2039,7 +2753,7 @@ _EXT_NAME = b"ARROW:extension:name"
 _EXT_META = b"ARROW:extension:metadata"
 
 
-def _geoarrow_extension(field) -> tuple[str | None, dict]:
+def geoarrow_extension(field) -> tuple[str | None, dict]:
     """A field's GeoArrow extension name and parsed metadata, in either carrier.
 
     pyarrow resolves the type when ``geoarrow.pyarrow`` is imported and leaves
@@ -2062,23 +2776,6 @@ def _geoarrow_extension(field) -> tuple[str | None, dict]:
     return name, parsed if isinstance(parsed, dict) else {}
 
 
-def geoarrow_field_edges(field) -> str | None:
-    """The edges a GeoArrow field declares, lower-case, in either carrier.
-
-    ``None`` when the field is not GeoArrow or declares no edges (planar is
-    the GeoArrow default, so a planar type serializes without the key). The
-    one reader of a field's edges: ``arrow_geo_metadata`` re-exports it.
-
-    The type only, by design. DuckDB never reads a ``geo`` block, so which
-    columns it refuses is a type question, and the register path relabels on
-    this answer even when a block says planar or the value is a typo. What a
-    table declares once its block is weighed is
-    ``write_funnels.table_nonplanar_edges``.
-    """
-    edges = _geoarrow_extension(field)[1].get("edges")
-    return edges.lower() if isinstance(edges, str) else None
-
-
 def _storage(column):
     """A column's storage chunks, whether or not its extension type is resolved."""
     import pyarrow as pa
@@ -2099,17 +2796,13 @@ def _planar_column(field, column, name: str, parsed: dict) -> tuple:
     import pyarrow as pa
 
     if hasattr(field.type, "with_edge_type"):
-        import geoarrow.pyarrow as ga
-
-        target = field.type.with_edge_type(ga.EdgeType.PLANAR)
+        target = field.type.with_edge_type(geoarrow_edge_type(PLANAR))
         chunks = [pa.ExtensionArray.from_storage(target, c.storage) for c in column.chunks]
         return field.with_type(target), pa.chunked_array(chunks, target)
     storage = _storage(column)
     metadata = dict(field.metadata or {})
     metadata[_EXT_NAME] = name.encode("utf-8")
-    metadata[_EXT_META] = json.dumps({k: v for k, v in parsed.items() if k != "edges"}).encode(
-        "utf-8"
-    )
+    metadata[_EXT_META] = json.dumps(without_edges(parsed)).encode("utf-8")
     return pa.field(field.name, storage.type, field.nullable, metadata), storage
 
 
@@ -2125,9 +2818,12 @@ def _planar_view(table, columns: Iterable[str] | None = None) -> tuple:
     for index, field in enumerate(table.schema):
         if wanted is not None and field.name not in wanted:
             continue
-        if geoarrow_field_edges(field) in (None, "planar"):
+        # The type only, by design: DuckDB never reads a ``geo`` block, so which
+        # columns it refuses is a type question, relabelled even when a block
+        # says planar or the value is a typo.
+        name, parsed = geoarrow_extension(field)
+        if not is_geodesic(geoarrow_type_edges(field.type, parsed)):
             continue
-        name, parsed = _geoarrow_extension(field)
         originals[field.name] = field
         planar_field, column = _planar_column(field, table.column(index), name, parsed)
         table = table.set_column(index, planar_field, column)
@@ -2149,10 +2845,28 @@ class RegisteredArrow:
         self.name = name
         self.fields = fields
 
+    def read_back(self, con, query: str, metadata: dict | None):
+        """``query``'s rows as an Arrow table that passes the input's rows through.
+
+        For a query that reorders or filters the registered rows and keeps their
+        geometry (a sort): the result gets the caller's input ``metadata`` --
+        its ``geo`` key is the write facade's witness for the table, which
+        decides the output's block when it is written -- and every pass-through
+        geometry column its registered field back (:meth:`restore_edges`).
+        """
+        result = con.sql(query).arrow().read_all()
+        if metadata:
+            result = result.replace_schema_metadata(metadata)
+        return self.restore_edges(result)
+
     @property
     def edges(self) -> dict[str, str]:
         """``{column: edges}`` for every column that was registered as planar."""
-        return {col: geoarrow_field_edges(field) or "planar" for col, field in self.fields.items()}
+        return {
+            col: edges
+            for col, field in self.fields.items()
+            if (edges := geoarrow_type_edges(field.type, geoarrow_extension(field)[1]))
+        }
 
     def restore_edges(self, result, columns: Iterable[str] | None = None):
         """``result`` with each pass-through geometry column given its input field back.
@@ -2202,7 +2916,7 @@ def register_arrow(con, name: str, table) -> RegisteredArrow:
 
     Every non-planar string is relabelled, not only a GeoParquet edge
     algorithm, because DuckDB rejects them all. Which values gpio honours is
-    the restore side's question (``geo_metadata.GEOGRAPHY_EDGE_ALGORITHMS``).
+    the restore side's question (``edges.GEOGRAPHY_EDGE_ALGORITHMS``).
     """
     view, registered = planar_view(table, name)
     if registered.fields:
@@ -2224,3 +2938,26 @@ def planar_view(table, name: str = "table", columns: Iterable[str] | None = None
     """
     view, fields = _planar_view(table, columns)
     return view, RegisteredArrow(name, fields)
+
+
+def computed_column_query(source, column_name, sql_expression, replace_column=None):
+    """The SELECT that adds (or replaces) one computed column on ``source``.
+
+    ``source`` is a SQL-ready relation. The column name is quoted here (it may
+    hold colons, as in ``metrics:area``), and ``replace_column`` is dropped with
+    EXCLUDE so the new column takes its place.
+    """
+    quoted_col = quote_identifier(column_name)
+    if replace_column:
+        return f"""
+        SELECT
+            * EXCLUDE ({quote_identifier(replace_column)}),
+            {sql_expression} AS {quoted_col}
+        FROM {source}
+    """
+    return f"""
+        SELECT
+            *,
+            {sql_expression} AS {quoted_col}
+        FROM {source}
+    """

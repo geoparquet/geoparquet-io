@@ -5,19 +5,22 @@ STAC Item and Collection generation for GeoParquet files.
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pystac
 
-from geoparquet_io.core.common import get_dataset_bounds, get_parquet_metadata
+from geoparquet_io.core.bbox_structure import dataset_bounds
+from geoparquet_io.core.common import get_parquet_metadata
+from geoparquet_io.core.crs_utils import authority_of
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
     InvalidParameterError,
 )
-from geoparquet_io.core.geo_metadata import parse_geo_metadata, sanitize_geo_metadata
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.file_utils import get_all_parquet_files
+from geoparquet_io.core.geo_metadata import sanitize_geo_metadata, sanitized_carried_geo
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.remote import is_remote_url
 
@@ -58,8 +61,7 @@ def _detect_stac_directory(dir_path: Path) -> str | None:
 
     # Check if directory also contains parquet files
     # If it does, it's a mixed directory (STAC + parquet) - allow it
-    parquet_files = list(dir_path.glob("*.parquet")) + list(dir_path.glob("*/*.parquet"))
-    if parquet_files:
+    if get_all_parquet_files(str(dir_path)):
         # Mixed directory - has both STAC and parquet, allow generation from parquet
         return None
 
@@ -142,7 +144,7 @@ def generate_stac_geometry(parquet_file: str, verbose: bool = False) -> dict:
     """
     Generate GeoJSON geometry for STAC Item from dataset bounds.
 
-    Uses existing get_dataset_bounds() function.
+    Uses existing dataset_bounds() function.
 
     Args:
         parquet_file: Path to parquet file
@@ -151,7 +153,7 @@ def generate_stac_geometry(parquet_file: str, verbose: bool = False) -> dict:
     Returns:
         GeoJSON Polygon dict representing dataset extent
     """
-    bounds = get_dataset_bounds(parquet_file, verbose=verbose)
+    bounds = dataset_bounds(parquet_file, verbose=verbose)
     if not bounds:
         raise GeoParquetError("Could not calculate dataset bounds")
 
@@ -213,9 +215,9 @@ def _add_projection_properties(item: pystac.Item, geo_meta: dict | None, parquet
     A write-path reader despite reading nothing but metadata: the CRS and
     geometry types it lifts out leave gpio inside a *published* STAC Item, so
     the block goes through the shared shape check rather than being copied out
-    of somebody else's file as-is (#947). ``parse_geo_metadata``, which the two
-    callers read with, is the read-only reader and stays untouched -- ``gpio
-    check`` needs it to show the file as it really is.
+    of somebody else's file as-is (#947). The two callers read it with
+    ``sanitized_carried_geo`` already; sanitizing again here keeps a caller
+    that hands over a raw block safe.
 
     Before the check, a ``columns: null`` block aborted ``gpio publish stac``
     with ``argument of type 'NoneType' is not iterable``, and a list- or
@@ -225,7 +227,7 @@ def _add_projection_properties(item: pystac.Item, geo_meta: dict | None, parquet
     if not geo_meta:
         return
 
-    geom_col = find_primary_geometry_column(parquet_file, verbose=False)
+    geom_col = primary_geometry_column(parquet_file, verbose=False)
     columns = geo_meta.get("columns")
     if not isinstance(columns, dict) or geom_col not in columns:
         return
@@ -237,8 +239,9 @@ def _add_projection_properties(item: pystac.Item, geo_meta: dict | None, parquet
         crs = col_info["crs"]
         # Try to extract EPSG code
         if isinstance(crs, dict):
-            if "id" in crs and "code" in crs["id"]:
-                item.properties["proj:epsg"] = crs["id"]["code"]
+            identifier = authority_of(crs)
+            if identifier and identifier[0] == "EPSG":
+                item.properties["proj:epsg"] = int(identifier[1])
             # Store full CRS as PROJJSON
             item.properties["proj:projjson"] = crs
         elif isinstance(crs, str):
@@ -316,10 +319,10 @@ def get_file_datetime(parquet_file: str) -> datetime:
     """
     if os.path.exists(parquet_file):
         mtime = os.path.getmtime(parquet_file)
-        return datetime.fromtimestamp(mtime, tz=timezone.utc)
+        return datetime.fromtimestamp(mtime, tz=UTC)
     else:
         # Fallback to current time for remote files
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 def generate_stac_item(
@@ -333,8 +336,8 @@ def generate_stac_item(
     Generate STAC Item for a single GeoParquet file.
 
     Uses existing metadata extraction:
-    - get_dataset_bounds() for bbox
-    - parse_geo_metadata() for CRS/geometry info
+    - dataset_bounds() for bbox
+    - sanitized_carried_geo() for CRS/geometry info
     - file mtime or current time for datetime
 
     Args:
@@ -373,10 +376,10 @@ def generate_stac_item(
 
     # Get metadata
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
-    geo_meta = parse_geo_metadata(metadata, verbose=False)
+    geo_meta = sanitized_carried_geo(metadata, source=parquet_file)
 
     # Get bounds and geometry
-    bounds = get_dataset_bounds(parquet_file, verbose=False)
+    bounds = dataset_bounds(parquet_file, verbose=False)
     if not bounds:
         raise GeoParquetError(f"Could not calculate bounds for {parquet_file}")
 
@@ -445,10 +448,10 @@ def _generate_stac_item_no_warning(
     """
     # Get metadata
     metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
-    geo_meta = parse_geo_metadata(metadata, verbose=False)
+    geo_meta = sanitized_carried_geo(metadata, source=parquet_file)
 
     # Get bounds and geometry
-    bounds = get_dataset_bounds(parquet_file, verbose=False)
+    bounds = dataset_bounds(parquet_file, verbose=False)
     if not bounds:
         raise GeoParquetError(f"Could not calculate bounds for {parquet_file}")
 
@@ -585,10 +588,8 @@ def generate_stac_collection(
 
 
 def _find_partition_files(partition_dir: str) -> list[Path]:
-    """Find all parquet files in partition directory."""
-    partition_files = list(Path(partition_dir).glob("*.parquet"))
-    hive_partitions = list(Path(partition_dir).glob("*/*.parquet"))
-    return partition_files + hive_partitions
+    """Every parquet file of a partition, as every other reader lists it."""
+    return [Path(f) for f in get_all_parquet_files(partition_dir)]
 
 
 def _generate_collection_items(

@@ -155,21 +155,30 @@ from geoparquet_io.core.logging_config import success, warn, error, info, debug
 from pathlib import Path  # Prefer over os.path
 ```
 
-### DuckDB 1.5 Patterns
+### DuckDB 1.5 / 2.0 Patterns
 
-**Enforced by `duckdb-antipatterns` pre-commit hook.** Violations fail the build.
+**Enforced by `duckdb-antipatterns` pre-commit hook** and, for the result-API
+and lambda rows, by `tests/test_duckdb2_result_api_guard.py` (an AST walk of
+`geoparquet_io/` and `tests/`). Violations fail the build. Code must run on
+both DuckDB 1.5.x and 2.0.
 
 | Old (crashes) | Correct |
 |---------------|---------|
-| `.fetch_arrow_table()` | `.arrow().read_all()` |
-| `.to_arrow_table()` | `.arrow().read_all()` |
+| `duckdb.__version__` | `duckdb_capabilities()` |
+| `.fetch_arrow_table()` | `con.sql(q).arrow().read_all()` |
+| `.to_arrow_table()` | `con.sql(q).arrow().read_all()` |
+| `con.execute(q).arrow()` (gone in 2.0) | `con.sql(q).arrow().read_all()` (`params=` for parameters) |
+| `con.execute(q).fetch_record_batch(n)` (gone in 2.0) | `con.sql(q).to_arrow_reader(batch_size=n)` |
+| `con.execute(q).fetchone()` / `.fetchmany(n)` (2.0 leaves the result open) | `fetch_one(con.execute(q))`; drain a multi-row read |
+| `con.sql(q).fetchone()` / `.fetchmany()` (gone in 2.0) | `fetch_one(con.execute(q))` / `.fetchall()` |
+| `list_transform(l, x -> x + 1)` (2.0 rejects `->`) | `list_transform(l, lambda x: x + 1)` |
 | `TRY_CAST(x AS GEOMETRY)` | `TRY(ST_GeomFromText(x))` |
 | `f'"{col}"'` / `col.replace('"', '""')` | `quote_identifier(col)` |
-| `WHERE path = '{value}'` | `_escape_sql_string(value)` |
+| `WHERE path = '{value}'` | `sql_literal(value)` |
 | `FROM '{path}'` | `FROM {sql_path(path)}` |
 
 Never hand-roll SQL escaping. `quote_identifier()` is for **identifiers**
-(column/table names — doubles embedded `"`); `_escape_sql_string()` is for SQL
+(column/table names — doubles embedded `"`); `sql_literal()` is for SQL
 **string literals** (doubles embedded `'`); `sql_path()` is for a **file path**
 and returns the quotes too, so a call site cannot forget the escape. All three
 live in `core/duckdb_utils.py` and take a RAW value — escaping is not
@@ -177,16 +186,25 @@ idempotent, so escape exactly once. Column names arrive from a file's own
 `geo.primary_column` and from `--column`/`--bbox-name`, so this is an injection
 surface, not a style nit.
 
-A path is escaped **either** by `safe_file_url()` (which also resolves remote
-URLs and checks existence; callers quote its bare result) **or** by `sql_path()`
-— never both. Handing an already-escaped path to a helper that escapes its own
+Escape a raw path exactly once with `sql_path()`. Handing an already-escaped path to a helper that escapes its own
 argument, or to a filesystem API, turns `o'brien` into `o''brien` and the file
 "disappears" (#718). A function takes a RAW path or a SQL-ready literal, never
 ambiguously both. `scripts/check_sql_path_literals.py` ratchets new
 `FROM '{path}'` sites out of the tree (`--update` regenerates its baseline).
 
+**DuckDB 2.0 result rules.** An `execute()` result stays open until a fetch
+returns no rows, and while it is open `con.sql()`, `con.register()`,
+`create_function()` and every relation read on that connection raise
+`ResourceInUseException`; `fetch_one` (in `core/duckdb_utils.py`) calls
+`complete()` after the row. A streaming reader blocks its connection the same
+way until drained, and a connection used from several threads needs a
+`con.cursor()` per thread. `to_arrow_reader(batch_size=n)` caps batches at `n`
+but does not merge smaller ones, so a writer that turns batches into row groups
+re-chunks them first (`regroup` in `core/parquet_writer.py`).
+
 Additional patterns (not yet enforced):
 - `ST_Transform(..., always_xy := true)` → `SET geometry_always_xy = true` at session level
+  (2.0 refuses `ST_Transform` and a GDAL `SRS` until it is set; `get_duckdb_connection` sets it)
 - `apply_crs_to_parquet()` removed → use `_wrap_query_with_crs()`
 
 ---
@@ -194,7 +212,24 @@ Additional patterns (not yet enforced):
 <!-- freshness: last-verified: 2026-04-03, maps-to: pyproject.toml -->
 ## Testing
 
+The collected-count ratchet in `tests/test_suite_budget.py` limits the fast suite using
+`tests/suite_budget.toml`; its numbers only go down, and raising one needs a reason in the PR.
+The per-test time cap is `timeout = 60` in `pyproject.toml` (the fast lane's); the slow and
+docs-examples jobs pass `--timeout=600`, and explicit timeout marks are ratcheted by
+`max_timeout_marks` in `tests/suite_budget.toml`.
+The duplicate-body gate in `tests/test_duplicate_tests.py` checks test bodies and their
+execution context to prevent identical tests from growing back.
+
 Config in `pyproject.toml [tool.pytest.ini_options]`.
+
+The fast lane runs `uv run pytest -n auto -m "not slow and not network and not meta"`;
+`integration` tests belong there unless also marked `slow` or `network`.
+Whole-pipeline journeys, subprocess pipelines, corpus checks, and all docs
+examples are slow by policy (#1402), keeping each fast CI leg under 20 minutes.
+Run the slow lane with `uv run pytest -n 4 -m "(slow or meta) and not network"`;
+CI runs it on three OS legs: Ubuntu, macOS, and Windows. Run docs locally with
+`uv run pytest docs/guide -m "not network"`, and network tests separately with
+`uv run pytest -m network`.
 
 ```bash
 uv run pytest -n auto -m "not slow and not network and not meta"  # Fast tests (no coverage)
@@ -224,17 +259,18 @@ echoes together (policy: ADR-0006). The diff-cover gate is passed
 `--branch-coverage`, so a partial branch on a changed line counts as
 uncovered there too.
 
-The `meta` lane (codespell, commitizen, doc-sync, mutmut, mypy,
-validate-claude-md, security tool checks) is excluded from the fast suite and
-runs in the slow/nightly job instead. Pre-commit covers most of it locally, but
-not all: commitizen is a `commit-msg`-stage hook and mutmut has no hook, so
-`uv run pytest -m meta` is the only local way to check those two.
+The `meta` lane (codespell, commitizen, doc-sync, mypy, validate-claude-md,
+security tool checks) is excluded from the fast suite and runs in the
+slow/nightly job instead. Pre-commit covers most of it locally, but not all:
+commitizen is a `commit-msg`-stage hook, so `uv run pytest -m meta` is the only
+local way to check it.
 
 <!-- BEGIN GENERATED: test-markers -->
 ### Test Markers
 
 | Marker | Description |
 |--------|-------------|
+| `@pytest.mark.fresh_duckdb` | requires an independent database to inspect connection initialization or extension state |
 | `@pytest.mark.slow` | marks tests as slow (deselect with '-m "not slow"') |
 | `@pytest.mark.network` | marks tests requiring network access (deselect with '-m "not network"') |
 | `@pytest.mark.integration` | marks end-to-end integration tests; runs in the fast suite unless also marked slow/network (see tests/e2e/test_integration_lane.py) |
@@ -250,14 +286,44 @@ lane, and locally they time out and read as a flaky docs lane.
 
 ---
 
+## One owner per concept
+
+Ask these owners for policy; callers pass explicit inputs instead of keeping local
+copies or compatibility wrappers. The guard set is in ADR-0008 and
+`docs/contributing.md` (owner guards).
+
+| Concept | Owner module | Public entry points |
+|---|---|---|
+| Final Parquet write policy | `geoparquet_io/core/parquet_writer.py`, `geoparquet_io/core/write_funnels.py`, `geoparquet_io/core/compression.py` | `WriteOptions`, `resolve_output_geoparquet_version`, `resolve_row_group_rows`, `resolve_codec`, `write_parquet_with_metadata`, `write_geoparquet_table` |
+| Footer patch or rewrite | `geoparquet_io/core/parquet_footer.py` | `patch_or_rewrite` |
+| Geo block decoding | `geoparquet_io/core/geo_metadata.py` | `read_raw_geo`, `sanitized_carried_geo`, `declared_version` |
+| Geo block composition and covering | `geoparquet_io/core/geo_metadata.py`, `geoparquet_io/core/bbox_structure.py` | `compose_geo_block`, `GeoBlockOptions`, `build_bbox_covering`, `bbox_struct_child_names_match`, `covering_bbox_refs` |
+| Geometry statistics and bounds | `geoparquet_io/core/geo_metadata.py` | `geometry_stats_of`, `bounds_of`, `geometry_types_of`, `merged_geometry_stats`, `bbox_xy` |
+| Non-planar edges | `geoparquet_io/core/edges.py` | `detect_edges`, `edges_for_version`, `carry_edges`, `representative_point_sql`, `geoarrow_type_edges` |
+| Geometry identity and read expressions | `geoparquet_io/core/geometry_detection.py` | `primary_geometry_column`, `resolve_geometry_column`, `resolve_geometry_read`, `require_geometry_column`, `create_geometry_view` |
+| CRS | `geoparquet_io/core/crs_utils.py` | `crs_of`, `is_geographic`, `is_projected`, `crs_equal`, `projjson_for_label`, `load_crs` |
+| Memory ceilings and byte sizes | `geoparquet_io/core/memory_limits.py`, `geoparquet_io/core/sizing.py` | `bound_open_connection`, `scoped_write_memory_limit`, `parse_size_string`, `format_size`, `format_memory_limit`, `mb_to_bytes` |
+| SQL escaping and native type probes | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `sql_literal`, `sql_path`, `quote_identifier`, `native_geo_type`, `is_native_geo_column` |
+| Paths, overwrite and staging | `geoparquet_io/core/remote.py`, `geoparquet_io/core/file_utils.py` | `is_remote_url`, `has_glob_pattern`, `is_partition_path`, `handle_output_overwrite`, `atomic_write`, `scratch_file`, `scratch_path`, `scratch_dir` |
+| Column-name resolution | `geoparquet_io/core/column_selection.py` | `fold`, `find_column`, `matching_columns`, `unique_name`, `exclude_columns`, `resolve_columns_against_schema` |
+| Index add and partition workflows | `geoparquet_io/core/index_ops.py` | `IndexSpec`, `add_index_column`, `ensure_index_column`, `index_expression`, `index_point` |
+| HTTP retries | `geoparquet_io/core/http_retry.py` | `make_request_with_retry`, `run_with_retry`, `retry_wait`, `parse_retry_after` |
+| CLI options and report formatting | `geoparquet_io/cli/decorators.py`, `geoparquet_io/core/bbox_parse.py`, `geoparquet_io/core/json_output.py`, `geoparquet_io/cli/commands/check.py` | `overwrite_option`, `refuse_together`, `parse_bbox`, `BBox`, `dumps_json`, `MultiFileCheckRunner` |
+| Spatial joins | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/admin_datasets.py` | `build_spatial_join_condition`, `build_spatial_join_query`, `build_admin_subquery`, `admin_match_order` |
+| Query schema and row-group statistics | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `query_schema`, `describe_query`, `get_row_group_bbox_stats`, `get_row_group_sizes` |
+| Error classification and CLI translation | `geoparquet_io/core/exceptions.py`, `geoparquet_io/cli/exception_handler.py` | `classify_failure`, `redact_credentials`, `status_message`, `error_boundary` |
+| GDAL format writes | `geoparquet_io/core/format_writers.py` | `write_gdal_format` |
+| DuckDB capabilities | `geoparquet_io/core/duckdb_utils.py` | `duckdb_capabilities`, `DuckDBCapabilities`, `complete_without_fetch`, `resolve_load_spatial` |
+
 ## Code Quality
 
 **All handled by pre-commit.** See `.pre-commit-config.yaml` for full list.
 
 | Stage | Hooks |
 |-------|-------|
-| commit | ruff, codespell, no-click-echo, duckdb-antipatterns, doc-sync, menard-check |
-| pre-push | xenon (complexity), import-linter, deptry, vulture |
+| commit | ruff, ruff-format, codespell, actionlint, zizmor, duckdb-antipatterns, no-click-echo, owner-only-defs, check-duplicates, pylint-duplicates, vulture, vulture-tests, no-cwd-change-in-tests, check-api-for-cli, validate-claude-md, doc-sync, sync-dependencies (plus the stock whitespace/YAML/TOML/merge-conflict checks) |
+| commit-msg | commitizen |
+| pre-push | xenon (complexity), import-linter, deptry, owner-only-defs, check-duplicates, pylint-duplicates, vulture, vulture-tests, mypy, fast-tests |
 
 Complexity guidance: guard clauses, dictionary dispatch, max 30-40 lines/function.
 

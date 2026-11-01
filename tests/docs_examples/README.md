@@ -41,7 +41,7 @@ gpio add bbox s3://bucket/in.parquet s3://bucket/out.parquet
 |---|---|
 | `skip="reason"` | Not executed. **The reason is required** and must be true of the whole fence. |
 | `network` | Runs only in the network CI lane (`-m network`), with a 600 s block timeout instead of the usual 120 s — a boundary download cannot finish in two minutes. Required on any fence that needs the internet; the meta-test checks the known ones. |
-| `slow` / `fast` | Force the block out of / into the fast suite, whatever page it is on. |
+| `slow` / `fast` | Legacy directives accepted for compatibility; all examples are slow whole-pipeline checks (#1402). |
 | `needs-tippecanoe` | Skipped when `tippecanoe` is not installed. Use it for anything piping to tippecanoe or calling `gpio pmtiles`. |
 | `needs-ogr` | Skipped when `ogr2ogr` is not installed. |
 | `setup="shell command"` | Runs before the block, in the same directory. Repeatable. Use it to build a precondition rather than skipping. |

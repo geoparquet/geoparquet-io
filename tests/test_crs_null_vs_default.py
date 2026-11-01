@@ -14,10 +14,11 @@ import pytest
 
 from geoparquet_io.core.crs_utils import (
     crs_is_explicitly_null,
-    extract_crs_from_parquet,
+    crs_of,
     geoparquet_crs_is_null,
     reset_null_crs_warnings,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.reproject import _reproject_streaming, reproject, reproject_table
 from geoparquet_io.core.validate import CheckStatus, _check_crs_valid
 from tests.conftest import get_geo_metadata
@@ -132,11 +133,8 @@ def _stream(input_file, output_file, target_crs, assume_crs84=False):
         output_file,
         target_crs,
         None,  # source_crs
-        "ZSTD",  # compression
-        None,  # compression_level
         False,  # verbose
-        None,  # profile
-        None,  # geoparquet_version
+        WriteOptions(compression="ZSTD"),
         assume_crs84=assume_crs84,
     )
 
@@ -266,8 +264,8 @@ def test_warn_on_null_crs_emitted_once(null_crs_parquet, caplog):
 
     reset_null_crs_warnings()
     with caplog.at_level(logging.WARNING):
-        extract_crs_from_parquet(null_crs_parquet)
-        extract_crs_from_parquet(null_crs_parquet)
+        crs_of(null_crs_parquet)
+        crs_of(null_crs_parquet)
     assert len(_null_crs_warnings(caplog.records)) == 1
 
 
@@ -276,7 +274,7 @@ def test_no_warn_on_absent_crs(absent_crs_parquet, caplog):
 
     reset_null_crs_warnings()
     with caplog.at_level(logging.WARNING):
-        extract_crs_from_parquet(absent_crs_parquet)
+        crs_of(absent_crs_parquet)
     assert _null_crs_warnings(caplog.records) == []
 
 
@@ -298,8 +296,8 @@ def test_warn_on_two_distinct_null_files(null_crs_parquet, buildings_test_file, 
 
     reset_null_crs_warnings()
     with caplog.at_level(logging.WARNING):
-        extract_crs_from_parquet(null_crs_parquet)
-        extract_crs_from_parquet(second_path)
+        crs_of(null_crs_parquet)
+        crs_of(second_path)
     assert len(_null_crs_warnings(caplog.records)) == 2
 
 

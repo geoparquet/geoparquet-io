@@ -15,139 +15,62 @@ module-private helpers -- ``_build_geo_block``, ``_crs_as_projjson`` and the
 like -- are not re-exported, and nothing outside this module reached them).
 """
 
-import json
-
-import pyarrow.parquet as pq
-
 from geoparquet_io.core.arrow_types import _rebuild_array_with_type
 from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
 from geoparquet_io.core.crs_utils import (
+    PARQUET_UNKNOWN_CRS,
     _format_crs_display,
-    apply_output_crs,
+    crs_of,
     field_type_crs_is_unknown,
     is_default_crs,
     is_empty_crs_value,
-    parse_geo_metadata_from_schema,
+    table_crs_is_unknown,
 )
-from geoparquet_io.core.duckdb_utils import geoarrow_field_edges, planar_view
+from geoparquet_io.core.duckdb_utils import geoarrow_extension, planar_view
+from geoparquet_io.core.edges import (
+    declares_edges,
+    geoarrow_edge_type,
+    geoarrow_type_edges,
+    is_nonplanar,
+    set_edges,
+)
 from geoparquet_io.core.geo_metadata import (
-    DEFAULT_GEOPARQUET_VERSION,
-    GEOGRAPHY_EDGE_ALGORITHMS,
+    DETECT_BBOX_COLUMN,
     GEOPARQUET_VERSIONS,
+    GeoBlockOptions,
+    SchemaSource,
     _bbox_claimed_by_another_column,
-    _get_geometry_type_name,
     _self_evident_bbox_column,
-    bbox_column_to_declare,
-    carried_version,
-    create_geo_metadata,
-    geoarrow_wkb_codes,
-    sanitize_geo_metadata,
+    compose_geo_block,
+    geometry_stats_of,
+    geometry_types_of,
+    is_bbox_struct_field,
     sanitized_carried_geo,
-    strip_absent_covering,
-    strip_bboxless_covering,
-    strip_illegal_bbox_covering,
+    with_geo_key,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     is_geoarrow_extension_field,
     is_wkb_extension_field,
 )
-from geoparquet_io.core.logging_config import debug, success
+from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.parquet_writer import (
     _CARRIED_SCHEMA_METADATA_KEYS_BYTES,
-    ParquetWriteSettings,
-    apply_output_kv_metadata,
-    estimate_row_size,
     output_schema_metadata,
-    resolve_row_group_rows_for_table,
+    resolve_output_geoparquet_version,
 )
 from geoparquet_io.core.write_strategies.base import (
-    merge_secondary_geometry_metadata,
     native_geometry_crs,
     resolve_geometry_columns,
 )
 
 
-def _detect_version_from_table(table, verbose: bool = False) -> str | None:
-    """
-    Detect GeoParquet version from table's schema metadata.
-
-    Checks the table's schema metadata for existing geo metadata and extracts
-    the version. This allows preserving v2.0 or parquet-geo-only formats when
-    writing a table that was read from such a source.
-
-    Also checks for native geoarrow extension types which indicate v2.0 or
-    parquet-geo-only format.
-
-    Args:
-        table: PyArrow Table to check
-        verbose: Whether to print verbose output
-
-    Returns:
-        Version string (e.g., "1.1", "2.0", "parquet-geo-only") or None if not detected
-    """
-    import json
-
-    # Check for native geoarrow extension types (indicates v2.0 or parquet-geo-only).
-    # `is_geoarrow_extension_field` reads the field, not just the type, so a
-    # metadata-declared geoarrow column is detected too -- without that, the
-    # same table resolved to "parquet-geo-only" or to the 1.1 default purely
-    # according to whether geoarrow.pyarrow had been imported (#792).
-    has_native_geo = any(is_geoarrow_extension_field(field) for field in table.schema)
-
-    # Check schema metadata for geo version
-    metadata = table.schema.metadata
-    if not metadata:
-        if has_native_geo:
-            # Native geo types but no metadata suggests parquet-geo-only
-            if verbose:
-                debug("Detected parquet-geo-only format from native geo types")
-            return "parquet-geo-only"
-        return None
-
-    if b"geo" not in metadata:
-        if has_native_geo:
-            # Native geo types but no geo metadata = parquet-geo-only
-            if verbose:
-                debug("Detected parquet-geo-only format (native types, no geo metadata)")
-            return "parquet-geo-only"
-        return None
-
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-        if isinstance(geo_meta, dict):
-            # Guarded, not truthiness-checked: a non-string version crashed
-            # `.split` here on the write path too -- `write_geoparquet_table`
-            # resolves auto-mode through this function (#979).
-            version = carried_version(geo_meta.get("version"))
-            if version:
-                parts = version.split(".")
-                if len(parts) >= 2:
-                    major = parts[0]
-                    if major == "2":
-                        if verbose:
-                            debug("Detected GeoParquet version 2.0 from table metadata")
-                        return "2.0"
-                    # Upgrade all 1.x versions to 1.1 (backwards compatible)
-                    if major == "1":
-                        if verbose:
-                            debug("Detected GeoParquet version 1.x from table metadata")
-                        return "1.1"
-        return None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-
-
 def _table_bbox_struct_ok(table, column_name: str) -> bool:
     """True when ``column_name`` is a struct column with the bbox fields."""
-    import pyarrow as pa
-
     try:
         field = table.schema.field(column_name)
     except KeyError:
         return False
-    return pa.types.is_struct(field.type) and {"xmin", "ymin", "xmax", "ymax"}.issubset(
-        {f.name for f in field.type}
-    )
+    return is_bbox_struct_field(field)
 
 
 def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
@@ -179,7 +102,7 @@ def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
     Returns:
         str: Name of the primary's bbox column if found, None otherwise
     """
-    geo_meta = parse_geo_metadata_from_schema(table.schema.metadata)
+    geo_meta = sanitized_carried_geo(table.schema.metadata)
     covering_column = _bbox_column_from_covering(geo_meta)
     if covering_column and _table_bbox_struct_ok(table, covering_column):
         if verbose:
@@ -194,25 +117,6 @@ def _detect_bbox_column_from_table(table, verbose: bool = False) -> str | None:
             debug(f"Not reading '{name}' as the primary's bbox: another column's covering names it")
         return None
     return name
-
-
-def _bbox_column_to_declare(
-    table, verbose: bool = False, original_metadata: dict | None = None
-) -> str | None:
-    """The bbox column this write may put in a ``covering``: the shared gate, on a table.
-
-    Stricter than :func:`_detect_bbox_column_from_table`, which is also a
-    read-side probe (``process aggregate --bucket-point bbox`` reads ``xmin`` by
-    name, which works in any field order).
-
-    Provenance is the input's own block when the caller has one: a table DuckDB
-    built from a query carries no schema metadata at all, so reading only that
-    would forget which column the primary declared (#953).
-    """
-    geo_meta = sanitized_carried_geo(original_metadata) or parse_geo_metadata_from_schema(
-        table.schema.metadata
-    )
-    return bbox_column_to_declare(table.schema, geo_meta, verbose=verbose)
 
 
 def _strip_geoarrow_to_plain_wkb(table, geometry_column: str, verbose: bool):
@@ -300,16 +204,6 @@ def _secondary_crs_from_field(field) -> dict:
     return {}
 
 
-def _is_spherical_edge_type(arrow_type) -> bool:
-    """Whether a GeoArrow extension type declares spherical edges."""
-    edge_type = getattr(arrow_type, "edge_type", None)
-    return getattr(edge_type, "name", "").upper() == "SPHERICAL"
-
-
-# One reader of a field's edges, shared with the DuckDB registration step (#1253).
-_field_edges = geoarrow_field_edges
-
-
 def nonplanar_edges_from_schema(schema) -> dict[str, str]:
     """Map each GeoArrow field with non-planar edges to its edges value.
 
@@ -319,15 +213,15 @@ def nonplanar_edges_from_schema(schema) -> dict[str, str]:
     need this to carry the edges over (#1269, #1253).
 
     The type carrier only. Only a GeoParquet edge algorithm
-    (``GEOGRAPHY_EDGE_ALGORITHMS``) counts (#1288). What a table declares once
+    (``edges.is_nonplanar``) counts (#1288). What a table declares once
     its ``geo`` block is weighed too is ``write_funnels.table_nonplanar_edges``.
     """
     edges_by_col: dict[str, str] = {}
     for field in schema:
         if not is_geoarrow_extension_field(field):
             continue
-        edges = _field_edges(field)
-        if edges in GEOGRAPHY_EDGE_ALGORITHMS:
+        edges = geoarrow_type_edges(field.type, geoarrow_extension(field)[1])
+        if is_nonplanar(edges):
             edges_by_col[field.name] = edges
     return edges_by_col
 
@@ -412,8 +306,9 @@ def table_geometry_info(
             col_meta.update(_secondary_crs_from_field(field))
         # The schema carries the edge interpretation as well as the CRS: left
         # behind, a spherical secondary came out planar with no warning.
-        if "edges" not in col_meta and _is_spherical_edge_type(field.type):
-            col_meta["edges"] = "spherical"
+        type_edges = geoarrow_type_edges(field.type, geoarrow_extension(field)[1])
+        if not declares_edges(col_meta) and is_nonplanar(type_edges):
+            set_edges(col_meta, type_edges)
         metadata[field.name] = col_meta
 
     if not metadata:
@@ -501,8 +396,9 @@ def _process_geometry_column_for_version(
                 new_type = ga.wkb()
             # The CRS is normalized, never the edges: a spherical column rebuilt
             # as a bare `ga.wkb()` came out a planar GEOMETRY (#1175).
-            if _is_spherical_edge_type(wkb_arr.type):
-                new_type = new_type.with_edge_type(ga.EdgeType.SPHERICAL)
+            type_edges = geoarrow_type_edges(wkb_arr.type)
+            if is_nonplanar(type_edges):
+                new_type = new_type.with_edge_type(geoarrow_edge_type(type_edges))
             # Always rebuild: geoarrow's WkbType.__eq__ ignores the CRS, so a
             # "types are equal" shortcut would skip precisely the case this is
             # here to normalize.
@@ -531,130 +427,6 @@ def _process_geometry_column_for_version(
     return table
 
 
-def _compute_geometry_types(table, geometry_column: str, verbose: bool) -> list[str]:
-    """
-    Compute geometry types from a geometry column using geoarrow.
-
-    Args:
-        table: PyArrow Table containing the geometry column
-        geometry_column: Name of the geometry column
-        verbose: Whether to print verbose output
-
-    Returns:
-        list: List of GeoParquet geometry type names (e.g., ["Point", "Polygon"])
-    """
-    import geoarrow.pyarrow as ga
-    import pyarrow.compute as pc
-
-    # Skip for empty tables (geoarrow crashes on empty arrays)
-    if table.num_rows == 0:
-        return []
-
-    try:
-        geom_col = table.column(geometry_column)
-
-        # Filter out NULL values to avoid geoarrow errors on invalid geometries
-        # This handles cases where BigQuery returns NULL or empty geometries
-        non_null_mask = pc.is_valid(geom_col)
-        if pc.any(non_null_mask).as_py():
-            geom_col = pc.filter(geom_col, non_null_mask)
-        else:
-            # All values are NULL
-            return []
-
-        # Skip if no valid geometries remain after filtering
-        if len(geom_col) == 0:
-            return []
-
-        wkb_arr = ga.as_wkb(geom_col)
-        types_struct = ga.unique_geometry_types(wkb_arr)
-
-        # Extract geometry type codes from struct array. geoarrow reports the
-        # base type and the dimensions separately, so the two are recombined
-        # into a WKB code -- reading `geometry_type` alone dropped the " Z" /
-        # " M" / " ZM" the spec makes part of the type name (#892).
-        type_codes = geoarrow_wkb_codes(types_struct)
-
-        # Map codes to GeoParquet standard names (avoid duplicates)
-        type_names = []
-        for code in type_codes:
-            name = _get_geometry_type_name(code)
-            if name not in type_names:
-                type_names.append(name)
-
-        if verbose:
-            debug(f"Computed geometry_types from data: {type_names}")
-        return type_names
-
-    except Exception as e:
-        # Catch all exceptions including geoarrow C++ errors
-        # (e.g., "Expected valid geometry type code but found 0")
-        if verbose:
-            debug(f"Could not compute geometry_types: {e}")
-        # Return empty list as fallback (allowed by spec - means any type)
-        return []
-
-
-def _compute_bbox_from_data(table, geometry_column: str, verbose: bool) -> list[float] | None:
-    """
-    Compute bounding box from geometry column data.
-
-    Args:
-        table: PyArrow Table containing the geometry column
-        geometry_column: Name of the geometry column
-        verbose: Whether to print verbose output
-
-    Returns:
-        list: [xmin, ymin, xmax, ymax] or None if computation fails
-    """
-    import geoarrow.pyarrow as ga
-    import pyarrow.compute as pc
-
-    # Skip for empty tables
-    if table.num_rows == 0:
-        return None
-
-    try:
-        geom_col = table.column(geometry_column)
-
-        # Filter out NULL values to avoid geoarrow errors on invalid geometries
-        non_null_mask = pc.is_valid(geom_col)
-        if pc.any(non_null_mask).as_py():
-            geom_col = pc.filter(geom_col, non_null_mask)
-        else:
-            # All values are NULL
-            return None
-
-        # Skip if no valid geometries remain after filtering
-        if len(geom_col) == 0:
-            return None
-
-        wkb_arr = ga.as_wkb(geom_col)
-        box_arr = ga.box(wkb_arr)
-
-        # Combine chunks and get storage (underlying struct array)
-        combined = box_arr.combine_chunks()
-        storage = combined.storage
-
-        # Extract struct fields and compute min/max
-        xmin = pc.min(pc.struct_field(storage, "xmin")).as_py()
-        ymin = pc.min(pc.struct_field(storage, "ymin")).as_py()
-        xmax = pc.max(pc.struct_field(storage, "xmax")).as_py()
-        ymax = pc.max(pc.struct_field(storage, "ymax")).as_py()
-
-        if all(v is not None for v in [xmin, ymin, xmax, ymax]):
-            if verbose:
-                debug(f"Computed bbox from data: [{xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f}]")
-            return [xmin, ymin, xmax, ymax]
-
-    except Exception as e:
-        # Catch all exceptions including geoarrow C++ errors
-        if verbose:
-            debug(f"Could not compute bbox: {e}")
-
-    return None
-
-
 def _assemble_and_apply_geo_metadata(
     table,
     geo_meta: dict,
@@ -681,8 +453,7 @@ def _assemble_and_apply_geo_metadata(
     # `ARROW:schema` and `geo:overviews` go, while a sidecar whose name only
     # starts with "geo" stays. The `geo` key itself is replaced just below.
     new_metadata = output_schema_metadata(table.schema.metadata, metadata_version)
-    new_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-    table = table.replace_schema_metadata(new_metadata)
+    table = table.replace_schema_metadata(with_geo_key(new_metadata, geo_meta))
 
     if verbose:
         debug(f"Applied geo metadata with version {metadata_version}")
@@ -782,28 +553,6 @@ def _canonicalize_wkb_columns(table, geometry_columns, verbose: bool = False, na
     return table
 
 
-def _parse_geo_metadata_quietly(original_metadata) -> dict:
-    """Best-effort parse of a carried ``geo`` key; ``{}`` when absent or unreadable."""
-    if not original_metadata:
-        return {}
-    raw = original_metadata.get(b"geo") or original_metadata.get("geo")
-    if not raw:
-        return {}
-    try:
-        if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
-        parsed = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-        return {}
-    # Callers read ``columns`` as a mapping of column name to a dict of that
-    # column's metadata. A carried block is arbitrary JSON from the input file,
-    # so anything else is dropped rather than allowed to raise a TypeError three
-    # frames away, in the middle of a write. The check lives in one place --
-    # ``sanitize_geo_metadata`` -- that every write-path reader goes through
-    # (#771); this function is one of them.
-    return sanitize_geo_metadata(parsed) or {}
-
-
 def _apply_geoparquet_metadata(
     table,
     geometry_column: str,
@@ -815,6 +564,7 @@ def _apply_geoparquet_metadata(
     edges: str | None = None,
     geometry_info: dict | None = None,
     geo_bbox: list[float] | None = None,
+    geo_types: list[str] | None = None,
 ):
     """
     Apply GeoParquet metadata to an Arrow Table based on version.
@@ -837,7 +587,7 @@ def _apply_geoparquet_metadata(
         input_crs: PROJJSON dict with CRS
         custom_metadata: Custom metadata (e.g., H3 covering info)
         verbose: Whether to print verbose output
-        edges: Edge interpretation, "spherical" or "planar" (default None = planar).
+        edges: Edge interpretation, one of ``edges.EDGES`` (default None = planar).
                Use "spherical" for data from BigQuery or other S2-based sources.
         geometry_info: Dict containing multi-geometry column info with keys:
             - "primary": primary geometry column name
@@ -848,23 +598,24 @@ def _apply_geoparquet_metadata(
             knows the data crosses the antimeridian passes the RFC 7946 5.2
             wrap form (xmin > xmax) here, which cannot be recovered from
             per-geometry extents alone.
+        geo_types: Pre-computed ``geometry_types`` for the primary column (a
+            caller that measured rows this table does not hold, such as the
+            union over an overview's levels), declared by the composer.
 
     Returns:
         pa.Table: Table with GeoParquet metadata applied
     """
-    # Auto-detect version from table schema metadata if not specified
-    effective_version = geoparquet_version
-    if effective_version is None:
-        effective_version = _detect_version_from_table(table, verbose)
-
-    version_config = GEOPARQUET_VERSIONS.get(
-        effective_version, GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]
+    # Auto mode: the facade decides from the table's own schema.
+    effective_version = resolve_output_geoparquet_version(
+        geoparquet_version, table=table, verbose=verbose
     )
+
+    version_config = GEOPARQUET_VERSIONS[effective_version]
     metadata_version = version_config["metadata_version"]
     should_add_geo_metadata = effective_version != "parquet-geo-only"
 
     if verbose:
-        debug(f"Applying GeoParquet metadata for version: {effective_version or 'default (1.1)'}")
+        debug(f"Applying GeoParquet metadata for version: {effective_version}")
 
     # Check if geometry column exists in table
     if geometry_column not in table.column_names:
@@ -897,7 +648,7 @@ def _apply_geoparquet_metadata(
     # `original_metadata` is deliberately None on the table entry points (passing
     # it there would smuggle the input's stale geo block into the output), so the
     # secondary names come from the table's own carried key instead.
-    carried_geo = _parse_geo_metadata_quietly(original_metadata) or _parse_geo_metadata_quietly(
+    carried_geo = sanitized_carried_geo(original_metadata) or sanitized_carried_geo(
         table.schema.metadata
     )
 
@@ -907,7 +658,9 @@ def _apply_geoparquet_metadata(
     # of `geo.columns` and wrote it as a native Parquet GEOMETRY inside a 1.1 file
     # (#1175). A caller that supplied `geometry_info` has already answered.
     if geometry_info is None:
-        geometry_info = table_geometry_info(table, geometry_column, carried_geo)
+        geometry_info = table_geometry_info(
+            table, geometry_column, sanitized_carried_geo(table.schema.metadata) or carried_geo
+        )
 
     # Step 1: Build the geo metadata, BEFORE the geometry columns are retyped.
     #
@@ -920,17 +673,17 @@ def _apply_geoparquet_metadata(
     # Built for parquet-geo-only too, which drops it again below: there the
     # logical type is the column's only geometry identity, so losing the CRS is
     # not a disagreement but a silent relabelling of projected coordinates.
-    geo_meta = _build_geo_block(
-        table,
+    block_args = (
         geometry_column,
         original_metadata,
         input_crs,
         custom_metadata,
-        metadata_version,
+        effective_version,
         edges,
         geometry_info,
         verbose,
     )
+    geo_meta = _build_geo_block(table, *block_args)
 
     # A column the block does not name falls back to what the input declared for
     # it: on the table entry points the block is built from `original_metadata`,
@@ -993,14 +746,23 @@ def _apply_geoparquet_metadata(
         # metadata, to match the other write paths.
         return _strip_geo_metadata_key(table, verbose)
 
-    # Stats are read off the written data, so they are filled in after step 2.
-    col_meta = geo_meta["columns"][geometry_column]
-    if "geometry_types" not in col_meta:
-        col_meta["geometry_types"] = _compute_geometry_types(table, geometry_column, verbose)
-
-    computed_bbox = geo_bbox or _compute_bbox_from_data(table, geometry_column, verbose)
-    if computed_bbox:
-        col_meta["bbox"] = computed_bbox
+    # Stats are read off the written data, so the block is composed again once
+    # step 2 has retyped it. One owner call measures whatever is missing, in one
+    # pass when both are.
+    need_types = "geometry_types" not in geo_meta["columns"][geometry_column]
+    measured: dict = {} if geo_types is None else {"geometry_types": geo_types}
+    need_types = need_types and geo_types is None
+    if geo_bbox:
+        measured["bbox"] = geo_bbox
+        if need_types:
+            measured["geometry_types"] = geometry_types_of(table, geometry_column, verbose=verbose)
+    else:
+        stats = geometry_stats_of(table, geometry_column, verbose=verbose)
+        if stats.bbox:
+            measured["bbox"] = stats.bbox
+        if need_types:
+            measured["geometry_types"] = stats.geometry_types
+    geo_meta = _build_geo_block(table, *block_args, stats={geometry_column: measured})
 
     return _assemble_and_apply_geo_metadata(table, geo_meta, metadata_version, verbose)
 
@@ -1011,133 +773,54 @@ def _build_geo_block(
     original_metadata: dict | None,
     input_crs: dict | None,
     custom_metadata: dict | None,
-    metadata_version: str,
+    effective_version: str,
     edges: str | None,
     geometry_info: dict | None,
     verbose: bool,
+    stats: dict | None = None,
 ) -> dict:
-    """Build the output's ``geo`` block, with the primary column's CRS resolved.
+    """The output's ``geo`` block, composed over the table's schema.
 
-    Everything here reads the table's *schema* only -- the bbox-covering probe --
-    so it can run before the geometry columns are retyped, which is what lets the
-    native Parquet GEOMETRY types be built from the CRS this declares (#848).
-    The per-column stats that need the data (``geometry_types``, ``bbox``) are
-    filled in by the caller afterwards.
+    Composed before the geometry columns are retyped, which is what lets the
+    native Parquet GEOMETRY types be built from the CRS it declares (#848), and
+    again with the ``stats`` measured off the retyped data.
+
+    Covering provenance is the input's own block when the caller has one, the
+    table's otherwise: a table DuckDB built from a query carries no schema
+    metadata at all, so reading only that would forget which column the
+    primary declared (#953); a table entry point passes no
+    ``original_metadata``, so its own block is the provenance.
     """
-    bbox_column = _bbox_column_to_declare(table, verbose, original_metadata)
-    geo_meta = create_geo_metadata(
-        original_metadata,
-        geometry_column,
-        {"has_bbox_column": bbox_column is not None, "bbox_column_name": bbox_column},
-        custom_metadata,
-        verbose,
-        version=metadata_version,
-        edges=edges,
-    )
-
-    # Set/clear the geometry column's crs per the GeoParquet null-vs-default rule
-    # (shared helper is the single source of truth across all write paths).
-    columns = geo_meta.setdefault("columns", {})
-    apply_output_crs(columns.setdefault(geometry_column, {}), input_crs)
     if verbose and input_crs and not is_default_crs(input_crs):
         debug(f"Added CRS to geo metadata: {_format_crs_display(input_crs)}")
-
-    # Secondary entries are merged in here rather than after the stats pass, so
-    # each one's own `crs` is available to the native-type decision.
-
-    merge_secondary_geometry_metadata(geo_meta, geometry_info)
-    # Secondary entries arrive after create_geo_metadata's gate (#954).
-    #
-    # Before the shape gate, which judges the struct a covering names and so has
-    # nothing to say about one naming no column at all. The DuckDB funnel prunes
-    # the carried block against the output's columns before any strategy sees it;
-    # this funnel had no equivalent, so a table whose own block declared a
-    # covering over a column it does not carry wrote the entry verbatim.
-    geo_meta = strip_absent_covering(geo_meta, table.column_names)
-    # `bbox_column` above answers "may this write declare that column?"; a `no`
-    # over a struct the INPUT already declared also has to drop the entry it
-    # declared, or the warning the gate just printed is a lie (#1172).
-    geo_meta = strip_illegal_bbox_covering(geo_meta, table.schema)
-    return strip_bboxless_covering(geo_meta, verbose)
-
-
-# The bytes-per-row estimate is the facade's now (`parquet_writer.estimate_row_size`):
-# it feeds the MB -> rows decision, and a second copy here was how two write
-# paths came to answer the same flag differently (#1021). Kept under its old
-# name for `common.py`'s compatibility shim until the shims go.
-_estimate_row_size = estimate_row_size
-
-
-def _write_table_with_settings(
-    table,
-    output_path: str,
-    compression: str,
-    compression_level: int | None,
-    row_group_rows: int | None,
-    row_group_size_mb: int | None,
-    geoparquet_version: str | None,
-    geometry_column: str,
-    verbose: bool = False,
-    extra_kv_metadata: dict[str, str] | None = None,
-) -> None:
-    """
-    Write Arrow table to Parquet with proper settings.
-
-    Uses pq.write_table directly since we've already applied all GeoParquet
-    metadata to the table. This preserves the metadata we set (including version,
-    geometry_types, CRS, etc.) without geoarrow overwriting it.
-
-    Args:
-        table: PyArrow Table to write
-        output_path: Output file path
-        compression: Compression type (ZSTD, GZIP, etc.)
-        compression_level: Compression level
-        row_group_rows: Exact number of rows per row group
-        row_group_size_mb: Target row group size in MB
-        geoparquet_version: GeoParquet version
-        geometry_column: Name of the geometry column
-        verbose: Whether to print verbose output
-        extra_kv_metadata: The caller's file-level keys. Passed again here so
-            this last pass does not drop a caller key named like a carried one
-    """
-    # The facade's row-group decision, including the MB -> rows sizing. Calling
-    # it again after write_geoparquet_table already resolved is harmless and
-    # silent; the paths that reach here without resolving still land on the one
-    # number rather than pyarrow's own default (#1021).
-    rows_per_group = resolve_row_group_rows_for_table(table, row_group_rows, row_group_size_mb)
-
-    # Use central configuration for write settings
-    settings = ParquetWriteSettings(
-        compression=compression,
-        compression_level=compression_level,
-        row_group_rows=row_group_rows,
-        row_group_size_mb=row_group_size_mb,
-    )
-    write_kwargs = settings.get_pyarrow_kwargs(
-        calculated_row_group_size=rows_per_group,
-        schema=table.schema,
-        geometry_columns=[geometry_column],
-    )
-
-    if verbose:
-        compression_desc = (
-            f"{compression}:{compression_level}" if compression_level else compression
+    # Resolve CRS data from the intact table before composing stripped declarations.
+    column_crs = {
+        name: (
+            PARQUET_UNKNOWN_CRS
+            if table_crs_is_unknown(table, name)
+            else crs_of(table, geometry_column=name, quiet=True)
         )
-        debug(f"Writing with {compression_desc} compression")
-        if rows_per_group:
-            debug(f"Row group size: {rows_per_group:,} rows")
-
-    # The facade has the last word on the file-level keys, here at the one
-    # place every Arrow-table write reaches: the table funnel and the helpers
-    # that call this directly never pass through a strategy (#1268).
-    table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
-
-    # Use pq.write_table for all versions - we've already applied all metadata
-    # Using geoarrow's write_geoparquet_table would overwrite our carefully constructed metadata
-    pq.write_table(table, output_path, **write_kwargs)
-
-    if verbose:
-        success(f"Wrote {table.num_rows:,} rows to {output_path}")
+        for name in (
+            table_geometry_info(table, None, sanitized_carried_geo(table.schema.metadata)) or {}
+        ).get("metadata", {})
+        if name != geometry_column
+    }
+    return compose_geo_block(
+        SchemaSource(table.schema, original_metadata),
+        GeoBlockOptions(
+            geometry_column=geometry_column,
+            version=effective_version,
+            covering=DETECT_BBOX_COLUMN,
+            covering_provenance=table.schema.metadata,
+            custom_metadata=custom_metadata,
+            edges=edges,
+            crs=input_crs,
+            column_crs=column_crs,
+            stats=stats,
+            geometry_info=geometry_info,
+            verbose=verbose,
+        ),
+    )
 
 
 def _normalize_arrow_large_types(table):
@@ -1180,44 +863,3 @@ def _normalize_arrow_large_types(table):
 
     new_schema = pa.schema(new_fields, metadata=table.schema.metadata)
     return table.cast(new_schema)
-
-
-def describe_wkb_geometry(
-    table, geometry_column: str, crs: dict | str | None = None, edges: str | None = None
-):
-    """Attach a ``geo`` block naming ``geometry_column`` to a table that has none.
-
-    A table built in memory from a query (``gpio.convert()``'s read) holds bare
-    WKB with no schema metadata, so nothing downstream can tell the column is
-    geometry or what CRS it is in: DuckDB reads it back as ``BLOB``, and the
-    CRS-aware cell indexes take projected metres for degrees (#1222). This gives
-    it the same self-description a table read from a GeoParquet file carries.
-
-    The block is a description, not an output decision: the write funnels
-    rebuild ``geo`` (types, bbox, version) from the data at write time. It
-    declares GeoParquet 1.1, which is what auto mode writes for a WKB table, and
-    an empty ``geometry_types`` (the spec's "not known"). ``crs`` is the source's
-    CRS as PROJJSON. ``None`` means the default (OGC:CRS84) and leaves the key
-    out, as the spec spells it. ``edges`` is the source's declared edge
-    interpretation (e.g. ``"spherical"``); ``None`` or ``"planar"`` leaves the
-    key out (planar is the spec default). Dropping it would let the write read
-    great-circle edges as straight lines over the same bytes (#1287).
-
-    A table that already has a ``geo`` key is returned unchanged.
-    """
-    metadata = dict(table.schema.metadata or {})
-    if b"geo" in metadata or geometry_column not in table.column_names:
-        return table
-
-    column: dict = {"encoding": "WKB", "geometry_types": []}
-    if crs is not None:
-        column["crs"] = crs
-    if edges and edges != "planar":
-        column["edges"] = edges
-    geo = {
-        "version": GEOPARQUET_VERSIONS[DEFAULT_GEOPARQUET_VERSION]["metadata_version"],
-        "primary_column": geometry_column,
-        "columns": {geometry_column: column},
-    }
-    metadata[b"geo"] = json.dumps(geo).encode("utf-8")
-    return table.replace_schema_metadata(metadata)

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import pyarrow as pa
 
+from geoparquet_io.core import index_ops
 from geoparquet_io.core.add.a5 import add_a5_table
 from geoparquet_io.core.add.bbox import add_bbox_table
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata_table
@@ -31,8 +32,13 @@ from geoparquet_io.core.add.s2 import add_s2_table
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.add.stac_metadata import add_stac_metadata as _add_stac_metadata_file
 from geoparquet_io.core.add.stac_metadata import add_stac_metadata_table as _add_stac_metadata_table
+from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
 from geoparquet_io.core.extract import extract_table
+from geoparquet_io.core.file_utils import scratch_path as _scratch_path
+from geoparquet_io.core.file_utils import unlink_released_file as _unlink_released_file
 from geoparquet_io.core.hilbert_order import hilbert_order_table
+from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
+from geoparquet_io.core.process.aggregate.grid_common import BUCKET_POINT_GEOMETRY
 from geoparquet_io.core.reproject import reproject_table
 from geoparquet_io.core.sort_by_column import sort_by_column_table
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey_table
@@ -127,7 +133,9 @@ def add_stac_metadata(
 
     Only the footer is rewritten; every page below it is copied verbatim, so
     the compression codec and level, the encodings, the bloom filters, the page
-    index, the row-group boundaries and the row order are all preserved.
+    index, the row-group boundaries and the row order are all preserved. A
+    footer that cannot be patched falls back, with a warning, to gpio's one
+    metadata-only rewrite, at the facade's codec and row groups.
 
     Args:
         parquet_file: Path to a local Parquet file. Modified in place unless
@@ -183,7 +191,7 @@ def add_stac_metadata_table(
 def add_quadkey(
     table: pa.Table,
     column_name: str = "quadkey",
-    resolution: int = 13,
+    resolution: int = index_ops.get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     geometry_column: str | None = None,
 ) -> pa.Table:
@@ -387,7 +395,7 @@ def extract(
 def add_h3(
     table: pa.Table,
     column_name: str = "h3_cell",
-    resolution: int = 9,
+    resolution: int = index_ops.get_index_spec("h3").default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -413,7 +421,7 @@ def add_h3(
 def add_a5(
     table: pa.Table,
     column_name: str = "a5_cell",
-    resolution: int = 15,
+    resolution: int = index_ops.get_index_spec("a5").default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -446,7 +454,7 @@ def aggregate_a5(
     geometry_column: str | None = None,
     where: str | None = None,
     metric_nodata: str | None = None,
-    bucket_point: str = "geometry",
+    bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
     memory_limit: str | None = None,
@@ -463,7 +471,7 @@ def aggregate_a5(
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
-        geometry_column: Geometry column name (defaults to "geometry")
+        geometry_column: Geometry column name (auto-detected if None)
         where: DuckDB WHERE clause filtering input rows before aggregation
         metric_nodata: NoData sentinel value(s) mapped to NULL in metric columns,
             e.g. "-999" or "-999,-9999"
@@ -481,21 +489,13 @@ def aggregate_a5(
         New PyArrow Table with one row per A5 cell
     """
     from geoparquet_io.core.process.aggregate.by_a5 import aggregate_a5_table
+    from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
     return aggregate_a5_table(
         table,
         resolution=resolution,
-        metric=metric,
-        breakdown=breakdown,
-        breakdown_limit=breakdown_limit,
-        out_geometry=out_geometry,
+        options=AggregateOptions.pick(locals()),
         geometry_column=geometry_column,
-        where=where,
-        metric_nodata=metric_nodata,
-        bucket_point=bucket_point,
-        bbox_column=bbox_column,
-        breakdown_metric=breakdown_metric,
-        memory_limit=memory_limit,
     )
 
 
@@ -509,7 +509,7 @@ def aggregate_h3(
     geometry_column: str | None = None,
     where: str | None = None,
     metric_nodata: str | None = None,
-    bucket_point: str = "geometry",
+    bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
     memory_limit: str | None = None,
@@ -526,7 +526,7 @@ def aggregate_h3(
         breakdown: Column name to pivot into per-category count columns
         breakdown_limit: Max number of breakdown categories (default: 20)
         out_geometry: Output geometry type: "polygon", "centroid", "both", or "none"
-        geometry_column: Geometry column name (defaults to "geometry")
+        geometry_column: Geometry column name (auto-detected if None)
         where: DuckDB WHERE clause filtering input rows before aggregation
         metric_nodata: NoData sentinel value(s) mapped to NULL in metric columns,
             e.g. "-999" or "-999,-9999"
@@ -544,21 +544,13 @@ def aggregate_h3(
         New PyArrow Table with one row per H3 cell
     """
     from geoparquet_io.core.process.aggregate.by_h3 import aggregate_h3_table
+    from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
     return aggregate_h3_table(
         table,
         resolution=resolution,
-        metric=metric,
-        breakdown=breakdown,
-        breakdown_limit=breakdown_limit,
-        out_geometry=out_geometry,
+        options=AggregateOptions.pick(locals()),
         geometry_column=geometry_column,
-        where=where,
-        metric_nodata=metric_nodata,
-        bucket_point=bucket_point,
-        bbox_column=bbox_column,
-        breakdown_metric=breakdown_metric,
-        memory_limit=memory_limit,
     )
 
 
@@ -571,7 +563,7 @@ def aggregate_admin(
     out_geometry: str = "polygon",
     where: str | None = None,
     metric_nodata: str | None = None,
-    bucket_point: str = "geometry",
+    bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
     memory_limit: str | None = None,
@@ -640,7 +632,7 @@ def create_overview_file(
     cell_column: str | None = None,
     scheme: str | None = None,
     output_dir: str | None = None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     force: bool = False,
@@ -680,7 +672,8 @@ def create_overview_file(
         output_dir: Directory for the per-level sibling files (default:
             beside the input).
         compression: Parquet compression codec (default ZSTD).
-        compression_level: Optional compression level.
+        compression_level: Optional compression level. Unset ZSTD resolves
+            to the process group's default of 9, not the funnel's 15.
         geoparquet_version: GeoParquet spec version to write.
         force: Overwrite an existing ``overview_out`` or sibling file.
         memory_limit: DuckDB memory limit for the rollups (e.g. "8GB").
@@ -731,7 +724,7 @@ def create_overviews(
     cell_column: str | None = None,
     scheme: str | None = None,
     output_dir: str | None = None,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     force: bool = False,
@@ -760,7 +753,8 @@ def create_overviews(
             e.g. H3 ids stored as integers
         output_dir: Directory for overview files (default: beside the input)
         compression: Parquet compression codec (default: ZSTD)
-        compression_level: Optional compression level
+        compression_level: Optional compression level. Unset ZSTD resolves
+            to the process group's default of 9, not the funnel's 15
         geoparquet_version: GeoParquet version to write
         force: Overwrite existing overview output files
         verbose: Enable verbose output
@@ -849,7 +843,7 @@ def add_kdtree(
 def add_s2(
     table: pa.Table,
     column_name: str = "s2_cell",
-    level: int = 13,
+    level: int = index_ops.get_index_spec("s2").default_resolution,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -907,7 +901,7 @@ def sort_column(
 def sort_quadkey(
     table: pa.Table,
     column_name: str = "quadkey",
-    resolution: int = 13,
+    resolution: int = index_ops.get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     remove_column: bool = False,
 ) -> pa.Table:
@@ -1008,7 +1002,7 @@ def partition_by_h3(
     auto: bool = False,
     target_rows: int = 100000,
     max_partitions: int = 10000,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     hive: bool = False,
     keep_h3_column: bool | None = None,
     overwrite: bool = False,
@@ -1070,7 +1064,7 @@ def partition_by_a5(
     auto: bool = False,
     target_rows: int = 100000,
     max_partitions: int = 10000,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     hive: bool = False,
     keep_a5_column: bool | None = None,
     overwrite: bool = False,
@@ -1130,7 +1124,7 @@ def partition_by_s2(
     auto: bool = False,
     target_rows: int = 100000,
     max_partitions: int = 10000,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     hive: bool = False,
     keep_s2_column: bool | None = None,
     overwrite: bool = False,
@@ -1191,7 +1185,7 @@ def partition_by_quadkey(
     auto: bool = False,
     target_rows: int = 100000,
     max_partitions: int = 10000,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     hive: bool = False,
     keep_quadkey_column: bool | None = None,
     overwrite: bool = False,
@@ -1260,7 +1254,7 @@ def partition_by_kdtree(
     hive: bool = False,
     keep_kdtree_column: bool | None = None,
     overwrite: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geometry_column: str | None = None,
 ) -> dict:
@@ -1327,7 +1321,7 @@ def partition_by_string(
     chars: int | None = None,
     hive: bool = False,
     overwrite: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geometry_column: str | None = None,
 ) -> dict:
@@ -1380,7 +1374,7 @@ def partition_by_admin(
     hive: bool = False,
     overwrite: bool = False,
     vecorel: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geometry_column: str | None = None,
 ) -> dict:
@@ -1447,8 +1441,6 @@ def partition_by_admin(
 # the CLI command each mirrors.
 # --------------------------------------------------------------------------
 
-_SUB_PARTITION_RESOLUTION_ARG = {"s2": "level"}
-
 
 def _parse_min_size(min_size: str | int) -> int:
     """Bytes from either the CLI's '100MB' spelling or a plain byte count."""
@@ -1487,7 +1479,7 @@ def _sub_partition(
     overwrite: bool = False,
     force: bool = False,
     skip_analysis: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     verbose: bool = False,
     column_name: str | None = None,
@@ -1505,6 +1497,7 @@ def _sub_partition(
 
     from geoparquet_io.core import sub_partition as core_sub_partition
     from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
+    from geoparquet_io.core.parquet_writer import WriteOptions
 
     if not _Path(directory).is_dir():
         raise InvalidParameterError(
@@ -1542,25 +1535,20 @@ def _sub_partition(
             "errors": [],
         }
 
-    argument = _SUB_PARTITION_RESOLUTION_ARG.get(partition_type, "resolution")
-    if partition_type == "quadkey":
-        # Quadkey takes two resolutions; refuse once here rather than per file
-        # (#854), spelled as keyword arguments rather than CLI flags.
-        missing = core_sub_partition.quadkey_resolution_error(
-            resolution,
-            partition_resolution,
-            auto=auto,
-            labels=("resolution=<int>", "partition_resolution=<int>"),
-            auto_label="auto=True",
+    from geoparquet_io.core.index_ops import get_index_spec, validate_partition_arguments
+
+    spec = get_index_spec(partition_type)
+    try:
+        validate_partition_arguments(
+            spec, resolution if resolution is not None else level, partition_resolution, auto
         )
-        if missing:
-            raise InvalidParameterError(argument, missing)
-    elif not auto and (resolution if resolution is not None else level) is None:
-        raise InvalidParameterError(
-            argument,
-            f"pass {argument}=<int> or auto=True -- gpio does not guess a "
-            f"{partition_type} {argument}",
+    except InvalidParameterError as exc:
+        message = (
+            exc.reason.replace("--partition-resolution", "partition_resolution=<int>")
+            .replace(f"--{spec.unit}", f"{spec.unit}=<int>")
+            .replace("--auto", "auto=True")
         )
+        raise InvalidParameterError(exc.param_name, message) from exc
 
     candidates = core_sub_partition.plan_sub_partition(
         str(directory), partition_type, min_size_bytes
@@ -1580,8 +1568,7 @@ def _sub_partition(
         verbose=verbose,
         force=force,
         skip_analysis=skip_analysis,
-        compression=compression.upper(),
-        compression_level=compression_level or 15,
+        write=WriteOptions(compression=compression, compression_level=compression_level),
         auto=auto,
         target_rows=target_rows,
         max_partitions=max_partitions,
@@ -1616,7 +1603,7 @@ def sub_partition_by_h3(
     overwrite: bool = False,
     force: bool = False,
     skip_analysis: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     verbose: bool = False,
     column_name: str | None = None,
@@ -1704,7 +1691,7 @@ def sub_partition_by_a5(
     overwrite: bool = False,
     force: bool = False,
     skip_analysis: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     verbose: bool = False,
     column_name: str | None = None,
@@ -1792,7 +1779,7 @@ def sub_partition_by_quadkey(
     overwrite: bool = False,
     force: bool = False,
     skip_analysis: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     verbose: bool = False,
     column_name: str | None = None,
@@ -1891,7 +1878,7 @@ def sub_partition_by_s2(
     overwrite: bool = False,
     force: bool = False,
     skip_analysis: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     verbose: bool = False,
     column_name: str | None = None,
@@ -2015,8 +2002,9 @@ def read_bigquery(
         geography_column: Column containing geometry data. Auto-detected
             for native GEOGRAPHY columns. Specify to parse VARCHAR columns.
         geometry_format: Format of VARCHAR geometry ("wkt" or "geojson")
-        edges: Edge interpretation ("spherical" or "planar"). Native
-            GEOGRAPHY columns default to "spherical", VARCHAR to "planar".
+        edges: Edge interpretation, one of ``edges.EDGES``: ``"planar"``,
+            ``"spherical"`` or an ellipsoidal algorithm. Native GEOGRAPHY
+            columns default to "spherical", VARCHAR to "planar".
 
     Returns:
         PyArrow Table with BigQuery data
@@ -2137,8 +2125,6 @@ def convert_to_geojson(
     Returns:
         Output path if writing to file, None if streaming to stdout
     """
-    import tempfile
-    import uuid
     from pathlib import Path
 
     from geoparquet_io.core.geojson_stream import (
@@ -2149,8 +2135,7 @@ def convert_to_geojson(
         raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
 
     # Write table to temp parquet file for processing
-    temp_dir = Path(tempfile.gettempdir())
-    temp_input = temp_dir / f"gpio_geojson_{uuid.uuid4()}.parquet"
+    temp_input = Path(_scratch_path(prefix="gpio_geojson_"))
 
     try:
         import pyarrow.parquet as pq
@@ -2172,8 +2157,7 @@ def convert_to_geojson(
 
     finally:
         # Clean up temp file
-        if temp_input.exists():
-            temp_input.unlink()
+        _unlink_released_file(temp_input)
 
 
 def _file_round_trip(
@@ -2187,15 +2171,12 @@ def _file_round_trip(
     Writes table to a temp input file, calls func(input_parquet, output_parquet, **kwargs),
     reads the output back, and cleans up both temp files.
     """
-    import tempfile
-    import uuid
     from pathlib import Path
 
     import pyarrow.parquet as pq
 
-    temp_dir = Path(tempfile.gettempdir())
-    temp_input = temp_dir / f"gpio_in_{uuid.uuid4()}.parquet"
-    temp_output = temp_dir / f"gpio_out_{uuid.uuid4()}.parquet"
+    temp_input = Path(_scratch_path(prefix="gpio_in_"))
+    temp_output = Path(_scratch_path(prefix="gpio_out_"))
 
     try:
         pq.write_table(table, str(temp_input))
@@ -2207,8 +2188,7 @@ def _file_round_trip(
         return pq.read_table(str(temp_output))
     finally:
         for f in (temp_input, temp_output):
-            if f.exists():
-                f.unlink()
+            _unlink_released_file(f)
 
 
 def _table_to_temp_parquet_and_convert(
@@ -2236,16 +2216,13 @@ def _table_to_temp_parquet_and_convert(
     Raises:
         TypeError: If table is not a PyArrow Table
     """
-    import tempfile
-    import uuid
     from pathlib import Path
 
     if not isinstance(table, pa.Table):
         raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
 
     # Write table to temp parquet file for processing
-    temp_dir = Path(tempfile.gettempdir())
-    temp_input = temp_dir / f"gpio_{prefix}_{uuid.uuid4()}.parquet"
+    temp_input = Path(_scratch_path(prefix=f"gpio_{prefix}_"))
 
     try:
         import pyarrow.parquet as pq
@@ -2264,15 +2241,14 @@ def _table_to_temp_parquet_and_convert(
 
     finally:
         # Clean up temp file
-        if temp_input.exists():
-            temp_input.unlink()
+        _unlink_released_file(temp_input)
 
 
 def convert_to_geopackage(
     table: pa.Table,
     output_path: str,
     overwrite: bool = False,
-    layer_name: str = "features",
+    layer_name: str | None = None,
     bbox: str | tuple[float, float, float, float] | None = None,
     geometry: str | None = None,
     where: str | None = None,
@@ -2287,7 +2263,7 @@ def convert_to_geopackage(
         table: Input PyArrow Table with geometry column
         output_path: Output file path (must be local, not cloud URL)
         overwrite: Overwrite existing file (default: False)
-        layer_name: Layer name in GeoPackage (default: 'features')
+        layer_name: Layer name in GeoPackage (default: the output file stem)
         bbox: Bounding box filter, (xmin, ymin, xmax, ymax) or
             "xmin,ymin,xmax,ymax"; prunes on the bbox covering column when
             the table has one
@@ -2450,7 +2426,7 @@ def from_arcgis(
     output_crs: str | None = None,
     max_allowable_offset: float | None = None,
     repair_geometry: bool = True,
-    timeout: float = 60.0,
+    timeout: float = DEFAULT_TIMEOUT,
     # Convention: `ops` signatures are positional-or-keyword, so a new parameter
     # is appended last (as max_allowable_offset was in d9c9282) rather than
     # grouped with its core neighbour; inserting mid-signature would silently
@@ -2609,7 +2585,7 @@ def from_wfs_layers(
     auto_tile: bool = True,
     skip_hilbert: bool = False,
     skip_bbox: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     overwrite: bool = False,
     repair_geometry: bool = True,
 ) -> dict[str, str]:
@@ -2687,7 +2663,7 @@ def from_carto(
     include_cols: str | None = None,
     exclude_cols: str | None = None,
     api_key: str | None = None,
-    timeout: float = 120.0,
+    timeout: float = CARTO_REQUEST_TIMEOUT,
     repair_geometry: bool = True,
     geometry: bool | None = None,
 ) -> pa.Table:
@@ -2710,7 +2686,7 @@ def from_carto(
         include_cols: Comma-separated columns to include
         exclude_cols: Comma-separated columns to exclude
         api_key: API key for authenticated requests (or set CARTO_API_KEY env var)
-        timeout: Request timeout in seconds (default: 120)
+        timeout: Request timeout in seconds (default: ``carto.CARTO_REQUEST_TIMEOUT``)
         repair_geometry: Repair invalid geometry with ST_MakeValid (geometry
             tables only; default: True)
         geometry: Extraction mode. ``None`` (default) auto-detects from the
@@ -2779,24 +2755,17 @@ def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
         Empty list if no geo stats are available.
     """
     from geoparquet_io.core.bbox_structure import check_bbox_structure
-    from geoparquet_io.core.duckdb_metadata import (
-        get_file_metadata,
-        get_per_row_group_bbox_stats,
-        get_per_row_group_native_geo_stats,
-    )
+    from geoparquet_io.core.duckdb_metadata import get_file_metadata, get_row_group_bbox_stats
     from geoparquet_io.core.metadata_utils import (
         _get_num_rows_per_row_group,
         _merge_row_counts,
     )
 
-    # Try native geo stats first (GeoParquet 2.0 / parquet-geo-only)
-    rg_stats = get_per_row_group_native_geo_stats(parquet_file)
-
-    # Fall back to bbox column if no native stats
-    if not rg_stats:
-        bbox_col_name = check_bbox_structure(parquet_file).get("bbox_column_name")
-        if bbox_col_name:
-            rg_stats = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
+    # Native geo stats first (GeoParquet 2.0 / parquet-geo-only), then the bbox column.
+    rg_stats, _source = get_row_group_bbox_stats(
+        parquet_file,
+        bbox_column=lambda: check_bbox_structure(parquet_file).get("bbox_column_name"),
+    )
 
     if not rg_stats:
         return []
@@ -2898,8 +2867,9 @@ def explain_analyze(
 
     Args:
         file_path: Path to the input Parquet file.
-        query: Optional SQL query. Use {file} as placeholder for the file path.
-               Defaults to SELECT * FROM read_parquet('{file}').
+        query: Optional SQL query. ``{file}`` is replaced by the file path as a
+               quoted, escaped SQL string literal (``'{file}'`` means the
+               same). Defaults to SELECT * FROM read_parquet({file}).
 
     Returns:
         Dictionary with operators, timing, and analysis results.
@@ -2912,7 +2882,7 @@ def explain_analyze(
         >>> # With a custom query:
         >>> result = ops.explain_analyze(
         ...     'input.parquet',
-        ...     query="SELECT * FROM read_parquet('{file}') WHERE id > 10"
+        ...     query="SELECT * FROM read_parquet({file}) WHERE id > 10"
         ... )
     """
     from geoparquet_io.core.benchmark import explain_analyze as _explain_analyze
@@ -3050,6 +3020,7 @@ def create_pmtiles_pyramid(
     force: bool = False,
     verbose: bool = False,
     temporary_directory: str | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """
     Create a banded multi-level PMTiles pyramid from an aggregate file.
@@ -3086,6 +3057,8 @@ def create_pmtiles_pyramid(
         verbose: Enable verbose output
         temporary_directory: Existing directory for this run's scratch and
             the intermediate band archives; defaults to the OS temp directory
+        memory_limit: DuckDB memory limit for band planning and the overview
+            rollups (e.g. "2GB"); default: half the memory ceiling (#1191)
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
@@ -3126,6 +3099,7 @@ def create_pmtiles_pyramid(
         force=force,
         verbose=verbose,
         temporary_directory=temporary_directory,
+        memory_limit=memory_limit,
     )
 
 
@@ -3190,6 +3164,7 @@ def polygonize(
     nodata: float | None = None,
     use_mask: bool = True,
     verbose: bool = False,
+    repair_geometry: bool = True,
 ) -> pa.Table:
     """
     Polygonize a categorical raster band into a GeoParquet-ready table.
@@ -3205,6 +3180,15 @@ def polygonize(
         nodata: Nodata value to exclude (default: the raster's own tag)
         use_mask: Honor the raster's mask/nodata (default: True)
         verbose: Whether to print verbose output
+        repair_geometry: Repair the self-touching rings contourrs emits where a
+            region pinches to one pixel corner -- not OGC-valid, where
+            rasterio's and GDAL's equivalent output is (default: True, as in
+            every command that offers ``--repair-geometry``). Appended last:
+            ops signatures are positional-or-keyword, so inserting it
+            mid-signature would silently re-map existing positional calls.
+            The count is reported either way; the repair itself can cost
+            several times the polygonization, because the self-touching
+            polygons are the large sprawling regions.
 
     Returns:
         PyArrow Table with one feature per contiguous class region
@@ -3218,6 +3202,7 @@ def polygonize(
         value_column=value_column,
         nodata=nodata,
         use_mask=use_mask,
+        repair_geometry=repair_geometry,
         verbose=verbose,
     )
 

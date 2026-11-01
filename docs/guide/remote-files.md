@@ -218,7 +218,6 @@ import geoparquet_io as gpio
 
 # Process in memory, then upload
 table = gpio.read('input.parquet') \
-    .extract(bbox=(-122.5, 37.5, -122.0, 38.0)) \
     .add_bbox() \
     .sort_hilbert()
 ```

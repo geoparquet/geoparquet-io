@@ -24,7 +24,7 @@ from geoparquet_io.core.convert import (
     read_spatial_to_arrow,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
+from geoparquet_io.core.geo_metadata import read_raw_geo
 
 
 def _write_geoparquet(path, table, geom_column="geometry"):
@@ -152,7 +152,7 @@ def latlon_parquet(tmp_path):
 
 def _geo(path):
     metadata, _ = get_parquet_metadata(path, verbose=False)
-    return parse_geo_metadata(metadata, verbose=False)
+    return read_raw_geo(metadata).value
 
 
 def _points(path):

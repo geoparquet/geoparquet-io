@@ -27,6 +27,14 @@ import io
 import sys
 from typing import TYPE_CHECKING
 
+from geoparquet_io.core.column_selection import same_column
+from geoparquet_io.core.geometry_detection import (
+    create_geometry_view,
+    primary_geometry_column,
+    require_geometry_column,
+    resolve_geometry_column,
+)
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from typing import TextIO
@@ -35,30 +43,41 @@ if TYPE_CHECKING:
 
 from geoparquet_io.core.crs_utils import (
     crs_is_explicitly_null,
-    crs_string_from_table,
-    parse_geo_metadata_from_schema,
+    crs_of,
+    is_default_crs,
     source_crs_string,
+    transform_source_crs,
     transform_source_label,
     warn_null_crs_once,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _escape_sql_string,
+    describe_query,
+    duckdb_capabilities,
+    duckdb_type_contains_geometry,
+    fetch_one,
     quote_identifier,
     register_arrow,
+    sql_literal,
     sql_path,
     uses_aws_profile,
 )
+from geoparquet_io.core.edges import is_nonplanar
 from geoparquet_io.core.exceptions import GeoParquetError
-from geoparquet_io.core.file_utils import get_all_parquet_files, has_glob_pattern, resolve_file_url
-from geoparquet_io.core.geo_metadata import GEOGRAPHY_EDGE_ALGORITHMS
-from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
+from geoparquet_io.core.file_utils import (
+    get_all_parquet_files,
+    glob_matches,
+    has_glob_pattern,
+    resolve_file_url,
+)
+from geoparquet_io.core.geo_metadata import (
+    bbox_xy,
+    sanitized_carried_geo,
+    sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geometry_repair import repair_geometry_sql
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import needs_httpfs
-from geoparquet_io.core.stream_io import _create_view_with_geometry
 from geoparquet_io.core.streaming import is_stdin
 from geoparquet_io.core.write_funnels import collect_nonplanar_edges, table_nonplanar_edges
 
@@ -78,7 +97,7 @@ def _require_planar_geojson_edges(column: str, edges: str | None) -> None:
     both skipped, would silently change the meaning of the same coordinates.
     The declaration decides this contract, including point-only or empty data.
     """
-    if edges in GEOGRAPHY_EDGE_ALGORITHMS:
+    if is_nonplanar(edges):
         raise GeoParquetError(
             f"GeoJSON export does not support non-planar edges. Column {column!r} "
             f"declares {edges!r} edges. GeoJSON uses straight Cartesian segments. "
@@ -93,14 +112,12 @@ def require_planar_geojson_file(
     input_path: str,
     geometry_column: str | None = None,
     profile: str | None = None,
-    *,
-    use_primary_geometry: bool = False,
 ) -> None:
     """Check file edge declarations before GeoJSON or PMTiles preprocessing.
 
-    PMTiles extract/reproject/chunk paths select the metadata primary, whereas
-    direct GeoJSON uses its existing geometry detection. Resolve that choice
-    under the same scoped profile as the footer reads.
+    The column is the file's primary (the owner's answer, block included) for
+    direct GeoJSON and PMTiles alike, resolved under the same scoped profile
+    as the footer reads.
     """
     edges = {
         column: algorithm
@@ -109,32 +126,20 @@ def require_planar_geojson_file(
     }
     if not edges:
         return
-    if geometry_column is None and use_primary_geometry:
-        geometry_column = find_primary_geometry_column(input_path)
     if geometry_column is None:
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-
-        input_url = resolve_file_url(input_path)
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_path))
-        try:
-            geometry_column = _find_geometry_column(con, f"read_parquet({sql_path(input_url)})")
-        finally:
-            con.close()
+        # The file's primary, block and typed columns both (#1367): the direct
+        # GeoJSON path and PMTiles ask the same question, of the first footer
+        # for a glob or a directory.
+        files = _geojson_input_files(input_path)
+        geometry_column = resolve_geometry_column(files[0] if files else input_path)
     _require_planar_geojson_edges(geometry_column, edges.get(geometry_column))
 
 
 def _geojson_input_files(input_path: str) -> list[str]:
     """Enumerate every footer so a planar-first glob cannot hide non-planar rows."""
     if has_glob_pattern(input_path):
-        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-
-        con = get_duckdb_connection(load_spatial=False, load_httpfs=needs_httpfs(input_path))
-        try:
-            return [
-                row[0] for row in con.execute("SELECT file FROM glob(?)", [input_path]).fetchall()
-            ]
-        finally:
-            con.close()
+        # Every match, not only `.parquet`: `*.pq` is a GeoParquet glob too.
+        return glob_matches(input_path)
     return get_all_parquet_files(input_path)
 
 
@@ -215,22 +220,12 @@ def _needs_reprojection(source_crs: str | None) -> bool:
     Returns:
         True if data needs reprojection to WGS84
     """
-    if source_crs is None:
-        # No CRS info - assume WGS84
-        return False
+    return source_crs is not None and not is_default_crs(source_crs)
 
-    # Normalize CRS string for comparison
-    crs_upper = source_crs.upper().replace(" ", "")
 
-    # Common WGS84 representations
-    wgs84_variants = {
-        "EPSG:4326",
-        "OGC:CRS84",
-        "CRS84",
-        "WGS84",
-    }
-
-    return crs_upper not in wgs84_variants
+def _is_geometry_or_bbox(column: str, geometry_column: str) -> bool:
+    """Whether ``column`` is the geometry or the bbox, which are not GeoJSON properties."""
+    return same_column(column, geometry_column) or same_column(column, "bbox")
 
 
 def _get_property_columns(
@@ -249,13 +244,53 @@ def _get_property_columns(
     Returns:
         List of column names to include as properties
     """
-    schema_query = f"SELECT * FROM {source_ref} LIMIT 0"
-    result = con.execute(schema_query)
-    columns = [col[0] for col in result.description]
+    columns = [name for name, _ in describe_query(con, f"SELECT * FROM {source_ref}")]
 
     # Exclude geometry column and bbox
-    excluded = {geometry_column.lower(), "bbox"}
-    return [col for col in columns if col.lower() not in excluded]
+    return [col for col in columns if not _is_geometry_or_bbox(col, geometry_column)]
+
+
+def _reprojected_source_ref(source_ref: str, quoted_geom: str, source_crs: str) -> str:
+    """Wrap ``source_ref`` so every reader below sees WGS84 geometry.
+
+    Reproject first, in a subquery, so everything downstream sees the geometry
+    in the CRS it will be written in. Reprojection is not topology-preserving: a
+    polygon ST_MakeValid has just made valid in the source CRS can come out of
+    ST_Transform invalid in WGS84, and ST_ReducePrecision - a GEOS topology
+    operation - then raises TopologyException on it. Repairing after the
+    transform is also what the explicit --src-crs route already does, since
+    core/pmtiles.py reprojects in a separate process before piping into this
+    query; only the auto-detected CRS path had the two in the wrong order.
+
+    The transform lives in a subquery rather than inline because
+    repair_geometry_sql repeats its argument, and ST_Transform is far too
+    expensive to evaluate once per repetition per row.
+    """
+    # source_crs comes straight out of a file's own geo metadata, so it can
+    # be any free-form string -- escape it like every other SQL literal.
+    source_crs_literal = sql_literal(source_crs)
+    return (
+        f"(SELECT * REPLACE ("
+        f"ST_Transform({quoted_geom}, {source_crs_literal}, {sql_literal(WGS84_CRS)}) AS {quoted_geom}"
+        f") FROM {source_ref} WHERE {quoted_geom} IS NOT NULL)"
+    )
+
+
+def _output_geometry_exprs(
+    quoted_geom: str, precision: int, repair_geometry: bool
+) -> tuple[str, str]:
+    """The repaired geometry and its precision-reduced form, as SQL expressions.
+
+    Both GeoJSON writers must serialize exactly the same geometry, so the chain
+    lives here: repair (issue #506) happens before precision reduction so
+    downstream consumers (e.g. tippecanoe in the PMTiles pipeline) never see a
+    self-intersection, and ST_ReducePrecision applies the RFC 7946 coordinate
+    grid of 10^-precision (e.g. precision=7 -> grid=0.0000001). Very low
+    precision values may collapse small geometries to empty.
+    """
+    geom_for_output = repair_geometry_sql(quoted_geom) if repair_geometry else quoted_geom
+    geom_with_precision = f"ST_ReducePrecision({geom_for_output}, pow(10, -{precision}))"
+    return geom_for_output, geom_with_precision
 
 
 def _build_feature_query(
@@ -289,38 +324,16 @@ def _build_feature_query(
     precision = int(precision)
     quoted_geom = quote_identifier(geometry_column)
 
-    # Reproject first, in a subquery, so everything below sees the geometry in
-    # the CRS it will be written in. Reprojection is not topology-preserving: a
-    # polygon ST_MakeValid has just made valid in the source CRS can come out of
-    # ST_Transform invalid in WGS84, and ST_ReducePrecision - a GEOS topology
-    # operation - then raises TopologyException on it. Repairing after the
-    # transform is also what the explicit --src-crs route already does, since
-    # core/pmtiles.py reprojects in a separate process before piping into this
-    # query; only the auto-detected CRS path had the two in the wrong order.
-    #
-    # The transform lives in a subquery rather than inline because
-    # repair_geometry_sql repeats its argument, and ST_Transform is far too
-    # expensive to evaluate once per repetition per row.
     if source_crs:
-        # source_crs comes straight out of a file's own geo metadata, so it can
-        # be any free-form string -- escape it like every other SQL literal.
-        source_crs_literal = _escape_sql_string(source_crs)
-        source_ref = (
-            f"(SELECT * REPLACE ("
-            f"ST_Transform({quoted_geom}, '{source_crs_literal}', '{WGS84_CRS}') AS {quoted_geom}"
-            f") FROM {source_ref} WHERE {quoted_geom} IS NOT NULL)"
-        )
+        source_ref = _reprojected_source_ref(source_ref, quoted_geom, source_crs)
 
-    # Repair invalid geometry (issue #506) before precision/GeoJSON so downstream
-    # consumers (e.g. tippecanoe in the PMTiles pipeline) never see a
-    # self-intersection. The NULL filter in the WHERE clause stays on the raw
-    # column. ST_AsGeoJSON requires native GEOMETRY, which this already is.
-    geom_for_output = repair_geometry_sql(quoted_geom) if repair_geometry else quoted_geom
-
-    # Apply coordinate precision using ST_ReducePrecision before GeoJSON conversion.
-    # The grid size is 10^-precision (e.g., precision=7 -> grid=0.0000001).
-    # Note: Very low precision values may collapse small geometries to empty.
-    geom_with_precision = f"ST_ReducePrecision({geom_for_output}, pow(10, -{precision}))"
+    # The repair/precision chain is shared with the native fast path so both
+    # writers serialize exactly the same geometry. The NULL filter in the WHERE
+    # clause stays on the raw column. ST_AsGeoJSON requires native GEOMETRY,
+    # which this already is.
+    geom_for_output, geom_with_precision = _output_geometry_exprs(
+        quoted_geom, precision, repair_geometry
+    )
     geom_expr = f"ST_AsGeoJSON({geom_with_precision})"
 
     # Build properties expression
@@ -382,6 +395,150 @@ def _build_feature_query(
     return query
 
 
+def _geometry_typed_property_columns(
+    con: duckdb.DuckDBPyConnection,
+    source_ref: str,
+    property_columns: list[str],
+) -> list[str]:
+    """Property columns whose type is GEOMETRY, which the two writers disagree on.
+
+    ``to_json`` renders a GEOMETRY property as a WKT string, while the native
+    writer nests it as GeoJSON. Any such column keeps the conversion on the
+    hand-built writer so the output does not change.
+    """
+    # Any depth, not only a top-level GEOMETRY: a STRUCT or LIST holding a
+    # geometry is rendered differently by the two writers too.
+    types = dict(describe_query(con, f"SELECT * FROM {source_ref}"))
+    return [col for col in property_columns if duckdb_type_contains_geometry(types.get(col))]
+
+
+def _native_feature_collection_to_file(
+    con: duckdb.DuckDBPyConnection,
+    source_ref: str,
+    geometry_column: str,
+    property_columns: list[str],
+    output_path: str,
+    precision: int,
+    source_crs: str | None,
+    repair_geometry: bool,
+    *,
+    verbose: bool = False,
+) -> int | None:
+    """Write a FeatureCollection file with DuckDB 2.0's native GeoJSON writer.
+
+    Semantic equivalence with the hand-built writer is the contract
+    (tests/test_geojson_native_writer.py compares both parsed outputs):
+
+    - The geometry chain (reprojection subquery, repair, ST_ReducePrecision)
+      is the same SQL both writers run, and the doubles both serializers emit
+      parse back to equal values. Parsed equality, not byte equality, is the
+      enforced contract: the hand-built output passes through a Python ``json``
+      re-serialization, so the two files need not match byte for byte.
+    - ``ID_COLUMN ''`` disables the writer's default promotion of a column
+      named ``id``, keeping it in ``properties`` like the hand-built writer.
+    - The same ``WHERE geometry IS NOT NULL`` filter drops NULL-geometry rows.
+
+    The caller guarantees eligibility; options the writer cannot reproduce
+    (pretty, description, id_field, write_bbox, geometry-typed properties)
+    never reach this function. ``ST_ReducePrecision`` is a GEOS topology
+    operation, so precision was already coerced to int by the caller.
+
+    The COPY is a DuckDB write, so it runs inside
+    :func:`scoped_write_memory_limit` like the GDAL and CSV export COPY sites
+    (#1174): no ``--write-memory`` reaches this path, so the ceiling-based
+    default applies and threads are capped to keep headroom per thread.
+
+    Returns:
+        Number of features written (the COPY row count after the NULL filter),
+        or ``None`` when the engine refuses ``FORMAT GEOJSON`` as unknown at
+        bind time. The version gate only proves the library is 2.x, not that
+        this build ships the copy format, so that refusal sends the caller to
+        the hand-built writer. A mid-write IO, conversion or interrupt error
+        still propagates.
+    """
+    import duckdb
+
+    quoted_geom = quote_identifier(geometry_column)
+    if source_crs:
+        source_ref = _reprojected_source_ref(source_ref, quoted_geom, source_crs)
+    _, geom_with_precision = _output_geometry_exprs(quoted_geom, precision, repair_geometry)
+    select_list = ", ".join(
+        [f"{geom_with_precision} AS {quoted_geom}"]
+        + [quote_identifier(col) for col in property_columns]
+    )
+    copy_query = (
+        f"COPY (SELECT {select_list} FROM {source_ref} WHERE {quoted_geom} IS NOT NULL) "
+        f"TO {sql_path(output_path)} (FORMAT GEOJSON, ID_COLUMN '', "
+        f"GEOMETRY_COLUMN {sql_literal(geometry_column)})"
+    )
+    debug(f"Native GeoJSON COPY: {copy_query}")
+    with scoped_write_memory_limit(con, None, verbose):
+        try:
+            row = fetch_one(con.execute(copy_query))
+        except (duckdb.CatalogException, duckdb.BinderException) as exc:
+            # A bind-time refusal: this engine has no GEOJSON copy format, so
+            # nothing was written and the hand-built writer still can.
+            debug(f"Native GeoJSON COPY not taken ({exc}); using the hand-built writer")
+            return None
+    return int(row[0]) if row else 0
+
+
+def _maybe_native_feature_collection(
+    con: duckdb.DuckDBPyConnection,
+    source_ref: str,
+    geometry_column: str,
+    property_columns: list[str],
+    *,
+    output_path: str | None,
+    precision: int,
+    write_bbox: bool,
+    id_field: str | None,
+    description: str | None,
+    pretty: bool,
+    source_crs: str | None,
+    repair_geometry: bool,
+    verbose: bool = False,
+) -> int | None:
+    """Take the native fast path when its output would be semantically identical.
+
+    Returns the feature count on success, or ``None`` when the conversion must
+    stay on the hand-built writer:
+
+    - no ``output_path``: the stdout paths stream (RS-delimited GeoJSONSeq for
+      tippecanoe, or a FeatureCollection) and COPY only writes files;
+    - ``pretty``/``description``: the native writer has no such options;
+    - ``id_field``: the writer's ID_COLUMN removes the column from properties
+      and emits ``"id": null`` for NULL values, where gpio keeps the property
+      and omits the member per RFC 7946;
+    - ``write_bbox``: the writer's BBOX option computes the box from the
+      precision-reduced geometry and omits it for EMPTY, where gpio rounds the
+      pre-reduction extent;
+    - a GEOMETRY-typed property column (WKT string vs nested GeoJSON);
+    - DuckDB 1.x, which has no native GeoJSON writer;
+    - a 2.x engine that refuses ``FORMAT GEOJSON`` as unknown at bind time,
+      which :func:`_native_feature_collection_to_file` reports as ``None``.
+    """
+    if not output_path or pretty or description or id_field or write_bbox:
+        return None
+    # FORMAT GEOJSON arrived with DuckDB 2.0's spatial extension; on 1.x the
+    # statement is a binder error (#1349).
+    if not duckdb_capabilities().native_geojson_writer:
+        return None
+    if _geometry_typed_property_columns(con, source_ref, property_columns):
+        return None
+    return _native_feature_collection_to_file(
+        con,
+        source_ref,
+        geometry_column,
+        property_columns,
+        output_path,
+        int(precision),
+        source_crs,
+        repair_geometry,
+        verbose=verbose,
+    )
+
+
 def _stream_to_stdout(
     con: duckdb.DuckDBPyConnection,
     query: str,
@@ -412,7 +569,7 @@ def _stream_to_stdout(
     try:
         with _utf8_stdout() as output:
             while True:
-                row = result.fetchone()
+                row = result.fetchone()  # drains to None; guard: open-result ok
                 if row is None:
                     break
 
@@ -475,7 +632,7 @@ def _stream_feature_collection(
 
     # Collect all features
     while True:
-        row = result.fetchone()
+        row = result.fetchone()  # drains to None; guard: open-result ok
         if row is None:
             break
         features.append(json.loads(row[0]))
@@ -515,48 +672,63 @@ def _stream_feature_collection(
     return count
 
 
-def _find_geometry_column(
-    con: duckdb.DuckDBPyConnection,
-    source_ref: str,
-) -> str:
-    """
-    Find the geometry column in a table.
+#: A small allowance on the lon/lat range, for coordinates a float rounding put
+#: just past 180 or 90.
+_LONLAT_TOLERANCE = 1e-6
 
-    Args:
-        con: DuckDB connection
-        source_ref: Table reference for SQL query
 
-    Returns:
-        Name of geometry column
+def _extent_of(source, geometry_column: str):
+    """The declared block extent, else the bounds owner's measurement."""
+    from geoparquet_io.core.exceptions import GeometryError
+    from geoparquet_io.core.geo_metadata import bounds_of
 
-    Raises:
-        ValueError: If no geometry column found
-    """
-    schema_query = f"SELECT * FROM {source_ref} LIMIT 0"
-    result = con.execute(schema_query)
-
-    # Look for common geometry column names
-    columns = [col[0] for col in result.description]
-
-    for name in STANDARD_GEOMETRY_NAMES:
-        for col in columns:
-            if col.lower() == name:
-                return col
-
-    # Check column types for GEOMETRY type
-    for col in columns:
-        try:
-            type_query = f"SELECT typeof({quote_identifier(col)}) FROM {source_ref} LIMIT 1"
-            type_result = con.execute(type_query).fetchone()
-            if type_result and "GEOMETRY" in str(type_result[0]).upper():
-                return col
-        except Exception:
-            continue
-
-    raise ValueError(
-        "Could not find geometry column. "
-        "Expected column named 'geometry', 'geom', 'wkb_geometry', or 'the_geom'."
+    geo = (
+        sanitized_carried_geo(source.schema.metadata)
+        if hasattr(source, "schema")
+        else sanitized_carried_geo_of_file(source)
     )
+    declared = geo.get("columns", {}).get(geometry_column, {}).get("bbox")
+    if isinstance(declared, list) and len(declared) in (4, 6, 8):
+        try:
+            return bbox_xy(declared)
+        except (TypeError, ValueError):
+            pass
+    try:
+        return bounds_of(source, geometry_column)
+    except GeometryError:
+        return None
+
+
+def _refuse_extent_outside_lonlat(input_path: str, geometry_column: str, table=None) -> None:
+    """Refuse to write RFC 7946 GeoJSON from coordinates that are not lon/lat.
+
+    Reached only when the input is not reprojected: its CRS is absent, lon/lat or
+    unknown. An unknown CRS is the way projected coordinates get here (#1258), and
+    the output would be wrong by definition, so it stops (#1263). ``table`` is
+    the stream read from stdin; a file is read by path.
+    """
+    extent = (
+        _extent_of(table, geometry_column)
+        if table is not None
+        else _extent_of(input_path, geometry_column)
+    )
+    if extent is None:
+        return
+    xmin, ymin, xmax, ymax = extent
+    tolerance = _LONLAT_TOLERANCE
+    if (
+        xmin < -180 - tolerance
+        or xmax > 180 + tolerance
+        or ymin < -90 - tolerance
+        or ymax > 90 + tolerance
+    ):
+        raise GeoParquetError(
+            f"The extent of {input_path} (x {xmin:g} to {xmax:g}, y {ymin:g} to {ymax:g}) lies "
+            "outside the lon/lat range, so it cannot be written as RFC 7946 GeoJSON. If the "
+            "coordinates are projected, name their CRS first: "
+            "`gpio convert reproject <input> <output> --src-crs <CRS> --dst-crs EPSG:4326`. "
+            "To write the coordinates as they are, pass --keep-crs."
+        )
 
 
 @uses_aws_profile
@@ -645,14 +817,41 @@ def convert_to_geojson_stream(
     try:
         source_ref = f"read_parquet({sql_path(input_url)})"
 
-        # Find geometry column
-        geometry_column = _find_geometry_column(con, source_ref)
+        # The file's primary, with its `geo` block: a declared `footprint`
+        # is the geometry even beside a `geometry` secondary (#1367).
+        geometry_column = resolve_geometry_column(input_path, con=con)
         require_planar_geojson_file(input_path, geometry_column)
         debug(f"Using geometry column: {geometry_column}")
+        if not keep_crs and not needs_reproject:
+            _refuse_extent_outside_lonlat(input_path, geometry_column)
 
         # Get property columns
         property_columns = _get_property_columns(con, source_ref, geometry_column)
         debug(f"Property columns: {', '.join(property_columns)}")
+
+        # A WKB column DuckDB does not read as GEOMETRY -- a file with no `geo`
+        # key, such as the one DuckDB writes for zero rows -- is decoded once,
+        # here, so the repair and serialization chain below sees GEOMETRY (#1359).
+        source_ref = create_geometry_view(con, source_ref, geometry_column, "__gpio_geojson_source")
+
+        count = _maybe_native_feature_collection(
+            con,
+            source_ref,
+            geometry_column,
+            property_columns,
+            output_path=output_path,
+            precision=precision,
+            write_bbox=write_bbox,
+            id_field=id_field,
+            description=description,
+            pretty=pretty,
+            source_crs=source_crs if needs_reproject else None,
+            repair_geometry=repair_geometry,
+            verbose=verbose,
+        )
+        if count is not None:
+            success(f"Wrote {count:,} features to {output_path}")
+            return count
 
         # Build and execute query (pass source_crs if reprojection needed)
         query = _build_feature_query(
@@ -688,7 +887,7 @@ def convert_to_geojson_stream(
 def _warn_on_explicit_null_crs(table, geometry_column: str) -> None:
     """Warn once per stream ``geo`` block whose column says ``"crs": null`` (unknown)."""
     metadata = table.schema.metadata or {}
-    geo_meta = parse_geo_metadata_from_schema(metadata)
+    geo_meta = sanitized_carried_geo(metadata)
     columns = geo_meta.get("columns") if isinstance(geo_meta, dict) else None
     col_meta = columns.get(geometry_column) if isinstance(columns, dict) else None
     if col_meta is None or not crs_is_explicitly_null(col_meta):
@@ -734,7 +933,6 @@ def _convert_from_stream(
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
     from geoparquet_io.core.streaming import (
-        find_geometry_column_from_table,
         read_arrow_stream,
     )
 
@@ -746,15 +944,10 @@ def _convert_from_stream(
     debug(f"Read {table.num_rows} rows from stream")
 
     # Find geometry column
-    geometry_column = find_geometry_column_from_table(table)
-    if not geometry_column:
-        available_columns = ", ".join(table.column_names)
-        raise ValueError(
-            f"No geometry column found in Arrow stream. "
-            f"Available columns: [{available_columns}]. "
-            "Expected a column named 'geometry', 'geom', 'wkb_geometry', or 'the_geom', "
-            "or a column with GeoParquet 'geo' metadata."
-        )
+    geometry_column = require_geometry_column(
+        primary_geometry_column(table),
+        f"the Arrow stream (columns: [{', '.join(table.column_names)}])",
+    )
 
     debug(f"Using geometry column: {geometry_column}")
 
@@ -762,14 +955,19 @@ def _convert_from_stream(
     _require_planar_geojson_edges(geometry_column, edges)
     _warn_on_explicit_null_crs(table, geometry_column)
     # --keep-crs writes the input coordinates, so the CRS is never resolved.
-    source_crs = None if keep_crs else crs_string_from_table(table, geometry_column)
+    source_crs = (
+        None if keep_crs else transform_source_crs(crs_of(table, geometry_column=geometry_column))
+    )
     needs_reproject = _needs_reprojection(source_crs)
     if needs_reproject:
         info(f"Reprojecting from {transform_source_label(source_crs)} to WGS84 (RFC 7946)")
+    elif not keep_crs:
+        _refuse_extent_outside_lonlat("the Arrow stream", geometry_column, table)
 
     # Get property columns
-    excluded = {geometry_column.lower(), "bbox"}
-    property_columns = [col for col in table.column_names if col.lower() not in excluded]
+    property_columns = [
+        col for col in table.column_names if not _is_geometry_or_bbox(col, geometry_column)
+    ]
 
     debug(f"Property columns: {', '.join(property_columns)}")
 
@@ -780,7 +978,30 @@ def _convert_from_stream(
         register_arrow(con, "input_stream", table)
 
         # Create view with proper geometry type
-        source_ref = _create_view_with_geometry(con, "input_stream", geometry_column)
+        source_ref = (
+            create_geometry_view(con, "input_stream", geometry_column, "input_stream_geom")
+            if geometry_column
+            else "input_stream"
+        )
+
+        count = _maybe_native_feature_collection(
+            con,
+            source_ref,
+            geometry_column,
+            property_columns,
+            output_path=output_path,
+            precision=precision,
+            write_bbox=write_bbox,
+            id_field=id_field,
+            description=description,
+            pretty=pretty,
+            source_crs=source_crs if needs_reproject else None,
+            repair_geometry=repair_geometry,
+            verbose=verbose,
+        )
+        if count is not None:
+            success(f"Wrote {count:,} features to {output_path}")
+            return count
 
         # Build and execute query
         query = _build_feature_query(

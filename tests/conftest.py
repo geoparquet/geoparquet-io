@@ -41,7 +41,9 @@ import functools  # noqa: E402
 import json  # noqa: E402
 import logging  # noqa: E402
 import os  # noqa: E402
+import re  # noqa: E402
 import shutil  # noqa: E402
+import sys  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
@@ -50,6 +52,80 @@ from pathlib import Path  # noqa: E402
 import click  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 import pytest  # noqa: E402
+
+
+def _install_worker_database():
+    """Share the default database, installing before test modules bind aliases."""
+    from inspect import signature
+
+    from geoparquet_io.core import duckdb_utils as utils
+    from geoparquet_io.core.add import quadkey
+
+    register = quadkey.SPEC.register
+
+    def register_once(con):
+        # Python UDFs belong to the database, surviving their cursor's close().
+        if not con.sql(
+            "SELECT 1 FROM duckdb_functions() WHERE function_name = 'lat_lon_to_quadkey'"
+        ).fetchall():
+            register(con)
+
+    object.__setattr__(quadkey.SPEC, "register", register_once)
+
+    real = utils.get_duckdb_connection
+    parameters = signature(real)
+    state = {"root": None, "fresh": False, "cursors": 0, "schemas": [], "issued": []}
+
+    @functools.wraps(real)
+    def connection(*args, **kwargs):
+        bound = parameters.bind(*args, **kwargs)
+        bound.apply_defaults()
+        options = bound.arguments
+        if (
+            any(
+                value != parameters.parameters[name].default
+                for name, value in options.items()
+                if name not in {"load_spatial", "load_httpfs"}
+            )
+            or options["load_spatial"] is False
+            or options["load_httpfs"]
+            or state["fresh"]
+        ):
+            return real(*args, **kwargs)
+        if state["root"] is None:
+            state["root"] = real()
+        state["cursors"] += 1
+        schema = f"test_connection_{state['cursors']}"
+        cursor = state["root"].cursor()
+        state["issued"].append(cursor)
+        # These database-wide resets affect every already-open cursor too.
+        cursor.execute(f"SET threads = {_DUCKDB_TEST_THREADS}")
+        utils._apply_connection_limits(cursor, None, None)
+        cursor.execute(f"CREATE SCHEMA {schema}")
+        state["schemas"].append(schema)
+        cursor.execute(f"SET schema = '{schema}'")
+        cursor.execute("SET arrow_large_buffer_size = true")
+        cursor.execute("SET geometry_always_xy = true")
+        utils._apply_s3_settings(cursor, utils._resolve_s3_settings(None, None, None))
+        return cursor
+
+    for module in tuple(sys.modules.values()):
+        if module and module.__name__.startswith("geoparquet_io."):
+            if getattr(module, "get_duckdb_connection", None) is real:
+                module.get_duckdb_connection = connection
+    return state
+
+
+_WORKER_DATABASE = _install_worker_database()
+
+
+@pytest.fixture(scope="session")
+def worker_duckdb_database():
+    """Keep the root alive until all connection-owning fixtures finish."""
+    yield _WORKER_DATABASE
+    if _WORKER_DATABASE["root"] is not None:
+        _WORKER_DATABASE["root"].close()
+
 
 # ---------------------------------------------------------------------------
 # Click "no default declared" sentinel
@@ -221,13 +297,14 @@ PACKAGE_CACHES = (
     crs_utils._emit_null_crs_warning,
     crs_utils._emit_srid0_crs_warning,
     crs_utils._free_form_source,
+    crs_utils._load_crs_cached,
     crs_utils._projjson_from_authority,
+    duckdb_utils.duckdb_capabilities,
     file_type.detect_geoparquet_file_type,
     geo_metadata._emit_malformed_geo_warning,
     geo_metadata._note_undeclarable_bbox_column,
     WriteStrategyFactory.get_strategy,
     wfs._bbox_axes,
-    wfs._request_pyproj_crs,
 )
 
 
@@ -247,10 +324,23 @@ def clear_package_caches() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_package_caches():
+def _isolate_package_caches(worker_duckdb_database, request):
     """Give every test in the suite a cold cache, warn-once caches included."""
     clear_package_caches()
-    yield
+    worker_duckdb_database["fresh"] = request.node.get_closest_marker("fresh_duckdb") is not None
+    first_schema = len(worker_duckdb_database["schemas"])
+    first_cursor = len(worker_duckdb_database["issued"])
+    try:
+        yield
+    finally:
+        for cursor in worker_duckdb_database["issued"][first_cursor:]:
+            cursor.close()  # DuckDB also tolerates cursors already closed by the test.
+        del worker_duckdb_database["issued"][first_cursor:]
+        root = worker_duckdb_database["root"]
+        for schema in worker_duckdb_database["schemas"][first_schema:]:
+            root.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+        del worker_duckdb_database["schemas"][first_schema:]
+        worker_duckdb_database["fresh"] = False
 
 
 def walk_cli_commands(cmd, path: tuple[str, ...] = ()):
@@ -347,7 +437,7 @@ def places_v11_file(tmp_path):
     GEOMETRY type.
     """
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.geo_metadata import parse_geo_metadata
+    from geoparquet_io.core.geo_metadata import read_raw_geo
 
     path = tmp_path / "places_v11.parquet"
 
@@ -368,7 +458,7 @@ def places_v11_file(tmp_path):
     # Non-vacuity: this must be a real 1.1 GeoParquet file with a bbox column and
     # no covering, not plain Parquet that quietly takes a fallback path.
     written = pq.read_metadata(str(path)).metadata
-    written_geo = parse_geo_metadata(written, False)
+    written_geo = read_raw_geo(written).value
     assert written_geo, "places_v11_file lost its geo metadata"
     assert written_geo["version"].startswith("1.1"), written_geo["version"]
     primary = written_geo["primary_column"]
@@ -569,6 +659,26 @@ def has_geoparquet_metadata(parquet_file):
     return metadata is not None and b"geo" in metadata
 
 
+def fast_path_query(*columns: str) -> dict:
+    """``con=``/``query=`` for the 2.0 fast-path decision over an output of ``columns``.
+
+    The decision composes the carried block against the output's schema (the
+    covering gates ask it which columns exist), so a unit test of the decision
+    names the output it describes: ``geometry`` plus each of ``columns`` --
+    ``bbox`` as a spec-order bbox struct, anything else as a string.
+    """
+    con = duckdb.connect()
+    select = ["NULL::BLOB AS geometry"]
+    for name in columns:
+        if name == "bbox":
+            select.append(
+                "{'xmin': 0.0, 'ymin': 0.0, 'xmax': 1.0, 'ymax': 1.0}::STRUCT(xmin DOUBLE, ymin DOUBLE, xmax DOUBLE, ymax DOUBLE) AS bbox"
+            )
+        else:
+            select.append(f'NULL::VARCHAR AS "{name}"')
+    return {"con": con, "query": "SELECT " + ", ".join(select)}
+
+
 def get_geo_metadata(parquet_file):
     """
     Get the full GeoParquet metadata from a file.
@@ -717,23 +827,6 @@ def country_partition_dir():
 # Helper functions for CLI output parsing
 
 
-def _extract_json_from_output(output: str) -> str:
-    """Extract JSON from output that may contain warnings or other text.
-
-    Some commands (e.g., deprecated ones) output warning lines before JSON.
-    This helper finds and returns just the JSON part.
-
-    Handles JSON that starts with '{', '[', or is the literal 'null'.
-    """
-    lines = output.strip().split("\n")
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("{") or stripped.startswith("[") or stripped == "null":
-            return "\n".join(lines[i:])
-    # If no JSON found, return original output
-    return output
-
-
 # CRS reference format test files
 @pytest.fixture
 def crs_projjson_file(test_data_dir):
@@ -798,27 +891,66 @@ def _is_unpublished_extension_error(exc) -> bool:
     return isinstance(exc, ExtensionUnavailableError) and is_unpublished_extension_error(exc)
 
 
+#: What ExtensionUnavailableError says only once it has classified the failure
+#: as unpublished, and the extension it names. A test that drives a command
+#: through Click, or through a wrapper such as PartitionError, sees this text
+#: in its assertion message or a wrapping exception, not the exception itself.
+_UNPUBLISHED_TEXT = re.compile(
+    r"community extension '([^']+)'.*?is not published for this one", re.DOTALL
+)
+
+
+def _unavailable_extension_named_in(exc) -> str | None:
+    """The extension an unpublished failure anywhere in ``exc``'s chain names.
+
+    Text alone is not trusted: the name is returned only when the session
+    probe confirms the extension really is unavailable here, so a test that
+    builds the message on purpose still fails on its own merits.
+    """
+    seen: set[int] = set()
+    cur = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if _is_unpublished_extension_error(cur):
+            return cur.name
+        match = _UNPUBLISHED_TEXT.search(str(cur))
+        if match and not _community_extension_available(match.group(1)):
+            return match.group(1)
+        cur = cur.__cause__ or cur.__context__
+    return None
+
+
+def _skip_unpublished_extension_failure(outcome) -> None:
+    excinfo = outcome.excinfo
+    if excinfo is None:
+        return
+    name = _unavailable_extension_named_in(excinfo[1])
+    if name is not None:
+        outcome.force_exception(
+            pytest.skip.Exception(
+                f"Optional DuckDB community extension '{name}' is not available for "
+                f"DuckDB {duckdb.__version__} in this environment (community "
+                f"extensions are built per DuckDB release)."
+            )
+        )
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_call(item):
-    """Convert an unpublished-extension (404) failure into a clean skip.
+    """Convert an unpublished-extension failure into a clean skip.
 
     Any other DuckDB error in the extension-loading path propagates unchanged
     and fails the test.
     """
     outcome = yield
-    excinfo = outcome.excinfo
-    if excinfo is None:
-        return
+    _skip_unpublished_extension_failure(outcome)
 
-    exc = excinfo[1]
-    if _is_unpublished_extension_error(exc):
-        outcome.force_exception(
-            pytest.skip.Exception(
-                f"Optional DuckDB community extension '{exc.name}' is not "
-                f"available for DuckDB {exc.duckdb_version} in this environment "
-                f"(community extensions are built per DuckDB release)."
-            )
-        )
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_setup(item):
+    """The same, for a fixture that builds its input with an unpublished extension."""
+    outcome = yield
+    _skip_unpublished_extension_failure(outcome)
 
 
 # ---------------------------------------------------------------------------
@@ -830,12 +962,48 @@ def pytest_runtest_call(item):
 # output -- so they must ask before asserting success (#737).
 
 
+#: DuckDB's texts when an extension could not be *downloaded* at all (offline,
+#: proxy): the registry never answered, so whether the extension is published
+#: is unknown here. For the availability probe that is still "this environment
+#: cannot run the extension", so the honest outcome is a skip -- unlike the
+#: user-facing classification, which must NOT call an offline error
+#: "unpublished" (#778). The unpublished 404 carries the first phrase too, but
+#: is classified first by `is_unpublished_extension_error`. a5 on DuckDB 2.0
+#: downloads from the Query.Farm repository (#1347), the others from the
+#: community registry; a failed download reads "Failed to download extension"
+#: either way. A *cold* offline start on 2.0 fails earlier: with no persisted
+#: query_farm registration, CREATE EXTENSION REPOSITORY cannot fetch the
+#: repository's metadata file, and that error ("Failed to read the metadata
+#: file of the extension repository ... Could not resolve hostname") never
+#: mentions a download.
+_DOWNLOAD_FAILURE_SIGNATURES = (
+    "failed to download extension",
+    "failed to read the metadata file of the extension repository",
+)
+
+
+def _extension_download_failed(exc) -> bool:
+    """True when ``exc``'s chain carries DuckDB's extension-download failure."""
+    seen: set[int] = set()
+    cur = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        blob = str(cur).lower()
+        if any(signature in blob for signature in _DOWNLOAD_FAILURE_SIGNATURES):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
+
+
 @functools.cache
 def _community_extension_available(name: str) -> bool:
     """Probe once per session whether `name` can be installed and loaded.
 
-    Only the unpublished/404 case counts as unavailable; any other failure is
-    re-raised so a genuinely broken environment still fails loudly.
+    Unavailable means the registry answered 404 (unpublished for this DuckDB)
+    or the download never completed (offline); either way the extension cannot
+    run here and its tests skip. Any other failure -- a corrupt extension, a
+    permission error -- is re-raised so a genuinely broken environment still
+    fails loudly.
     """
     from geoparquet_io.core.duckdb_utils import require_community_extension
     from geoparquet_io.core.exceptions import ExtensionUnavailableError
@@ -843,7 +1011,7 @@ def _community_extension_available(name: str) -> bool:
     try:
         require_community_extension(name)
     except ExtensionUnavailableError as exc:
-        if _is_unpublished_extension_error(exc):
+        if _is_unpublished_extension_error(exc) or _extension_download_failed(exc):
             return False
         raise
     return True
@@ -853,8 +1021,30 @@ def skip_if_geography_unavailable() -> None:
     """Skip an S2 test when 'geography' is not published for the running DuckDB."""
     if not _community_extension_available("geography"):
         pytest.skip(
-            f"DuckDB community extension 'geography' (S2) is not published for "
-            f"DuckDB {duckdb.__version__}"
+            f"DuckDB community extension 'geography' (S2) is not available for "
+            f"DuckDB {duckdb.__version__} (not published for it, or not "
+            f"downloadable from here)"
+        )
+
+
+#: The DuckDB community extension each grid command loads.
+_GRID_EXTENSIONS = {"a5": "a5", "h3": "h3", "s2": "geography"}
+
+
+def skip_if_grid_unavailable(grid: str) -> None:
+    """Skip a CLI test of grid command ``grid`` when its extension is unavailable.
+
+    A no-op for grids that need no community extension (quadkey, kdtree). On
+    DuckDB 2.0, for example, 'geography' is not yet built, while h3 is
+    published for both and a5 auto-installs from the Query.Farm repository
+    (#1347) whenever that registry is reachable.
+    """
+    extension = _GRID_EXTENSIONS.get(grid)
+    if extension is not None and not _community_extension_available(extension):
+        pytest.skip(
+            f"DuckDB extension '{extension}' ({grid}) is not available for "
+            f"DuckDB {duckdb.__version__} (not published for it, or not "
+            f"downloadable from here)"
         )
 
 
@@ -872,3 +1062,25 @@ def skip_if_geography_available() -> None:
             f"DuckDB community extension 'geography' (S2) is published for "
             f"DuckDB {duckdb.__version__}, so S2 no longer raises"
         )
+
+
+@pytest.fixture
+def remote_parts(monkeypatch):
+    """Two copies of a bbox-less 1.0 file behind a loopback S3 endpoint, as
+    ``s3://bkt/parts/``, with that endpoint as the ambient S3 config."""
+    from geoparquet_io.core.duckdb_utils import s3_config_scope
+    from tests._fake_s3 import fake_s3
+
+    data = (Path(__file__).parent / "data" / "buildings_test.parquet").read_bytes()
+    for name, value in {
+        "AWS_ACCESS_KEY_ID": "test",
+        "AWS_SECRET_ACCESS_KEY": "test",
+        "AWS_REGION": "us-east-1",
+    }.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    with (
+        fake_s3({"bkt/parts/a.parquet": data, "bkt/parts/b.parquet": data}) as served,
+        s3_config_scope({"s3_endpoint": served[0], "s3_use_ssl": False}),
+    ):
+        yield served

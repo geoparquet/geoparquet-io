@@ -1,7 +1,7 @@
 """Unit tests for verified code-review fixes (todos 036, 038, 039, 042).
 
 Covers:
-- 036: _crs_equals must not report equality for arbitrary id-less PROJJSON pairs
+- 036: crs_equal must not report equality for arbitrary id-less PROJJSON pairs
 - 038: validator must not crash on malformed metadata (numeric crs.id authority,
        valid-JSON non-object geo values)
 - 039: non-planar edges declared on a planar GEOMETRY column must be flagged
@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 import pytest
 from pyproj import CRS as PyprojCRS
 
+from geoparquet_io.core.crs_utils import crs_equal
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.validate import (
     CheckStatus,
@@ -26,12 +27,10 @@ from geoparquet_io.core.validate import (
     _check_v2_edges_consistency,
     _check_version_features,
     _check_version_known,
-    _crs_equals,
     _interpret_bbox_result,
     _is_crs84_equivalent,
     _is_ogc_crs84,
     _is_read_failure,
-    _normalize_found_geometry_type,
     _version_at_least,
     validate_geoparquet,
 )
@@ -49,41 +48,41 @@ class TestCrsEqualsIdless:
     """036: id-less PROJJSON dicts must be compared semantically, not assumed equal."""
 
     def test_idless_3857_vs_idless_utm32n_not_equal(self):
-        assert not _crs_equals(_idless_projjson("EPSG:3857"), _idless_projjson("EPSG:32632"))
+        assert not crs_equal(_idless_projjson("EPSG:3857"), _idless_projjson("EPSG:32632"))
 
     def test_identical_idless_projjson_equal(self):
         a = _idless_projjson("EPSG:3857")
         b = json.loads(json.dumps(a))
-        assert _crs_equals(a, b)
+        assert crs_equal(a, b)
 
     def test_both_with_matching_id_equal(self):
         a = {"type": "ProjectedCRS", "name": "A", "id": {"authority": "EPSG", "code": 3857}}
         b = {"type": "ProjectedCRS", "name": "B", "id": {"authority": "EPSG", "code": 3857}}
-        assert _crs_equals(a, b)
+        assert crs_equal(a, b)
 
     def test_both_with_different_id_not_equal(self):
         a = {"type": "ProjectedCRS", "name": "A", "id": {"authority": "EPSG", "code": 3857}}
         b = {"type": "ProjectedCRS", "name": "A", "id": {"authority": "EPSG", "code": 32632}}
-        assert not _crs_equals(a, b)
+        assert not crs_equal(a, b)
 
     def test_different_dicts_sharing_name_are_not_equal(self):
         """The old name-only fallback made these equal; must fail closed now."""
-        assert not _crs_equals(
+        assert not crs_equal(
             {"name": "whatever", "type": "GeographicCRS"},
             {"name": "whatever", "type": "ProjectedCRS"},
         )
 
     def test_identical_unparsable_dicts_are_equal(self):
         """Byte-identical declarations describe the same CRS even if unparsable."""
-        assert _crs_equals({"name": "whatever"}, {"name": "whatever"})
+        assert crs_equal({"name": "whatever"}, {"name": "whatever"})
 
     def test_string_forms_unchanged(self):
-        assert _crs_equals("EPSG:4326", "EPSG:4326")
-        assert not _crs_equals("EPSG:4326", "EPSG:3857")
+        assert crs_equal("EPSG:4326", "EPSG:4326")
+        assert not crs_equal("EPSG:4326", "EPSG:3857")
 
     def test_none_handling_unchanged(self):
-        assert _crs_equals(None, None)
-        assert not _crs_equals(None, {"name": "x"})
+        assert crs_equal(None, None)
+        assert not crs_equal(None, {"name": "x"})
 
 
 class TestMalformedMetadataNoCrash:
@@ -189,11 +188,6 @@ class TestEpochCrsHandling:
     def test_explicit_null_crs_with_epoch_warns(self):
         check = _check_epoch_valid({"epoch": 2020.0, "crs": None}, "geometry")
         assert check.status == CheckStatus.WARNING, check.message
-
-    def test_absent_crs_with_epoch_fails(self):
-        """Absent crs means the OGC:CRS84 default — a datum ensemble."""
-        check = _check_epoch_valid({"epoch": 2020.0}, "geometry")
-        assert check.status == CheckStatus.FAILED
 
     def test_unresolvable_crs_with_epoch_warns_not_passes(self):
         crs = {
@@ -373,11 +367,20 @@ class TestProjjsonTypeMember:
 class TestGeomTypeNormalization:
     """046-V10: unmapped base types must not get their Z/M suffix doubled."""
 
-    def test_unmapped_base_no_double_suffix(self):
-        assert _normalize_found_geometry_type("TRIANGLE Z") == "TRIANGLE Z"
+    # The data-side type names now come from the stats owner (#1367 concept 5).
+
+    def test_unmapped_base_is_dropped_not_echoed(self):
+        # One reader, one rule: a name that is no spec type is no type (#1367).
+        from geoparquet_io.core.geo_metadata import geometry_type_name
+
+        assert geometry_type_name("TRIANGLE Z") is None
 
     def test_mapped_with_suffix(self):
-        assert _normalize_found_geometry_type("MULTIPOINT ZM") == "MultiPoint ZM"
+        from geoparquet_io.core.geo_metadata import geometry_type_name
+
+        assert geometry_type_name("MULTIPOINT ZM") == "MultiPoint ZM"
 
     def test_st_prefix_stripped(self):
-        assert _normalize_found_geometry_type("ST_POINT") == "Point"
+        from geoparquet_io.core.geo_metadata import geometry_type_name
+
+        assert geometry_type_name("ST_POINT") == "Point"

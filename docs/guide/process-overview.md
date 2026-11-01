@@ -194,9 +194,11 @@ zooms; tylertoo derives zooms from `gsd` otherwise.
     The format's canonical level normally reproduces the source exactly. Here
     the finest level *is* an aggregate — the base cells — so that is what the
     file declares as canonical, in `duplicating` mode: every level is a
-    complete rendering and a reader picks exactly one. Not yet written: the
-    1.1 bbox covering the format requires (§4.4) and a spatial order within a
-    level (§5.1); `tylertoo validate` reports the former.
+    complete rendering and a reader picks exactly one. The 1.1 bbox covering
+    the format requires (§4.4) is written when the input has a bbox column:
+    each level rebuilds that column over its own parent cells and declares it,
+    so run `gpio add bbox` (or `Table.add_bbox()`) on the aggregate first.
+    Not yet written: a spatial order within a level (§5.1).
 
 ## Options
 
@@ -215,7 +217,9 @@ zooms; tylertoo derives zooms from `gsd` otherwise.
 | `--gsd` | measured | Explicit GSDs in metres, coarse to fine, one per built level plus the base (with `--overview-out`) |
 | `--write-memory` | half the memory ceiling | DuckDB memory limit for the rollups (e.g. `8GB`). The default follows the container or Slurm job cap when that is lower than RAM |
 
-Compression (`--compression`, `--compression-level`), `--geoparquet-version`, `--verbose`, and `--show-sql` behave as elsewhere in gpio.
+Compression (`--compression`, `--compression-level`), `--geoparquet-version`, `--verbose`, and `--show-sql` behave as elsewhere in gpio,
+except that an unset `--compression-level` resolves to ZSTD 9 rather than the write funnel's 15 — see
+[Compression](../concepts/best-practices.md#compression) for why.
 
 ## See Also
 

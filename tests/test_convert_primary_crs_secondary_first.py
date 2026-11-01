@@ -1,7 +1,7 @@
 """``convert`` reads the primary geometry's CRS, not a secondary's that comes first.
 
 A Parquet input with no ``geo`` block records each geometry column's CRS only
-in its native logical type. ``convert`` asked ``extract_crs_from_parquet`` for
+in its native logical type. ``convert`` asked ``crs_of`` for
 "the" CRS without naming the column it was converting, so the answer was the
 first non-default CRS in schema order. With a secondary column ahead of the
 primary, that is the secondary's CRS, and the primary was relabelled with it --

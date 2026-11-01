@@ -1,0 +1,517 @@
+# The one exemptions file for the owner guards of #1367 ("one owner per concept").
+#
+# Every check that bans a pattern outside its owner module keeps its exceptions
+# here, one entry per copy, each with a reason. tests/test_owner_guards.py pins
+# how many entries each check has and fails on an entry that no longer matches
+# anything, so a number only ever goes down, and only with a diff that shows it.
+# When you delete a copy, delete its entry and lower the count in
+# tests/test_owner_guards.py::EXPECTED_COUNTS in the same commit.
+#
+# Entry keys: path (from the repo root), optional name (the enclosing def's
+# dotted name, the banned API for G1.tid251, the def name for G2), optional
+# line_pattern (a regex on the source line), optional count (how many hits the
+# entry covers, default 1), and reason (mandatory).
+#
+# Never add an entry to make a new copy pass. Call the owner.
+
+# ---------------------------------------------------------------------------
+# G1: banned calls outside the owner (tests/test_owner_guards.py; ruff TID251)
+# ---------------------------------------------------------------------------
+# [[G1.tid251]] mirrors [tool.ruff.lint.per-file-ignores] in pyproject.toml:
+# one ignore line per file listed here.
+[G1]
+# Binary byte-unit arithmetic belongs exclusively to core/sizing.py.
+binary_mb = []
+
+[[G1.tid251]]
+path = "geoparquet_io/api/ops.py"
+name = "pyarrow.parquet.write_table"
+count = 3
+reason = "permanent scratch copy: stages the in-memory input table to a temp file a file-based core call reads back; never an output, so not a facade write. Its path comes from file_utils.scratch_path"
+[[G1.tid251]]
+path = "geoparquet_io/benchmarks/operations.py"
+name = "pyarrow.parquet.write_table"
+reason = "permanent: benchmark fixture write that measures pyarrow itself; not a gpio output path"
+[[G1.tid251]]
+path = "geoparquet_io/core/add/kdtree.py"
+name = "pyarrow.parquet.write_table"
+reason = "permanent scratch copy: the planar view the kdtree pass reads back with DuckDB; never an output, so not a facade write. Its path comes from file_utils.scratch_file"
+[[G1.tid251]]
+path = "geoparquet_io/core/arcgis.py"
+name = "pyarrow.parquet.ParquetWriter"
+reason = "permanent scratch copy: the paged ArcGIS spool, read back by pq.read_table; never an output, so not a facade write. Its path comes from file_utils.scratch_path"
+[[G1.tid251]]
+path = "geoparquet_io/core/carto.py"
+name = "httpx"
+reason = "permanent: CARTO status probe streams one request with httpx.stream to read the status without the body; accepted caller-specific classification"
+[[G1.tid251]]
+path = "geoparquet_io/core/duckdb_utils.py"
+name = "psutil"
+reason = "permanent: process-liveness check for stale DuckDB temp dirs, not a memory fact; optional import (#1330)"
+[[G1.tid251]]
+path = "geoparquet_io/core/streaming.py"
+name = "pyarrow.parquet.write_table"
+reason = "permanent scratch copy: stdin spooled to a temp file the command then reads; never an output, so not a facade write. Its path comes from file_utils.scratch_path (concept 11)"
+[[G1.tid251]]
+path = "geoparquet_io/core/wfs.py"
+name = "httpx"
+count = 3
+reason = "permanent: WFS request, feature count, streaming page download and startIndex probe use httpx for its exception types and stream; retries run through http_retry"
+
+# Row-group count: core/parquet_writer.py owns the default and every resolver (#981, #1215).
+[[G1.row_group_policy]]
+path = "geoparquet_io/core/benchmark.py"
+line_pattern = "ROW_GROUP_SIZE=100000"
+reason = "permanent: the same baseline, named in the benchmark's report"
+# HTTP retry policy: core/http_retry.py owns attempts, delay, timeout, statuses and Retry-After.
+[[G1.retry_status_sets]]
+path = "geoparquet_io/core/carto.py"
+name = "_probe_request_status"
+count = 2
+reason = "permanent: 400 <= code < 500 and code != 429 picks which 4xx answers get a detail probe for the error message; not a retry decision"
+[[G1.retry_status_sets]]
+path = "geoparquet_io/core/arcgis.py"
+name = "_is_page_pressure_error"
+reason = "permanent: ArcGIS JSON error-body code 500 marks page pressure (halve the page size), not an HTTP retry classification"
+# Bare json.dumps / json.dump in cli/ and core/: reports go through
+# core/json_output.dumps_json (#1226). Metadata serializers have exact counts.
+[[G1.json_dumps]]
+path = "geoparquet_io/core/add/stac_metadata.py"
+count = 2
+reason = "permanent: metadata serialization, not a report: stac-geoparquet footer payload"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/arcgis.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: geo block and a staged ArcGIS JSON document"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/bbox_structure.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: debug dump of the geo block"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/constants.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: collection footer key"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/crs_utils.py"
+count = 7
+reason = "permanent: metadata serialization, not a report: PROJJSON for SQL, cache keys and messages"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/duckdb_metadata.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: CRS inside a GEOMETRY type string"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/duckdb_utils.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: ARROW:extension:metadata"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/extract.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: GeoJSON geometry handed to SQL"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/format_writers.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: SRS parameter for GDAL"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/geo_metadata.py"
+name = "geo_key_value"
+line_pattern = 'json\.dumps'
+count = 1
+reason = "permanent: metadata serialization, not a report: geo block (owner of its encoding)"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/geoarrow_compat.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: ARROW:extension:metadata"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/geojson_stream.py"
+count = 5
+reason = "permanent: metadata serialization, not a report: GeoJSON output (the data, not a report)"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/metadata_utils.py"
+count = 2
+reason = "permanent: metadata serialization, not a report: PROJJSON/covering pretty-printed inside the human meta view"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/parquet_footer.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: ARROW:extension:metadata"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/pmtiles.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: GeoJSON feature lines fed to tippecanoe"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/pmtiles_chunks.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: chunk manifest file"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/process/overview/overview_file.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: geo block and overviews footer key"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/stac.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: STAC item/collection JSON file"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/write_strategies/base.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: PROJJSON literal for SQL"
+[[G1.json_dumps]]
+path = "geoparquet_io/core/write_strategies/duckdb_kv.py"
+count = 1
+reason = "permanent: metadata serialization, not a report: PROJJSON for SQL"
+
+# Who owns one key of a geo block's column entry (#1367 concept 4). The
+# geo_compose arm reads this table: an edit of a LISTED key in its module is the
+# composer's delegated step (step 5's CRS output rule, step 4's edges), not a
+# second composer. An ownership statement, not an exemption: it carries no
+# count, and any other key edited in these modules is still a hit.
+[G1.geo_compose_entry_key_owners]
+"geoparquet_io/core/crs_utils.py" = ["crs"]
+"geoparquet_io/core/edges.py" = ["edges", "orientation"]
+
+# The modules that own the SHAPE of a schema-listing walk (G1.column_fold's
+# "tests or keys a column by name" check): the walk is not a hit there. An
+# ownership statement, not an exemption: a fold or a suffix loop in the same
+# module is still a hit.
+[G1.column_fold_walk_owners]
+modules = ["geoparquet_io/core/parquet_schema.py"]
+
+# A geometry column chosen outside core/geometry_detection.py (#1367 concept 7).
+# Seed baseline recorded when the arm was created (#1392 pass 3): counts only
+# go down from here; removing a copy removes its exemption.
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/geo_metadata.py"
+line_pattern = '\.get\("primary_column"\)'
+count = 8
+reason = "permanent: the geo-block decoder; reading the block's primary_column claim is its business"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/validate.py"
+name = "_check_primary_column_present"
+reason = "permanent: the validator checks the block's primary_column claim itself"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/validate.py"
+name = "_check_primary_column_in_columns"
+reason = "permanent: the validator checks the block's primary_column claim itself"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/derive_geo_from_file.py"
+name = "_with_primary_column"
+reason = "permanent: a block repoint: compares the claim it is about to rewrite"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/inspect.py"
+name = "inspect_summary"
+count = 2
+reason = "permanent: extract_geo_info's result: the resolver's answer, not the block's claim (two reads)"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/inspect.py"
+name = "inspect_preview"
+reason = "permanent: extract_geo_info's result: the resolver's answer, not the block's claim"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/inspect.py"
+name = "inspect_stats"
+reason = "permanent: extract_geo_info's result: the resolver's answer, not the block's claim"
+[[G1.geometry_identity]]
+path = "geoparquet_io/core/wfs.py"
+name = "_probe_properties_type"
+reason = "permanent: the GeoJSON properties column's type (unnest a STRUCT), not a geometry read kind"
+
+[[G1.schema_probe]]
+path = "geoparquet_io/core/carto.py"
+count = 1
+reason = "permanent: remote CARTO SQL API probe"
+[[G1.schema_probe]]
+path = "geoparquet_io/core/convert.py"
+count = 1
+reason = "permanent: ST_Read column bind detects non-UTF-8 names"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/carto.py"
+count = 1
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/extract.py"
+count = 2
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/extract_bigquery.py"
+count = 2
+reason = "permanent: constant geometry filter, not a spatial join"
+[[G1.spatial_filter]]
+path = "geoparquet_io/core/wfs.py"
+count = 1
+reason = "permanent: constant geometry filter, not a spatial join"
+
+# ---------------------------------------------------------------------------
+# G2: owner-only definitions (scripts/check_owner_defs.py)
+# ---------------------------------------------------------------------------
+# Each key is an fnmatch glob over a def name; only the listed modules may
+# define a name in its family anywhere under geoparquet_io/. A leading
+# underscore on either side is ignored (_is_geographic_crs is an
+# is_geographic*), and [G2.known_copies] adds renamed copies by exact name.
+[G2.owners]
+"is_geographic*" = ["geoparquet_io/core/crs_utils.py"]
+"*crs_equal*" = ["geoparquet_io/core/crs_utils.py"]
+"resolve_*version*" = ["geoparquet_io/core/parquet_writer.py"]
+# T2b audit: the rest of the output-version family. `*_geoparquet_version*`
+# rather than `*geoparquet_version*`: the bare name is the public
+# `Table.geoparquet_version` property and `geoparquet_version_option` is the CLI
+# flag, neither a decision, and the rules allow no new exemption for them.
+"*_geoparquet_version*" = ["geoparquet_io/core/parquet_writer.py"]
+"version_for_*" = ["geoparquet_io/core/parquet_writer.py"]
+"_version_of_*" = ["geoparquet_io/core/parquet_writer.py"]
+"*version_upgrade*" = ["geoparquet_io/core/parquet_writer.py"]
+# Every covering name: the composer (geo_metadata) and the covering lookups
+# (bbox_structure) own them. The checks, predicates and repairs that read a
+# covering elsewhere are named for what they check (``*cover*``), so the T0b
+# narrowing to builder shapes is gone (#1367 T3e, HANDOFFS row 16).
+"*covering*" = ["geoparquet_io/core/geo_metadata.py", "geoparquet_io/core/bbox_structure.py"]
+"parse_size*" = ["geoparquet_io/core/sizing.py"]
+"format_size*" = ["geoparquet_io/core/sizing.py"]
+# The one staging owner (#1367 T2f, concept 11): moved out of
+# write_strategies/base.py, which write_funnels and parquet_footer could not
+# both import without a cycle. No re-export.
+"atomic_write" = ["geoparquet_io/core/file_utils.py"]
+# T1c: the native-geo-type probe (was _is_geography_column, copied in validate.py) and
+# the query-schema probes (was geo_metadata.output_query_schema / LIMIT 0 / DESCRIBE copies).
+"_is_geography_column" = ["geoparquet_io/core/duckdb_metadata.py"]
+"native_geo_type" = ["geoparquet_io/core/duckdb_metadata.py"]
+"is_native_geo_column" = ["geoparquet_io/core/duckdb_metadata.py"]
+"*query_schema" = ["geoparquet_io/core/duckdb_utils.py"]
+"describe_query" = ["geoparquet_io/core/duckdb_utils.py"]
+# T1c audit: the per-row-group spatial-stats ladder, the parquet_metadata() runner,
+# and the DuckDB-type (DESCRIBE/TYPEOF) geometry test.
+"get_row_group_bbox_stats" = ["geoparquet_io/core/duckdb_metadata.py"]
+"_parquet_metadata_rows" = ["geoparquet_io/core/duckdb_metadata.py"]
+"duckdb_type_is_geometry" = ["geoparquet_io/core/duckdb_utils.py"]
+"duckdb_type_contains_geometry" = ["geoparquet_io/core/duckdb_utils.py"]
+"duckdb_type_is_numeric" = ["geoparquet_io/core/duckdb_utils.py"]
+"parse_duckdb_geo_type" = ["geoparquet_io/core/duckdb_utils.py"]
+"geometry_stats_of" = ["geoparquet_io/core/geo_metadata.py"]
+"bounds_of" = ["geoparquet_io/core/geo_metadata.py"]
+"geometry_types_of" = ["geoparquet_io/core/geo_metadata.py"]
+"handle_output_overwrite" = ["geoparquet_io/core/file_utils.py"]
+"is_remote_url" = ["geoparquet_io/core/remote.py"]
+"parse_bbox" = ["geoparquet_io/core/bbox_parse.py"]
+"_get_query_columns" = ["geoparquet_io/core/duckdb_utils.py"]
+"*unique_name*" = ["geoparquet_io/core/column_selection.py"]
+"*_with_retry" = ["geoparquet_io/core/http_retry.py"]
+"*ensure*_column" = ["geoparquet_io/core/index_ops.py"]
+"build_spatial_join*" = ["geoparquet_io/core/duckdb_utils.py"]
+"_align*schema" = ["geoparquet_io/core/arrow_types.py"]
+"_unify*schema" = ["geoparquet_io/core/arrow_types.py"]
+"_reconcile*schema" = ["geoparquet_io/core/arrow_types.py"]
+# Owners T1a/T1b (#1375) created: DuckDB capability and connection plumbing in
+# duckdb_utils, the memory-limit display in sizing.
+"duckdb_capabilities" = ["geoparquet_io/core/duckdb_utils.py"]
+"complete_without_fetch" = ["geoparquet_io/core/duckdb_utils.py"]
+"resolve_load_spatial" = ["geoparquet_io/core/duckdb_utils.py"]
+"_apply_memory_limit" = ["geoparquet_io/core/duckdb_utils.py"]
+"pin_duckdb_settings" = ["geoparquet_io/core/duckdb_utils.py"]
+"format_memory_limit" = ["geoparquet_io/core/sizing.py"]
+"nudged_size" = ["geoparquet_io/core/sizing.py"]
+# T3d (#1367 concept 6): the edges field's vocabulary, version gate, the one
+# precedence between a request, a carried block and a native type, and the key's
+# readers. The gatherers that read a file or a table stay with their callers
+# (write_funnels.collect_nonplanar_edges / table_nonplanar_edges).
+"*edges_for_version*" = ["geoparquet_io/core/edges.py"]
+"detect_edges" = ["geoparquet_io/core/edges.py"]
+"requested_edges" = ["geoparquet_io/core/edges.py"]
+"agree_across_files" = ["geoparquet_io/core/edges.py"]
+"edges_of" = ["geoparquet_io/core/edges.py"]
+"block_edges" = ["geoparquet_io/core/edges.py"]
+"strip_edges" = ["geoparquet_io/core/edges.py"]
+"logical_type_edges" = ["geoparquet_io/core/edges.py"]
+"*_type_edges" = ["geoparquet_io/core/edges.py"]
+"*spherical_edge_type*" = ["geoparquet_io/core/edges.py"]
+"representative_point*" = ["geoparquet_io/core/edges.py"]
+"set_edges" = ["geoparquet_io/core/edges.py"]
+"state_edges" = ["geoparquet_io/core/edges.py"]
+"without_edges" = ["geoparquet_io/core/edges.py"]
+"declares_edges" = ["geoparquet_io/core/edges.py"]
+"declared_edges" = ["geoparquet_io/core/edges.py"]
+"is_nonplanar" = ["geoparquet_io/core/edges.py"]
+"is_geodesic" = ["geoparquet_io/core/edges.py"]
+"is_ellipsoidal" = ["geoparquet_io/core/edges.py"]
+"normalized_edges" = ["geoparquet_io/core/edges.py"]
+"edges_allowed" = ["geoparquet_io/core/edges.py"]
+"*_field_edges" = ["geoparquet_io/core/edges.py"]
+"geoarrow_edge_type" = ["geoparquet_io/core/edges.py"]
+"logical_type_algorithm" = ["geoparquet_io/core/edges.py"]
+"carry_edges" = ["geoparquet_io/core/edges.py"]
+"requests_planar" = ["geoparquet_io/core/edges.py"]
+"implied_orientation" = ["geoparquet_io/core/edges.py"]
+"is_geoparquet_1x" = ["geoparquet_io/core/geo_metadata.py"]
+# The row-group policy (T2c): one resolver family, one MB -> rows measurement,
+# one vector snap. write_strategies/row_group_sizing.py carried a second
+# `_resolve_row_group_rows*` pair with its parameters swapped (#1030).
+"*resolve_row_group_rows*" = ["geoparquet_io/core/parquet_writer.py"]
+"*rows_for_*target*" = ["geoparquet_io/core/parquet_writer.py"]
+"estimate_row_size" = ["geoparquet_io/core/parquet_writer.py"]
+"align_to_writer_vector" = ["geoparquet_io/core/parquet_writer.py"]
+
+# Renamed copies no glob sees, by the family they belong to (the #1367
+# Copies rows and the T0b audit). A name here is banned outside the owner even
+# once its last copy is deleted (the CRS ones are: T4c), so it cannot grow back.
+[G2.known_copies]
+"resolve_*version*" = ["_detect_version_from_table", "extract_version_from_metadata", "detect_version_for_output"]
+"*crs_equal*" = ["_crs_are_equivalent", "_crs_matches"]
+"parse_bbox" = ["_normalize_bbox", "_validated_bbox"]
+
+# Owners named above that do not exist yet (none today).
+[G2.pending_owners]
+
+# Reviewed permanent name collisions outside the owner. count = how many defs
+# of that name the file holds (default 1); the check fails when the tree differs.
+# No deferred track-owned copies remain.
+[[G2.exemptions]]
+path = "geoparquet_io/core/carto.py"
+name = "_fetch_with_retry"
+reason = "permanent: caller-specific classify wrapper over run_with_retry, accepted caller-specific classification"
+
+# ---------------------------------------------------------------------------
+# G3: near-duplicate functions (scripts/check_duplicates.py; pylint R0801)
+# ---------------------------------------------------------------------------
+# [[G3.pairs]] gives the reason for each line of scripts/duplicate_pairs_baseline.txt;
+# tests/test_owner_guards.py fails when the two lists differ.
+[G3]
+baseline = "scripts/duplicate_pairs_baseline.txt"
+# Every near-duplicate pair is gone; the list stays, empty, so a new one has nowhere to hide.
+pairs = []
+
+# pylint R0801 (scripts/check_pylint_duplicates.py, the pylint-duplicates hook).
+# One entry per reported block, keyed by the module and the function (or class,
+# or <module>) each side starts in (geoparquet_io. dropped), counted by report;
+# the wrapper fails when the tree differs, so swapping one copy for another
+# between the same two modules fails too. Most are keyword-argument lists forwarded to one callee:
+# R0801 counts lines, not logic, so those are permanent.
+[[G3.pylint]]
+block = "api.ops:aggregate_admin|api.table:Table.aggregate_admin"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "api.ops:contour|core.process.raster.contour:contour_file"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "api.ops:create_pmtiles_pyramid|cli.commands.pmtiles:pmtiles_pyramid"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "api.ops:create_pmtiles|cli.commands.pmtiles:pmtiles_create"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "api.ops:from_arcgis|api.table:extract_arcgis"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "api.ops:from_arcgis|core.arcgis:convert_arcgis_to_geoparquet"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "api.ops:from_carto|core.carto:convert_carto_to_geoparquet"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "api.ops:from_wfs|api.table:Table.from_wfs"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "api.ops:read_bigquery|api.table:Table.from_bigquery"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "api.table:Table.contour|core.process.raster.contour:contour_file"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "api.table:Table.from_bigquery|cli.commands.extract:extract_bigquery_cmd"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "api.table:extract_arcgis|core.arcgis:convert_arcgis_to_geoparquet"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "cli.commands.add:add_h3|cli.commands.sort:str_order_command"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "core.extract:_extract_streaming|core.str_order:_str_order_streaming"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+[[G3.pylint]]
+block = "core.process.raster.contour:contour_file|core.process.raster.polygonize:polygonize_file"
+reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
+
+# ---------------------------------------------------------------------------
+# G13: shared-option consistency (tests/test_cli_shared_options.py)
+# ---------------------------------------------------------------------------
+# Option names declared on more than one command whose type, default, callback,
+# multiple or is_flag differ, with the fields that differ. The set is exact: a
+# new difference fails, and a unified option must leave the list.
+# Not here: --bbox (every declaration is the same str; the parse layer has its
+# own arm, tests/test_cli_shared_options.py's inline_bbox_parsers, which finds
+# none since T5c routed them to core/bbox_parse.parse_bbox: add a
+# [[G13.bbox_parsers]] entry only if one must stay) and --json/--markdown
+# (declared repeatedly but identically).
+[[G13.options]]
+option = "--auto"
+fields = ["type", "is_flag"]
+reason = "permanent: two meanings, kdtree's --auto N (target partition count) and a bool switch on the index commands"
+[[G13.options]]
+option = "--bbox-name"
+fields = ["default"]
+reason = "permanent: add bbox names the new column ('bbox'); add bbox-metadata detects the existing one when not given"
+[[G13.options]]
+option = "--encoding"
+fields = ["default"]
+reason = "permanent: convert geoparquet auto-detects (None); shapefile DBF text defaults to UTF-8"
+[[G13.options]]
+option = "--geometry"
+fields = ["type", "is_flag"]
+reason = "permanent: a different concept (include geometry) under the same name; renaming breaks the CLI"
+[[G13.options]]
+option = "--geoparquet-version"
+fields = ["type"]
+reason = "permanent: check spec validates against spec versions, and 1.1-geoarrow is a write encoding, not a spec version"
+[[G13.options]]
+option = "--level"
+fields = ["type", "default"]
+reason = "permanent: S2 level (add 13; partition None = auto-resolve) vs aggregate admin's country/region level"
+[[G13.options]]
+option = "--precision"
+fields = ["default"]
+reason = "permanent: PMTiles tile precision 6 and GeoJSON writer precision 7 are deliberate per-format defaults; one default changes tile bytes (not approved)"
+[[G13.options]]
+option = "--profile"
+fields = ["type", "is_flag"]
+reason = "permanent: two meanings, benchmark suite's profiling switch and check's 'web' rule profile"
+[[G13.options]]
+option = "--resolution"
+fields = ["type", "default"]
+reason = "permanent: per-index bounds and defaults (H3 0-15, A5 0-30, quadkey 0-23; partition/aggregate None = auto); IndexSpec carries them"
+[[G13.options]]
+option = "--timeout"
+fields = ["default"]
+reason = "permanent: one type via cli.decorators.timeout_option; the 60 s (arcgis) and 120 s (carto) defaults are per-service budgets the service retry audit accepted"
+[[G13.options]]
+option = "--where"
+fields = ["default"]
+reason = "permanent: ArcGIS REST requires a where clause, so extract arcgis defaults to its select-all '1=1'"
+
+
+# ---------------------------------------------------------------------------
+# G4: dead code (vulture at min_confidence = 60)
+# ---------------------------------------------------------------------------
+[G4]
+whitelist = "scripts/vulture_whitelist.py"
+tests_whitelist = "scripts/vulture_whitelist_tests.py"
+reason = "Only names used dynamically remain; each line explains its dynamic dispatch. Package and tests are scanned separately so a test does not count as a production use. Delete a whitelist line when its dynamic use disappears."
+
+# ---------------------------------------------------------------------------
+# G5: core/common.py (tests/test_common_split_guards.py)
+# ---------------------------------------------------------------------------
+# No exemptions: the pinned name sets and the size ceilings live in the test.
+
+[[G1.raw_parquet_copy]]
+path = "geoparquet_io/core/admin_datasets.py"
+count = 2
+reason = "permanent: cache Parquet staging; codec comes from resolve_codec"
+
+[[G1.raw_parquet_copy]]
+path = "geoparquet_io/core/benchmark.py"
+count = 1
+reason = "permanent: benchmark measures DuckDB COPY itself with resolved codec and row groups"
+
+[[G1.raw_parquet_copy]]
+path = "geoparquet_io/core/compression.py"
+count = 1
+reason = "permanent: dry-run display of the resolved facade COPY statement"
+
+[[G1.raw_parquet_copy]]
+path = "geoparquet_io/core/partition/staging.py"
+count = 1
+reason = "permanent: scratch or cache Parquet staging; codec comes from resolve_codec, not a final output"

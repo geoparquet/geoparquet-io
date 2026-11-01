@@ -15,19 +15,23 @@ Key features:
 
 from __future__ import annotations
 
-import json
+import os
 import re
-import tempfile
 import time
 import xml.etree.ElementTree as ET  # nosec B405 - the one parse here (_is_empty_gml_collection) refuses any body declaring a DTD, so no entity expansion is possible; stdlib ET never resolves external entities regardless
+from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import duckdb
 import pyarrow as pa
+
+from geoparquet_io.core.duckdb_utils import as_wkb_sql, geom_from_wkb_sql
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
+from geoparquet_io.core.sizing import BYTES_PER_MIB, bytes_to_mb
 
 # Public API
 __all__ = [
@@ -47,21 +51,49 @@ __all__ = [
 ]
 
 from geoparquet_io.core.arrow_types import _cast_table_to_schema, _compute_unified_schema
-from geoparquet_io.core.crs_utils import _projjson_from_authority
+from geoparquet_io.core.bbox_parse import BBox, parse_bbox, refuse_wrap
+from geoparquet_io.core.crs_utils import (
+    UnresolvableCRSError,
+    crs_equal,
+    epsg_code_of_label,
+    is_geographic,
+    load_crs,
+    projjson_for_label,
+)
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    fetch_one,
     get_duckdb_connection,
+    parse_duckdb_geo_type,
     quote_identifier,
     sql_path,
 )
+from geoparquet_io.core.exceptions import (
+    FailureKind,
+    GeoParquetError,
+    RemoteAccessError,
+    classify_failure,
+    fatal_status_message,
+    is_auth_status,
+)
+from geoparquet_io.core.file_utils import handle_output_overwrite, scratch_dir
+from geoparquet_io.core.geo_metadata import (
+    GeoBlockOptions,
+    SchemaSource,
+    bounds_of,
+    compose_geo_block,
+    with_geo_block,
+)
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
 from geoparquet_io.core.http_retry import (
-    get_shared_http_client as _get_shared_http_client_base,
-)
-from geoparquet_io.core.http_retry import (
-    parse_retry_after,
-)
-from geoparquet_io.core.http_retry import (
-    reset_http_client as _reset_http_client_base,
+    DEFAULT_MAX_RETRIES,
+    DEFAULT_RETRY_DELAY,
+    RetryExhaustedError,
+    final_request_error,
+    get_shared_http_client,
+    make_request_with_retry,
+    run_with_retry,
+    status_error,
 )
 from geoparquet_io.core.logging_config import (
     configure_verbose,
@@ -74,11 +106,22 @@ from geoparquet_io.core.logging_config import (
 from geoparquet_io.core.reproject import reproject_table
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
-# Maximum JSON object size for DuckDB parsing (1GB)
+# Bounds for DuckDB's ``maximum_object_size`` when parsing a GeoJSON response.
+# A FeatureCollection is one JSON object, so the limit must reach the payload's
+# own size; but DuckDB's reader allocates a multiple of the limit per active
+# reader, so a fixed 1 GiB ran small responses out of memory on modest hosts
+# (#1344). The limit is sized per response, with a floor, and capped at 1 GiB.
+_MIN_JSON_OBJECT_SIZE = 16 * BYTES_PER_MIB
 _MAX_JSON_OBJECT_SIZE = 1073741824
 
 
-class WFSError(Exception):
+def _json_object_size_for(path: str) -> int:
+    """``maximum_object_size`` for the downloaded response at ``path``."""
+    size = os.path.getsize(path)
+    return min(_MAX_JSON_OBJECT_SIZE, max(_MIN_JSON_OBJECT_SIZE, size))
+
+
+class WFSError(GeoParquetError):
     """Exception raised for WFS-related errors."""
 
     pass
@@ -172,120 +215,13 @@ class WFSLayerInfo:
     sortable_attribute: str | None = None
 
 
-# Default timeout for HTTP requests (seconds)
-DEFAULT_TIMEOUT = 60.0
 # A GetFeature page can take minutes on a large layer; the startIndex probe
 # asks for one feature. Both are passed per request, never only to the shared
 # client, which keeps the timeout of whichever caller built it (#1184).
 _PAGE_TIMEOUT = 600.0
+#: What a 401/403 tells the user to fix: WFS has no credential flags, the key rides in the URL.
+WFS_CREDENTIALS_HINT = "Check the credentials in the URL."
 _PROBE_TIMEOUT = 30.0
-
-
-def _get_shared_http_client(timeout: float = DEFAULT_TIMEOUT):
-    """Get shared HTTP client from http_retry module."""
-    return _get_shared_http_client_base(timeout=timeout)
-
-
-def _reset_http_client():
-    """Reset shared HTTP client from http_retry module."""
-    _reset_http_client_base()
-
-
-def _make_request(
-    url: str,
-    params: dict | None = None,
-    max_retries: int = 3,
-    retry_delay: float = 1.0,
-    accept: str | None = None,
-    timeout: float = DEFAULT_TIMEOUT,
-) -> bytes:
-    """
-    Make HTTP GET request with retry logic.
-
-    Returns raw bytes to handle both JSON and XML responses.
-
-    Args:
-        url: Request URL
-        params: Query parameters
-        max_retries: Number of retry attempts
-        retry_delay: Base delay between retries (exponential backoff)
-        accept: Accept header value (e.g., "application/json")
-        timeout: Request timeout in seconds
-
-    Returns:
-        Response content as bytes
-    """
-    import httpx
-
-    last_exception: Exception | None = None
-
-    headers = {
-        "Accept-Encoding": "gzip, deflate",
-    }
-    if accept:
-        headers["Accept"] = accept
-
-    # Build full URL for logging
-    request_desc = url
-    if params:
-        param_summary = ", ".join(f"{k}={v}" for k, v in list(params.items())[:5])
-        if len(params) > 5:
-            param_summary += f", ... ({len(params)} params)"
-        request_desc = f"{url}?{param_summary}"
-
-    for attempt in range(max_retries):
-        try:
-            debug(f"HTTP GET: {request_desc[:100]}{'...' if len(request_desc) > 100 else ''}")
-            start_time = time.time()
-            client = _get_shared_http_client(timeout=timeout)
-            # The timeout rides on the request, not just the client: the shared
-            # client keeps the timeout of whichever caller built it first, so a
-            # client-level timeout alone would cap every later caller (#1184).
-            response = client.get(url, params=params, headers=headers, timeout=timeout)
-            elapsed = time.time() - start_time
-            response.raise_for_status()
-            content = bytes(response.content)
-            debug(f"HTTP OK: {len(content):,} bytes in {elapsed:.1f}s")
-            return content
-        except httpx.RemoteProtocolError as e:
-            last_exception = e
-            warn(f"HTTP protocol error (attempt {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                _reset_http_client()
-                time.sleep(retry_delay * (attempt + 1))
-        except httpx.TimeoutException as e:
-            last_exception = e
-            warn(f"HTTP timeout after {timeout}s (attempt {attempt + 1}/{max_retries})")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
-        except httpx.NetworkError as e:
-            last_exception = e
-            warn(f"HTTP network error (attempt {attempt + 1}/{max_retries}): {e}")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay * (attempt + 1))
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code
-            if status == 429 or (500 <= status < 600):
-                last_exception = e
-                warn(f"HTTP {status} (attempt {attempt + 1}/{max_retries})")
-                if attempt < max_retries - 1:
-                    retry_after = parse_retry_after(e.response.headers.get("Retry-After"))
-                    delay = retry_after if retry_after is not None else retry_delay * (attempt + 1)
-                    time.sleep(delay)
-                    continue
-            elif status == 401:
-                raise WFSAuthenticationError(
-                    url, 401, "Authentication required. WFS server requires credentials."
-                ) from e
-            elif status == 403:
-                raise WFSAuthenticationError(
-                    url, 403, "Access denied. Check your permissions for this WFS service."
-                ) from e
-            elif status == 404:
-                raise WFSError(f"WFS service not found (404). Check the URL: {url}") from e
-            raise WFSError(f"HTTP error {status}: {e}") from e
-
-    raise WFSError(f"Request failed after {max_retries} attempts: {last_exception}")
 
 
 def _clean_service_url(url: str) -> str:
@@ -405,16 +341,29 @@ def get_wfs_capabilities(service_url: str, version: str = "1.1.0"):
         wfs = WebFeatureService(url=clean_url, version=version)
         return wfs
     except Exception as e:
-        error_msg = str(e).lower()
-        if "connection" in error_msg or "timeout" in error_msg:
+        # Classified by exception type and status (`exceptions.classify_failure`),
+        # never by the message: OWSLib's text embeds the request URL, so the
+        # user's own layer name or filter could decide the verdict (#1034).
+        verdict = classify_failure(e)
+        if verdict.kind in (FailureKind.UNREACHABLE, FailureKind.TIMEOUT):
             raise WFSError(f"Could not connect to WFS service: {clean_url}\nError: {e}") from e
-        elif "xml" in error_msg or "parse" in error_msg:
+        if verdict.kind is FailureKind.MALFORMED_RESPONSE:
             raise WFSError(
                 f"Invalid WFS response from: {clean_url}\n"
                 f"The server may not be a valid WFS service. Error: {e}"
             ) from e
-        else:
-            raise WFSError(f"Failed to get WFS capabilities: {e}") from e
+        if is_auth_status(verdict.status):
+            raise WFSAuthenticationError(
+                clean_url,
+                verdict.status,
+                fatal_status_message(
+                    verdict.status,
+                    subject="the WFS service",
+                    credentials=WFS_CREDENTIALS_HINT,
+                )
+                or "",
+            ) from e
+        raise WFSError(f"Failed to get WFS capabilities: {e}") from e
 
 
 # WFS versions in preference order (newest first)
@@ -473,58 +422,27 @@ def negotiate_wfs_version(service_url: str, preferred_version: str = "auto"):
     )
 
 
-# The EPSG code a CRS string names: the ASCII digit run after "EPSG", behind a
-# ":", "/" or "#", that ends the string or one part of a compound URN. "EPSG"
-# must start the string or a URI part, so "not-a-crs-EPSG:4326" names no code.
-# That one rule reads every form WFS servers send:
-#   EPSG:4326                                      short form
-#   urn:ogc:def:crs:EPSG::4326                     OGC URN
-#   urn:x-ogc:def:crs:EPSG:6.11:31287              versioned URN (6.11 is the database version)
-#   urn:EPSG:geographicCRS:25830                   legacy URN
-#   urn:EPSG:def:crs:::25830                       OWSLib's rewrite of the legacy URN
-#   http://www.opengis.net/def/crs/EPSG/0/4326     OGC URL
-#   http://www.opengis.net/gml/srs/epsg.xml#31287  GML srs URL
-#   urn:ogc:def:crs,crs:EPSG::4326,crs:EPSG::5773  compound URN, the first
-#                                                  (horizontal) part is read
-_EPSG_CODE: Final = re.compile(r"(?:^|[:/,])EPSG[^,]*?[:/#]([0-9]{1,9})\s*(?:,|$)", re.IGNORECASE)
-# A server CRS string longer than this is not a CRS name. It is never parsed.
-_MAX_CRS_STRING: Final = 1024
-
-
-def _epsg_code(crs: str) -> str | None:
-    """The EPSG code a CRS string names, in any form listed above, or None."""
-    if len(crs) > _MAX_CRS_STRING:
-        return None
-    match = _EPSG_CODE.search(crs)
-    return match.group(1) if match else None
-
-
 def _normalize_crs(crs: str) -> str:
     """
     Normalize a CRS string to the short ``EPSG:<code>`` form.
 
-    Reads every URN and URL form listed at ``_EPSG_CODE``. CRS84 becomes
+    Reads every URN and URL form ``epsg_code_of_label`` reads. CRS84 becomes
     EPSG:4326 (the short form is read lon/lat in practice, like CRS84).
     Anything else is returned as-is.
 
     Returns:
         Normalized EPSG string (e.g., "EPSG:4326")
     """
-    code = _epsg_code(crs)
+    code = epsg_code_of_label(crs)
     if code:
         return f"EPSG:{code}"
 
     # CRS84 is equivalent to EPSG:4326 (axis order differs but we handle that)
-    if "CRS84" in crs.upper() or "CRS:84" in crs.upper():
+    if crs_equal(crs, "OGC:CRS84"):
         return "EPSG:4326"
 
     # Return as-is if no pattern matches
     return crs
-
-
-def _crs_matches(crs1: str, crs2: str) -> bool:
-    """Check if two CRS strings represent the same coordinate system."""
-    return _normalize_crs(crs1) == _normalize_crs(crs2)
 
 
 def _with_server_crs(table: pa.Table, server_crs: str | None) -> pa.Table:
@@ -609,27 +527,11 @@ def _validate_crs_coordinates(
         return True, None
 
     try:
-        # Extract bbox from geometry column using DuckDB
-        # Geometry is stored as WKB, so we need ST_GeomFromWKB to convert
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-        try:
-            con.register("data", table)
-            result = con.execute("""
-                SELECT
-                    MIN(ST_XMin(ST_GeomFromWKB(geometry))) as xmin,
-                    MIN(ST_YMin(ST_GeomFromWKB(geometry))) as ymin,
-                    MAX(ST_XMax(ST_GeomFromWKB(geometry))) as xmax,
-                    MAX(ST_YMax(ST_GeomFromWKB(geometry))) as ymax
-                FROM data
-                WHERE geometry IS NOT NULL
-            """).fetchone()
-
-            if result is None or result[0] is None:
-                return True, None
-
-            bbox = (result[0], result[1], result[2], result[3])
-        finally:
-            con.close()
+        # The fetched geometry is WKB; the bounds owner measures it on the Arrow path.
+        measured = bounds_of(table, BUILT_GEOMETRY_COLUMN)
+        if measured is None:
+            return True, None
+        bbox = (measured[0], measured[1], measured[2], measured[3])
 
         # Validate coordinates match requested CRS
         normalized_crs = _normalize_crs(requested_crs)
@@ -638,15 +540,15 @@ def _validate_crs_coordinates(
 
         # Check for mismatch between requested and detected CRS
         mismatch = False
-        if normalized_crs == "EPSG:4326":
+        if crs_equal(normalized_crs, "EPSG:4326"):
             # WGS84 coordinates should be in valid range
             if abs(xmin) > 180 or abs(xmax) > 180 or abs(ymin) > 90 or abs(ymax) > 90:
                 mismatch = True
-        elif normalized_crs == "EPSG:3857":
+        elif crs_equal(normalized_crs, "EPSG:3857"):
             # Web Mercator should have large meter values, not small degree values
             if abs(xmin) < 1000 and abs(xmax) < 1000 and abs(ymin) < 1000 and abs(ymax) < 1000:
                 mismatch = True
-        elif normalized_crs == "EPSG:3035":
+        elif crs_equal(normalized_crs, "EPSG:3035"):
             # LAEA Europe should be in specific range
             if not (2_000_000 < xmin < 7_500_000 and 1_000_000 < ymin < 5_500_000):
                 mismatch = True
@@ -658,8 +560,8 @@ def _validate_crs_coordinates(
             # mismatch when the categories disagree; otherwise trust the
             # server-honored CRS rather than relabel it on a guess, which silently
             # corrupts downstream reprojection (issue #499).
-            requested_geographic = _is_geographic_crs(normalized_crs)
-            detected_geographic = detected == "EPSG:4326"
+            requested_geographic = is_geographic(normalized_crs)
+            detected_geographic = crs_equal(detected, "EPSG:4326")
             if requested_geographic != detected_geographic:
                 mismatch = True
 
@@ -706,7 +608,7 @@ def _reconcile_source_crs(
     one was given, raise under ``strict_crs``, else label the output with the
     real ``source_crs`` rather than silently mislabeling it (issue #499).
     """
-    if _crs_matches(source_crs, requested_crs):
+    if crs_equal(source_crs, requested_crs):
         return table, requested_crs
 
     lead = "Server declared" if origin == "server" else "Coordinates look like"
@@ -837,12 +739,14 @@ def _detect_geometry_column(wfs, typename: str) -> str:
         typename: Layer typename
 
     Returns:
-        Geometry column name (default: "geometry")
+        Geometry column name; when the server describes none, the name gpio
+        gives the geometry it reads (``BUILT_GEOMETRY_COLUMN``, the column every
+        WFS read writes)
     """
     try:
         schema = _describe_schema(wfs, typename)
         if schema and "geometry" in schema:
-            return str(schema.get("geometry_column", "geometry"))
+            return str(schema.get("geometry_column") or BUILT_GEOMETRY_COLUMN)
         # Check for common geometry column names in properties
         if schema and "properties" in schema:
             for prop_name, prop_type in schema["properties"].items():
@@ -852,9 +756,9 @@ def _detect_geometry_column(wfs, typename: str) -> str:
                 ):
                     return str(prop_name)
     except Exception:
-        pass  # Fall back to default
+        pass  # Nothing described: gpio's own name for it
 
-    return "geometry"
+    return BUILT_GEOMETRY_COLUMN
 
 
 def _detect_sortable_attribute(wfs, typename: str) -> str | None:
@@ -875,7 +779,7 @@ def _detect_sortable_attribute(wfs, typename: str) -> str | None:
     try:
         schema = _describe_schema(wfs, typename)
         if schema and "properties" in schema:
-            geometry_col = schema.get("geometry_column", "geometry")
+            geometry_col = schema.get("geometry_column") or BUILT_GEOMETRY_COLUMN
             for prop_name, prop_type in schema["properties"].items():
                 # Skip geometry columns
                 if prop_name == geometry_col:
@@ -1162,14 +1066,14 @@ def _negotiate_crs(layer_info: WFSLayerInfo, output_crs: str | None = None) -> s
     # If user specified CRS, check if supported
     if output_crs:
         for crs in crs_list:
-            if _crs_matches(crs, output_crs):
+            if crs_equal(crs, output_crs):
                 debug(f"Using requested CRS: {crs}")
                 return crs
         warn(f"Requested CRS '{output_crs}' not in layer's CRS list. Using server default.")
 
     # Try EPSG:4326 variants
     for crs in crs_list:
-        if _crs_matches(crs, "EPSG:4326"):
+        if crs_equal(crs, "EPSG:4326"):
             debug(f"Using WGS84: {crs}")
             return crs
 
@@ -1219,69 +1123,11 @@ def _determine_bbox_strategy(
     return True
 
 
-def _is_geographic_crs(crs: str) -> bool:
-    """Check if CRS is a geographic coordinate system (lat/lon, not projected).
-
-    Uses pyproj for authoritative detection across all geographic CRSs rather
-    than a hardcoded list — an allowlist misclassifies valid geographic systems
-    outside it (e.g. EPSG:4171 RGF93) as projected, which would flag a false
-    coordinate mismatch and relabel correct data to EPSG:4326. Falls back to a
-    small known set only when pyproj cannot resolve the CRS.
-    """
-    normalized = _normalize_crs(crs)
-    try:
-        from pyproj import CRS as _PyprojCRS
-
-        return bool(_PyprojCRS.from_user_input(normalized).is_geographic)
-    except Exception:
-        # pyproj unavailable or CRS unrecognized — fall back to a known set.
-        geographic_codes = {
-            "EPSG:4326",  # WGS84
-            "EPSG:4269",  # NAD83
-            "EPSG:4267",  # NAD27
-            "EPSG:4258",  # ETRS89
-        }
-        return normalized in geographic_codes or "CRS84" in crs.upper()
-
-
 # The lon/lat CRS label every WFS server reads in x,y order (see _build_bbox_param).
 _CRS84_URN: Final = "urn:ogc:def:crs:OGC:1.3:CRS84"
 # The OGC URN form, which WFS 1.1.0 and 2.0.0 servers read in the authority's
 # own axis order.
 _EPSG_URN_PREFIX: Final = "urn:ogc:def:crs:EPSG::"
-
-
-# The WMS-style ``CRS:84`` label, which pyproj does not read. The URN and URL
-# forms of CRS84 it reads as they are.
-_CRS_84_LABEL: Final = re.compile(r"^\s*CRS:84\s*$", re.IGNORECASE)
-
-
-def _pyproj_input(crs: str, code: str | None) -> str:
-    """The string pyproj reads for a WFS CRS string with EPSG code ``code``."""
-    if code:
-        return f"EPSG:{code}"
-    if _CRS_84_LABEL.match(crs):
-        return "OGC:CRS84"
-    return crs
-
-
-@lru_cache(maxsize=64)
-def _request_pyproj_crs(crs: str):
-    """The pyproj CRS a WFS CRS string names, or None when it cannot be read.
-
-    The EPSG code comes first (every form ``_EPSG_CODE`` reads, which pyproj
-    does not all know), then ``CRS:84``, then pyproj on the string itself
-    (``ESRI:102100``, a CRS84 URN or URL).
-    """
-    if len(crs) > _MAX_CRS_STRING:
-        return None
-    from pyproj import CRS as _PyprojCRS
-
-    try:
-        return _PyprojCRS.from_user_input(_pyproj_input(crs, _epsg_code(crs)))
-    except Exception as e:
-        debug(f"pyproj could not read CRS {crs[:200]!r}: {e}")
-        return None
 
 
 @dataclass(frozen=True)
@@ -1324,18 +1170,13 @@ def _first_axis_is_north(axis_info) -> bool:
 @lru_cache(maxsize=64)
 def _bbox_axes(crs: str) -> _BboxAxes | None:
     """The axis facts of the request CRS, from pyproj, or None when unknown."""
-    target = _request_pyproj_crs(crs)
+    target = load_crs(crs)
     if target is None or not target.axis_info:
         return None
-    from pyproj import CRS as _PyprojCRS
-
     north_first = _first_axis_is_north(target.axis_info)
     return _BboxAxes(
         north_first=north_first,
-        wgs84_lon_lat=bool(
-            target.is_geographic
-            and target.equals(_PyprojCRS.from_user_input("OGC:CRS84"), ignore_axis_order=True)
-        ),
+        wgs84_lon_lat=is_geographic(target) and crs_equal(target, "OGC:CRS84"),
         x_axis=_x_axis_word(target.axis_info, north_first),
     )
 
@@ -1407,7 +1248,7 @@ def _build_bbox_param(
     if version == "1.0.0":
         return xy
     axes = _bbox_axes(crs)
-    code = _epsg_code(crs)
+    code = epsg_code_of_label(crs)
     swap = axis_order == "latlon" or (axis_order == "auto" and not (axes and axes.wgs84_lon_lat))
     if axes and axes.north_first and code and swap:
         return f"{ymin},{xmin},{ymax},{xmax},{_EPSG_URN_PREFIX}{code}"
@@ -1446,7 +1287,7 @@ def _bbox_looks_lon_lat_on_projected(
     known, a box that overlaps the extent in the CRS but not the extent in
     lon/lat is real small coordinates (EPSG:3857 metres near 0,0), not degrees.
     """
-    if _is_geographic_crs(crs) or _estimate_crs_from_bbox(bbox) != "EPSG:4326":
+    if is_geographic(crs) or not crs_equal(_estimate_crs_from_bbox(bbox), "EPSG:4326"):
         return False
     native = _layer_extent_in_crs(crs, layer_bbox)
     if native is None or layer_bbox is None:
@@ -1503,10 +1344,10 @@ def _warn_no_features_in_bbox(
 def _bbox_crs_line(crs: str) -> str:
     """One line that says --bbox is read in the layer CRS, with its name."""
     label = _normalize_crs(crs)
-    target = _request_pyproj_crs(crs)
+    target = load_crs(crs)
     if target is not None and target.name:
         label = f"{label} ({target.name})"
-    if _is_geographic_crs(crs):
+    if is_geographic(crs):
         order = "lon,lat"
     else:
         axes = _bbox_axes(crs)
@@ -1532,7 +1373,7 @@ def _bbox_hint_lines(
 
 def _bbox_extent_lines(crs: str, layer_bbox: tuple[float, float, float, float] | None) -> list[str]:
     """The layer extent from capabilities, in lon/lat and in ``crs``."""
-    if not layer_bbox or layer_bbox[0] > layer_bbox[2]:
+    if not layer_bbox or BBox(*layer_bbox).crosses_antimeridian(geographic=True):
         return []
     line = f"Layer extent is {_format_bbox(layer_bbox)} in lon/lat"
     native = _layer_extent_in_crs(crs, layer_bbox)
@@ -1545,7 +1386,11 @@ def _layer_extent_in_crs(
     crs: str, layer_bbox: tuple[float, float, float, float] | None
 ) -> tuple[float, float, float, float] | None:
     """The lon/lat layer extent reprojected into a projected ``crs``, or None."""
-    if not layer_bbox or layer_bbox[0] > layer_bbox[2] or _is_geographic_crs(crs):
+    if (
+        not layer_bbox
+        or BBox(*layer_bbox).crosses_antimeridian(geographic=True)
+        or is_geographic(crs)
+    ):
         return None
     clipped = _clip_to_area_of_use_or_none(layer_bbox, crs)
     return _try_lon_lat_bbox_in_crs(clipped, crs) if clipped else None
@@ -1637,9 +1482,7 @@ def _build_local_bbox_filter(
     # for every name that reaches here -- it is used anyway so the quoting rule
     # is enforced at the interpolation site rather than by a distant allowlist
     # that a later edit could loosen (#936).
-    return (
-        f"ST_Intersects(ST_GeomFromWKB({quote_identifier(safe_column)}), ST_GeomFromText('{wkt}'))"
-    )
+    return f"ST_Intersects({geom_from_wkb_sql(quote_identifier(safe_column))}, ST_GeomFromText('{wkt}'))"
 
 
 def _reproject_bbox_for_local_filter(
@@ -1727,8 +1570,13 @@ def _get_feature_count(
     url = _merge_query_params(clean_url, params)
 
     try:
-        content = _make_request(url)
-    except (WFSError, httpx.HTTPError, OSError) as e:
+        # The one HTTP owner: gzip, shared client, retry policy and the
+        # 401/403/404 wording all live in `http_retry`.
+        content = cast(
+            bytes,
+            make_request_with_retry("GET", url, parse_json=False, credentials=WFS_CREDENTIALS_HINT),
+        )
+    except (WFSError, RemoteAccessError, httpx.HTTPError, OSError) as e:
         # Expected failure modes: the service is down, unreachable, rejecting us,
         # or timing out. Degrade to "count unknown" rather than aborting the
         # extraction, but say so — a silent None disables auto-tiling and
@@ -1799,7 +1647,8 @@ def _infer_column_types(table: pa.Table) -> pa.Table:
             quoted_col = quote_identifier(col_name)
 
             try:
-                stats = con.execute(f"""
+                stats = fetch_one(
+                    con.execute(f"""
                     SELECT
                         COUNT(*) AS total,
                         COUNT({quoted_col}) AS non_null,
@@ -1810,7 +1659,8 @@ def _infer_column_types(table: pa.Table) -> pa.Table:
                         SUM(CASE WHEN LOWER({quoted_col}) IN ('true', 'false', '1', '0')
                             THEN 1 ELSE 0 END) AS is_bool
                     FROM _wfs_data
-                """).fetchone()
+                """)
+                )
 
                 total, non_null, is_int, is_float, is_bool = stats
 
@@ -1823,7 +1673,7 @@ def _infer_column_types(table: pa.Table) -> pa.Table:
                 if is_int == non_null:
                     # All non-null values are valid integers
                     casted = (
-                        con.execute(f"""
+                        con.sql(f"""
                         SELECT CAST({quoted_col} AS BIGINT) FROM _wfs_data
                     """)
                         .arrow()
@@ -1834,7 +1684,7 @@ def _infer_column_types(table: pa.Table) -> pa.Table:
                 elif is_float == non_null and is_int < non_null:
                     # All non-null values are valid floats (but not all integers)
                     casted = (
-                        con.execute(f"""
+                        con.sql(f"""
                         SELECT CAST({quoted_col} AS DOUBLE) FROM _wfs_data
                     """)
                         .arrow()
@@ -1845,7 +1695,7 @@ def _infer_column_types(table: pa.Table) -> pa.Table:
                 elif is_bool == non_null:
                     # All non-null values are valid booleans
                     casted = (
-                        con.execute(f"""
+                        con.sql(f"""
                         SELECT CASE
                             WHEN LOWER({quoted_col}) IN ('true', '1') THEN TRUE
                             WHEN LOWER({quoted_col}) IN ('false', '0') THEN FALSE
@@ -1894,19 +1744,24 @@ def _probe_properties_type(
     See: https://github.com/geoparquet/geoparquet-io/issues/441
     """
     try:
-        props_type_result = con.execute(f"""
+        # The bound type, from DESCRIBE: no feature is read, so a response with
+        # no features reports the type DuckDB inferred (JSON) instead of "NULL".
+        ((_, props_type),) = describe_query(
+            con,
+            f"""
             WITH features AS (
                 SELECT unnest(features) AS feature
                 FROM read_json_auto({sql_path(response_path)}, maximum_object_size={max_object_size})
             )
-            SELECT typeof(feature.properties) AS props_type
+            SELECT feature.properties AS props_type
             FROM features
-            LIMIT 1
-        """).fetchone()
-        props_type = props_type_result[0] if props_type_result else "NULL"
+        """,
+        )
     except duckdb.BinderException as e:
         # Missing 'properties' key in feature struct (malformed GeoJSON per RFC 7946)
-        if "properties" in str(e):
+        # DuckDB: `Could not find key "properties" in struct` -- the exact phrase,
+        # not any binder error whose SQL excerpt happens to quote `.properties`.
+        if 'Could not find key "properties" in struct' in str(e):
             props_type = "MISSING"
         else:
             raise
@@ -1943,11 +1798,11 @@ def _build_wfs_feature_query(
             extracted AS (
                 SELECT
                     {fid_col}
-                    ST_AsWKB(ST_GeomFromGeoJSON(feature.geometry)) AS geometry,
+                    {as_wkb_sql("ST_GeomFromGeoJSON(feature.geometry)")} AS {quote_identifier(BUILT_GEOMETRY_COLUMN)},
                     feature.properties AS props
                 FROM features
             )
-            SELECT {fid_select} geometry, unnest(props) FROM extracted
+            SELECT {fid_select} {quote_identifier(BUILT_GEOMETRY_COLUMN)}, unnest(props) FROM extracted
         """
     else:
         # Fallback: properties are empty/null/missing (MAP, JSON, or MISSING type),
@@ -1959,7 +1814,7 @@ def _build_wfs_feature_query(
             )
             SELECT
                 {fid_col}
-                ST_AsWKB(ST_GeomFromGeoJSON(feature.geometry)) AS geometry
+                {as_wkb_sql("ST_GeomFromGeoJSON(feature.geometry)")} AS {quote_identifier(BUILT_GEOMETRY_COLUMN)}
             FROM features
         """
 
@@ -1986,12 +1841,14 @@ def _read_count_and_server_crs(
 
     See https://github.com/geoparquet/geoparquet-io/issues/499
     """
-    row = con.execute(f"""
+    row = fetch_one(
+        con.execute(f"""
         SELECT
             json_array_length(content, '$.features') AS cnt,
             json_extract_string(content, '$.crs.properties.name') AS crs_name
         FROM read_text({sql_path(response_path)})
-    """).fetchone()
+    """)
+    )
     if not row:
         return 0, None
     feature_count = row[0] or 0
@@ -2012,9 +1869,9 @@ _GML_CONTENT_TYPE_MARKERS: Final[tuple[str, ...]] = ("gml", "xml")
 _ERROR_PAGE_CONTENT_TYPE_MARKERS: Final[tuple[str, ...]] = ("html", "text/plain")
 
 # GDAL reports a GML layer's CRS in the DuckDB column type, e.g.
-# GEOMETRY('EPSG:4326'). That is the server's own statement of the CRS it
-# returned, so it plays the same role the GeoJSON `crs` member does.
-_GEOMETRY_TYPE_CRS_RE: Final = re.compile(r"GEOMETRY\('([^']+)'\)", re.IGNORECASE)
+# GEOMETRY('EPSG:4326') (read by duckdb_utils.parse_duckdb_geo_type). That is
+# the server's own statement of the CRS it returned, so it plays the same role
+# the GeoJSON `crs` member does.
 
 
 def _classify_wfs_content_type(content_type: str) -> str:
@@ -2059,7 +1916,7 @@ def _read_body_preview(path: str) -> str:
 
 # An empty FeatureCollection is a few hundred bytes of markup; a body larger
 # than this holds features and can skip the extra XML parse.
-_EMPTY_GML_SNIFF_MAX_BYTES: Final = 1024 * 1024
+_EMPTY_GML_SNIFF_MAX_BYTES: Final = BYTES_PER_MIB
 
 # FeatureCollection children that carry no features: bounds, metadata, or a
 # featureMembers wrapper with nothing inside (GeoServer's GML 3.1 empty shape).
@@ -2173,7 +2030,7 @@ def _gml_geometry_column(
     is invoked at all, because Linux builds segfault here instead of raising.
     """
     try:
-        described = con.execute(f"DESCRIBE SELECT * FROM ST_Read({sql_path(tmp_path)})").fetchall()
+        described = describe_query(con, f"SELECT * FROM ST_Read({sql_path(tmp_path)})")
     except duckdb.IOException as e:
         if "contains no layers" in str(e):
             return None
@@ -2182,12 +2039,11 @@ def _gml_geometry_column(
     geometry_column: str | None = None
     server_crs: str | None = None
     other_columns: list[str] = []
-    for row in described:
-        name, column_type = str(row[0]), str(row[1])
-        if geometry_column is None and column_type.upper().startswith("GEOMETRY"):
+    for name, column_type in described:
+        parsed = parse_duckdb_geo_type(column_type)
+        if geometry_column is None and parsed is not None and parsed[0] == "GEOMETRY":
             geometry_column = name
-            match = _GEOMETRY_TYPE_CRS_RE.search(column_type)
-            server_crs = _normalize_crs(match.group(1)) if match else None
+            server_crs = _normalize_crs(parsed[1]) if parsed[1] else None
         else:
             other_columns.append(name)
 
@@ -2222,12 +2078,12 @@ def _parse_gml_response(
     # ``described is None`` branch is the fallback for platforms that raise.
     if _is_empty_gml_collection(body):
         debug("Empty GML response, returning empty table")
-        return pa.table({"geometry": pa.array([], type=pa.binary())})
+        return pa.table({BUILT_GEOMETRY_COLUMN: pa.array([], type=pa.binary())})
 
     described = _gml_geometry_column(con, tmp_path, content_type)
     if described is None:
         debug("Empty GML response, returning empty table")
-        return pa.table({"geometry": pa.array([], type=pa.binary())})
+        return pa.table({BUILT_GEOMETRY_COLUMN: pa.array([], type=pa.binary())})
     geometry_column, other_columns, server_crs = described
 
     # OGC_FID is synthesized by GDAL as a per-file row number, not server data.
@@ -2236,7 +2092,9 @@ def _parse_gml_response(
     if "OGC_FID" in other_columns:
         excluded.append("OGC_FID")
 
-    select_parts = [f"ST_AsWKB({quote_identifier(geometry_column)}) AS geometry"]
+    select_parts = [
+        f"{as_wkb_sql(quote_identifier(geometry_column))} AS {quote_identifier(BUILT_GEOMETRY_COLUMN)}"
+    ]
     # gml:id is the GML equivalent of a GeoJSON feature id, used to deduplicate
     # features that straddle two spatial tiles. GDAL synthesizes gml_id = ''
     # (not NULL) for features with no gml:id; NULLIF sends those to the
@@ -2248,7 +2106,7 @@ def _parse_gml_response(
     select_parts.append(f"* EXCLUDE({exclude_list})")
 
     query = f"SELECT {', '.join(select_parts)} FROM ST_Read({sql_path(tmp_path)})"
-    table = con.execute(query).arrow().read_all()
+    table = con.sql(query).arrow().read_all()
     return _with_server_crs(table, server_crs)
 
 
@@ -2268,11 +2126,71 @@ def _accept_header_for(output_format: str | None) -> str:
     return output_format if "/" in output_format else "*/*"
 
 
+@dataclass
+class _WfsDownload:
+    """One downloaded GetFeature page: where it landed and how to parse it."""
+
+    tmp_path: str
+    content_type: str
+    body_kind: str
+    total_bytes: int
+    started: float = 0.0
+
+
+def _download_wfs_page(url: str, accept: str, tmp_dir: str) -> _WfsDownload:
+    """One attempt at streaming a GetFeature response into ``tmp_dir``.
+
+    Raises ``httpx`` errors for ``run_with_retry`` to classify and ``WFSError``
+    for answers that retrying cannot change.
+    """
+    total_bytes = 0
+    client = get_shared_http_client(timeout=_PAGE_TIMEOUT)
+
+    # Per-request timeout: the shared client was usually built by the
+    # 60s feature-count probe, and keeps that timeout (#1184).
+    with client.stream(
+        "GET",
+        url,
+        headers={"Accept": accept, "Accept-Encoding": "gzip, deflate"},
+        timeout=_PAGE_TIMEOUT,
+    ) as response:
+        # Check HTTP status
+        if response.status_code == 400:
+            body = response.read().decode("utf-8", errors="replace")
+            if "startindex" in body.lower():
+                raise WFSError(
+                    f"Server rejected paginated request (startIndex limit): {body.strip()}"
+                )
+            raise WFSError(
+                status_error(url, response, WFS_CREDENTIALS_HINT, detail=body[:500]).message
+            )
+        response.raise_for_status()
+
+        # Dispatch on the content-type the server actually sent. HTML and
+        # text/plain are never feature responses (error pages returned
+        # with 200 OK); XML/GML may be either a FeatureCollection or an
+        # ows:ExceptionReport, which the GML parser tells apart.
+        content_type = response.headers.get("content-type", "").lower()
+        body_kind = _classify_wfs_content_type(content_type)
+        if body_kind == "error":
+            preview = response.read().decode("utf-8", errors="replace")[:500]
+            raise _error_page_error(content_type, preview)
+
+        suffix = ".gml" if body_kind == "gml" else ".json"
+        tmp_path = str(Path(tmp_dir) / f"response{suffix}")
+        with open(tmp_path, "wb") as tmp_file:
+            for chunk in response.iter_bytes(chunk_size=65536):
+                tmp_file.write(chunk)
+                total_bytes += len(chunk)
+
+    return _WfsDownload(tmp_path, content_type, body_kind, total_bytes)
+
+
 def _fetch_wfs_page(
     url: str,
     extract_fid: bool = False,
-    max_retries: int = 3,
-    retry_delay: float = 2.0,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: float = DEFAULT_RETRY_DELAY,
     output_format: str | None = None,
 ) -> pa.Table:
     """
@@ -2301,138 +2219,95 @@ def _fetch_wfs_page(
     """
     import httpx
 
-    last_exception: Exception | None = None
-    accept = _accept_header_for(output_format)
+    with ExitStack() as stack:
+        accept = _accept_header_for(output_format)
+        attempts_made = 0
 
-    for attempt in range(max_retries):
-        start_time = time.time()
-        if attempt > 0:
-            debug(f"Retry {attempt}/{max_retries - 1}: {url[:80]}...")
-        else:
-            debug(f"Fetching: {url[:100]}...")
+        def attempt() -> _WfsDownload:
+            nonlocal attempts_made
+            start_time = time.time()
+            if attempts_made > 0:
+                debug(f"Retry {attempts_made}/{max_retries - 1}: {url[:80]}...")
+            else:
+                debug(f"Fetching: {url[:100]}...")
+            attempts_made += 1
 
-        # Stream the response into a temp *directory*, not a temp file: GDAL
-        # writes a .gfs schema sidecar next to a schema-less GML body, and only
-        # a directory cleanup is guaranteed to take it with it.
-        tmp_dir = tempfile.TemporaryDirectory(prefix="gpio-wfs-")
-        tmp_path = None
-        content_type = ""
-        body_kind = "json"
-        total_bytes = 0
-        try:
-            client = _get_shared_http_client(timeout=_PAGE_TIMEOUT)
-
-            # Per-request timeout: the shared client was usually built by the
-            # 60s feature-count probe, and keeps that timeout (#1184).
-            with client.stream(
-                "GET",
-                url,
-                headers={"Accept": accept, "Accept-Encoding": "gzip, deflate"},
-                timeout=_PAGE_TIMEOUT,
-            ) as response:
-                # Check HTTP status
-                if response.status_code == 400:
-                    body = response.read().decode("utf-8", errors="replace")
-                    if "startindex" in body.lower():
-                        raise WFSError(
-                            f"Server rejected paginated request (startIndex limit): {body.strip()}"
-                        )
-                    raise WFSError(f"WFS request failed with HTTP 400: {body[:500]}")
-                response.raise_for_status()
-
-                # Dispatch on the content-type the server actually sent. HTML and
-                # text/plain are never feature responses (error pages returned
-                # with 200 OK); XML/GML may be either a FeatureCollection or an
-                # ows:ExceptionReport, which the GML parser tells apart.
-                content_type = response.headers.get("content-type", "").lower()
-                body_kind = _classify_wfs_content_type(content_type)
-                if body_kind == "error":
-                    preview = response.read().decode("utf-8", errors="replace")[:500]
-                    raise _error_page_error(content_type, preview)
-
-                suffix = ".gml" if body_kind == "gml" else ".json"
-                tmp_path = str(Path(tmp_dir.name) / f"response{suffix}")
-                with open(tmp_path, "wb") as tmp_file:
-                    for chunk in response.iter_bytes(chunk_size=65536):
-                        tmp_file.write(chunk)
-                        total_bytes += len(chunk)
-
-            # Success - break out of retry loop
+            # Stream the response into a temp *directory*, not a temp file: GDAL
+            # writes a .gfs schema sidecar next to a schema-less GML body, and only
+            # a directory cleanup is guaranteed to take it with it.
+            with ExitStack() as attempt_stack:
+                tmp_dir = attempt_stack.enter_context(scratch_dir(prefix="gpio-wfs-"))
+                download = _download_wfs_page(url, accept, tmp_dir)
+                stack.enter_context(attempt_stack.pop_all())
+            download.started = start_time
             download_time = time.time() - start_time
-            size_mb = total_bytes / (1024 * 1024)
+            size_mb = bytes_to_mb(download.total_bytes)
             debug(f"Downloaded {size_mb:.1f} MB in {download_time:.1f}s")
-            break
+            return download
 
-        except httpx.HTTPStatusError as e:
-            tmp_dir.cleanup()
-            raise WFSError(f"WFS request failed with HTTP {e.response.status_code}") from e
-        except (httpx.RequestError, httpx.RemoteProtocolError) as e:
-            # Transient network error - retry
-            last_exception = e
-            tmp_dir.cleanup()
-            if attempt < max_retries - 1:
-                delay = retry_delay * (attempt + 1)
-                warn(f"Network error (attempt {attempt + 1}/{max_retries}): {e}")
-                warn(f"Retrying in {delay:.1f}s...")
-                _reset_http_client()
-                time.sleep(delay)
-                continue
-            raise WFSError(f"Failed to fetch WFS data after {max_retries} attempts: {e}") from e
-        except WFSError:
-            tmp_dir.cleanup()
-            raise
-    else:
-        # Exhausted retries without success
-        raise WFSError(f"Failed to fetch WFS data after {max_retries} attempts: {last_exception}")
-
-    con = None
-    try:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-
-        if body_kind == "gml":
-            parse_start = time.time()
-            table = _parse_gml_response(con, tmp_path, extract_fid, content_type)
-            debug(
-                f"Parsed {table.num_rows:,} GML rows in {time.time() - parse_start:.1f}s "
-                f"(total: {time.time() - start_time:.1f}s)"
+        try:
+            download = run_with_retry(attempt, max_retries=max_retries, retry_delay=retry_delay)
+        except (httpx.HTTPStatusError, RetryExhaustedError) as e:
+            error, cause = final_request_error(
+                url, e, max_retries=max_retries, credentials=WFS_CREDENTIALS_HINT
             )
-            return table
+            raise WFSError(error.message) from cause
 
-        # Read the feature count (DuckDB can't UNNEST empty JSON arrays) and the
-        # authoritative CRS the server reported in its GeoJSON response, if any,
-        # in a single scan over the response.
-        feature_count, server_crs = _read_count_and_server_crs(con, tmp_path)
+        tmp_path = download.tmp_path
+        content_type, body_kind = download.content_type, download.body_kind
+        start_time = download.started
 
-        if feature_count == 0:
-            debug("Empty response, returning empty table")
-            empty = pa.table({"geometry": pa.array([], type=pa.binary())})
-            return _with_server_crs(empty, server_crs)
+        con = None
+        try:
+            con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
 
-        # Detect property type and build extraction query
-        props_type, can_unnest_props = _probe_properties_type(con, tmp_path, _MAX_JSON_OBJECT_SIZE)
-        if not can_unnest_props:
-            debug(f"Properties type is {props_type}, cannot unnest - returning geometry-only table")
+            if body_kind == "gml":
+                parse_start = time.time()
+                table = _parse_gml_response(con, tmp_path, extract_fid, content_type)
+                debug(
+                    f"Parsed {table.num_rows:,} GML rows in {time.time() - parse_start:.1f}s "
+                    f"(total: {time.time() - start_time:.1f}s)"
+                )
+                return table
 
-        parse_start = time.time()
-        query = _build_wfs_feature_query(
-            tmp_path, extract_fid, can_unnest_props, _MAX_JSON_OBJECT_SIZE
-        )
+            # Read the feature count (DuckDB can't UNNEST empty JSON arrays) and the
+            # authoritative CRS the server reported in its GeoJSON response, if any,
+            # in a single scan over the response.
+            feature_count, server_crs = _read_count_and_server_crs(con, tmp_path)
 
-        result = con.execute(query)
-        table = result.arrow().read_all()
+            if feature_count == 0:
+                debug("Empty response, returning empty table")
+                empty = pa.table({BUILT_GEOMETRY_COLUMN: pa.array([], type=pa.binary())})
+                return _with_server_crs(empty, server_crs)
 
-        parse_time = time.time() - parse_start
-        total_time = time.time() - start_time
-        debug(f"Parsed {table.num_rows:,} rows in {parse_time:.1f}s (total: {total_time:.1f}s)")
-        return _with_server_crs(table, server_crs)
-    except WFSError:
-        raise
-    except Exception as e:
-        raise WFSError(f"Failed to parse WFS response: {e}") from e
-    finally:
-        if con:
-            con.close()
-        tmp_dir.cleanup()
+            # Detect property type and build extraction query
+            props_type, can_unnest_props = _probe_properties_type(
+                con, tmp_path, _json_object_size_for(tmp_path)
+            )
+            if not can_unnest_props:
+                debug(
+                    f"Properties type is {props_type}, cannot unnest - returning geometry-only table"
+                )
+
+            parse_start = time.time()
+            query = _build_wfs_feature_query(
+                tmp_path, extract_fid, can_unnest_props, _json_object_size_for(tmp_path)
+            )
+
+            result = con.sql(query)
+            table = result.arrow().read_all()
+
+            parse_time = time.time() - parse_start
+            total_time = time.time() - start_time
+            debug(f"Parsed {table.num_rows:,} rows in {parse_time:.1f}s (total: {total_time:.1f}s)")
+            return _with_server_crs(table, server_crs)
+        except WFSError:
+            raise
+        except Exception as e:
+            raise WFSError(f"Failed to parse WFS response: {e}") from e
+        finally:
+            if con:
+                con.close()
 
 
 def _generate_tile_grid(
@@ -2587,7 +2462,7 @@ def _deduplicate_tiles(table: pa.Table) -> pa.Table:
                 ) WHERE _rn = 1
             """
 
-        result = con.execute(query)
+        result = con.sql(query)
         return result.arrow().read_all()
     finally:
         con.close()
@@ -2723,7 +2598,7 @@ def _probe_startindex_limit(
     )
 
     try:
-        client = _get_shared_http_client(timeout=_PROBE_TIMEOUT)
+        client = get_shared_http_client(timeout=_PROBE_TIMEOUT)
         # Per-request timeout, so this probe neither inherits nor pins the
         # shared client's timeout (#1184).
         response = client.get(
@@ -3207,24 +3082,22 @@ def _get_tiling_bbox(
     (it is already in the request CRS). Otherwise falls back to the layer's
     advertised WGS84 bbox from capabilities, reprojected into ``crs``, since
     each tile is sent labelled with ``crs``. Returns None if no bbox is
-    available, a bbox crosses the antimeridian (xmin > xmax, which a midpoint
-    split cannot tile), or the layer bbox cannot be reprojected.
+    available, the layer bbox crosses the antimeridian (xmin > xmax, which a
+    midpoint split cannot tile), or the layer bbox cannot be reprojected.
 
     Like every bbox gpio holds, the result is in x,y order (east-first, see
     ``_first_axis_is_north``). ``_build_bbox_param`` swaps it, once, when the
     request goes out.
     """
     if user_bbox and use_server_bbox:
-        if user_bbox[0] > user_bbox[2]:
-            warn("The --bbox crosses the antimeridian (xmin > xmax), so auto-tiling is off.")
-            return None
+        # wfs_to_table has refused a wrapped user bbox already (refuse_wrap).
         return user_bbox
     if not layer_info.bbox:
         return None
-    if layer_info.bbox[0] > layer_info.bbox[2]:
+    if BBox(*layer_info.bbox).crosses_antimeridian(geographic=True):
         warn("The layer bbox crosses the antimeridian, so auto-tiling is off.")
         return None
-    if _crs_matches(crs, "EPSG:4326"):
+    if crs_equal(crs, "EPSG:4326"):
         return layer_info.bbox
     try:
         lon_lat = _clip_to_area_of_use(layer_info.bbox, _normalize_crs(crs))
@@ -3270,9 +3143,10 @@ def _clip_to_area_of_use(
     alone when the area of use crosses the antimeridian (EPSG:4269), where a
     plain min/max clip would be wrong.
     """
-    from pyproj import CRS as _PyprojCRS
-
-    area = _PyprojCRS.from_user_input(crs).area_of_use
+    target = load_crs(crs)
+    if target is None:
+        raise ValueError(f"pyproj cannot read the CRS {crs[:200]!r}")
+    area = target.area_of_use
     xmin, ymin, xmax, ymax = lon_lat
     if area is None:
         return lon_lat
@@ -3287,29 +3161,20 @@ def _clip_to_area_of_use(
 def _output_crs_projjson(crs: str) -> dict:
     """PROJJSON for the CRS the output is labelled with, or a refusal.
 
-    Tries the EPSG code the string names (any form ``_EPSG_CODE`` reads), then
-    pyproj on the string itself (``ESRI:102100``, a CRS84 URN). A bare id stub
-    is never written. When neither resolves, the extraction stops: writing no
+    ``crs_utils.projjson_for_label`` reads any form a server sends (the EPSG
+    code first, then ``ESRI:102100``, a CRS84 URN) and never writes a bare id
+    stub. When it cannot resolve the label, the extraction stops: writing no
     ``crs`` key would label the coordinates OGC:CRS84 (#1046).
     """
-    code = _epsg_code(crs)
-    cached = _projjson_from_authority("EPSG", code) if code else None
-    if cached is not None:
-        projjson = json.loads(cached)
-        if isinstance(projjson, dict):
-            return projjson
-    if len(crs) <= _MAX_CRS_STRING:
-        try:
-            from pyproj import CRS as _PyprojCRS
-
-            return _PyprojCRS.from_user_input(_pyproj_input(crs, None)).to_json_dict()
-        except Exception as e:
-            debug(f"pyproj could not read CRS {crs[:200]!r}: {e}")
-    raise WFSError(
-        f"gpio could not resolve the layer CRS {crs[:200]!r}, so it cannot label the "
-        "coordinates. Writing the file without a CRS would mark them as lon/lat "
-        "(OGC:CRS84). Ask the service for an EPSG CRS it offers with --output-crs."
-    )
+    try:
+        return projjson_for_label(crs)
+    except UnresolvableCRSError as e:
+        debug(f"pyproj could not read CRS {crs[:200]!r}: {e}")
+        raise WFSError(
+            f"gpio could not resolve the layer CRS {crs[:200]!r}, so it cannot label the "
+            "coordinates. Writing the file without a CRS would mark them as lon/lat "
+            "(OGC:CRS84). Ask the service for an EPSG CRS it offers with --output-crs."
+        ) from e
 
 
 def wfs_to_table(
@@ -3372,6 +3237,10 @@ def wfs_to_table(
         PyArrow Table with GeoParquet-compatible geometry
     """
     configure_verbose(verbose)
+    # The one bbox verdict (bbox_parse), before any request. A WFS BBOX has no
+    # wrapped form (and a midpoint split cannot tile one), so it is refused by name.
+    if bbox is not None:
+        bbox = refuse_wrap(parse_bbox(bbox), "WFS")
 
     # Handle auto version negotiation
     if version == "auto":
@@ -3554,14 +3423,14 @@ def wfs_to_table(
         # The bbox is in the requested CRS, but the geometries are in the CRS the
         # server actually returned. When those differ, align the bbox to the
         # geometries' CRS so the filter doesn't drop valid rows (issue #499).
-        filter_bbox = bbox
-        if server_crs and not _crs_matches(server_crs, crs):
+        filter_bbox: tuple[float, float, float, float] = bbox
+        if server_crs and not crs_equal(server_crs, crs):
             filter_bbox = _reproject_bbox_for_local_filter(bbox, crs, server_crs)
-        filter_sql = _build_local_bbox_filter(filter_bbox, "geometry")
+        filter_sql = _build_local_bbox_filter(filter_bbox, BUILT_GEOMETRY_COLUMN)
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
             con.register("features", table)
-            filtered = con.execute(f"SELECT * FROM features WHERE {filter_sql}").arrow()
+            filtered = con.sql(f"SELECT * FROM features WHERE {filter_sql}").arrow()
             table = _with_server_crs(filtered.read_all(), server_crs)
             debug(f"After local filter: {table.num_rows:,} features")
         finally:
@@ -3572,7 +3441,7 @@ def wfs_to_table(
     # geometry. The helper repairs on native GEOMETRY in DuckDB and restores the
     # table's schema metadata (including the server-CRS marker, issue #499).
     if table.num_rows > 0:
-        table, _ = repair_arrow_table_geometry(table, "geometry", repair=repair_geometry)
+        table, _ = repair_arrow_table_geometry(table, BUILT_GEOMETRY_COLUMN, repair=repair_geometry)
 
     # Resolve the CRS to label/reproject to. Trust the server's declared CRS
     # when it gave one; otherwise fall back to a coordinate-range guess.
@@ -3585,19 +3454,16 @@ def wfs_to_table(
 
     # Add CRS metadata to schema. A CRS that does not resolve is refused, never
     # omitted: an absent crs key means OGC:CRS84 (#1046).
-    geo_meta = {
-        "version": "1.0.0",
-        "primary_column": "geometry",
-        "columns": {
-            "geometry": {
-                "encoding": "WKB",
-                "crs": _output_crs_projjson(crs),
-            }
-        },
-    }
-    existing_meta[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-
-    table = table.replace_schema_metadata(existing_meta)
+    geo_meta = compose_geo_block(
+        SchemaSource(table.schema),
+        GeoBlockOptions(
+            geometry_column=BUILT_GEOMETRY_COLUMN,
+            version="1.0",
+            covering=None,
+            crs=_output_crs_projjson(crs),
+        ),
+    )
+    table = with_geo_block(table.replace_schema_metadata(existing_meta), geo_meta)
 
     success(f"Fetched {table.num_rows:,} features from WFS")
     return table
@@ -3618,7 +3484,7 @@ def convert_wfs_to_geoparquet(
     strict_crs: bool = False,
     skip_hilbert: bool = False,
     skip_bbox: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -3667,10 +3533,7 @@ def convert_wfs_to_geoparquet(
     """
     configure_verbose(verbose)
 
-    # Check output file
-    output_path = Path(output_file)
-    if output_path.exists() and not overwrite:
-        raise WFSError(f"Output file exists: {output_file}\nUse --overwrite to replace it.")
+    handle_output_overwrite(output_file, overwrite, remove=False)
 
     # Fetch data
     table = wfs_to_table(
@@ -3696,7 +3559,7 @@ def convert_wfs_to_geoparquet(
         progress("Applying Hilbert curve ordering...")
         from geoparquet_io.core.hilbert_order import hilbert_order_table
 
-        table = hilbert_order_table(table, geometry_column="geometry")
+        table = hilbert_order_table(table, geometry_column=BUILT_GEOMETRY_COLUMN)
         debug("Hilbert sort complete")
 
     # Add bbox column (unless skipped)
@@ -3704,7 +3567,7 @@ def convert_wfs_to_geoparquet(
         progress("Adding bbox column...")
         from geoparquet_io.core.add.bbox import add_bbox_table
 
-        table = add_bbox_table(table, geometry_column="geometry")
+        table = add_bbox_table(table, geometry_column=BUILT_GEOMETRY_COLUMN)
         debug("Bbox column added")
 
     # Write output
@@ -3774,7 +3637,7 @@ def convert_wfs_layers_to_directory(
     strict_crs: bool = False,
     skip_hilbert: bool = False,
     skip_bbox: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -3828,6 +3691,8 @@ def convert_wfs_layers_to_directory(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     configure_verbose(verbose)
+    if bbox is not None:
+        bbox = refuse_wrap(parse_bbox(bbox), "WFS")
 
     output_path = Path(output_dir)
 
@@ -3838,20 +3703,10 @@ def convert_wfs_layers_to_directory(
     else:
         output_path.mkdir(parents=True)
 
-    # Check for existing files if not overwriting
-    if not overwrite:
-        existing = []
-        for typename in typenames:
-            safe_name = typename.replace(":", "_").replace("/", "_")
-            file_path = output_path / f"{safe_name}.parquet"
-            if file_path.exists():
-                existing.append(str(file_path))
-        if existing:
-            raise WFSError(
-                "Output files already exist:\n  "
-                + "\n  ".join(existing)
-                + "\nUse --overwrite to replace them."
-            )
+    # Every layer's output is checked before the first layer is fetched
+    for typename in typenames:
+        safe_name = typename.replace(":", "_").replace("/", "_")
+        handle_output_overwrite(str(output_path / f"{safe_name}.parquet"), overwrite, remove=False)
 
     progress(
         f"Extracting {len(typenames)} layers to {output_dir} "

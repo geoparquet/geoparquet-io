@@ -18,6 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import fetch_one
 from tests.conftest import safe_unlink
 from tests.http_transport import FakeTransport, html_reply, json_reply
 from tests.native_geo_probes import geo_block_crs_id, spec_problems
@@ -35,7 +36,6 @@ MOCK_LAYER_INFO = {
     "maxRecordCount": 1000,
 }
 
-MOCK_FEATURE_COUNT = {"count": 3}
 
 MOCK_FEATURES_PAGE = {
     "type": "FeatureCollection",
@@ -252,7 +252,7 @@ class TestValidateArcgisUrl:
 class TestGenerateToken:
     """Tests for token generation."""
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     def test_successful_generation(self, mock_request):
         """Test successful token generation."""
         from geoparquet_io.core.arcgis import generate_token
@@ -264,7 +264,7 @@ class TestGenerateToken:
         assert result == "new_token"
         mock_request.assert_called_once()
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     def test_invalid_credentials(self, mock_request):
         """Test error on invalid credentials."""
         from geoparquet_io.core.arcgis import generate_token
@@ -281,7 +281,7 @@ class TestGenerateToken:
 class TestGetLayerInfo:
     """Tests for layer info retrieval."""
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     @patch("geoparquet_io.core.arcgis.get_feature_count")
     def test_successful_info(self, mock_count, mock_request):
         """Test successful layer info retrieval."""
@@ -297,7 +297,7 @@ class TestGetLayerInfo:
         assert result.max_record_count == 1000
         assert result.total_count == 100
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     @patch("geoparquet_io.core.arcgis.get_feature_count")
     def test_spatial_reference_from_extent(self, mock_count, mock_request):
         """Many servers advertise the layer SR only under extent.spatialReference."""
@@ -316,7 +316,7 @@ class TestGetLayerInfo:
 
         assert result.spatial_reference == {"wkid": 25830, "latestWkid": 25830}
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     @patch("geoparquet_io.core.arcgis.get_feature_count")
     def test_spatial_reference_from_source_sr(self, mock_count, mock_request):
         from geoparquet_io.core.arcgis import get_layer_info
@@ -334,7 +334,7 @@ class TestGetLayerInfo:
 
         assert result.spatial_reference == {"wkid": 4269}
 
-    @patch("geoparquet_io.core.arcgis._make_request")
+    @patch("geoparquet_io.core.arcgis.make_request_with_retry")
     @patch("geoparquet_io.core.arcgis.get_feature_count")
     def test_spatial_reference_missing_is_empty_not_4326(self, mock_count, mock_request):
         """No advertised SR must not silently default to 4326 (native would lie)."""
@@ -498,10 +498,12 @@ class TestCrsParsing:
         assert _wkid_candidates(spatial_ref) == expected
 
     def test_normalize_wkid_maps_esri_legacy_codes(self):
-        from geoparquet_io.core.arcgis import _normalize_wkid
+        from geoparquet_io.core.crs_utils import canonical_crs_code
 
-        assert _normalize_wkid(102100) == 3857
-        assert _normalize_wkid(25830) == 25830
+        assert canonical_crs_code(102100) == 3857
+        assert canonical_crs_code(102113) == 3785
+        assert canonical_crs_code(900913) == 3857
+        assert canonical_crs_code(25830) == 25830
 
 
 class TestCrsExtraction:
@@ -513,18 +515,18 @@ class TestCrsExtraction:
 
         # Standard EPSG
         result = _extract_crs_from_spatial_reference({"wkid": 4326})
-        assert result is not None
+        assert result["id"] == {"authority": "EPSG", "code": 4326}
 
         # Web Mercator special case
         result = _extract_crs_from_spatial_reference({"wkid": 102100})
-        assert result is not None
+        assert result["id"] == {"authority": "EPSG", "code": 3857}
 
     def test_default_crs(self):
         """Test default CRS when no spatial reference."""
         from geoparquet_io.core.arcgis import _extract_crs_from_spatial_reference
 
         result = _extract_crs_from_spatial_reference({})
-        assert result is not None  # Should default to WGS84
+        assert result["id"] == {"authority": "EPSG", "code": 4326}  # Should default to WGS84
 
     @pytest.mark.parametrize(
         ("spatial_ref", "expected_code"),
@@ -2778,5 +2780,5 @@ class TestArcgisOutputCrsLive:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial")
-        crs = con.execute(f"SELECT ST_CRS(geometry) FROM '{out}' LIMIT 1").fetchone()[0]
+        crs = fetch_one(con.execute(f"SELECT ST_CRS(geometry) FROM '{out}' LIMIT 1"))[0]
         assert "25830" in str(crs)

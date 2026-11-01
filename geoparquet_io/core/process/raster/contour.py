@@ -10,12 +10,27 @@ from bisect import bisect_left
 
 import pyarrow as pa
 
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.logging_config import info
 from geoparquet_io.core.optional_deps import load_module, require_contourrs
 from geoparquet_io.core.process.raster.output import finalize_raster_table
 from geoparquet_io.core.process.raster.reader import read_band
 from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+
+def require_one_break_rule(levels: list[float] | None, interval: float | None) -> None:
+    """Exactly one of ``levels`` or ``interval``: the one rule the CLI and API share.
+
+    Dependency-free, so :func:`contour_file` applies it before it opens the raster.
+    """
+    if levels is not None and interval is not None:
+        raise InvalidParameterError(
+            "levels", "give either explicit levels or an interval, not both"
+        )
+    if levels is None and interval is None:
+        raise InvalidParameterError("levels", "one of levels or interval is required")
 
 
 def resolve_levels(
@@ -27,18 +42,14 @@ def resolve_levels(
 ) -> list[float]:
     """The explicit break values, or a ``base + k*interval`` ladder that
     brackets the band's [min, max] (gdal_contour-style)."""
-    if levels is not None and interval is not None:
-        raise InvalidParameterError(
-            "levels", "give either explicit levels or an interval, not both"
-        )
+    require_one_break_rule(levels, interval)
     if levels is not None:
         if len(levels) < 2:
             raise InvalidParameterError("levels", "at least two values are needed to form a band")
         if any(b <= a for a, b in zip(levels, levels[1:], strict=False)):
             raise InvalidParameterError("levels", "values must be strictly increasing")
         return [float(v) for v in levels]
-    if interval is None:
-        raise InvalidParameterError("levels", "one of levels or interval is required")
+    assert interval is not None  # require_one_break_rule
     if interval <= 0:
         raise InvalidParameterError("interval", "must be > 0")
     start = base + math.floor((band_min - base) / interval) * interval
@@ -80,7 +91,7 @@ def contour_array(
             "min_column", f"min_column and max_column are both '{min_column}'"
         )
     for name, value in (("min_column", min_column), ("max_column", max_column)):
-        if value == "geometry":
+        if value == BUILT_GEOMETRY_COLUMN:
             raise InvalidParameterError(name, "collides with the output's geometry column name")
     if max_column == "value" and min_column != "value":
         # contourrs' own output column is named 'value'; appending the max
@@ -166,7 +177,7 @@ def contour_file(
     use_mask: bool = True,
     min_column: str = "min",
     max_column: str = "max",
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -174,6 +185,8 @@ def contour_file(
     verbose: bool = False,
 ) -> None:
     """Extract contour bands from one raster band into a GeoParquet file."""
+    require_one_break_rule(levels, interval)
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     table = contour_raster(
         input_raster,
         levels=levels,

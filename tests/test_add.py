@@ -8,7 +8,9 @@ import duckdb
 import pytest
 from click.testing import CliRunner
 
-from geoparquet_io.cli.main import add
+from geoparquet_io.cli.main import add, cli
+from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.parquet_writer import WriteOptions
 from tests.conftest import BUILDINGS_TEST_FILE
 
 
@@ -59,10 +61,10 @@ class TestAddCommands:
         assert "bbox_1" not in column_names
 
         # Row count matches the input.
-        input_count = conn.execute(
-            f'SELECT COUNT(*) FROM "{places_with_covering_file}"'
-        ).fetchone()[0]
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"').fetchone()[0]
+        input_count = fetch_one(
+            conn.execute(f'SELECT COUNT(*) FROM "{places_with_covering_file}"')
+        )[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"'))[0]
         assert input_count == output_count
 
     def test_add_bbox_copies_when_covering_metadata_missing(
@@ -84,8 +86,8 @@ class TestAddCommands:
         columns = conn.execute(f'DESCRIBE SELECT * FROM "{temp_output_file}"').fetchall()
         column_names = [col[0] for col in columns]
         assert column_names.count("bbox") == 1
-        input_count = conn.execute(f'SELECT COUNT(*) FROM "{places_v11_file}"').fetchone()[0]
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"').fetchone()[0]
+        input_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{places_v11_file}"'))[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"'))[0]
         assert input_count == output_count
 
     def test_add_bbox_copy_to_s3_uses_the_configured_endpoint(self, places_with_covering_file):
@@ -189,16 +191,21 @@ class TestAddCommands:
         assert column_names.count("bbox") == 1
         assert "bbox_1" not in column_names
 
-    def test_add_bbox_without_write_options_still_copies(self, places_test_file, temp_output_file):
-        """The plain form is unchanged: no explicit write option, so still a copy."""
+    def test_add_bbox_on_a_1_0_input_is_rewritten_at_1_1(self, places_test_file, temp_output_file):
+        """No write option, but a copy would keep 1.0 where auto mode writes 1.1.
+
+        Approved change 7 of #1367: ``add bbox`` follows the common version rule
+        like every other command, so the existing column is recomputed and the
+        output declares 1.1 (copies of inputs already at 1.1 stay copies:
+        tests/test_output_version_table.py).
+        """
         runner = CliRunner()
         result = runner.invoke(add, ["bbox", places_test_file, temp_output_file])
         assert result.exit_code == 0, result.output
-        assert "Copied" in result.output
+        assert "Copied" not in result.output
 
-        # A verbatim copy keeps the input's 1.0 version, covering key and all.
         geo = _read_geo_metadata(temp_output_file)
-        assert geo["version"].startswith("1.0"), geo["version"]
+        assert geo["version"] == "1.1.0", geo["version"]
 
     def test_add_bbox_dry_run_previews_the_copy_instead_of_sql(
         self, places_with_covering_file, temp_output_file
@@ -220,8 +227,9 @@ class TestAddCommands:
         """stdin -> file must honour the same contract as file -> file (#798 review).
 
         The input already carries a bbox column gpio did not compute, so the
-        stream is passed through unchanged: no covering may be declared for it,
-        and the input's declared version must survive the copy.
+        stream is passed through rather than recomputed. Its version is the
+        facade's: the 1.0 input writes 1.1 (approved change 7 of #1367), where
+        the writer treats the conventional ``bbox`` column as any 1.1 write does.
         """
         import io
         import logging
@@ -250,9 +258,7 @@ class TestAddCommands:
             add_bbox_column("-", output)
 
         geo = _read_geo_metadata(output)
-        primary = geo["primary_column"]
-        assert "covering" not in geo["columns"][primary], geo["columns"][primary]
-        assert geo["version"].startswith("1.0"), geo["version"]
+        assert geo["version"] == "1.1.0", geo["version"]
 
         # And it must not claim to have added anything.
         assert "not recomputed" in caplog.text
@@ -347,8 +353,8 @@ class TestAddCommands:
         assert len(bbox_columns) == 1
 
         # Verify row count preserved
-        input_count = conn.execute(f'SELECT COUNT(*) FROM "{places_test_file}"').fetchone()[0]
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"').fetchone()[0]
+        input_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{places_test_file}"'))[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"'))[0]
         assert input_count == output_count
 
     def test_add_bbox_force_with_custom_name(self, places_test_file, temp_output_file):
@@ -375,6 +381,7 @@ class TestAddCommands:
         result = runner.invoke(add, ["bbox", "nonexistent.parquet", temp_output_file])
         # Should fail with non-zero exit code
         assert result.exit_code != 0
+        assert "nonexistent.parquet" in result.output
 
     def test_add_bbox_metadata_on_v10_file_with_bbox_errors(self, temp_output_dir):
         """add bbox-metadata refuses a 1.0 file, whose version cannot carry covering.
@@ -412,13 +419,6 @@ class TestAddCommands:
         result = runner.invoke(add, ["bbox-metadata", buildings_test_file])
         assert result.exit_code != 0
         assert "No valid bbox column found" in result.output
-
-    # Note: add admin-divisions tests are skipped because they require a countries file
-    # and network access. These should be tested separately with appropriate test data.
-    @pytest.mark.skip(reason="Requires countries file and network access")
-    def test_add_admin_divisions(self, places_test_file, temp_output_file):
-        """Test adding admin divisions (skipped - requires countries file)."""
-        pass
 
 
 @pytest.fixture(scope="module")
@@ -518,8 +518,8 @@ class TestAddBboxCLI:
         input_columns = conn.execute(f'DESCRIBE SELECT * FROM "{BUILDINGS_TEST_FILE}"').fetchall()
         assert {col[0] for col in input_columns}.issubset(column_names)
 
-        input_count = conn.execute(f'SELECT COUNT(*) FROM "{BUILDINGS_TEST_FILE}"').fetchone()[0]
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{bbox_default_run}"').fetchone()[0]
+        input_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{BUILDINGS_TEST_FILE}"'))[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{bbox_default_run}"'))[0]
         assert input_count == output_count
 
     def test_covering_metadata_is_written_without_being_asked_for(self, bbox_default_run):
@@ -588,17 +588,19 @@ class TestAddH3CLI:
         h3_col = next(col for col in columns if col[0] == "h3_cell")
         assert "VARCHAR" in h3_col[1]
 
-        output_count = conn.execute(f'SELECT COUNT(*) FROM "{h3_default_run}"').fetchone()[0]
-        valid_count = conn.execute(
-            f'SELECT COUNT(*) FROM "{h3_default_run}" '
-            f"WHERE h3_is_valid_cell(h3_string_to_h3(h3_cell))"
-        ).fetchone()[0]
+        output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{h3_default_run}"'))[0]
+        valid_count = fetch_one(
+            conn.execute(
+                f'SELECT COUNT(*) FROM "{h3_default_run}" '
+                f"WHERE h3_is_valid_cell(h3_string_to_h3(h3_cell))"
+            )
+        )[0]
         assert valid_count == output_count
 
         # ...added to, not in place of, the input's rows and columns.
         input_columns = conn.execute(f'DESCRIBE SELECT * FROM "{BUILDINGS_TEST_FILE}"').fetchall()
         assert {col[0] for col in input_columns}.issubset(column_names)
-        input_count = conn.execute(f'SELECT COUNT(*) FROM "{BUILDINGS_TEST_FILE}"').fetchone()[0]
+        input_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{BUILDINGS_TEST_FILE}"'))[0]
         assert input_count == output_count
 
     def test_default_resolution_is_9(self, h3_default_run):
@@ -744,10 +746,10 @@ class TestRemoteWriteSupport:
             con.execute("INSTALL spatial; LOAD spatial;")
 
             # Simple query to read the test file
-            from geoparquet_io.core.file_utils import safe_file_url
+            from geoparquet_io.core.duckdb_utils import sql_path
 
-            input_url = safe_file_url(buildings_test_file, False)
-            query = f"SELECT * FROM '{input_url}' LIMIT 10"
+            input_url = sql_path(buildings_test_file)
+            query = f"SELECT * FROM {input_url} LIMIT 10"
 
             # Remote S3 output
             remote_output = "s3://test-bucket/output.parquet"
@@ -778,14 +780,14 @@ class TestAddCommandErrorHandling:
         gpkg_file.write_text("Not a parquet file")
 
         runner = CliRunner()
-        result = runner.invoke(add, ["bbox", str(gpkg_file)])
+        result = runner.invoke(cli, ["add", "bbox", str(gpkg_file)])
 
         # Should fail with exit code 1
         assert result.exit_code == 1
 
         # Should show friendly error message, not a stack trace
         assert "Traceback" not in result.output
-        assert "Not a valid Parquet file" in result.output
+        assert "is not a Parquet file; this command reads .parquet" in result.output
         assert "gpio convert" in result.output
 
     def test_add_bbox_with_nonexistent_file_shows_friendly_error(self):
@@ -878,14 +880,8 @@ class TestAddBboxCoveringMetadata:
             output_path=output_file,
             bbox_column_name="bbox",
             verbose=False,
-            compression="ZSTD",
-            compression_level=None,
-            row_group_size_mb=None,
-            row_group_rows=None,
-            profile=None,
+            write=WriteOptions(compression="ZSTD", geoparquet_version="2.0"),
             force=False,
-            geoparquet_version="2.0",
-            memory_limit=None,
         )
 
         assert os.path.exists(output_file)
@@ -947,19 +943,23 @@ class TestAddBboxMetadataPreservesFileProperties:
         # BEFORE: Verify bloom filter and GEOMETRY type exist
         # Check bloom filter on 'name' column
         conn = duckdb.connect()
-        bloom_before = conn.execute(f"""
+        bloom_before = fetch_one(
+            conn.execute(f"""
             SELECT bloom_filter_offset IS NOT NULL AS has_bloom
             FROM parquet_metadata('{test_file}')
             WHERE path_in_schema = 'name'
             LIMIT 1
-        """).fetchone()[0]
+        """)
+        )[0]
 
         # Check GEOMETRY logical type
-        schema_before = conn.execute(f"""
+        schema_before = fetch_one(
+            conn.execute(f"""
             SELECT logical_type
             FROM parquet_schema('{test_file}')
             WHERE name = 'geometry'
-        """).fetchone()[0]
+        """)
+        )[0]
         conn.close()
 
         assert bloom_before, "BEFORE: Expected bloom filter on 'name' column"
@@ -976,18 +976,22 @@ class TestAddBboxMetadataPreservesFileProperties:
 
         # AFTER: Verify bloom filter and GEOMETRY type are preserved
         conn = duckdb.connect()
-        bloom_after = conn.execute(f"""
+        bloom_after = fetch_one(
+            conn.execute(f"""
             SELECT bloom_filter_offset IS NOT NULL AS has_bloom
             FROM parquet_metadata('{test_file}')
             WHERE path_in_schema = 'name'
             LIMIT 1
-        """).fetchone()[0]
+        """)
+        )[0]
 
-        schema_after = conn.execute(f"""
+        schema_after = fetch_one(
+            conn.execute(f"""
             SELECT logical_type
             FROM parquet_schema('{test_file}')
             WHERE name = 'geometry'
-        """).fetchone()[0]
+        """)
+        )[0]
         conn.close()
 
         # These assertions will FAIL on current code (issue #433)
@@ -1035,9 +1039,9 @@ class TestAddBboxMetadataPreservesFileProperties:
         """)
 
         # Read the geo metadata that DuckDB created
-        geo_meta_row = conn.execute(
-            f"SELECT value FROM parquet_kv_metadata('{test_file}') WHERE key = 'geo'"
-        ).fetchone()
+        geo_meta_row = fetch_one(
+            conn.execute(f"SELECT value FROM parquet_kv_metadata('{test_file}') WHERE key = 'geo'")
+        )
         geo_meta_value = geo_meta_row[0].decode("utf-8") if geo_meta_row else "{}"
 
         # DuckDB's 'V1' declares GeoParquet 1.0.0, which cannot carry the 1.1-only
@@ -1155,9 +1159,9 @@ class TestAddBboxMetadataPreservesFileProperties:
             ) TO '{test_file}' (FORMAT PARQUET, GEOPARQUET_VERSION 'V1')
         """)
 
-        geo_meta_row = conn.execute(
-            f"SELECT value FROM parquet_kv_metadata('{test_file}') WHERE key = 'geo'"
-        ).fetchone()
+        geo_meta_row = fetch_one(
+            conn.execute(f"SELECT value FROM parquet_kv_metadata('{test_file}') WHERE key = 'geo'")
+        )
         geo_meta_value = geo_meta_row[0].decode("utf-8") if geo_meta_row else "{}"
         # 'V1' declares 1.0.0, which cannot carry the 1.1-only covering key.
         geo_meta_value = geo_meta_value.replace('"version":"1.0.0"', '"version":"1.1.0"').replace(
@@ -1229,93 +1233,22 @@ class TestAddBboxMetadataPreservesFileProperties:
             )
 
 
-class TestPassthroughVersion:
-    """Unit tests for `_passthrough_version`'s branches (#798 diff-cover gap).
-
-    A pass-through copy must declare the version the *input* already had, not
-    whatever the streaming writer would default to -- see `_passthrough_version`
-    in geoparquet_io/core/add/bbox.py for the reasoning.
-    """
-
-    def test_explicit_geoparquet_version_wins(self):
-        """An explicitly requested version is returned outright, metadata unread."""
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        assert _passthrough_version(None, "1.1") == "1.1"
-
-    def test_no_metadata_returns_none(self):
-        """No file metadata at all: nothing to derive a version from."""
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        assert _passthrough_version(None, None) is None
-
-    def test_metadata_without_geo_key_returns_none(self):
-        """Metadata present but missing the 'geo' key: still nothing to derive from."""
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        assert _passthrough_version({b"other": b"value"}, None) is None
-
-    def test_unparseable_geo_json_returns_none(self):
-        """Malformed JSON under 'geo' must not raise -- just fall back to None."""
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        assert _passthrough_version({b"geo": b"{not valid json"}, None) is None
-
-    def test_geo_metadata_not_a_dict_returns_none(self):
-        """'geo' that parses to something other than an object is not usable."""
-        import json
-
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        metadata = {b"geo": json.dumps(["unexpected", "list"]).encode("utf-8")}
-        assert _passthrough_version(metadata, None) is None
-
-    def test_non_string_version_returns_none(self):
-        """A 'version' field that is not a string cannot be parsed further."""
-        import json
-
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        metadata = {b"geo": json.dumps({"version": 11}).encode("utf-8")}
-        assert _passthrough_version(metadata, None) is None
-
-    def test_version_without_minor_component_returns_none(self):
-        """A version string with no '<major>.<minor>' shape can't be truncated to one."""
-        import json
-
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        metadata = {b"geo": json.dumps({"version": "1"}).encode("utf-8")}
-        assert _passthrough_version(metadata, None) is None
-
-    def test_valid_version_is_truncated_to_major_minor(self):
-        """A well-formed patch version is truncated to its major.minor form."""
-        import json
-
-        from geoparquet_io.core.add.bbox import _passthrough_version
-
-        metadata = {b"geo": json.dumps({"version": "1.1.0"}).encode("utf-8")}
-        assert _passthrough_version(metadata, None) == "1.1"
-
-
 class TestStreamingGeometryColumnFallback:
-    """`_make_streaming_bbox_query` falls back to 'geometry' when no standard
-    geometry column name is present in the source's schema (#798 diff-cover gap).
+    """`_make_streaming_bbox_query` on a source with no geometry column refuses it
+    with the shared error rather than guessing the literal 'geometry' (#1367).
     """
 
-    def test_falls_back_to_geometry_when_no_standard_name_present(self):
+    def test_refuses_a_source_with_no_geometry_column(self):
         import duckdb
 
         from geoparquet_io.core.add.bbox import _make_streaming_bbox_query
+        from geoparquet_io.core.geometry_detection import GeometryColumnNotFoundError
 
         con = duckdb.connect()
         con.execute("CREATE TABLE t AS SELECT 1 AS id, 'x' AS label")
 
-        query, passed_through, bbox_name = _make_streaming_bbox_query("t", con, "bbox", force=False)
-
-        assert passed_through is False
-        assert bbox_name == "bbox"
-        assert '"geometry"' in query
+        with pytest.raises(GeometryColumnNotFoundError):
+            _make_streaming_bbox_query("t", con, "bbox", force=False)
 
 
 class TestPreviewCopyWithoutOutputPath:

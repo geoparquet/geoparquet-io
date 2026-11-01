@@ -53,7 +53,7 @@ class TestExtractArcgisCliLayer:
 
     SERVICE_URL = "https://example.com/arcgis/rest/services/x/FeatureServer/0"
 
-    def test_bbox_string_reaches_core_as_float_tuple(self, runner, tmp_path):
+    def test_bbox_string_reaches_core_unparsed(self, runner, tmp_path):
         output = tmp_path / "out.parquet"
         with patch.object(arcgis_module, "convert_arcgis_to_geoparquet") as mock_convert:
             result = runner.invoke(
@@ -70,7 +70,8 @@ class TestExtractArcgisCliLayer:
 
         assert result.exit_code == 0, result.output
         kwargs = mock_convert.call_args.kwargs
-        assert kwargs["bbox"] == (-122.5, 37.5, -122.0, 38.0)
+        # Passed through as typed: the core entry is the one parser (bbox_parse).
+        assert kwargs["bbox"] == " -122.5, 37.5 ,-122.0,38.0 "
         assert kwargs["service_url"] == self.SERVICE_URL
         assert kwargs["output_file"] == str(output)
 
@@ -84,7 +85,7 @@ class TestExtractArcgisCliLayer:
 
     def test_bbox_with_wrong_value_count_is_rejected(self, runner, tmp_path):
         output = tmp_path / "out.parquet"
-        with patch.object(arcgis_module, "convert_arcgis_to_geoparquet") as mock_convert:
+        with patch("socket.getaddrinfo", side_effect=AssertionError("no request")) as dns:
             result = runner.invoke(
                 cli,
                 [
@@ -98,21 +99,23 @@ class TestExtractArcgisCliLayer:
             )
 
         assert result.exit_code != 0
-        assert "Invalid bbox format" in result.output
+        assert "Invalid value for bbox" in result.output
         assert "xmin,ymin,xmax,ymax" in result.output
-        mock_convert.assert_not_called()
+        # The core entry refused it, before any name was resolved.
+        dns.assert_not_called()
 
     def test_non_numeric_bbox_is_rejected(self, runner, tmp_path):
         output = tmp_path / "out.parquet"
-        with patch.object(arcgis_module, "convert_arcgis_to_geoparquet") as mock_convert:
+        with patch("socket.getaddrinfo", side_effect=AssertionError("no request")) as dns:
             result = runner.invoke(
                 cli,
                 ["extract", "arcgis", self.SERVICE_URL, str(output), "--bbox", "west,south,e,n"],
             )
 
         assert result.exit_code != 0
-        assert "Invalid bbox format" in result.output
-        mock_convert.assert_not_called()
+        assert "Invalid value for bbox" in result.output
+        # The core entry refused it, before any name was resolved.
+        dns.assert_not_called()
 
 
 class TestExtractBigqueryCliLayer:
@@ -327,7 +330,7 @@ class TestExtractWfsArgumentValidation:
         assert ".parquet extension" in result.output
 
     def test_invalid_bbox_is_rejected(self, runner, tmp_path):
-        with patch.object(wfs_module, "convert_wfs_to_geoparquet") as mock_convert:
+        with patch("socket.getaddrinfo", side_effect=AssertionError("no request")) as dns:
             result = runner.invoke(
                 cli,
                 [
@@ -342,9 +345,10 @@ class TestExtractWfsArgumentValidation:
             )
 
         assert result.exit_code != 0
-        assert "Invalid bbox format" in result.output
+        assert "Invalid value for bbox" in result.output
         assert "xmin,ymin,xmax,ymax" in result.output
-        mock_convert.assert_not_called()
+        # The core entry refused it, before any name was resolved.
+        dns.assert_not_called()
 
 
 class TestExtractWfsConverterDispatch:
@@ -382,7 +386,7 @@ class TestExtractWfsConverterDispatch:
         # Whitespace around a typename is stripped.
         assert kwargs["typename"] == "roads"
         assert kwargs["output_file"] == str(output)
-        assert kwargs["bbox"] == (-122.5, 37.5, -122.0, 38.0)
+        assert kwargs["bbox"] == "-122.5,37.5,-122.0,38.0"
         assert kwargs["limit"] == 10
         assert kwargs["max_workers"] == 3
         assert kwargs["compression"] == "ZSTD"
@@ -469,7 +473,7 @@ class TestExtractCartoCliLayer:
         assert kwargs["table_name"] == self.TABLE
         assert kwargs["output_file"] == str(output)
         assert kwargs["where"] == "market_value > 100"
-        assert kwargs["bbox"] == (-75.2, 39.9, -75.1, 40.0)
+        assert kwargs["bbox"] == "-75.2, 39.9,-75.1,40.0"
         assert kwargs["limit"] == 5
         # --timeout is an int option but core takes seconds as a float.
         assert kwargs["timeout"] == 60.0
@@ -491,16 +495,17 @@ class TestExtractCartoCliLayer:
 
     def test_invalid_bbox_is_rejected(self, runner, tmp_path):
         output = tmp_path / "out.parquet"
-        with patch.object(carto_module, "convert_carto_to_geoparquet") as mock_convert:
+        with patch("socket.getaddrinfo", side_effect=AssertionError("no request")) as dns:
             result = runner.invoke(
                 cli,
                 ["extract", "carto", self.URL, self.TABLE, str(output), "--bbox", "-75.2,39.9"],
             )
 
         assert result.exit_code != 0
-        assert "Invalid bbox format" in result.output
+        assert "Invalid value for bbox" in result.output
         assert "xmin,ymin,xmax,ymax" in result.output
-        mock_convert.assert_not_called()
+        # The core entry refused it, before any name was resolved.
+        dns.assert_not_called()
 
     def test_non_parquet_output_is_rejected(self, runner, tmp_path):
         output = tmp_path / "out.csv"
