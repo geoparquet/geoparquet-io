@@ -40,7 +40,7 @@ jobs:
           fetch-depth: 0  # Full history for tag creation
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
         with:
           # No cache in the publish path: a poisoned cache must never be able
           # to influence artifacts shipped to PyPI (zizmor cache-poisoning).
@@ -109,7 +109,7 @@ jobs:
         # with "InvalidDistribution: '2.5' is not a valid metadata version",
         # which failed the v1.4.0 publish after the tag was already pushed.
         # v1.14.2 ships Twine 7, which accepts 2.5.
-        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
         with:
           print-hash: true
 

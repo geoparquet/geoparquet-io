@@ -33,6 +33,11 @@ updates:
     cooldown:
       default-days: 7
     # Group minor and patch updates together
+    # DuckDB 2.0 cannot run S2 until its geography extension is published.
+    # Remove this ignore with the <1.6 cap once #1346's acceptance checks pass.
+    ignore:
+      - dependency-name: "duckdb"
+        versions: [">=2.0.0,<2.1.0"]
     groups:
       development-dependencies:
         dependency-type: "development"
