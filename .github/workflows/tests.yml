@@ -7,7 +7,7 @@ on:
         description: Bounded diagnostic experiment
         type: choice
         default: narrow
-        options: [narrow, suite, native, database]
+        options: [narrow, suite, suite-load, native, http, database]
       platform:
         description: Operating systems to measure
         type: choice

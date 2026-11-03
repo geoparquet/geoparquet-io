@@ -119,7 +119,9 @@ def run_case(name, arguments, limit, *, profile=False, env_extra=None):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--mode", choices=["narrow", "suite", "native", "database"], default="narrow"
+        "--mode",
+        choices=["narrow", "suite", "suite-load", "native", "http", "database"],
+        default="narrow",
     )
     args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
@@ -157,8 +159,15 @@ def main():
     }
     (OUT / "environment.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(json.dumps(metadata), flush=True)
-    if args.mode == "native":
-        subprocess.run([sys.executable, str(Path(__file__).with_name("native.py"))], check=True)
+    if args.mode in {"native", "http"}:
+        subprocess.run(
+            [
+                sys.executable,
+                str(Path(__file__).with_name("native.py")),
+                *(["--http-logs"] if args.mode == "http" else []),
+            ],
+            check=True,
+        )
         return
     if args.mode == "database":
         selected = [
@@ -184,14 +193,14 @@ def main():
                     },
                 )
         return
-    if args.mode == "suite":
+    if args.mode in {"suite", "suite-load"}:
         run_case(
-            "full-fast-120",
+            "full-fast-120" if args.mode == "suite" else "full-fast-load-120",
             [
                 "tests",
                 "-n",
                 "4",
-                "--dist=loadfile" if os.name == "nt" else "--dist=load",
+                "--dist=loadfile" if os.name == "nt" and args.mode == "suite" else "--dist=load",
                 "-m",
                 "not slow and not network and not meta",
                 "--timeout=120",

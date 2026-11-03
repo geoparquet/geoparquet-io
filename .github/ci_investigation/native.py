@@ -74,6 +74,8 @@ def worker(case):
     timed("load-spatial", lambda: connection.execute("LOAD spatial"))
     connection.execute("SET allow_asterisks_in_http_paths = true")
     connection.execute("SET http_retry_wait_ms = 0")
+    if os.environ.get("GPIO_CI_HTTP_LOGS") == "1":
+        connection.execute("CALL enable_logging(level='DEBUG',storage='memory')")
     connection.execute(
         "SET http_timeout = 1" if case == "st-read-one-second" else "SET http_timeout = 30000"
     )
@@ -91,19 +93,23 @@ def worker(case):
         flush=True,
     )
     timed(case, lambda: connection.sql("SELECT * FROM ST_Read(?)", params=[URL]).arrow().read_all())
+    if os.environ.get("GPIO_CI_HTTP_LOGS") == "1":
+        logs = connection.sql("SELECT message FROM duckdb_logs() WHERE type='HTTP'").fetchall()
+        print(json.dumps({"http_log_count": len(logs), "http_logs": logs}), flush=True)
     connection.close()
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--case")
+    parser.add_argument("--http-logs", action="store_true")
     args = parser.parse_args()
     if args.case:
         worker(args.case)
         return
     OUT.mkdir(parents=True, exist_ok=True)
     recording = False
-    if os.name == "nt":
+    if os.name == "nt" and not args.http_logs:
         with (OUT / "wpr.log").open("w") as log:
             try:
                 result = subprocess.run(
@@ -117,7 +123,7 @@ def main():
             except (OSError, subprocess.TimeoutExpired) as error:
                 log.write(str(error))
     try:
-        for case in [
+        cases = [
             "socket",
             "httpx",
             "st-read-default",
@@ -125,8 +131,13 @@ def main():
             "st-read-no-retries",
             "st-read-gdal-env",
             "connections",
-        ]:
+        ]
+        if args.http_logs:
+            cases = ["st-read-default", "st-read-no-retries"]
+        for case in cases:
             env = os.environ.copy()
+            if args.http_logs:
+                env["GPIO_CI_HTTP_LOGS"] = "1"
             if case == "st-read-gdal-env":
                 env.update(
                     GDAL_HTTP_CONNECTTIMEOUT="1", GDAL_HTTP_TIMEOUT="1", GDAL_HTTP_MAX_RETRY="0"
