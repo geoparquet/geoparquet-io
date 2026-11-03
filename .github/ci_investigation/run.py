@@ -21,7 +21,7 @@ TARGET = (
 )
 
 
-def run_case(name, arguments, limit, *, profile=False, env_extra=None):
+def run_case(name, arguments, limit, *, profile=False, env_extra=None, instrument=True):
     directory = OUT / name
     directory.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -36,8 +36,7 @@ def run_case(name, arguments, limit, *, profile=False, env_extra=None):
     command += [
         "-m",
         "pytest",
-        "-p",
-        "probe_plugin",
+        *(["-p", "probe_plugin"] if instrument else []),
         "--no-cov",
         "--tb=short",
         "--durations=0",
@@ -120,7 +119,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--mode",
-        choices=["narrow", "suite", "suite-load", "native", "http", "database"],
+        choices=[
+            "narrow",
+            "suite",
+            "suite-load",
+            "plain-loadfile",
+            "plain-load",
+            "native",
+            "http",
+            "database",
+        ],
         default="narrow",
     )
     args = parser.parse_args()
@@ -193,19 +201,22 @@ def main():
                     },
                 )
         return
-    if args.mode in {"suite", "suite-load"}:
+    if args.mode in {"suite", "suite-load", "plain-loadfile", "plain-load"}:
         run_case(
-            "full-fast-120" if args.mode == "suite" else "full-fast-load-120",
+            f"full-fast-{args.mode}-120",
             [
                 "tests",
                 "-n",
                 "4",
-                "--dist=loadfile" if os.name == "nt" and args.mode == "suite" else "--dist=load",
+                "--dist=loadfile"
+                if os.name == "nt" and args.mode in {"suite", "plain-loadfile"}
+                else "--dist=load",
                 "-m",
                 "not slow and not network and not meta",
                 "--timeout=120",
             ],
             1200,
+            instrument=not args.mode.startswith("plain-"),
         )
         return
     run_case("carto-serial-120", [TARGET, "-n", "0", "--timeout=120"], 170)
