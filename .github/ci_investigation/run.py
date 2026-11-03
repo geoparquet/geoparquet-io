@@ -118,7 +118,9 @@ def run_case(name, arguments, limit, *, profile=False, env_extra=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["narrow", "suite", "native"], default="narrow")
+    parser.add_argument(
+        "--mode", choices=["narrow", "suite", "native", "database"], default="narrow"
+    )
     args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     # Workflow-contract tests must inspect the historical production workflow,
@@ -129,9 +131,12 @@ def main():
         cwd=ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=True,
     ).stdout
-    (OUT / "dispatch-workflow.txt").write_text(workflow.read_text(), encoding="utf-8")
+    (OUT / "dispatch-workflow.txt").write_text(
+        workflow.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     workflow.write_text(original, encoding="utf-8")
     metadata = {
         "platform": platform.platform(),
@@ -154,6 +159,30 @@ def main():
     print(json.dumps(metadata), flush=True)
     if args.mode == "native":
         subprocess.run([sys.executable, str(Path(__file__).with_name("native.py"))], check=True)
+        return
+    if args.mode == "database":
+        selected = [
+            "tests/test_check.py",
+            "tests/test_sort.py",
+            "tests/test_api.py",
+            "-n",
+            "4",
+            "--dist=loadfile" if os.name == "nt" else "--dist=load",
+            "-m",
+            "not slow and not network and not meta",
+            "--timeout=120",
+        ]
+        for repeat in range(3):
+            for mode in ["shared", "fresh"] if repeat % 2 == 0 else ["fresh", "shared"]:
+                run_case(
+                    f"database-{mode}-{repeat}",
+                    selected,
+                    240,
+                    env_extra={
+                        "GPIO_CI_FORCE_FRESH": "1" if mode == "fresh" else "0",
+                        "GPIO_CI_COUNT_CONNECTIONS": "1",
+                    },
+                )
         return
     if args.mode == "suite":
         run_case(

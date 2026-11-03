@@ -1,6 +1,7 @@
 """Temporary diagnostic plugin; never imported by ordinary test runs."""
 
 import faulthandler
+import functools
 import json
 import os
 import sys
@@ -34,6 +35,25 @@ def pytest_configure(config):
     faulthandler.enable(file=_stacks)
     faulthandler.dump_traceback_later(25, repeat=True, file=_stacks)
     record("configure", worker=getattr(config, "workerinput", {}).get("workerid", "controller"))
+    if os.environ.get("GPIO_CI_COUNT_CONNECTIONS") == "1":
+        import duckdb
+
+        real_connect = duckdb.connect
+
+        @functools.wraps(real_connect)
+        def observed_connect(*args, **kwargs):
+            start, cpu = time.perf_counter(), time.process_time()
+            connection = real_connect(*args, **kwargs)
+            record("connect", wall=time.perf_counter() - start, cpu=time.process_time() - cpu)
+            return connection
+
+        duckdb.connect = observed_connect
+
+
+def pytest_collection_modifyitems(items):
+    if os.environ.get("GPIO_CI_FORCE_FRESH") == "1":
+        for item in items:
+            item.add_marker(pytest.mark.fresh_duckdb)
 
 
 def pytest_collection_finish(session):
