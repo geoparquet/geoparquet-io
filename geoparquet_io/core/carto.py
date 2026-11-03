@@ -7,6 +7,7 @@ for efficient GeoJSON parsing.
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from typing import NamedTuple, cast
@@ -320,7 +321,8 @@ def _get_row_count(
         full_url += f"&api_key={quote(api_key)}"
 
     conn = get_duckdb_connection()
-    conn.execute(f"SET http_timeout = {int(timeout * 1000)}")  # DuckDB uses milliseconds
+    # DuckDB takes whole seconds; preserve fractional budgets by rounding up.
+    conn.execute(f"SET http_timeout = {math.ceil(timeout)}")
     result = fetch_one(
         conn.execute(f"SELECT rows[1].count FROM read_json_auto({sql_path(full_url)})")
     )
@@ -946,7 +948,10 @@ def _fetch_with_retry(
         nonlocal started
         conn = get_duckdb_connection()
         conn.execute("SET allow_asterisks_in_http_paths = true")
-        conn.execute(f"SET http_timeout = {int(timeout * 1000)}")  # milliseconds
+        conn.execute(f"SET http_timeout = {math.ceil(timeout)}")
+        # run_with_retry owns this request's retry budget. DuckDB's defaults
+        # otherwise repeat each native HTTP operation inside every attempt.
+        conn.execute("SET http_retries = 0")
 
         # The clock that decides "timed out" starts at the request, not at
         # the connection: loading the spatial extension on a cold macOS

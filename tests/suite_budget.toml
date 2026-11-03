@@ -1,8 +1,9 @@
 # These numbers only go down; raising either needs a reason in the PR.
 # Reviewed baseline: 14199, plus the 18 fast tests the main merge brought in
 # with #1360 (a5 from Query.Farm), less the 12 CODEOWNERS wiring tests removed.
+# Add two owner regressions for DuckDB's timeout units and Carto's retry budget.
 [fast_suite]
-max_collected = 14205
+max_collected = 14207
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

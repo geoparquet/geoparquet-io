@@ -74,7 +74,9 @@ def timeout_marks(root):
 
 
 def test_default_timeout_is_pinned():
-    options = tomllib.loads((REPO / "pyproject.toml").read_text())["tool"]["pytest"]["ini_options"]
+    options = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["tool"][
+        "pytest"
+    ]["ini_options"]
     assert options["timeout"] == 60
     assert "timeout" not in str(options.get("addopts", "")).lower()
     # Unset, pytest-timeout uses SIGALRM where it exists (an expiry is a failing
@@ -87,10 +89,18 @@ def test_default_timeout_is_pinned():
     for job_id in ("slow-tests", "docs-examples"):
         for line in _job_pytest_lines(job_id):
             assert "--timeout=600" in line, f"{job_id}: {line}"
+    # loadfile reschedules a crashed test onto replacement workers. Windows
+    # thread-method timeouts must fail the lane instead of replaying that test.
+    for job_id in ("test", "slow-tests"):
+        for line in _job_pytest_lines(job_id):
+            if "--dist=loadfile" in line:
+                assert "--max-worker-restart=0" in line, f"{job_id}: {line}"
 
 
 def _job_pytest_lines(job_id):
-    workflow = yaml.safe_load((REPO / ".github" / "workflows" / "tests.yml").read_text())
+    workflow = yaml.safe_load(
+        (REPO / ".github" / "workflows" / "tests.yml").read_text(encoding="utf-8")
+    )
     steps = workflow["jobs"][job_id]["steps"]
     script = "\n".join(step.get("run", "") for step in steps)
     lines = [line for line in script.splitlines() if "uv run pytest" in line]
@@ -137,14 +147,14 @@ def test_fast_collection_budget():
     )
     assert_budget(
         collected_count(result.stdout),
-        tomllib.loads(BUDGET.read_text())["fast_suite"]["max_collected"],
+        tomllib.loads(BUDGET.read_text(encoding="utf-8"))["fast_suite"]["max_collected"],
     )
 
 
 def test_timeout_mark_budget():
     assert_budget(
         timeout_marks(REPO / "tests"),
-        tomllib.loads(BUDGET.read_text())["fast_suite"]["max_timeout_marks"],
+        tomllib.loads(BUDGET.read_text(encoding="utf-8"))["fast_suite"]["max_timeout_marks"],
     )
 
 
