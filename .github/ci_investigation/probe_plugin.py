@@ -91,6 +91,13 @@ def _trace(frame, event, arg):
             "load_spatial_extension",
         }:
             record(event, function=function, filename=filename.rsplit("/", 1)[-1])
+            if (
+                event == "return"
+                and function == "immediate_connection"
+                and os.environ.get("GPIO_CI_NATIVE_RETRIES") == "0"
+            ):
+                arg.execute("SET http_retries = 0")
+                record("diagnostic_override", setting="http_retries", value=0)
 
 
 @pytest.hookimpl(wrapper=True)

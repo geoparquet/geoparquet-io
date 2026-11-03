@@ -128,6 +128,7 @@ def main():
             "native",
             "http",
             "database",
+            "carto-retry-control",
         ],
         default="narrow",
     )
@@ -167,6 +168,14 @@ def main():
     }
     (OUT / "environment.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(json.dumps(metadata), flush=True)
+    if args.mode == "carto-retry-control":
+        run_case(
+            "carto-no-native-retries-60",
+            [TARGET, "-n", "0", "--timeout=60"],
+            90,
+            env_extra={"GPIO_CI_NATIVE_RETRIES": "0"},
+        )
+        return
     if args.mode in {"native", "http"}:
         subprocess.run(
             [
