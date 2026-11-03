@@ -7,7 +7,7 @@ on:
         description: Bounded diagnostic experiment
         type: choice
         default: narrow
-        options: [narrow, suite]
+        options: [narrow, suite, native]
 
 permissions:
   contents: read

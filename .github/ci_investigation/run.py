@@ -118,7 +118,7 @@ def run_case(name, arguments, limit, *, profile=False, env_extra=None):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["narrow", "suite"], default="narrow")
+    parser.add_argument("--mode", choices=["narrow", "suite", "native"], default="narrow")
     args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     # Workflow-contract tests must inspect the historical production workflow,
@@ -152,6 +152,9 @@ def main():
     }
     (OUT / "environment.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     print(json.dumps(metadata), flush=True)
+    if args.mode == "native":
+        subprocess.run([sys.executable, str(Path(__file__).with_name("native.py"))], check=True)
+        return
     if args.mode == "suite":
         run_case(
             "full-fast-120",
