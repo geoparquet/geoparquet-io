@@ -113,6 +113,62 @@ class TestValidateTableName:
             _validate_table_name("123_table")
 
 
+@pytest.mark.fresh_duckdb
+class TestDuckDBRequestSettings:
+    """Check actual DuckDB settings while replacing only the remote read."""
+
+    @pytest.mark.parametrize("request_kind", ["count", "fetch"])
+    def test_timeout_seconds_and_retry_owner(self, monkeypatch, request_kind):
+        import duckdb
+
+        with duckdb.connect() as connection:
+            default_retries = connection.sql("SELECT current_setting('http_retries')").fetchall()[
+                0
+            ][0]
+
+            class LocalReadConnection:
+                def execute(self, statement):
+                    if statement.startswith("SET "):
+                        return connection.execute(statement)
+                    assert "read_json_auto(" in statement
+                    return connection.execute("SELECT 7")
+
+                def sql(self, statement):
+                    assert "ST_Read(" in statement
+                    return connection.sql("SELECT 1 AS id")
+
+            monkeypatch.setattr(
+                carto_module, "get_duckdb_connection", lambda: LocalReadConnection()
+            )
+            # DuckDB's timeout is whole seconds. Round up fractional requests,
+            # including sub-second values, instead of truncating to zero.
+            for timeout, seconds in [(0.01, 1), (2.5, 3), (30, 30)]:
+                if request_kind == "count":
+                    assert (
+                        carto_module._get_row_count(
+                            "http://gpio.invalid/api/v2/sql", "t", timeout=timeout
+                        )
+                        == 7
+                    )
+                else:
+                    result = _fetch_with_retry(
+                        "http://gpio.invalid/api/v2/sql", "t", "SELECT * FROM t", timeout=timeout
+                    )
+                    assert result.column("id").to_pylist() == [1]
+                settings = dict(
+                    connection.sql(
+                        "SELECT name, value FROM duckdb_settings() "
+                        "WHERE name IN ('http_timeout', 'http_retries')"
+                    ).fetchall()
+                )
+                assert settings["http_timeout"] == str(seconds), timeout
+                # Only fetch has an application retry loop. Counting rows keeps
+                # DuckDB's default retries; fetching must not multiply its budget.
+                assert settings["http_retries"] == (
+                    "0" if request_kind == "fetch" else str(default_retries)
+                )
+
+
 class TestBuildCartoQuery:
     """Tests for SQL query building."""
 
@@ -1146,11 +1202,6 @@ class TestFailureClassificationIgnoresTheUsersSql:
         monkeypatch.setattr(carto_module, "run_with_retry", immediate_retry)
         real_get_conn = carto_module.get_duckdb_connection
 
-        def immediate_connection():
-            conn = real_get_conn()
-            conn.execute("SET http_retry_wait_ms = 0")
-            return conn
-
         seen = {"attempts": 0}
 
         class _Counting:
@@ -1168,12 +1219,13 @@ class TestFailureClassificationIgnoresTheUsersSql:
                 return self._inner.sql(sql_text, *args, **kwargs)
 
         monkeypatch.setattr(
-            carto_module, "get_duckdb_connection", lambda *a, **k: _Counting(immediate_connection())
+            carto_module, "get_duckdb_connection", lambda *a, **k: _Counting(real_get_conn())
         )
 
-        # A refused loopback connection fails in milliseconds; the generous
-        # timeout keeps a slow GDAL on a cold runner from making the attempt
-        # look like it ran out the clock, which is a different verdict.
+        # Windows takes about two seconds per refused connection. The fetch
+        # disables native retries so the three application attempts fit the
+        # fast lane's 60-second cap. Keep a per-attempt budget above refusal
+        # time so this still exercises a transport failure, not a timeout.
         with pytest.raises(CartoError) as excinfo:
             _fetch_with_retry(
                 url=self.DEAD_URL,

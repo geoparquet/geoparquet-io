@@ -258,8 +258,9 @@ jobs:
           # word-splitting intended: COV_ARGS is a flag list (or --no-cov)
           # shellcheck disable=SC2086
           if [ "$RUNNER_OS" == "Windows" ]; then
-            # Use loadfile distribution on Windows to reduce DuckDB extension conflicts
-            uv run pytest -n 4 --dist=loadfile -m "not slow and not network and not meta" -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
+            # Keep files together for DuckDB extension isolation. A Windows
+            # timeout kills its worker; do not replay it on replacement workers.
+            uv run pytest -n 4 --dist=loadfile --max-worker-restart=0 -m "not slow and not network and not meta" -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
           elif [ "$RUNNER_OS" == "macOS" ]; then
             uv run pytest -n 3 -m "not slow and not network and not meta" -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
           else
@@ -565,8 +566,9 @@ jobs:
           # above and leave all three invocations unsuppressed).
           # shellcheck disable=SC2086
           if [ "$RUNNER_OS" == "Windows" ]; then
-            # Use loadfile distribution on Windows to reduce DuckDB extension conflicts
-            uv run pytest -n 4 --dist=loadfile -m "(slow or meta) and not network" --timeout=600 -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
+            # A crashed test must fail this lane instead of replaying for
+            # another ten-minute timeout on each replacement worker.
+            uv run pytest -n 4 --dist=loadfile --max-worker-restart=0 -m "(slow or meta) and not network" --timeout=600 -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
           elif [ "$RUNNER_OS" == "macOS" ]; then
             uv run pytest -n 3 -m "(slow or meta) and not network" --timeout=600 -v --tb=short --durations=25 --durations-min=0.5 $COV_ARGS
           else
