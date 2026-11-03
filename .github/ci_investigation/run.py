@@ -121,6 +121,18 @@ def main():
     parser.add_argument("--mode", choices=["narrow", "suite"], default="narrow")
     args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
+    # Workflow-contract tests must inspect the historical production workflow,
+    # not this branch's manually dispatched measurement wrapper.
+    workflow = ROOT / ".github/workflows/tests.yml"
+    original = subprocess.run(
+        ["git", "show", "552703312773cd525c0b74ce6bcb1b8737b44d00:.github/workflows/tests.yml"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    (OUT / "dispatch-workflow.txt").write_text(workflow.read_text(), encoding="utf-8")
+    workflow.write_text(original, encoding="utf-8")
     metadata = {
         "platform": platform.platform(),
         "python": sys.version,
