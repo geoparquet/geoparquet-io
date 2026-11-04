@@ -18,7 +18,13 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.column_selection import matching_columns
 from geoparquet_io.core.compression import resolve_codec
-from geoparquet_io.core.duckdb_utils import fetch_one, query_schema, quote_identifier, sql_path
+from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
+    query_schema,
+    quote_identifier,
+    register_arrow,
+    sql_path,
+)
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
 from geoparquet_io.core.geo_metadata import (
@@ -370,27 +376,40 @@ def _build_levels(
     """Roll the input up to each level and write it as a sibling file."""
     source_sql = f"SELECT * FROM {relation}"
     bbox_field = _input_bbox_field(con, source_sql, input_parquet, info)
-    results: list[tuple[int | str, str]] = []
     for out_path in outputs:
         Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-    for level, out_path in zip(target_levels, outputs, strict=True):
-        sql = build_level_sql(con, info, source_sql, level)
-        if show_sql or verbose:
-            debug(sql)
-        table = with_input_bbox(con.sql(sql).arrow().read_all(), bbox_field)
-        _write_overview(
-            table,
-            out_path,
-            info,
-            compression,
-            compression_level,
-            geoparquet_version,
-            verbose,
-            geo_bbox=_overview_geo_bbox(con, table, info),
-        )
-        success(f"Wrote level {level} overview ({table.num_rows} rows) -> {out_path}")
-        results.append((level, out_path))
-    return results
+    # Averages lack per-metric non-NULL counts: an intermediate count would
+    # give NULL children weight at the next level. Keep those on the base.
+    composable = info.scheme != ADMIN_SCHEME and not any(
+        col.func == "avg" for col in info.rollup_columns
+    )
+    jobs = list(zip(target_levels, outputs, strict=True))
+    if composable:
+        jobs.sort(key=lambda job: int(job[0]), reverse=True)
+    try:
+        for index, (level, out_path) in enumerate(jobs):
+            sql = build_level_sql(con, info, source_sql, level)
+            if show_sql or verbose:
+                debug(sql)
+            table = with_input_bbox(con.sql(sql).arrow().read_all(), bbox_field)
+            _write_overview(
+                table,
+                out_path,
+                info,
+                compression,
+                compression_level,
+                geoparquet_version,
+                verbose,
+                geo_bbox=_overview_geo_bbox(con, table, info),
+            )
+            success(f"Wrote level {level} overview ({table.num_rows} rows) -> {out_path}")
+            if composable and index + 1 < len(jobs):
+                register_arrow(con, "__overview_previous", table)
+                source_sql = "SELECT * FROM __overview_previous"
+    finally:
+        if composable:
+            con.unregister("__overview_previous")
+    return list(zip(target_levels, outputs, strict=True))
 
 
 def create_overview_file(

@@ -462,6 +462,111 @@ class TestGridRollupStubbed:
         assert col("max_v", 5000) == 2.0
         assert col("count", 5001) == 7
         assert col("avg_v", 5001) == pytest.approx(25.0 / 7.0)
+        self._assert_levels_reuse_smaller_sources(tmp_path, monkeypatch)
+
+    def _assert_levels_reuse_smaller_sources(self, tmp_path, monkeypatch):
+        from geoparquet_io.core.duckdb_utils import fetch_one
+        from geoparquet_io.core.process.overview import run
+        from geoparquet_io.core.process.overview.detect import AggregateInfo, RollupColumn
+
+        # A transitive hierarchy: four children per level, including a NULL bucket.
+        with duckdb.connect() as con:
+            con.create_function(
+                "a5_cell_to_parent",
+                lambda cell, level: level * 1000 + (cell % 1000) // 4 ** (cell // 1000 - level),
+                ["UBIGINT", "INTEGER"],
+                "UBIGINT",
+            )
+            base = pa.table(
+                {
+                    "a5_cell": pa.array([6000 + i for i in range(64)] + [None], pa.uint64()),
+                    "count": [1] * 65,
+                    "sum_v": [float(i) for i in range(64)] + [None],
+                    "avg_v": [None if i < 16 else float(i) for i in range(64)] + [None],
+                }
+            )
+            con.register("base", base)
+            original = run.build_level_sql
+            source_rows = []
+            written = {}
+
+            def measured(con, info, source, level):
+                source_rows.append(fetch_one(con.execute(f"SELECT count(*) FROM ({source})"))[0])
+                return original(con, info, source, level)
+
+            monkeypatch.setattr(run, "build_level_sql", measured)
+            monkeypatch.setattr(
+                run, "_write_overview", lambda table, path, *a, **kw: written.update({path: table})
+            )
+            for averages in (False, True):
+                columns = (RollupColumn("sum_v", "sum"),)
+                if averages:
+                    columns += (RollupColumn("avg_v", "avg"),)
+                info = AggregateInfo("a5", "a5_cell", 6, columns, "none")
+                levels = [2, 5, 3]  # sparse and deliberately unordered
+                outputs = [str(tmp_path / f"r{level}.parquet") for level in levels]
+                source_rows.clear()
+                result = run._build_levels(
+                    con,
+                    "base",
+                    info,
+                    levels,
+                    outputs,
+                    compression=None,
+                    compression_level=None,
+                    geoparquet_version=None,
+                    verbose=False,
+                    show_sql=False,
+                )
+                assert result == list(zip(levels, outputs, strict=True))
+                assert source_rows == ([65, 65, 65] if averages else [65, 17, 2])
+                for level, path in result:
+                    rows = written[path].sort_by("a5_cell").to_pylist()
+                    expected = (
+                        con.sql(original(con, info, "SELECT * FROM base", level)).arrow().read_all()
+                    )
+                    assert rows == expected.sort_by("a5_cell").to_pylist()
+                    assert sum(row["count"] for row in rows) == 65
+                    for row in rows:
+                        cell = row["a5_cell"]
+                        values = (
+                            [i for i in range(64) if cell == level * 1000 + i // 4 ** (6 - level)]
+                            if cell is not None
+                            else []
+                        )
+                        assert row["count"] == (len(values) if values else 1)
+                        assert row["sum_v"] == (float(sum(values)) if values else None)
+                        if averages:
+                            nonnull = [i for i in values if i >= 16]
+                            assert row["avg_v"] == (
+                                pytest.approx(sum(nonnull) / len(nonnull)) if nonnull else None
+                            )
+
+            attempts = []
+
+            def fail_second_write(table, path, *args, **kwargs):
+                attempts.append(path)
+                if len(attempts) == 2:
+                    raise OSError("write failed")
+
+            monkeypatch.setattr(run, "_write_overview", fail_second_write)
+            info = AggregateInfo("a5", "a5_cell", 6, (RollupColumn("sum_v", "sum"),), "none")
+            with pytest.raises(OSError, match="write failed"):
+                run._build_levels(
+                    con,
+                    "base",
+                    info,
+                    levels,
+                    outputs,
+                    compression=None,
+                    compression_level=None,
+                    geoparquet_version=None,
+                    verbose=False,
+                    show_sql=False,
+                )
+            with pytest.raises(duckdb.CatalogException, match="__overview_previous"):
+                con.sql("SELECT * FROM __overview_previous")
+            assert len(attempts) == 2
 
     def test_create_overviews_auto_levels(self, tmp_path, monkeypatch):
         from geoparquet_io.core.memory_limits import open_bounded_connection
