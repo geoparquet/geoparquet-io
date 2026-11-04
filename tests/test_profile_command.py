@@ -136,3 +136,18 @@ def test_cli_exit_is_not_a_successful_measurement(monkeypatch):
     monkeypatch.setattr(importlib.import_module("geoparquet_io.cli.main"), "cli", failing)
     with pytest.raises(RuntimeError, match="status 7"):
         _cli([])
+
+
+def test_admin_fixture_write_is_outside_measured_command(tmp_path):
+    from geoparquet_io.benchmarks.matrix import COMMANDS
+    from geoparquet_io.benchmarks.workloads import generate_workload
+    from scripts.profile_command import CallSpies, invoke
+
+    spec = next(row for row in COMMANDS if row["id"] == "aggregate-admin")
+    source = generate_workload("W2", tmp_path / "input")
+    output = tmp_path / "output"
+    output.mkdir()
+    prepared = invoke(spec, source, output, None, prepare=True)
+    with CallSpies() as spies:
+        invoke(spec, source, output, None, prepared=prepared)
+    assert spies.counts["parquet_writes"] == 1

@@ -226,8 +226,6 @@ def invoke(spec, input_path, output, url, *, prepare=False, prepared=None):
                 return _cli(["extract", "geoparquet", str(input_path), "-"])
         with Path(prepared).open("r") as stdin, patch.object(sys, "stdin", stdin):
             return _cli(["convert", "geojson", "-", str(output / "result.geojson")])
-    if kind == "admin":
-        return _admin(input_path, output)
     if kind.startswith("admin-"):
         fixture = Path(prepared)
         prepared_input = fixture / "input.parquet"
@@ -294,16 +292,12 @@ def _admin_fixture(boundary):
     pq.write_table(table, boundary)
 
 
-def _admin(input_path, output, *, boundary=None, operation="aggregate"):
+def _admin(input_path, output, *, boundary, operation="aggregate"):
     """Keep the real admin command paths, substituting only local source data."""
     from unittest.mock import patch
 
     from geoparquet_io.core.admin_datasets import AdminDatasetFactory
-    from geoparquet_io.core.process.aggregate.by_admin import aggregate_by_admin
 
-    if boundary is None:
-        boundary = output.parent / "admin.parquet"
-        _admin_fixture(boundary)
     factory = AdminDatasetFactory.create
 
     def local(dataset_name, source_path=None, verbose=False):
@@ -338,8 +332,16 @@ def _admin(input_path, output, *, boundary=None, operation="aggregate"):
                     "--skip-analysis",
                 ]
             )
-        return aggregate_by_admin(
-            str(input_path), str(output / "result.parquet"), breakdown="category"
+        return _cli(
+            [
+                "process",
+                "aggregate",
+                "admin",
+                str(input_path),
+                str(output / "result.parquet"),
+                "--breakdown",
+                "category",
+            ]
         )
 
 

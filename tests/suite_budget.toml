@@ -7,7 +7,9 @@
 # Seven above baseline preserve plan/review regressions with independent root/lock
 # lifetimes and platform/socket skip conditions; further merging mixes those lifetimes.
 # Full justification: scratchpad/final/budget_reason.md in the verification artifacts.
-max_collected = 14214
+# Round-0 profiling: +11 independent regressions (3 workloads, 6 profiler, 2 archive).
+# Seven deterministic generator cases share one property test and fixture lifetime.
+max_collected = 14225
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

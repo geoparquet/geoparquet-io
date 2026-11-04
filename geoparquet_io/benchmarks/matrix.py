@@ -198,7 +198,13 @@ COMMANDS = [
         "tickets": [1111],
     },
     {"id": "overview", "workload": "W1", "kind": "overview", "tickets": [1123]},
-    {"id": "aggregate-admin", "workload": "W2", "kind": "admin", "tickets": [1190, 550, 543]},
+    {
+        "id": "aggregate-admin",
+        "workload": "W2",
+        "kind": "admin-aggregate",
+        "prepare": True,
+        "tickets": [1190, 550, 543],
+    },
     {
         "id": "extract-wfs",
         "workload": "W6",

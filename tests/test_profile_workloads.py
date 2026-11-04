@@ -3,22 +3,19 @@
 import hashlib
 from urllib.request import Request, urlopen
 
-import pytest
-
 from geoparquet_io.benchmarks.workloads import generate_workload, serve_workload
 
 
-@pytest.mark.parametrize("name", ["W1", "W2", "W2-skew", "W3", "W4", "W5", "W6"])
-def test_workload_reproducible(tmp_path, name):
-    first = generate_workload(name, tmp_path / "first")
-    second = generate_workload(name, tmp_path / "second")
-
+def test_workload_reproducible(tmp_path):
     def digest(path):
         files = sorted(path.rglob("*")) if path.is_dir() else [path]
         return [hashlib.sha256(file.read_bytes()).hexdigest() for file in files if file.is_file()]
 
-    assert digest(first) == digest(second)
-    assert digest(first)
+    for name in ["W1", "W2", "W2-skew", "W3", "W4", "W5", "W6"]:
+        first = generate_workload(name, tmp_path / name / "first")
+        second = generate_workload(name, tmp_path / name / "second")
+        assert digest(first) == digest(second), name
+        assert digest(first), name
 
 
 def test_http_ranges_and_wfs_pages(tmp_path):
