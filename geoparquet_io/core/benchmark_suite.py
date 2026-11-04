@@ -242,7 +242,7 @@ def run_benchmark_suite(
     Returns:
         SuiteResult with all benchmark data
     """
-    from geoparquet_io.benchmarks.config import CORE_OPERATIONS
+    from geoparquet_io.benchmarks.workloads import CORE_OPERATIONS
 
     if operations is None:
         operations = CORE_OPERATIONS

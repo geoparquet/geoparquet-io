@@ -270,7 +270,7 @@ def cmd_compare(args):
             "uv",
             "run",
             "python",
-            "scripts/version_benchmark.py",
+            "scripts/benchmark_history.py",
             "--compare",
             str(files[0]),
             str(files[1]),
@@ -300,7 +300,7 @@ def cmd_trends(args):
         files.append(str(filepath))
 
     # Run trend analysis
-    cmd = ["uv", "run", "python", "scripts/version_benchmark.py", "--trend"] + files
+    cmd = ["uv", "run", "python", "scripts/benchmark_history.py", "--trend"] + files
     if args.threshold:
         cmd.extend(["--trend-threshold", str(args.threshold)])
 

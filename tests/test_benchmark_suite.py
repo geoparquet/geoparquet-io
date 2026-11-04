@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from geoparquet_io.benchmarks.config import (
+from geoparquet_io.benchmarks.workloads import (
     BENCHMARK_DATA_URL,
     BENCHMARK_FILES,
     CHAIN_OPERATIONS,
@@ -82,8 +82,8 @@ class TestOperationRegistry:
 
     def test_all_core_operations_registered(self):
         """Test that all core operations have handlers."""
-        from geoparquet_io.benchmarks.config import CORE_OPERATIONS
         from geoparquet_io.benchmarks.operations import OPERATION_REGISTRY
+        from geoparquet_io.benchmarks.workloads import CORE_OPERATIONS
 
         for op in CORE_OPERATIONS:
             assert op in OPERATION_REGISTRY, f"Missing handler for {op}"

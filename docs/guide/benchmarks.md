@@ -4,16 +4,36 @@ gpio includes a benchmark suite for measuring performance and detecting regressi
 
 ## Quick Start
 
-Run benchmarks comparing current version against a previous release:
+The local profile harness runs seeded inputs in a fresh process for each repetition.
+Install the profiling tools and run the full matrix with at least three repetitions:
 
-<!-- doctest: skip="runs a script that ships outside the guide" -->
+<!-- doctest: skip="runs the full performance matrix" -->
 ```bash
-# Run benchmarks on current version
-python scripts/version_benchmark.py --version-label "current" -o results_current.json
-
-# Compare against previous results
-python scripts/version_benchmark.py --compare results_baseline.json results_current.json
+uv sync --extra profile
+uv run python -m scripts.profile_command --size full --runs 3 --output matrix.json
 ```
+
+For a focused run, add `--command sort-str`. The matrix definition is `geoparquet_io/benchmarks/matrix.py`,
+the single list of command/workload pairs.
+
+For separate diagnostic runs (DuckDB operators and call counters for every
+command, py-spy and native memray for the slowest 20):
+
+<!-- doctest: skip="runs full diagnostic profiling" -->
+```bash
+uv run python -m scripts.profile_costs matrix.json
+```
+
+The diagnostics produce `costs.md`, `costs.json` and raw captures beside the
+matrix. Their overhead is excluded from baseline timing. Operator shares use
+summed operator CPU; sampled symbols cover the child lifetime. Memray measures
+allocation high water, which can include reserved, nonresident memory; it does
+not attribute process RSS to symbols. Memray requires Linux or macOS.
+
+`--child --command NAME --work-dir DIR --output ROW.json` runs one command
+in-process. Add `--spies`, `--memray CAPTURE.bin`, or `--pyinstrument REPORT.html`
+for diagnostics, and `--input-path INPUT` to use a fixture generated outside the
+child. `GPIO_DUCKDB_PROFILE=DIR` enables per-query operator JSON.
 
 ## Benchmark Operations
 
@@ -115,35 +135,44 @@ Files are automatically downloaded and cached locally in `/tmp/gpio-benchmark-ca
 
 ## Running Benchmarks Locally
 
-### Version Comparison Script
+### Seeded Profile Workloads
 
-The `scripts/version_benchmark.py` script works with any gpio version:
+`geoparquet_io/benchmarks/workloads.py` owns the generators. Small inputs are
+for harness checks; full inputs are for comparisons. Reuse the same seed and
+size on both revisions, and generate outside the timed process.
 
-<!-- doctest: skip="runs a script that ships outside the guide" -->
+| Workload | Shape | Full size |
+|----------|-------|-----------|
+| W1 | Points, ID, category, numeric value | 1,000,000 rows |
+| W2 | Small square polygons | 1,000,000 rows |
+| W2-skew | Polygons, 95% in a small cluster | 1,000,000 rows |
+| W3 | Many tiny Parquet files | 1,000 files × 100 rows |
+| W4 | Points over localhost HTTP with byte ranges | 1,000,000 rows |
+| W5 | Points plus 128 numeric columns | 100,000 rows |
+| W6 | Local paginated WFS service | 1,000 features |
+
+=== "CLI"
+    <!-- doctest: skip="runs an external profiling script" -->
+    ```bash
+    uv run python -m scripts.profile_command --command sort-str --size small --runs 3 --output sort-str.json
+    ```
+
+=== "Python"
+    <!-- doctest: skip="creates local profiling inputs" -->
+    ```python
+    from geoparquet_io.benchmarks.workloads import generate_workload, serve_workload
+
+    path = generate_workload("W4", "profile-inputs", size="small", seed=1368)
+    with serve_workload(path) as url:
+        print(url)  # Use the URL while this context is open.
+    ```
+
+Archived release JSON still supports comparison and trend analysis:
+
+<!-- doctest: skip="needs archived benchmark files" -->
 ```bash
-# Run full benchmarks (all files, all operations)
-python scripts/version_benchmark.py --version-label "v0.9.0" -o results.json
-
-# Run quick benchmarks (smaller file set, fewer operations)
-python scripts/version_benchmark.py --version-label "v0.9.0" -o results.json --files quick --ops quick
-
-# Run benchmarks with more iterations for accuracy
-python scripts/version_benchmark.py --version-label "main" -o results.json -n 5
-
-# Run specific operations on specific files
-python scripts/version_benchmark.py --version-label "test" --files small,medium --ops add-bbox,sort-hilbert
-
-# Compare two result files
-python scripts/version_benchmark.py --compare results_baseline.json results_current.json
-
-# Analyze trends across multiple baselines (oldest to newest)
-python scripts/version_benchmark.py --trend results_v0.7.0.json results_v0.8.0.json results_v0.9.0.json
-
-# Customize degradation threshold for trend detection (default: 0.05 = 5%)
-python scripts/version_benchmark.py --trend baseline1.json baseline2.json baseline3.json --trend-threshold 0.10
-
-# Skip local caching (test remote file performance)
-python scripts/version_benchmark.py --version-label "remote-test" --no-cache
+uv run python scripts/benchmark_history.py --compare baseline.json current.json
+uv run python scripts/benchmark_history.py --trend baseline1.json baseline2.json baseline3.json
 ```
 
 ### Managing Historical Baselines
@@ -503,19 +532,11 @@ Trend analysis helps detect gradual performance drift that might be missed when 
 
 Before releasing a new version:
 
-1. **Run benchmarks locally** against the previous release:
-   <!-- doctest: skip="runs a script that ships outside the guide" -->
+1. **Run the seeded matrix** in isolated clones of the previous release and
+   candidate, using the same inputs, core affinity, size and repetition count:
+   <!-- doctest: skip="runs the full performance matrix" -->
    ```bash
-   # Install previous version
-   git checkout v0.9.0 && pip install -e .
-   python scripts/version_benchmark.py --version-label "v0.9.0" -o baseline.json -n 5
-
-   # Install new version
-   git checkout main && pip install -e .
-   python scripts/version_benchmark.py --version-label "new" -o current.json -n 5
-
-   # Compare
-   python scripts/version_benchmark.py --compare baseline.json current.json
+   uv run python -m scripts.profile_command --size full --runs 3 --output matrix.json
    ```
 
 2. **Check for regressions** (>25% slower on large files)

@@ -181,7 +181,7 @@ def benchmark_suite(
     from pathlib import Path
 
     configure_verbose(verbose)
-    from geoparquet_io.benchmarks.config import CORE_OPERATIONS, FULL_OPERATIONS
+    from geoparquet_io.benchmarks.workloads import CORE_OPERATIONS, FULL_OPERATIONS
     from geoparquet_io.core.benchmark_suite import run_benchmark_suite
     from geoparquet_io.core.logging_config import info, progress, success
 

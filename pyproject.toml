@@ -97,6 +97,7 @@ gpio = "geoparquet_io.cli.main:main"
 "Source" = "https://github.com/geoparquet/geoparquet-io"
 
 [project.optional-dependencies]
+profile = ["py-spy>=0.4", "memray>=1.19; sys_platform != 'win32'", "pyinstrument>=5.0"]
 dev = [
     "pytest>=9.0.3",  # CVE-2025-71176 fix
     "pytest-cov>=4.0.0",

@@ -1,4 +1,4 @@
-"""Tests for version_benchmark.py trend analysis."""
+"""Tests for benchmark_history.py trend analysis."""
 
 import json
 import tempfile
@@ -9,7 +9,7 @@ import pytest
 # Import via the scripts package (not a sys.path hack): a relative sys.path
 # insertion resolves against the CWD, not this file, and breaks when the suite
 # runs from anywhere but the repo root.
-from scripts.version_benchmark import analyze_trends
+from scripts.benchmark_history import analyze_trends
 
 
 @pytest.fixture
