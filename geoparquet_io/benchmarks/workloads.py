@@ -136,7 +136,7 @@ def generate_workload(name, directory, size="small", seed=1368):
     import pyarrow.parquet as pq
 
     count = WORKLOADS[name][size]
-    geometry_columns = (5000 if size == "full" else 8) if name == "W5" else 1
+    geometry_columns = (500 if size == "full" else 8) if name == "W5" else 1
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
@@ -172,7 +172,8 @@ def generate_workload(name, directory, size="small", seed=1368):
             pq.write_table(_batch(i * 100, 100, "W1", rng), path / f"part-{i:05}.parquet")
         complete.touch()
         return path
-    path = directory / f"{name}-{size}-{seed}-{count}.parquet"
+    width = f"-{geometry_columns}geo" if name == "W5" else ""
+    path = directory / f"{name}-{size}-{seed}-{count}{width}.parquet"
     if path.exists():
         return path
     temporary = path.with_suffix(".tmp")

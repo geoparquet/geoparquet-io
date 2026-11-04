@@ -108,7 +108,7 @@ def test_api_convert_profiles_one_read(tmp_path, monkeypatch):
     from unittest.mock import Mock
 
     from geoparquet_io.api import table
-    from geoparquet_io.benchmarks.matrix import invoke
+    from scripts.profile_command import invoke
 
     converted = Mock()
     convert = Mock(return_value=converted)
@@ -118,3 +118,21 @@ def test_api_convert_profiles_one_read(tmp_path, monkeypatch):
     invoke({"kind": "api-convert"}, input_path, tmp_path, None)
     convert.assert_called_once_with(input_path)
     converted.write.assert_called_once_with(tmp_path / "result.parquet")
+
+
+def test_cli_exit_is_not_a_successful_measurement(monkeypatch):
+    import importlib
+
+    import click
+    import pytest
+
+    from scripts.profile_command import _cli
+
+    @click.command()
+    @click.pass_context
+    def failing(context):
+        context.exit(7)
+
+    monkeypatch.setattr(importlib.import_module("geoparquet_io.cli.main"), "cli", failing)
+    with pytest.raises(RuntimeError, match="status 7"):
+        _cli([])
