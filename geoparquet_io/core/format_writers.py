@@ -531,11 +531,15 @@ def write_gdal_format(
         if where_filter:
             source_query += f" WHERE {where_filter}"
 
-        staging = f"CREATE OR REPLACE TEMP TABLE {_STAGED_TABLE} AS {source_query}"
+        staging = None
+        # Retain filtered materialization and the existing GeoPackage write path.
+        if where_filter or format_name == "geopackage":
+            staging = f"CREATE OR REPLACE TEMP TABLE {_STAGED_TABLE} AS {source_query}"
+            source_query = f"SELECT * FROM {_STAGED_TABLE}"
 
         def copy_query(target: str) -> str:
             return f"""
-            COPY (SELECT * FROM {_STAGED_TABLE})
+            COPY ({source_query})
             TO {sql_path(target)}
             WITH (FORMAT GDAL, DRIVER '{config["driver"]}'{lco_clause}{srs_clause})
         """
@@ -544,8 +548,9 @@ def write_gdal_format(
         # ceiling-based default; the export used to run at DuckDB's own
         # 80%-of-host default, blind to a container or job cgroup (#1174).
         with scoped_write_memory_limit(con, None, verbose):
-            debug(f"Executing: {staging}")
-            con.execute(staging)
+            if staging:
+                debug(f"Executing: {staging}")
+                con.execute(staging)
             with atomic_write(
                 output_path,
                 suffix=str(config["extension"]),
