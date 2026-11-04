@@ -66,7 +66,7 @@ size on both revisions, and generate outside the timed process.
 | W2-skew | Polygons, 95% in a small cluster | 1,000,000 rows |
 | W3 | Many tiny Parquet files | 1,000 files × 100 rows |
 | W4 | Points over localhost HTTP with byte ranges | 1,000,000 rows |
-| W5 | Points plus 128 numeric columns | 100,000 rows |
+| W5 | 5,000 declared WKB geometry columns | 2 rows |
 | W6 | Local paginated WFS service | 1,000 features |
 
 === "CLI"

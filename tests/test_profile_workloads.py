@@ -35,3 +35,16 @@ def test_http_ranges_and_wfs_pages(tmp_path):
             page = json.load(response)
             assert len(page["features"]) == 2
             assert page["features"][0]["id"] == "points.1"
+
+
+def test_wide_workload_has_many_declared_geometry_columns(tmp_path):
+    import json
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path = generate_workload("W5", tmp_path, "small")
+    schema = pq.read_schema(path)
+    geometries = json.loads(schema.metadata[b"geo"])["columns"]
+    assert len(geometries) > 1
+    assert all(pa.types.is_binary(schema.field(name).type) for name in geometries)

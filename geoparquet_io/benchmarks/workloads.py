@@ -71,12 +71,12 @@ WORKLOADS = {
     "W2-skew": {"small": 256, "full": 1_000_000},
     "W3": {"small": 8, "full": 1_000},
     "W4": {"small": 256, "full": 1_000_000},
-    "W5": {"small": 128, "full": 100_000},
+    "W5": {"small": 16, "full": 2},
     "W6": {"small": 16, "full": 1_000},
 }
 
 
-def _batch(start, count, name, rng):
+def _batch(start, count, name, rng, geometry_columns=1):
     import struct
 
     import pyarrow as pa
@@ -103,20 +103,19 @@ def _batch(start, count, name, rng):
         "value": pa.array([rng.random() * 100 for _ in range(count)], type=pa.float64()),
         "geometry": pa.array(geometry, type=pa.binary()),
     }
-    if name == "W5":
-        columns.update(
-            {
-                f"column_{i:03}": pa.array([rng.random() for _ in range(count)], type=pa.float64())
-                for i in range(128)
-            }
-        )
+    geometry_names = ["geometry"]
+    for i in range(1, geometry_columns):
+        column = f"geometry_{i:04}"
+        columns[column] = columns["geometry"]
+        geometry_names.append(column)
     import json
 
     geo = {
         "version": "1.1.0",
         "primary_column": "geometry",
         "columns": {
-            "geometry": {"encoding": "WKB", "geometry_types": ["Polygon" if polygons else "Point"]}
+            column: {"encoding": "WKB", "geometry_types": ["Polygon" if polygons else "Point"]}
+            for column in geometry_names
         },
     }
     return pa.table(columns).replace_schema_metadata(
@@ -137,6 +136,7 @@ def generate_workload(name, directory, size="small", seed=1368):
     import pyarrow.parquet as pq
 
     count = WORKLOADS[name][size]
+    geometry_columns = (5000 if size == "full" else 8) if name == "W5" else 1
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     rng = random.Random(seed)
@@ -176,9 +176,13 @@ def generate_workload(name, directory, size="small", seed=1368):
     if path.exists():
         return path
     temporary = path.with_suffix(".tmp")
-    with pq.ParquetWriter(temporary, _batch(0, 0, name, random.Random(seed)).schema) as writer:
+    with pq.ParquetWriter(
+        temporary, _batch(0, 0, name, random.Random(seed), geometry_columns).schema
+    ) as writer:
         for start in range(0, count, 16_384):
-            writer.write_table(_batch(start, min(16_384, count - start), name, rng))
+            writer.write_table(
+                _batch(start, min(16_384, count - start), name, rng, geometry_columns)
+            )
     temporary.replace(path)
     return path
 

@@ -60,6 +60,12 @@ COMMANDS = [
         "tickets": [1322],
     },
     {
+        "id": "convert-shapefile",
+        "workload": "W2",
+        "argv": ["convert", "shapefile", "{input}", "{shp}"],
+        "tickets": [1322],
+    },
+    {
         "id": "reproject",
         "workload": "W2",
         "argv": ["convert", "reproject", "{input}", "{output}", "-d", "EPSG:3857"],
@@ -396,6 +402,7 @@ def invoke(spec, input_path, output, url, *, prepare=False, prepared=None):
         "geojson": str(output / "result.geojson"),
         "fgb": str(output / "result.fgb"),
         "gpkg": str(output / "result.gpkg"),
+        "shp": str(output / "result.shp"),
         "glob": str(Path(input_path) / "*.parquet"),
         "url": url,
     }
