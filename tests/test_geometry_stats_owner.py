@@ -207,7 +207,26 @@ def test_a_missing_geometry_column_measures_nothing(tmp_path):
         con.close()
 
 
-def test_types_carry_the_dimension_suffix_on_every_source(tmp_path):
+def test_types_and_bounds_share_query_geometry_evaluation(tmp_path):
     point_z = struct.pack("<BI3d", 1, 1001, 1.0, 2.0, 3.0)
     for label, run in _all_sources(tmp_path, [point_z, _pt(0.0, 0.0)]):
         assert run(geometry_types_of) == ["Point", "Point Z"], label
+
+    # Also bound source evaluations while the query owner collects types and bounds.
+    con = get_duckdb_connection(load_spatial=True)
+    calls = []
+
+    def counted(value: bytes) -> bytes:
+        calls.append(value)
+        return value
+
+    try:
+        con.create_function("counted_geometry", counted, ["BLOB"], "BLOB")
+        geoms = [point_z, EMPTY_POLYGON, EMPTY_POINT, _pt(3.0, 4.0)]
+        register_arrow(con, "counted_input", _table(geoms))
+        query = "SELECT ST_GeomFromWKB(counted_geometry(geometry)) AS geometry FROM counted_input"
+        stats = geometry_stats_of(QuerySource(con, query), "geometry")
+        assert stats == GeometryStats([1.0, 2.0, 3.0, 4.0], ["Point", "Point Z", "Polygon"])
+        assert len(calls) <= len(geoms), f"{len(calls)} evaluations for {len(geoms)} rows"
+    finally:
+        con.close()
