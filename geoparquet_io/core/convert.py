@@ -2631,7 +2631,8 @@ def read_spatial_to_arrow(
         # multiple layers sequentially. GDAL's internal handles may not be
         # fully released before the next connection opens.
         # See: https://github.com/geoparquet/geoparquet-io/issues/322, #401
-        gc.collect()
+        if not is_csv and not is_parquet:
+            gc.collect()
 
 
 def _read_csv_to_arrow(

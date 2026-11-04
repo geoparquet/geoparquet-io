@@ -272,7 +272,7 @@ class BboxInfo(TypedDict, total=False):
     message: str
 
 
-def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
+def check_bbox_structure(parquet_file, verbose=False, con=None) -> BboxInfo:
     """
     Check bbox structure and metadata coverage in a GeoParquet file.
 
@@ -285,7 +285,7 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
             - message (str): Human readable description
     """
     # Get schema info using DuckDB
-    schema_info = get_schema_info(parquet_file)
+    schema_info = get_schema_info(parquet_file, con=con)
 
     if verbose:
         debug("\nSchema fields:")
@@ -298,7 +298,7 @@ def check_bbox_structure(parquet_file, verbose=False) -> BboxInfo:
     # Find the primary's bbox column: the authoritative covering metadata on its
     # own entry first (spec-valid files may use non-conventional names), then the
     # one self-evident conventional name as the no-provenance fallback (#1171).
-    geo_meta = raw_geo_of_file(parquet_file).block
+    geo_meta = raw_geo_of_file(parquet_file, con=con).block
     bbox_column_name = None
     covering_column = _bbox_column_from_covering(geo_meta)
     if covering_column:

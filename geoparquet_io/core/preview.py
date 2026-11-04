@@ -99,41 +99,46 @@ def preview_bbox_filter(
     """
     query_bbox = parse_bbox(bbox)
 
-    from geoparquet_io.core.duckdb_metadata import get_row_group_sizes
+    from geoparquet_io.core.duckdb_metadata import _get_connection_for_file, get_row_group_sizes
 
-    sizes = get_row_group_sizes(parquet_file)
-    totals = {
-        "total_row_groups": len(sizes),
-        "total_rows": sum(size["num_rows"] for size in sizes),
-        "total_bytes": sum(size["compressed_bytes"] for size in sizes),
-    }
+    con, _ = _get_connection_for_file(parquet_file)
+    try:
+        sizes = get_row_group_sizes(parquet_file, con=con)
+        totals = {
+            "total_row_groups": len(sizes),
+            "total_rows": sum(size["num_rows"] for size in sizes),
+            "total_bytes": sum(size["compressed_bytes"] for size in sizes),
+        }
 
-    stats, source = _row_group_spatial_stats(parquet_file, geometry_column)
-    if not stats:
+        stats, source = _row_group_spatial_stats(parquet_file, geometry_column, con=con)
+        if not stats:
+            return BboxFilterPreview(
+                has_estimate=False,
+                reason=NO_STATS_REASON,
+                stats_source=None,
+                row_groups=(),
+                est_rows=None,
+                est_bytes=None,
+                **totals,
+            )
+
+        matched = _matching_row_groups(stats, sizes, query_bbox)
         return BboxFilterPreview(
-            has_estimate=False,
-            reason=NO_STATS_REASON,
-            stats_source=None,
-            row_groups=(),
-            est_rows=None,
-            est_bytes=None,
+            has_estimate=True,
+            reason=None,
+            stats_source=source,
+            row_groups=matched,
+            est_rows=sum(group.num_rows for group in matched),
+            est_bytes=sum(group.compressed_bytes for group in matched),
             **totals,
         )
 
-    matched = _matching_row_groups(stats, sizes, query_bbox)
-    return BboxFilterPreview(
-        has_estimate=True,
-        reason=None,
-        stats_source=source,
-        row_groups=matched,
-        est_rows=sum(group.num_rows for group in matched),
-        est_bytes=sum(group.compressed_bytes for group in matched),
-        **totals,
-    )
+    finally:
+        con.close()
 
 
 def _row_group_spatial_stats(
-    parquet_file: str, geometry_column: str | None
+    parquet_file: str, geometry_column: str | None, con=None
 ) -> tuple[list[dict], Literal["native", "bbox_struct"] | None]:
     """The file's per-row-group bboxes and where they came from, or ``([], None)``.
 
@@ -154,13 +159,14 @@ def _row_group_spatial_stats(
         parquet_file,
         # An explicit column the file lacks is the caller's typo: raise it.
         native=lambda: get_per_row_group_native_geo_stats(
-            parquet_file, geometry_column, strict=True
+            parquet_file, geometry_column, strict=True, con=con
         ),
-        bbox_column=lambda: _prunable_bbox_column(parquet_file, geometry_column),
+        bbox_column=lambda: _prunable_bbox_column(parquet_file, geometry_column, con=con),
+        con=con,
     )
 
 
-def _prunable_bbox_column(parquet_file: str, geometry_column: str | None) -> str | None:
+def _prunable_bbox_column(parquet_file: str, geometry_column: str | None, con=None) -> str | None:
     """The bbox covering column the preview may prune on, or ``None``.
 
     With no explicit column (or the primary named explicitly) that is the
@@ -172,15 +178,15 @@ def _prunable_bbox_column(parquet_file: str, geometry_column: str | None) -> str
 
     if geometry_column is not None:
         try:
-            primary = primary_geometry_column(parquet_file)
+            primary = primary_geometry_column(parquet_file, con=con)
         except Exception:  # noqa: BLE001 - a pruning hint, never the preview's failure
             primary = None
     if geometry_column is None or geometry_column == primary:
-        return check_bbox_structure(parquet_file).get("bbox_column_name")
+        return check_bbox_structure(parquet_file, con=con).get("bbox_column_name")
 
     from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
-    return bbox_covering_column_for(raw_geo_of_file(parquet_file).block, geometry_column)
+    return bbox_covering_column_for(raw_geo_of_file(parquet_file, con=con).block, geometry_column)
 
 
 def _matching_row_groups(

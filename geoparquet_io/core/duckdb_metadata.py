@@ -1171,6 +1171,7 @@ def get_row_group_bbox_stats(
     *,
     bbox_column: Callable[[], str | None],
     native: Callable[[], list[dict]] | None = None,
+    con=None,
 ) -> tuple[list[dict], Literal["native", "bbox_struct"] | None]:
     """Per-row-group bboxes and where they came from, or ``([], None)`` (#1367 concept 17).
 
@@ -1182,12 +1183,16 @@ def get_row_group_bbox_stats(
     reads one named column; by default it is the file's primary geometry
     (:func:`get_per_row_group_native_geo_stats`).
     """
-    stats = native() if native is not None else get_per_row_group_native_geo_stats(parquet_file)
+    stats = (
+        native()
+        if native is not None
+        else get_per_row_group_native_geo_stats(parquet_file, con=con)
+    )
     if stats:
         return stats, "native"
     column = bbox_column()
     if column:
-        stats = get_per_row_group_bbox_stats(parquet_file, column)
+        stats = get_per_row_group_bbox_stats(parquet_file, column, con=con)
         if stats:
             return stats, "bbox_struct"
     return [], None

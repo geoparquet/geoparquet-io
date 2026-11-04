@@ -209,7 +209,7 @@ def _file_columns(raw_url: str, con, verbose: bool) -> list[tuple[str, bool]] | 
 
         return [
             (col["name"], _is_geometry_type(col.get("logical_type")))
-            for col in root_schema_columns(get_schema_info(raw_url))
+            for col in root_schema_columns(get_schema_info(raw_url, con=None if own else con))
         ]
     except Exception as e:  # noqa: BLE001 - nothing readable: the block's word stands
         if is_interrupt(e):
