@@ -2,6 +2,8 @@
 
 
 def test_spies_count_real_connection(tmp_path):
+    import sys
+
     import pyarrow as pa
     import pyarrow.ipc as ipc
     import pyarrow.parquet as pq
@@ -13,27 +15,44 @@ def test_spies_count_real_connection(tmp_path):
     )
     from scripts.profile_command import CallSpies
 
-    with CallSpies() as spies:
-        with get_duckdb_connection(load_spatial=False, load_httpfs=False) as con:
-            result = con.sql("SELECT 42 AS answer").arrow().read_all()
-            complete_without_fetch(
-                con.execute(
-                    f"COPY (SELECT 42 AS answer) TO {sql_path(tmp_path / 'copy.parquet')} (FORMAT PARQUET)"
+    def check(directory):
+        directory.mkdir()
+        with CallSpies() as spies:
+            with get_duckdb_connection(load_spatial=False, load_httpfs=False) as con:
+                before = spies.counts["execute"]
+                complete_without_fetch(con.execute("PRAGMA disable_profiling"))
+                assert spies.counts["execute"] == before
+                result = con.sql("SELECT 42 AS answer").arrow().read_all()
+                complete_without_fetch(
+                    con.execute(
+                        f"COPY (SELECT 42 AS answer) TO {sql_path(directory / 'copy.parquet')} (FORMAT PARQUET)"
+                    )
                 )
-            )
-            con.sql("SELECT 42 AS answer").write_parquet(str(tmp_path / "relation.parquet"))
-        pq.write_table(result, tmp_path / "tiny.parquet")
-        pq.read_metadata(tmp_path / "tiny.parquet")
-        buffer = pa.BufferOutputStream()
-        with ipc.new_stream(buffer, result.schema) as writer:
-            writer.write_table(result)
-        assert ipc.open_stream(buffer.getvalue()).read_all().equals(result)
-    assert spies.counts["footer_reads"] == 1
-    assert spies.counts["parquet_writes"] == 3
-    assert result.column("answer").to_pylist() == [42]
-    assert spies.counts["connections"] == 1
-    assert spies.counts["arrow_read_all"] == 2
-    assert spies.counts["execute"] > 0
+                con.sql("SELECT 42 AS answer").write_parquet(str(directory / "relation.parquet"))
+            pq.write_table(result, directory / "tiny.parquet")
+            metadata = pq.read_metadata(directory / "tiny.parquet")
+            pq.ParquetFile(directory / "tiny.parquet", metadata=metadata).close()
+            buffer = pa.BufferOutputStream()
+            with ipc.new_stream(buffer, result.schema) as writer:
+                writer.write_table(result)
+            assert ipc.open_stream(buffer.getvalue()).read_all().equals(result)
+        assert spies.counts["footer_reads"] == 1
+        assert spies.counts["parquet_writes"] == 3
+        assert result.column("answer").to_pylist() == [42]
+        assert spies.counts["connections"] == 1
+        assert spies.counts["arrow_read_all"] == 2
+        assert spies.counts["execute"] > 0
+
+    check(tmp_path / "native")
+    monitoring = getattr(sys, "monitoring", None)
+    if monitoring is not None and monitoring.get_tool(5) is None:
+        monitoring.use_tool_id(5, "occupied-for-fallback-test")
+        try:
+            check(tmp_path / "fallback")
+        finally:
+            monitoring.free_tool_id(5)
+    else:
+        check(tmp_path / "fallback")
 
 
 def test_operator_costs_do_not_double_count_parent_cpu(tmp_path):

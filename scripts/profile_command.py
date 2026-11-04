@@ -96,8 +96,21 @@ class CallSpies:
             original = getattr(duckdb.DuckDBPyConnection, name)
 
             def execute(owner, *args, _original=original, **kwargs):
-                counts["execute"] += 1
                 query = args[0] if args else kwargs.get("query", "")
+                instrumentation = (
+                    str(query)
+                    .lstrip()
+                    .upper()
+                    .startswith(
+                        (
+                            "SET PROFILING_OUTPUT",
+                            "SET ENABLE_PROFILING",
+                            "PRAGMA DISABLE_PROFILING",
+                        )
+                    )
+                )
+                if not instrumentation:
+                    counts["execute"] += 1
                 if re.search(r"\bFORMAT\s*(?:=|:=)?\s*['\"]?PARQUET\b", str(query), re.I):
                     counts["parquet_writes"] += 1
                 return _original(owner, *args, **kwargs)
@@ -112,15 +125,49 @@ class CallSpies:
         self.patches.enter_context(
             patch.object(duckdb.DuckDBPyRelation, "write_parquet", write_parquet)
         )
-        self.previous_threads = threading.getprofile()
-        threading.setprofile(self._event)
-        self.previous = sys.getprofile()
-        sys.setprofile(self._event)
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+        self.monitoring = getattr(sys, "monitoring", None)
+        if self.monitoring is not None and self.monitoring.get_tool(5) is None:
+            # Local events keep per-row serialization out of the counter callback.
+            self.codes = {
+                get_duckdb_connection.__code__: "connections",
+                pq.ParquetFile.__init__.__code__: "footer_reads",
+                pq.ParquetWriter.write_table.__code__: "parquet_writes",
+            }
+            self.monitoring.use_tool_id(5, "gpio-call-spies")
+
+            def entered(code, _offset):
+                counter = self.codes[code]
+                if (
+                    counter == "footer_reads"
+                    and sys._getframe(1).f_locals.get("metadata") is not None
+                ):
+                    return
+                counts[counter] += 1
+
+            self.monitoring.register_callback(5, self.monitoring.events.PY_START, entered)
+            for code in self.codes:
+                self.monitoring.set_local_events(5, code, self.monitoring.events.PY_START)
+        else:
+            self.monitoring = None
+            self.previous_threads = threading.getprofile()
+            threading.setprofile(self._event)
+            self.previous = sys.getprofile()
+            sys.setprofile(self._event)
         return self
 
     def __exit__(self, *exc):
-        sys.setprofile(self.previous)
-        threading.setprofile(self.previous_threads)
+        if self.monitoring is not None:
+            for code in self.codes:
+                self.monitoring.set_local_events(5, code, 0)
+            self.monitoring.register_callback(5, self.monitoring.events.PY_START, None)
+            self.monitoring.free_tool_id(5)
+        else:
+            sys.setprofile(self.previous)
+            threading.setprofile(self.previous_threads)
         self.patches.close()
 
 
