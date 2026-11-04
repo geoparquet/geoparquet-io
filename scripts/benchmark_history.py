@@ -6,15 +6,55 @@ New measurements use scripts/profile_command.py and seeded local workloads.
 
 import argparse
 import json
+from collections import defaultdict
 from pathlib import Path
+
+
+def normalize_matrix(rows: list[dict], version: str) -> dict:
+    """Adapt seeded harness rows to the archived summary shape without mixing workloads."""
+    if not rows or any(row.get("diagnostic") for row in rows):
+        raise ValueError("Expected nonempty, uninstrumented matrix measurements")
+    grouped = defaultdict(list)
+    for row in rows:
+        grouped[(row["command"], row["workload"], row["size"])].append(row)
+    benchmarks = []
+    for (command, workload, size), runs in grouped.items():
+        times = [run["wall_seconds"] for run in runs]
+        benchmarks.append(
+            {
+                "operation": command,
+                "file_size": f"{workload}/{size}",
+                "avg_time": sum(times) / len(times),
+                "min_time": min(times),
+                "max_time": max(times),
+                "cpu_seconds": min(run["cpu_seconds"] for run in runs),
+                "peak_rss_bytes": max(run["peak_rss_bytes"] for run in runs),
+                "success_count": len(runs),
+                "fail_count": 0,
+            }
+        )
+    from importlib.metadata import version as package_version
+
+    return {
+        "version": version,
+        "gpio_version": package_version("geoparquet-io"),
+        "iterations": min(len(runs) for runs in grouped.values()),
+        "measurement": "seeded-profile-v1",
+        "benchmarks": benchmarks,
+    }
+
+
+def load_results(path) -> dict:
+    """Accept archived summaries and new raw matrix arrays."""
+    with open(path) as source:
+        result = json.load(source)
+    return normalize_matrix(result, Path(path).stem) if isinstance(result, list) else result
 
 
 def compare_results(file1: str, file2: str):
     """Compare two benchmark result files."""
-    with open(file1) as f:
-        results1 = json.load(f)
-    with open(file2) as f:
-        results2 = json.load(f)
+    results1 = load_results(file1)
+    results2 = load_results(file2)
 
     print(f"\n{'=' * 70}")
     print(f"Comparison: {results1['version']} vs {results2['version']}")
@@ -85,8 +125,7 @@ def analyze_trends(baseline_files: list[str], degradation_threshold: float = 0.0
     baselines = []
     for filepath in baseline_files:
         try:
-            with open(filepath) as f:
-                baselines.append(json.load(f))
+            baselines.append(load_results(filepath))
         except Exception as e:
             return {"error": f"Failed to load {filepath}: {e}"}
 
@@ -130,7 +169,10 @@ def analyze_trends(baseline_files: list[str], degradation_threshold: float = 0.0
         # Check for consistent degradation (last 2 deltas both exceed threshold)
         # Also verify the last 2 baselines (most recent) both have data
         last_two_indices = [entries[-2][0], entries[-1][0]]
-        has_recent_consecutive = last_two_indices[-1] == last_two_indices[-2] + 1
+        has_recent_consecutive = (
+            last_two_indices[-1] == last_two_indices[-2] + 1
+            and last_two_indices[-1] == len(baselines) - 1
+        )
 
         if has_recent_consecutive and all(d > degradation_threshold for d in deltas[-2:]):
             avg_degradation = sum(deltas[-2:]) / 2 * 100
@@ -237,10 +279,17 @@ def main():
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--compare", nargs=2, metavar=("BASE", "HEAD"))
     action.add_argument("--trend", nargs="+")
+    action.add_argument("--matrix", help="Normalize raw profile_command JSON for CI summaries")
+    parser.add_argument("--version-label", default="unknown")
     parser.add_argument("--trend-threshold", type=float, default=0.05)
     parser.add_argument("--output", "-o")
     args = parser.parse_args()
-    if args.compare:
+    if args.matrix:
+        if not args.output:
+            parser.error("--matrix requires --output")
+        result = normalize_matrix(json.loads(Path(args.matrix).read_text()), args.version_label)
+        Path(args.output).write_text(json.dumps(result, indent=2) + "\n")
+    elif args.compare:
         compare_results(*args.compare)
     else:
         result = analyze_trends(args.trend, args.trend_threshold)

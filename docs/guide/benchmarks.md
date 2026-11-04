@@ -35,103 +35,21 @@ in-process. Add `--spies`, `--memray CAPTURE.bin`, or `--pyinstrument REPORT.htm
 for diagnostics, and `--input-path INPUT` to use a fixture generated outside the
 child. `GPIO_DUCKDB_PROFILE=DIR` enables per-query operator JSON.
 
-## Benchmark Operations
+## Command Coverage
 
-The suite tests these operations covering most gpio capabilities:
+The single profiling matrix is `geoparquet_io/benchmarks/matrix.py`. It covers
+CLI import, conversion and GDAL exports, indexes, sorting, partitioning, checks,
+inspection, extraction and streaming, aggregate breakdowns, admin joins and
+overviews, plus the corresponding eager Table API paths. The stdout producer
+and stdin GeoJSON consumer are measured separately, with IPC fixture generation
+outside the measured child; simultaneous pipeline RSS is not inferred. Admin variants exercise
+WKB without bbox, native geometry and reprojected input. Remote fixtures use a
+local HTTP server with range requests; WFS uses a local paginated service.
 
-### Extract Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `inspect` | Read and display file metadata |
-| `extract-limit` | Extract first 100 rows |
-| `extract-columns` | Extract specific columns (includes geometry) |
-| `extract-bbox` | Spatial bounding box filtering |
-
-### Add Column Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `add-bbox` | Add bounding box column |
-| `add-quadkey` | Add quadkey column (resolution 12) |
-| `add-h3` | Add H3 cell ID column (resolution 8) |
-
-### Sort Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `sort-hilbert` | Sort by Hilbert curve for spatial locality |
-| `sort-quadkey` | Sort by quadkey spatial index |
-
-### Transform Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `reproject` | Reproject to Web Mercator (EPSG:3857) |
-
-### Partition Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `partition-quadkey` | Partition by quadkey (resolution 4) |
-| `partition-h3` | Partition by H3 cells (resolution 4) |
-
-### Convert/Export Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `convert-geojson` | Convert to GeoJSON format |
-| `convert-flatgeobuf` | Convert to FlatGeobuf format |
-| `convert-geopackage` | Convert to GeoPackage format |
-
-### Import Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `import-geojson` | Import from GeoJSON to GeoParquet |
-| `import-geopackage` | Import from GeoPackage to GeoParquet |
-
-Note: Import operations only run on tiny/small file sizes as source format files are only available in those sizes.
-
-### Chain Operations (Multi-step Workflows)
-
-| Operation | Description |
-|-----------|-------------|
-| `chain-extract-bbox-sort` | Extract columns → Add bbox → Hilbert sort |
-| `chain-filter-sort` | Bbox filter → Hilbert sort |
-
-### Operation Presets
-
-| Preset | Operations |
-|--------|------------|
-| `quick` | inspect, extract-limit, add-bbox |
-| `standard` | inspect, extract-limit, extract-columns, add-bbox, sort-hilbert |
-| `full` | All 19 operations including imports and chains |
-
-## Test Data
-
-Benchmark files are hosted on source.coop with different size tiers:
-
-| Tier | Rows | Geometry | CRS | Source |
-|------|------|----------|-----|--------|
-| tiny | 1,000 | Polygon | EPSG:4326 | Overture Buildings (Singapore) |
-| small | 10,000 | Polygon | EPSG:4326 | Overture Buildings (Singapore) |
-| medium | 100,000 | Polygon | EPSG:4326 | Overture Buildings (Singapore) |
-| large | 809,000 | Polygon | EPSG:3794 | fiboa field boundaries (Slovenia) |
-| points-tiny | 1,000 | Point | EPSG:3857 | Building centroids (Web Mercator) |
-| points-small | 10,000 | Point | EPSG:3857 | Building centroids (Web Mercator) |
-
-The points files provide variation in geometry type and CRS for regression testing.
-
-### File Presets
-
-| Preset | Files |
-|--------|-------|
-| `quick` | tiny, small |
-| `standard` | small, medium |
-| `full` | tiny, small, medium, large, points-tiny, points-small |
-
-Files are automatically downloaded and cached locally in `/tmp/gpio-benchmark-cache/`.
+Select one matrix command with `--command`; omit it for the complete matrix.
+The earlier version script's operation and file presets are replaced by these
+command IDs and the seeded `small`/`full` workloads below. Existing multi-engine
+comparisons remain available through `gpio benchmark suite`.
 
 ## Running Benchmarks Locally
 
@@ -432,7 +350,8 @@ The benchmark workflow automatically suggests profiling when regressions are det
    gpio benchmark suite --files large.parquet --operations sort-hilbert --profile
 ```
 
-Profile artifacts are uploaded with 30-day retention when profiling is enabled.
+Raw measurements and command logs are uploaded with 30-day retention. Local
+profiling provides the detailed diagnostics.
 
 ## GitHub Actions Workflows
 
@@ -452,14 +371,23 @@ Run benchmarks manually from the Actions tab:
 2. Click **Run workflow**
 3. Configure options:
    - **iterations**: Number of runs per operation (default: 3)
-   - **files**: File preset or comma-separated list (default: full)
-   - **ops**: Operation preset or comma-separated list (default: full)
+   - **size**: Seeded workload size, `small` or `full` (default: full)
+   - **command**: One matrix command ID (default: `sort-hilbert`)
    - **compare_version**: Optional version to compare against (e.g., `v0.9.0`)
 4. View results in the workflow summary
 
+These existing workflows use the same seeded harness as local profiling. They
+run one command, which must be supported by both revisions. The default
+`sort-hilbert` works across historical releases; selecting a newer command on
+an older release fails visibly and retains partial measurements and logs.
+Current harness files are copied into each historical checkout, while the
+production package comes from the selected revision.
+
 ### Release Benchmarks
 
-When a release is created, benchmarks automatically:
+When a release is created, the workflow measures `sort-hilbert` on the full
+seeded polygon workload. Manual release runs can select another command and
+size. Benchmarks automatically:
 
 1. Run on the new release version
 2. Compare against the previous release tag
@@ -477,6 +405,10 @@ When a release is created, benchmarks automatically:
 
 **Baseline Storage:**
 - Baselines are stored as GitHub Actions artifacts
+- Archived public-dataset results remain readable. Seeded results use distinct
+  workload/size keys such as `W2/full`; only matching keys are compared or
+  included in a current trend. A legacy `small` dataset is never compared with
+  the new seeded `W2/small` workload.
 - Retention: 400 days (covers ~5-10 releases)
 - Artifact naming: `release-benchmark-{version}`
 - Contains: benchmark results JSON, comparison text, trend analysis

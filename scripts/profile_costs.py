@@ -74,7 +74,7 @@ def allocation_site(path):
     return site, size, sum(totals.values())
 
 
-def diagnose(matrix, top=20):
+def diagnose(matrix):
     from geoparquet_io.benchmarks.matrix import COMMANDS
     from geoparquet_io.benchmarks.workloads import generate_workload
 
@@ -144,6 +144,7 @@ def diagnose(matrix, top=20):
         op, buffer_peak = operators(root / "duckdb")
         summary = {
             "command": name,
+            "size": samples[0]["size"],
             "wall_seconds": wall,
             "peak_rss_bytes": rss,
             "tickets": spec["tickets"],
@@ -152,7 +153,7 @@ def diagnose(matrix, top=20):
             "duckdb_peak_buffer_bytes": buffer_peak,
             "counters": json.loads((root / "spies.json").read_text())["counters"],
         }
-        if name in ranked[:top]:
+        if name in ranked[:20]:
             speedscope = root / "py-spy.json"
             if not speedscope.exists():
                 shutil.rmtree(root / "sampling", ignore_errors=True)
@@ -202,7 +203,7 @@ def render_costs(directory, summaries):
     lines = [
         "# Baseline costs",
         "",
-        "Timing/RSS: three fresh, uninstrumented processes, full size, cores 0–15.",
+        f"Timing/RSS: three fresh, uninstrumented processes, {', '.join(sorted({r['size'] for r in summaries}))} size, cores 0–15.",
         "Wall is the minimum; RSS is the maximum Linux ru_maxrss (includes process startup).",
         "Diagnostics are separate runs. Operator seconds sum thread CPU and can exceed wall time;",
         "operator share below is of profiled operator CPU, not a wall-time attribution.",
@@ -249,9 +250,8 @@ def render_costs(directory, summaries):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("matrix", type=Path)
-    parser.add_argument("--top", type=int, default=20)
     args = parser.parse_args()
-    diagnose(args.matrix.resolve(), args.top)
+    diagnose(args.matrix.resolve())
 
 
 if __name__ == "__main__":

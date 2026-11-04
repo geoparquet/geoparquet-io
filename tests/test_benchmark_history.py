@@ -246,3 +246,48 @@ def test_analyze_trends_skips_failed_operations(tmp_path):
     # Should process the valid operation and skip the failed one
     assert "error" not in result
     assert result["operations_tracked"] == 1  # Only "test" operation tracked
+
+
+def test_matrix_summary_preserves_distinct_workloads_and_legacy(tmp_path):
+    from scripts.benchmark_history import load_results, normalize_matrix
+
+    rows = [
+        {
+            "command": "sort-hilbert",
+            "workload": "W2",
+            "size": "full",
+            "wall_seconds": value,
+            "cpu_seconds": value / 2,
+            "peak_rss_bytes": 100 + value,
+        }
+        for value in [3.0, 1.0, 2.0]
+    ]
+    rows += [dict(row, workload="W1") for row in rows]
+    summary = normalize_matrix(rows, "candidate")
+    assert len(summary["benchmarks"]) == 2
+    result = summary["benchmarks"][0]
+    assert summary["version"] == "candidate"
+    assert summary["iterations"] == 3
+    assert result["file_size"] == "W2/full"
+    assert (result["avg_time"], result["min_time"], result["max_time"]) == (2.0, 1.0, 3.0)
+    assert result["peak_rss_bytes"] == 103
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(json.dumps({"version": "old", "benchmarks": []}))
+    assert load_results(legacy) == {"version": "old", "benchmarks": []}
+
+
+def test_seeded_history_does_not_attribute_legacy_trends_to_new_inputs(sample_baselines, tmp_path):
+    current = tmp_path / "seeded.json"
+    current.write_text(
+        json.dumps(
+            {
+                "version": "new",
+                "benchmarks": [
+                    {"file_size": "W2/full", "operation": "sort-hilbert", "avg_time": 1.0}
+                ],
+            }
+        )
+    )
+    result = analyze_trends([*sample_baselines, str(current)])
+    assert result["warnings"] == []
+    assert result["improvements"] == []

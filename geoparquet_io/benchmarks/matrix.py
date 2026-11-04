@@ -171,7 +171,8 @@ COMMANDS = [
         "argv": ["extract", "geoparquet", "{glob}", "{output}"],
         "tickets": [1013, 1058, 1343, 1353],
     },
-    {"id": "extract-stdout", "workload": "W1", "kind": "stream", "tickets": [1126]},
+    {"id": "extract-stdout", "workload": "W2", "kind": "stream", "tickets": [1126]},
+    {"id": "convert-stdin", "workload": "W2", "kind": "stdin", "prepare": True, "tickets": [1126]},
     {
         "id": "aggregate-breakdown",
         "workload": "W1",
@@ -294,6 +295,13 @@ def invoke(spec, input_path, output, url, *, prepare=False, prepared=None):
 
     kind = spec.get("kind", "cli")
     if prepare:
+        if kind == "stdin":
+            from contextlib import redirect_stdout
+
+            stream = output.parent / "input.arrow"
+            with stream.open("w") as stdout, redirect_stdout(stdout):
+                _cli(["extract", "geoparquet", str(input_path), "-"])
+            return stream
         if spec.get("prepared_input"):
             path = output.parent / "bbox.parquet"
             unsorted = output.parent / "bbox-unsorted.parquet"
@@ -347,11 +355,9 @@ def invoke(spec, input_path, output, url, *, prepare=False, prepared=None):
     if kind.startswith("api-"):
         from geoparquet_io.api.table import convert, read
 
-        table = read(input_path)
         operation = kind.removeprefix("api-")
-        if operation == "convert":
-            table = convert(input_path)
-        elif operation == "h3":
+        table = convert(input_path) if operation == "convert" else read(input_path)
+        if operation == "h3":
             table = table.add_h3(resolution=5)
         elif operation == "kdtree":
             table = table.add_kdtree(iterations=3)
@@ -362,15 +368,15 @@ def invoke(spec, input_path, output, url, *, prepare=False, prepared=None):
         elif operation == "extract":
             table = table.extract(bbox=(-60, -30, 60, 30))
         return table.write(output / "result.parquet")
-    if kind == "stream":
+    if kind in {"stream", "stdin"}:
         import sys
         from contextlib import redirect_stdout
         from unittest.mock import patch
 
-        stream = output / "stream.arrow"
-        with stream.open("w") as stdout, redirect_stdout(stdout):
-            _cli(["extract", "geoparquet", str(input_path), "-"])
-        with stream.open("r") as stdin, patch.object(sys, "stdin", stdin):
+        if kind == "stream":
+            with (output / "stream.arrow").open("w") as stdout, redirect_stdout(stdout):
+                return _cli(["extract", "geoparquet", str(input_path), "-"])
+        with Path(prepared).open("r") as stdin, patch.object(sys, "stdin", stdin):
             return _cli(["convert", "geojson", "-", str(output / "result.geojson")])
     if kind == "admin":
         return _admin(input_path, output)

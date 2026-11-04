@@ -2,21 +2,37 @@
 
 
 def test_spies_count_real_connection(tmp_path):
+    import pyarrow as pa
+    import pyarrow.ipc as ipc
     import pyarrow.parquet as pq
 
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from geoparquet_io.core.duckdb_utils import (
+        complete_without_fetch,
+        get_duckdb_connection,
+        sql_path,
+    )
     from scripts.profile_command import CallSpies
 
     with CallSpies() as spies:
         with get_duckdb_connection(load_spatial=False, load_httpfs=False) as con:
             result = con.sql("SELECT 42 AS answer").arrow().read_all()
+            complete_without_fetch(
+                con.execute(
+                    f"COPY (SELECT 42 AS answer) TO {sql_path(tmp_path / 'copy.parquet')} (FORMAT PARQUET)"
+                )
+            )
+            con.sql("SELECT 42 AS answer").write_parquet(str(tmp_path / "relation.parquet"))
         pq.write_table(result, tmp_path / "tiny.parquet")
         pq.read_metadata(tmp_path / "tiny.parquet")
+        buffer = pa.BufferOutputStream()
+        with ipc.new_stream(buffer, result.schema) as writer:
+            writer.write_table(result)
+        assert ipc.open_stream(buffer.getvalue()).read_all().equals(result)
     assert spies.counts["footer_reads"] == 1
-    assert spies.counts["parquet_writes"] == 1
+    assert spies.counts["parquet_writes"] == 3
     assert result.column("answer").to_pylist() == [42]
     assert spies.counts["connections"] == 1
-    assert spies.counts["arrow_read_all"] == 1
+    assert spies.counts["arrow_read_all"] == 2
     assert spies.counts["execute"] > 0
 
 
@@ -86,3 +102,19 @@ def test_resume_rejects_a_measurement_from_another_revision(tmp_path, monkeypatc
     with pytest.raises(RuntimeError, match="Stale measurement"):
         run_matrix(args)
     assert not (tmp_path / "matrix.json").exists()
+
+
+def test_api_convert_profiles_one_read(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    from geoparquet_io.api import table
+    from geoparquet_io.benchmarks.matrix import invoke
+
+    converted = Mock()
+    convert = Mock(return_value=converted)
+    monkeypatch.setattr(table, "convert", convert)
+    monkeypatch.setattr(table, "read", Mock(side_effect=AssertionError("extra full-table read")))
+    input_path = tmp_path / "input.parquet"
+    invoke({"kind": "api-convert"}, input_path, tmp_path, None)
+    convert.assert_called_once_with(input_path)
+    converted.write.assert_called_once_with(tmp_path / "result.parquet")

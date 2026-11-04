@@ -11,9 +11,11 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -48,6 +50,7 @@ class CallSpies:
 
     def __enter__(self):
         import duckdb
+        import pyarrow.ipc as ipc
 
         self.patches = contextlib.ExitStack()
         counts = self.counts
@@ -73,7 +76,16 @@ class CallSpies:
             def __exit__(self, *exc):
                 return self.reader.__exit__(*exc)
 
+        original_read = ipc.RecordBatchStreamReader.read_all
+
+        def read_all(owner, *args, **kwargs):
+            counts["arrow_read_all"] += 1
+            return original_read(owner, *args, **kwargs)
+
+        self.patches.enter_context(patch.object(ipc.RecordBatchStreamReader, "read_all", read_all))
         for cls in (duckdb.DuckDBPyConnection, duckdb.DuckDBPyRelation):
+            if not hasattr(cls, "arrow"):
+                continue
             original = cls.arrow
 
             def arrow(owner, *args, _original=original, **kwargs):
@@ -85,15 +97,30 @@ class CallSpies:
 
             def execute(owner, *args, _original=original, **kwargs):
                 counts["execute"] += 1
+                query = args[0] if args else kwargs.get("query", "")
+                if re.search(r"\bFORMAT\s*(?:=|:=)?\s*['\"]?PARQUET\b", str(query), re.I):
+                    counts["parquet_writes"] += 1
                 return _original(owner, *args, **kwargs)
 
             self.patches.enter_context(patch.object(duckdb.DuckDBPyConnection, name, execute))
+        original_write = duckdb.DuckDBPyRelation.write_parquet
+
+        def write_parquet(owner, *args, **kwargs):
+            counts["parquet_writes"] += 1
+            return original_write(owner, *args, **kwargs)
+
+        self.patches.enter_context(
+            patch.object(duckdb.DuckDBPyRelation, "write_parquet", write_parquet)
+        )
+        self.previous_threads = threading.getprofile()
+        threading.setprofile(self._event)
         self.previous = sys.getprofile()
         sys.setprofile(self._event)
         return self
 
     def __exit__(self, *exc):
         sys.setprofile(self.previous)
+        threading.setprofile(self.previous_threads)
         self.patches.close()
 
 
