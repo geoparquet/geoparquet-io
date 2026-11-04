@@ -45,6 +45,33 @@ def _settings(con):
 
 
 def test_cursor_objects_settings_and_catalog_isolation(production_factory):
+    from tests.conftest import _isolate_shared_database, _shared_database_snapshot
+
+    # Exercise teardown with both a pre-existing root and one created in the test.
+    for existing in (False, True):
+        utils._reset_shared_database_for_tests()
+        if existing:
+            with production_factory(load_spatial=False) as con:
+                con.execute("CREATE TABLE retained_baseline AS SELECT 42")
+        with _isolate_shared_database():
+            with production_factory(load_spatial=False) as con:
+                root = utils._shared_state().root
+                baseline = _shared_database_snapshot(root)
+                con.execute("SET threads = 1")
+                assert _shared_database_snapshot(root)[1]["threads"] == 1
+                con.execute(f"SET threads = {baseline[1]['threads']}")
+                con.execute("CREATE TABLE teardown_marker AS SELECT 1")
+                con.execute('CREATE SCHEMA "test schema"')
+                con.execute('CREATE TABLE "test schema".t AS SELECT 1 AS value')
+                con.execute('CREATE VIEW "test schema".v AS SELECT * FROM "test schema".t')
+                con.execute('CREATE MACRO "test schema".m(x) AS x + 1')
+                con.execute('CREATE MACRO "test schema".tm() AS TABLE SELECT 1')
+                con.execute('CREATE SEQUENCE "test schema".s')
+                con.execute("SET memory_limit = '128MB'; SET threads = 1")
+                con.execute("SET preserve_insertion_order = false")
+        assert utils._shared_state().root is root
+        assert _shared_database_snapshot(root) == baseline
+
     with production_factory() as first, production_factory() as second:
         first.execute("CREATE TEMP TABLE private_table AS SELECT 1 AS value")
         first.register("private_arrow", pa.table({"value": [2]}))

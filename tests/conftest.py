@@ -248,6 +248,72 @@ def clear_package_caches() -> None:
     _reset_module_state()
 
 
+def _shared_database_snapshot(root):
+    """Capture test-owned catalog objects and the shared database settings."""
+    catalog = set(
+        root.execute("""
+        SELECT 'TABLE', database_name, schema_name, table_name
+          FROM duckdb_tables() WHERE NOT internal AND NOT temporary
+        UNION ALL
+        SELECT 'VIEW', database_name, schema_name, view_name
+          FROM duckdb_views() WHERE NOT internal AND NOT temporary
+        UNION ALL
+        SELECT 'SEQUENCE', database_name, schema_name, sequence_name
+          FROM duckdb_sequences() WHERE NOT temporary
+        UNION ALL
+        SELECT 'SCHEMA', database_name, schema_name, schema_name
+          FROM duckdb_schemas() WHERE NOT internal AND database_name != 'temp'
+    """).fetchall()
+    )
+    values = root.execute("""
+        SELECT current_setting('memory_limit'), current_setting('threads'),
+               current_setting('preserve_insertion_order')
+    """).fetchall()[0]
+    return catalog, dict(
+        zip(("memory_limit", "threads", "preserve_insertion_order"), values, strict=True)
+    )
+
+
+@contextmanager
+def _isolate_shared_database():
+    """Keep the root (and loaded spatial extension), but undo test-owned state."""
+    from unittest.mock import patch
+
+    root = duckdb_utils._shared_state().root
+    catalog, settings = _shared_database_snapshot(root) if root is not None else (set(), {})
+    created = {}
+    open_database = duckdb_utils._open_isolated_database
+
+    def remember_defaults(*args, **kwargs):
+        con = open_database(*args, **kwargs)
+        # Capture creation-time defaults before the caller can change settings.
+        if duckdb_utils._shared_state().root is None:
+            created[con] = _shared_database_snapshot(con)[1]
+        return con
+
+    with patch.object(duckdb_utils, "_open_isolated_database", remember_defaults):
+        try:
+            yield
+        finally:
+            current = duckdb_utils._shared_state().root
+            if current is not None:
+                before = catalog if current is root else set()
+                after, current_settings = _shared_database_snapshot(current)
+                order = {"VIEW": 0, "TABLE": 1, "SEQUENCE": 2, "SCHEMA": 3}
+                for kind, database, schema, name in sorted(
+                    after - before, key=lambda row: order[row[0]]
+                ):
+                    parts = (database, schema) if kind == "SCHEMA" else (database, schema, name)
+                    identifier = ".".join(duckdb_utils.quote_identifier(part) for part in parts)
+                    current.execute(f"DROP {kind} IF EXISTS {identifier} CASCADE")
+                saved = settings if current is root else created[current]
+                changed = {
+                    key: value for key, value in saved.items() if current_settings[key] != value
+                }
+                if changed:
+                    duckdb_utils.restore_duckdb_settings(current, changed)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_package_caches(request, monkeypatch):
     """Give each test cold package caches; honor explicit database isolation."""
@@ -255,7 +321,8 @@ def _isolate_package_caches(request, monkeypatch):
     if request.node.get_closest_marker("fresh_duckdb") is not None:
         factory = duckdb_utils.get_duckdb_connection
         monkeypatch.setattr(factory, "__kwdefaults__", {**factory.__kwdefaults__, "isolated": True})
-    yield
+    with _isolate_shared_database():
+        yield
 
 
 def walk_cli_commands(cmd, path: tuple[str, ...] = ()):
