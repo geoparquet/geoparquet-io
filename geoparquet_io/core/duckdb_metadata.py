@@ -580,7 +580,7 @@ def get_row_group_metadata(parquet_file: str, con=None) -> list[dict]:
     return _parquet_metadata_rows(parquet_file, con, "SELECT * FROM {source}", load_spatial=None)
 
 
-def materialize_row_group_metadata(parquet_file: str, con, table_name: str) -> None:
+def _materialize_row_group_metadata(parquet_file: str, con, table_name: str) -> None:
     """Read one footer into a TEMP table owned by the caller's cursor.
 
     Pass ``table_name`` as ``metadata_table`` to the row-group readers to

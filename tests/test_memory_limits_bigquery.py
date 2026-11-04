@@ -78,28 +78,13 @@ def _settings(con):
     )
 
 
-def test_write_memory_caps_threads_with_the_limit(local_bigquery):
-    con, observed = local_bigquery
-    before = _settings(con)
-    _run("1GB")
-    # 1GB is 1e9 bytes (953.6 MiB); at 512 MiB a thread that affords one thread.
-    assert observed == [("953.6 MiB", 1)]
-    assert _settings(con) == before
-
-
-def test_bare_number_is_megabytes(local_bigquery, monkeypatch):
-    # Fix the CPU count so 2000 MB affords fewer threads on every host.
+def test_write_memory_caps_threads_and_restores_settings(local_bigquery, monkeypatch):
     monkeypatch.setattr(os, "cpu_count", lambda: 4)
     con, observed = local_bigquery
     before = _settings(con)
-    _run("2000")
-    assert observed == [("1.8 GiB", 3)]
-    assert _settings(con) == before
-
-
-def test_no_write_memory_leaves_the_connection_alone(local_bigquery):
-    con, observed = local_bigquery
-    before = _settings(con)
-    _run(None)
-    assert observed == [before]
-    assert _settings(con) == before
+    # 1GB affords one thread; a bare 2000 means MB and affords three.
+    for limit, expected in [("1GB", ("953.6 MiB", 1)), ("2000", ("1.8 GiB", 3)), (None, before)]:
+        observed.clear()
+        _run(limit)
+        assert observed == [expected]
+        assert _settings(con) == before

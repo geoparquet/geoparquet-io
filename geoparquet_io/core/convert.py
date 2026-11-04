@@ -33,6 +33,7 @@ from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     _get_query_columns,
     _install_and_load_extension,
+    _is_shared_connection,
     as_wkb_sql,
     complete_without_fetch,
     describe_query,
@@ -40,7 +41,6 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     geom_from_wkb_sql,
     get_duckdb_connection,
-    is_shared_connection,
     quote_identifier,
     sql_literal,
     sql_path,
@@ -2628,10 +2628,13 @@ def read_spatial_to_arrow(
 
     finally:
         con.close()
-        # Keep the #322/#401 GDAL cleanup when a database is destroyed.
-        # Closing a shared cursor leaves that database alive.
-        if not is_csv and not is_parquet and not is_shared_connection(con):
-            gc.collect()
+        _collect_after_read(con, is_csv, is_parquet)
+
+
+def _collect_after_read(con, is_csv, is_parquet):
+    # Keep #322/#401 GDAL cleanup only when closing destroys the database.
+    if not is_csv and not is_parquet and not _is_shared_connection(con):
+        gc.collect()
 
 
 def _read_csv_to_arrow(

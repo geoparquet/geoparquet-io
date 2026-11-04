@@ -1805,7 +1805,7 @@ def _registration_owner(con):
     return _shared_cursors.get(con, con)
 
 
-def is_shared_connection(con) -> bool:
+def _is_shared_connection(con) -> bool:
     """Whether closing this factory connection leaves its database alive."""
     while isinstance(con, ProfiledConnection):
         con = con._con

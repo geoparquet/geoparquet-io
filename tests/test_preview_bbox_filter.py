@@ -330,18 +330,19 @@ def test_preview_module_imports_without_duckdb():
     subprocess.run([sys.executable, "-c", code], check=True, timeout=120)
 
 
-@pytest.mark.parametrize(
-    ("source", "geometry_column", "stats_source", "rows"),
-    [
+def test_preview_opens_one_connection(monkeypatch):
+    """Count every factory alias, including helpers imported lazily by preview."""
+    for source, geometry_column, stats_source, rows in [
         (GPQ2, None, "native", 100),
         (PLACES, None, "bbox_struct", 766),
         (BUILDINGS, None, None, 42),
         (PLACES, "geometry", "bbox_struct", 766),
-    ],
-    ids=["native", "bbox-fallback", "no-stats", "explicit-geometry"],
-)
-def test_preview_opens_one_connection(monkeypatch, source, geometry_column, stats_source, rows):
-    """Count every factory alias, including helpers imported lazily by preview."""
+    ]:
+        with monkeypatch.context() as case_patch:
+            _assert_preview_reads_once(case_patch, source, geometry_column, stats_source, rows)
+
+
+def _assert_preview_reads_once(monkeypatch, source, geometry_column, stats_source, rows):
     from geoparquet_io.core import (
         bbox_structure,
         duckdb_metadata,
@@ -359,43 +360,18 @@ def test_preview_opens_one_connection(monkeypatch, source, geometry_column, stat
         return factory(*args, **kwargs)
 
     # Import the entire helper tree before patching module-level aliases.
-    for module in (bbox_structure, duckdb_metadata, geo_metadata, geometry_detection, preview):
+    for module in (
+        bbox_structure,
+        duckdb_metadata,
+        geo_metadata,
+        geometry_detection,
+        preview,
+    ):
         assert module is not None
     for module in tuple(sys.modules.values()):
         if module and module.__name__.startswith("geoparquet_io."):
             if getattr(module, "get_duckdb_connection", None) is factory:
                 monkeypatch.setattr(module, "get_duckdb_connection", spy)
-
-    result = preview_bbox_filter(str(source), WORLD, geometry_column=geometry_column)
-    assert result.total_rows == rows
-    assert result.stats_source == stats_source
-    assert result.has_estimate == (stats_source is not None)
-    assert len(captured) == 1, f"preview opened {len(captured)} connections: {captured}"
-
-
-@pytest.mark.parametrize("fixture", [GPQ2, PLACES], ids=["native", "bbox"])
-def test_remote_preview_reads_each_footer_view_once(fixture):
-    """Loopback only: one metadata, key/value and schema read per preview."""
-    from contextlib import ExitStack
-
-    from tests._fake_s3 import fake_s3
-
-    with ExitStack() as stack:
-        try:
-            endpoint, requests = stack.enter_context(
-                fake_s3({"preview/data.parquet": fixture.read_bytes()})
-            )
-        except PermissionError:
-            pytest.skip("sandbox blocks loopback sockets")
-        result = preview_bbox_filter(f"http://{endpoint}/preview/data.parquet", WORLD)
-        assert result.has_estimate
-        assert len(requests) == 6
-
-
-@pytest.mark.parametrize("fixture", [GPQ2, PLACES], ids=["native", "bbox"])
-def test_preview_reads_each_footer_view_once(monkeypatch, fixture):
-    """Count real footer SQL even in sandboxes that prohibit loopback sockets."""
-    from geoparquet_io.core import duckdb_metadata
 
     queries = []
     original = duckdb_metadata._get_connection_for_file
@@ -422,9 +398,36 @@ def test_preview_reads_each_footer_view_once(monkeypatch, fixture):
         return connection, owned
 
     monkeypatch.setattr(duckdb_metadata, "_get_connection_for_file", recording_connection)
-    assert preview_bbox_filter(str(fixture), WORLD).has_estimate
-    for table_function in ("parquet_metadata", "parquet_kv_metadata", "parquet_schema"):
-        assert sum(f"{table_function}(" in query for query in queries) == 1
+
+    result = preview_bbox_filter(str(source), WORLD, geometry_column=geometry_column)
+    assert result.total_rows == rows
+    assert result.stats_source == stats_source
+    assert result.has_estimate == (stats_source is not None)
+    assert len(captured) == 1, f"preview opened {len(captured)} connections: {captured}"
+
+    if stats_source is not None:
+        for table_function in ("parquet_metadata", "parquet_kv_metadata", "parquet_schema"):
+            assert sum(f"{table_function}(" in query for query in queries) == 1
+
+
+def test_remote_preview_reads_each_footer_view_once():
+    """Loopback only: one metadata, key/value and schema read per preview."""
+    for fixture in [GPQ2, PLACES]:
+        from contextlib import ExitStack
+
+        from tests._fake_s3 import fake_s3
+
+        with ExitStack() as stack:
+            try:
+                endpoint, requests = stack.enter_context(
+                    fake_s3({"preview/data.parquet": fixture.read_bytes()})
+                )
+            except PermissionError:
+                pytest.skip("sandbox blocks loopback sockets")
+            result = preview_bbox_filter(f"http://{endpoint}/preview/data.parquet", WORLD)
+            assert result.has_estimate
+            # HEAD + footer GET, then HEAD for key/value metadata and schema (cached bytes).
+            assert [method for method, _ in requests] == ["HEAD", "GET", "HEAD", "HEAD"]
 
 
 def test_preview_sees_rewritten_row_groups(sorted_places, tmp_path):

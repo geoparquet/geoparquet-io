@@ -44,15 +44,7 @@ def _settings(con):
     )
 
 
-def test_factory_loads_spatial_once(production_factory, spatial_loads):
-    for _ in range(4):
-        with production_factory() as con:
-            utils.load_spatial_extension(con)
-            assert utils.fetch_one(con.execute("SELECT ST_X(ST_Point(1, 2))")) == (1.0,)
-    assert spatial_loads == ["spatial"]
-
-
-def test_temp_tables_and_registered_names_are_cursor_local(production_factory):
+def test_cursor_objects_settings_and_catalog_isolation(production_factory):
     with production_factory() as first, production_factory() as second:
         first.execute("CREATE TEMP TABLE private_table AS SELECT 1 AS value")
         first.register("private_arrow", pa.table({"value": [2]}))
@@ -64,14 +56,28 @@ def test_temp_tables_and_registered_names_are_cursor_local(production_factory):
         assert utils.fetch_one(first.execute("SELECT * FROM private_arrow")) == (2,)
         assert utils.fetch_one(second.execute("SELECT * FROM private_table")) == (3,)
 
+    with production_factory() as shared:
+        shared.execute("CREATE TABLE shared_catalog_marker AS SELECT 1")
+        with production_factory(isolated=True) as isolated:
+            assert not isolated.sql(
+                "SELECT 1 FROM duckdb_tables() WHERE table_name = 'shared_catalog_marker'"
+            ).fetchall()
+            isolated.execute("CREATE TABLE isolated_catalog_marker AS SELECT 2")
+        with production_factory() as sibling:
+            assert utils.fetch_one(sibling.execute("SELECT * FROM shared_catalog_marker")) == (1,)
+            assert not sibling.sql(
+                "SELECT 1 FROM duckdb_tables() WHERE table_name = 'isolated_catalog_marker'"
+            ).fetchall()
 
-def test_write_scope_restores_database_settings(production_factory):
-    with production_factory() as first, production_factory() as observer:
-        before = _settings(first)
-        with scoped_write_memory_limit(first, "256MB", False, pinned={"threads": 1}):
-            assert _settings(first)[1] == 1
-            assert _settings(observer) == _settings(first)
-        assert _settings(first) == _settings(observer) == before
+    with production_factory() as first:
+        first.execute("SET geometry_always_xy = false")
+        with production_factory() as second:
+            assert utils.fetch_one(
+                second.execute("SELECT current_setting('geometry_always_xy')")
+            ) == (True,)
+        assert utils.fetch_one(first.execute("SELECT current_setting('geometry_always_xy')")) == (
+            False,
+        )
 
 
 def test_overlapping_thread_scopes_do_not_cross_restore(production_factory):
@@ -100,6 +106,13 @@ def test_overlapping_thread_scopes_do_not_cross_restore(production_factory):
             for future in futures:
                 future.result(timeout=10)
         assert _settings(observer) == before
+
+    with production_factory() as first, production_factory() as observer:
+        before = _settings(first)
+        with scoped_write_memory_limit(first, "256MB", False, pinned={"threads": 1}):
+            assert _settings(first)[1] == 1
+            assert _settings(observer) == _settings(first)
+        assert _settings(first) == _settings(observer) == before
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is unavailable on Windows")
@@ -133,39 +146,24 @@ def test_fork_child_gets_a_new_root(production_factory):
         assert report == b"fresh"
 
 
-@pytest.mark.parametrize("profiled", [False, True])
-def test_owner_registered_udf_survives_cursor_close(
-    production_factory, monkeypatch, tmp_path, profiled
-):
-    if profiled:
-        monkeypatch.setenv("GPIO_DUCKDB_PROFILE", str(tmp_path / "profiles"))
+def test_owner_registered_udf_survives_cursor_close(production_factory, monkeypatch, tmp_path):
+    for profiled in [False, True]:
+        utils._reset_shared_database_for_tests()
+        with monkeypatch.context() as case_patch:
+            if profiled:
+                case_patch.setenv("GPIO_DUCKDB_PROFILE", str(tmp_path / "profiles"))
 
-    def increment(value: int) -> int:
-        return value + 1
+            def increment(value: int) -> int:
+                return value + 1
 
-    con = production_factory()
-    try:
-        utils.register_shared_function(con, "shared_increment", increment)
-        utils.register_shared_function(con, "shared_increment", increment)
-    finally:
-        con.close()
-    with production_factory() as sibling:
-        assert utils.fetch_one(sibling.execute("SELECT shared_increment(41)")) == (42,)
-
-
-def test_isolated_database_has_independent_catalog(production_factory):
-    with production_factory() as shared:
-        shared.execute("CREATE TABLE shared_catalog_marker AS SELECT 1")
-        with production_factory(isolated=True) as isolated:
-            assert not isolated.sql(
-                "SELECT 1 FROM duckdb_tables() WHERE table_name = 'shared_catalog_marker'"
-            ).fetchall()
-            isolated.execute("CREATE TABLE isolated_catalog_marker AS SELECT 2")
-        with production_factory() as sibling:
-            assert utils.fetch_one(sibling.execute("SELECT * FROM shared_catalog_marker")) == (1,)
-            assert not sibling.sql(
-                "SELECT 1 FROM duckdb_tables() WHERE table_name = 'isolated_catalog_marker'"
-            ).fetchall()
+            con = production_factory()
+            try:
+                utils.register_shared_function(con, "shared_increment", increment)
+                utils.register_shared_function(con, "shared_increment", increment)
+            finally:
+                con.close()
+            with production_factory() as sibling:
+                assert utils.fetch_one(sibling.execute("SELECT shared_increment(41)")) == (42,)
 
 
 def test_spill_release_belongs_to_root(monkeypatch, production_factory):
@@ -180,18 +178,6 @@ def test_spill_release_belongs_to_root(monkeypatch, production_factory):
     utils._reset_shared_database_for_tests()
     gc.collect()
     assert spill in [call.args[0] for call in release.call_args_list]
-
-
-def test_geometry_always_xy_on_each_cursor(production_factory):
-    with production_factory() as first:
-        first.execute("SET geometry_always_xy = false")
-        with production_factory() as second:
-            assert utils.fetch_one(
-                second.execute("SELECT current_setting('geometry_always_xy')")
-            ) == (True,)
-        assert utils.fetch_one(first.execute("SELECT current_setting('geometry_always_xy')")) == (
-            False,
-        )
 
 
 @pytest.fixture
@@ -214,9 +200,15 @@ def one_point_geojson(tmp_path):
     return path
 
 
-def test_two_api_chains_load_spatial_once(
+def test_factory_and_api_chains_load_spatial_once(
     production_factory, spatial_loads, one_point_geojson, tmp_path
 ):
+    for _ in range(4):
+        with production_factory() as con:
+            utils.load_spatial_extension(con)
+            assert utils.fetch_one(con.execute("SELECT ST_X(ST_Point(1, 2))")) == (1.0,)
+    assert spatial_loads == ["spatial"]
+
     import geoparquet_io as gpio
 
     for index in range(2):
@@ -226,74 +218,100 @@ def test_two_api_chains_load_spatial_once(
     assert spatial_loads == ["spatial"]
 
 
-@pytest.mark.parametrize("gdal", [False, True], ids=["parquet", "gdal"])
-@pytest.mark.parametrize("isolated", [False, True], ids=["shared", "isolated"])
-@pytest.mark.parametrize("profiled", [False, True], ids=["plain", "profiled"])
 def test_gc_only_after_isolated_gdal_read(
-    monkeypatch, production_factory, one_point_geojson, tmp_path, gdal, isolated, profiled
+    monkeypatch, production_factory, one_point_geojson, tmp_path
 ):
-    import geoparquet_io as gpio
-    from geoparquet_io.core import convert
+    for gdal in [False, True]:
+        for isolated in [False, True]:
+            for profiled in [False, True]:
+                with monkeypatch.context() as case_patch:
+                    import geoparquet_io as gpio
+                    from geoparquet_io.core import convert
 
-    source = one_point_geojson
-    if not gdal:
-        source = tmp_path / "source.parquet"
-        gpio.convert(str(one_point_geojson)).write(str(source))
-    if profiled:
-        monkeypatch.setenv("GPIO_DUCKDB_PROFILE", str(tmp_path / "profiles"))
-    monkeypatch.setattr(
-        convert,
-        "get_duckdb_connection",
-        lambda **kwargs: production_factory(isolated=isolated, **kwargs),
-    )
-    collect = Mock()
-    monkeypatch.setattr(convert.gc, "collect", collect)
-    result = gpio.convert(str(source))
-    assert result.num_rows == 1
-    assert collect.call_count == int(gdal and isolated)
-
-
-@pytest.mark.parametrize("opening", ["factory", "bounded", "scoped"])
-@pytest.mark.parametrize("exit_mode", ["close", "exception"])
-def test_connection_limits_isolate_or_restore_on_exit(production_factory, opening, exit_mode):
-    from geoparquet_io.core.memory_limits import open_bounded_connection
-
-    with production_factory() as observer:
-        before = (
-            *_settings(observer),
-            utils._current_setting(observer, "preserve_insertion_order"),
-        )
-        lifetime = ExitStack()
-        if opening == "factory":
-            con = production_factory(memory_limit="256MB", threads=1)
-        elif opening == "bounded":
-            con = open_bounded_connection(memory_limit="256MB")
-        else:
-            con = lifetime.enter_context(production_factory())
-            lifetime.enter_context(scoped_write_memory_limit(con, "256MB", False))
-        if opening != "scoped":
-            lifetime.enter_context(con)
-        assert _settings(con)[0] != before[0]
-        if opening != "scoped":
-            assert _settings(observer) == before[:2]
-        if opening == "bounded":
-            assert utils._current_setting(con, "preserve_insertion_order") is False
-        if exit_mode == "close":
-            lifetime.close()
-        else:
-            with pytest.raises(RuntimeError), lifetime:
-                raise RuntimeError("stop")
-        assert (
-            *_settings(observer),
-            utils._current_setting(observer, "preserve_insertion_order"),
-        ) == before
+                    source = one_point_geojson
+                    if not gdal:
+                        source = tmp_path / "source.parquet"
+                        gpio.convert(str(one_point_geojson)).write(str(source))
+                    if profiled:
+                        case_patch.setenv("GPIO_DUCKDB_PROFILE", str(tmp_path / "profiles"))
+                    case_patch.setattr(
+                        convert,
+                        "get_duckdb_connection",
+                        lambda isolated=isolated, **kwargs: production_factory(
+                            isolated=isolated, **kwargs
+                        ),
+                    )
+                    collect = Mock()
+                    case_patch.setattr(convert.gc, "collect", collect)
+                    result = gpio.convert(str(source))
+                    assert result.num_rows == 1
+                    assert collect.call_count == int(gdal and isolated)
 
 
-@pytest.mark.parametrize("opening", ["factory", "bounded", "threads"])
-@pytest.mark.parametrize("cleanup", ["close", "gc"])
+def test_connection_limits_restore_on_exit_and_allow_out_of_order_close(production_factory):
+    for opening in ["factory", "bounded", "scoped"]:
+        for exit_mode in ["close", "exception"]:
+            from geoparquet_io.core.memory_limits import open_bounded_connection
+
+            with production_factory() as observer:
+                before = (
+                    *_settings(observer),
+                    utils._current_setting(observer, "preserve_insertion_order"),
+                )
+                lifetime = ExitStack()
+                if opening == "factory":
+                    con = production_factory(memory_limit="256MB", threads=1)
+                elif opening == "bounded":
+                    con = open_bounded_connection(memory_limit="256MB")
+                else:
+                    con = lifetime.enter_context(production_factory())
+                    lifetime.enter_context(scoped_write_memory_limit(con, "256MB", False))
+                if opening != "scoped":
+                    lifetime.enter_context(con)
+                assert _settings(con)[0] != before[0]
+                if opening != "scoped":
+                    assert _settings(observer) == before[:2]
+                if opening == "bounded":
+                    assert utils._current_setting(con, "preserve_insertion_order") is False
+                if exit_mode == "close":
+                    lifetime.close()
+                else:
+                    with pytest.raises(RuntimeError), lifetime:
+                        raise RuntimeError("stop")
+                assert (
+                    *_settings(observer),
+                    utils._current_setting(observer, "preserve_insertion_order"),
+                ) == before
+
+    for opening in ["factory", "bounded"]:
+        from geoparquet_io.core.memory_limits import open_bounded_connection
+
+        factory = production_factory if opening == "factory" else open_bounded_connection
+        with production_factory(load_spatial=False) as observer:
+            before = _settings(observer)
+            first = factory(memory_limit="256MB", load_spatial=False)
+            second = factory(memory_limit="512MB", load_spatial=False)
+            try:
+                second_limit = _settings(second)
+                first.close()
+                remaining_limit = _settings(second)
+            finally:
+                first.close()
+                second.close()
+            assert _settings(observer) == before
+            assert remaining_limit == second_limit
+
+
 def test_limited_connection_cross_thread_cleanup_does_not_strand_settings_lock(
-    production_factory, monkeypatch, opening, cleanup
+    production_factory, monkeypatch
 ):
+    for opening in ["factory", "bounded", "threads"]:
+        for cleanup in ["close", "gc"]:
+            with monkeypatch.context() as case_patch:
+                _assert_cross_thread_cleanup(production_factory, case_patch, opening, cleanup)
+
+
+def _assert_cross_thread_cleanup(production_factory, monkeypatch, opening, cleanup):
     from geoparquet_io.core import memory_limits
 
     lock = RLock()
@@ -344,23 +362,3 @@ def test_limited_connection_cross_thread_cleanup_does_not_strand_settings_lock(
     assert completed, "cross-thread cleanup stranded the settings lock"
     assert wrote.is_set()
     assert not errors
-
-
-@pytest.mark.parametrize("opening", ["factory", "bounded"])
-def test_limited_connections_closed_out_of_order_leave_shared_defaults(production_factory, opening):
-    from geoparquet_io.core.memory_limits import open_bounded_connection
-
-    factory = production_factory if opening == "factory" else open_bounded_connection
-    with production_factory(load_spatial=False) as observer:
-        before = _settings(observer)
-        first = factory(memory_limit="256MB", load_spatial=False)
-        second = factory(memory_limit="512MB", load_spatial=False)
-        try:
-            second_limit = _settings(second)
-            first.close()
-            remaining_limit = _settings(second)
-        finally:
-            first.close()
-            second.close()
-        assert _settings(observer) == before
-        assert remaining_limit == second_limit

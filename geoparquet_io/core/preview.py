@@ -101,15 +101,15 @@ def preview_bbox_filter(
 
     from geoparquet_io.core.duckdb_metadata import (
         _get_connection_for_file,
+        _materialize_row_group_metadata,
         get_row_group_sizes,
-        materialize_row_group_metadata,
     )
 
     con, _ = _get_connection_for_file(parquet_file)
     try:
         # A cursor owns its TEMP tables. Materialize this footer only for this
         # preview, so repeated statistics queries cannot fetch it again.
-        materialize_row_group_metadata(parquet_file, con, "_gpio_preview_metadata")
+        _materialize_row_group_metadata(parquet_file, con, "_gpio_preview_metadata")
         sizes = get_row_group_sizes(parquet_file, con=con, metadata_table="_gpio_preview_metadata")
         totals = {
             "total_row_groups": len(sizes),
