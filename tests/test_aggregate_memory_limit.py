@@ -259,6 +259,7 @@ class TestTheDefaultLimit:
         aggregate_by_a5(str(points_parquet), str(tmp_path / "out.parquet"), resolution=5)
         assert connection_spy[0]["memory_limit"] == _duckdb_renders("1.0GiB")
 
+    @pytest.mark.fresh_duckdb
     def test_unknown_ceiling_leaves_duckdbs_own_default(
         self, points_parquet, tmp_path, monkeypatch, connection_spy
     ):

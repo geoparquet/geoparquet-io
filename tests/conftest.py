@@ -43,7 +43,6 @@ import logging  # noqa: E402
 import os  # noqa: E402
 import re  # noqa: E402
 import shutil  # noqa: E402
-import sys  # noqa: E402
 import tempfile  # noqa: E402
 import time  # noqa: E402
 from contextlib import contextmanager  # noqa: E402
@@ -52,80 +51,6 @@ from pathlib import Path  # noqa: E402
 import click  # noqa: E402
 import pyarrow.parquet as pq  # noqa: E402
 import pytest  # noqa: E402
-
-
-def _install_worker_database():
-    """Share the default database, installing before test modules bind aliases."""
-    from inspect import signature
-
-    from geoparquet_io.core import duckdb_utils as utils
-    from geoparquet_io.core.add import quadkey
-
-    register = quadkey.SPEC.register
-
-    def register_once(con):
-        # Python UDFs belong to the database, surviving their cursor's close().
-        if not con.sql(
-            "SELECT 1 FROM duckdb_functions() WHERE function_name = 'lat_lon_to_quadkey'"
-        ).fetchall():
-            register(con)
-
-    object.__setattr__(quadkey.SPEC, "register", register_once)
-
-    real = utils.get_duckdb_connection
-    parameters = signature(real)
-    state = {"root": None, "fresh": False, "cursors": 0, "schemas": [], "issued": []}
-
-    @functools.wraps(real)
-    def connection(*args, **kwargs):
-        bound = parameters.bind(*args, **kwargs)
-        bound.apply_defaults()
-        options = bound.arguments
-        if (
-            any(
-                value != parameters.parameters[name].default
-                for name, value in options.items()
-                if name not in {"load_spatial", "load_httpfs"}
-            )
-            or options["load_spatial"] is False
-            or options["load_httpfs"]
-            or state["fresh"]
-        ):
-            return real(*args, **kwargs)
-        if state["root"] is None:
-            state["root"] = real()
-        state["cursors"] += 1
-        schema = f"test_connection_{state['cursors']}"
-        cursor = state["root"].cursor()
-        state["issued"].append(cursor)
-        # These database-wide resets affect every already-open cursor too.
-        cursor.execute(f"SET threads = {_DUCKDB_TEST_THREADS}")
-        utils._apply_connection_limits(cursor, None, None)
-        cursor.execute(f"CREATE SCHEMA {schema}")
-        state["schemas"].append(schema)
-        cursor.execute(f"SET schema = '{schema}'")
-        cursor.execute("SET arrow_large_buffer_size = true")
-        cursor.execute("SET geometry_always_xy = true")
-        utils._apply_s3_settings(cursor, utils._resolve_s3_settings(None, None, None))
-        return cursor
-
-    for module in tuple(sys.modules.values()):
-        if module and module.__name__.startswith("geoparquet_io."):
-            if getattr(module, "get_duckdb_connection", None) is real:
-                module.get_duckdb_connection = connection
-    return state
-
-
-_WORKER_DATABASE = _install_worker_database()
-
-
-@pytest.fixture(scope="session")
-def worker_duckdb_database():
-    """Keep the root alive until all connection-owning fixtures finish."""
-    yield _WORKER_DATABASE
-    if _WORKER_DATABASE["root"] is not None:
-        _WORKER_DATABASE["root"].close()
-
 
 # ---------------------------------------------------------------------------
 # Click "no default declared" sentinel
@@ -324,23 +249,13 @@ def clear_package_caches() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_package_caches(worker_duckdb_database, request):
-    """Give every test in the suite a cold cache, warn-once caches included."""
+def _isolate_package_caches(request, monkeypatch):
+    """Give each test cold package caches; honor explicit database isolation."""
     clear_package_caches()
-    worker_duckdb_database["fresh"] = request.node.get_closest_marker("fresh_duckdb") is not None
-    first_schema = len(worker_duckdb_database["schemas"])
-    first_cursor = len(worker_duckdb_database["issued"])
-    try:
-        yield
-    finally:
-        for cursor in worker_duckdb_database["issued"][first_cursor:]:
-            cursor.close()  # DuckDB also tolerates cursors already closed by the test.
-        del worker_duckdb_database["issued"][first_cursor:]
-        root = worker_duckdb_database["root"]
-        for schema in worker_duckdb_database["schemas"][first_schema:]:
-            root.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
-        del worker_duckdb_database["schemas"][first_schema:]
-        worker_duckdb_database["fresh"] = False
+    if request.node.get_closest_marker("fresh_duckdb") is not None:
+        factory = duckdb_utils.get_duckdb_connection
+        monkeypatch.setattr(factory, "__kwdefaults__", {**factory.__kwdefaults__, "isolated": True})
+    yield
 
 
 def walk_cli_commands(cmd, path: tuple[str, ...] = ()):

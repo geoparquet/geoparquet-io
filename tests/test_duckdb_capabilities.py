@@ -274,6 +274,7 @@ def test_extension_error_reports_the_owner_version():
 
 
 @pytest.mark.parametrize(("version", "has_spatial"), [("1.5.6", True), ("2.0.0", False)])
+@pytest.mark.fresh_duckdb
 def test_inspect_preview_reads_the_owner(monkeypatch, version, has_spatial):
     """``gpio inspect head`` tells the preview what its connection was opened with.
 

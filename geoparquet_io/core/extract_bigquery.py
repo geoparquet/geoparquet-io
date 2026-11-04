@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import re
+from contextlib import nullcontext
 
 import duckdb
 import pyarrow as pa
@@ -46,7 +47,7 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
-from geoparquet_io.core.memory_limits import bound_open_connection
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.write_funnels import write_geoparquet_table, write_plain_parquet_table
 
@@ -268,7 +269,7 @@ def _setup_bigquery_connection() -> duckdb.DuckDBPyConnection:
         Configured DuckDB connection with spatial + BigQuery extensions
     """
     # Use get_duckdb_connection for consistent setup (spatial + geometry_always_xy)
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=False, isolated=True)
 
     try:
         # Layer BigQuery extension on top
@@ -1377,15 +1378,20 @@ def _execute_bigquery_extraction(
 ) -> pa.Table | None:
     """Execute the BigQuery extraction with the given parameters."""
     debug("Connecting to BigQuery...")
-    with BigQueryConnection(
-        project=project,
-        credentials_file=credentials_file,
-    ) as con:
+    with (
+        BigQueryConnection(
+            project=project,
+            credentials_file=credentials_file,
+        ) as con,
+        (
+            scoped_write_memory_limit(con, write.memory_limit, verbose=True)
+            if write.memory_limit is not None
+            else nullcontext()
+        ),
+    ):
         # The BigQuery scan is what actually consumes memory here (the result is
         # materialised as an Arrow table before the PyArrow write), so the
         # user's limit -- and the thread cap it affords -- bound this connection.
-        if write.memory_limit is not None:
-            bound_open_connection(con, write.memory_limit, verbose=True)
 
         # --sql is its own relation. Building it once here means every step
         # below -- the DESCRIBE, the geometry detection, the read -- is

@@ -39,12 +39,15 @@ def local_bigquery(monkeypatch):
         def __exit__(self, *exc):
             return False
 
+    observed = []
+
     def stop(*_args, **_kwargs):
+        observed.append(_settings(con))
         raise _StopAfterLimits
 
     monkeypatch.setattr(extract_bigquery, "BigQueryConnection", FakeBigQueryConnection)
     monkeypatch.setattr(extract_bigquery, "_schema_rows", stop)
-    yield con
+    yield con, observed
     con.close()
 
 
@@ -76,19 +79,27 @@ def _settings(con):
 
 
 def test_write_memory_caps_threads_with_the_limit(local_bigquery):
+    con, observed = local_bigquery
+    before = _settings(con)
     _run("1GB")
     # 1GB is 1e9 bytes (953.6 MiB); at 512 MiB a thread that affords one thread.
-    assert _settings(local_bigquery) == ("953.6 MiB", 1)
+    assert observed == [("953.6 MiB", 1)]
+    assert _settings(con) == before
 
 
 def test_bare_number_is_megabytes(local_bigquery, monkeypatch):
     # Fix the CPU count so 2000 MB affords fewer threads on every host.
     monkeypatch.setattr(os, "cpu_count", lambda: 4)
+    con, observed = local_bigquery
+    before = _settings(con)
     _run("2000")
-    assert _settings(local_bigquery) == ("1.8 GiB", 3)
+    assert observed == [("1.8 GiB", 3)]
+    assert _settings(con) == before
 
 
 def test_no_write_memory_leaves_the_connection_alone(local_bigquery):
-    before = _settings(local_bigquery)
+    con, observed = local_bigquery
+    before = _settings(con)
     _run(None)
-    assert _settings(local_bigquery) == before
+    assert observed == [before]
+    assert _settings(con) == before

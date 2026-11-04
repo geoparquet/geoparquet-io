@@ -166,6 +166,7 @@ class TestFastPathMemoryLimit:
             assert _setting(con, "memory_limit") == "953.6 MiB"
 
     def test_default_tightens_duckdbs_own_default(self, con, monkeypatch):
+        con.execute("RESET memory_limit")
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: GIB)
         with memory_limits.scoped_write_memory_limit(con, None, verbose=False):
             assert _setting(con, "memory_limit") == "512.0 MiB"  # 512MiB
@@ -191,6 +192,7 @@ class TestFastPathMemoryLimit:
         assert (_setting(con, "memory_limit"), _setting(con, "threads")) == (before, 8)
 
 
+@pytest.mark.fresh_duckdb
 class TestResolveLimitReadsTheSessionThroughTheDisplay:
     """``current_setting`` truncates a size, so the session reads back smaller.
 
@@ -394,6 +396,7 @@ class TestCeilingWithoutPsutil:
         assert memory_limits.memory_ceiling() is None
         assert memory_limits.default_memory_limit() is None
 
+    @pytest.mark.fresh_duckdb
     def test_connection_opens_with_duckdbs_own_default(self, tmp_path, monkeypatch):
         self._point_at(monkeypatch, str(tmp_path / "missing"), str(tmp_path / "missing_root"))
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)

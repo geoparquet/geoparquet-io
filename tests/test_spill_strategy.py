@@ -144,11 +144,13 @@ class TestConnectionDefaults:
         finally:
             con.close()
 
-    def test_two_connections_never_share_a_spill_directory(self):
+    def test_only_isolated_databases_get_distinct_spill_directories(self):
         first = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         second = get_duckdb_connection(load_spatial=False, load_httpfs=False)
         try:
-            assert _temp_directory(first) != _temp_directory(second)
+            assert _temp_directory(first) == _temp_directory(second)
+            with get_duckdb_connection(load_spatial=False, isolated=True) as isolated:
+                assert _temp_directory(first) != _temp_directory(isolated)
         finally:
             first.close()
             second.close()
@@ -198,6 +200,7 @@ class TestConnectionDefaults:
             con.close()
 
 
+@pytest.mark.fresh_duckdb
 class TestSpillsActuallyLandThere:
     """The setting is not the point; surviving the spill is."""
 
@@ -454,6 +457,7 @@ class TestOrphanedSpillDirectoriesAreReaped:
         """The default base always exists; an explicit one need not yet."""
         assert spill_directory(tmp_path / "not-created-yet")
 
+    @pytest.mark.fresh_duckdb
     def test_opening_a_default_connection_reaps_the_temp_directory(
         self, tmp_path, dead_pid, monkeypatch
     ):
@@ -618,6 +622,7 @@ def test_spill_sweep_without_fcntl_uses_the_pid_check(tmp_path, dead_pid, monkey
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="no fcntl, so no spill marker and no finalizer")
+@pytest.mark.fresh_duckdb
 def test_a_connection_collected_while_the_spill_guard_is_held_does_not_deadlock(monkeypatch):
     """The cyclic GC can run a connection's finalizer inside ``spill_directory``.
 

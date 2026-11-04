@@ -162,6 +162,7 @@ def test_inspect_head_still_loads_spatial_without_core_geometry(
 # --- the on-demand fallback ----------------------------------------------------
 
 
+@pytest.mark.fresh_duckdb
 def test_preview_query_loads_spatial_on_demand(extension_loads):
     """A function outside DuckDB's core set loads spatial and retries (any version)."""
     con = get_duckdb_connection(load_spatial=False, load_httpfs=False)
@@ -191,6 +192,7 @@ def test_preview_query_with_spatial_reraises():
 
 
 @pytest.mark.usefixtures("spatial_unavailable")
+@pytest.mark.fresh_duckdb
 def test_preview_fallback_surfaces_the_querys_own_error_when_load_fails():
     """Air-gapped host + a file that genuinely needs a non-core function.
 

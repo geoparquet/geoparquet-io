@@ -200,7 +200,7 @@ class TestStreamIoWkbConversionQuoting:
         try:
             quoted = quote_identifier(column_name)
             con.execute(
-                f"CREATE TABLE t AS SELECT 1 AS id, ST_GeomFromText('POINT (1 2)') AS {quoted}"
+                f"CREATE TEMP TABLE t AS SELECT 1 AS id, ST_GeomFromText('POINT (1 2)') AS {quoted}"
             )
 
             wrapped = _wrap_query_with_wkb_conversion("SELECT * FROM t", column_name)
@@ -218,7 +218,7 @@ class TestStreamIoWkbConversionQuoting:
         try:
             quoted = quote_identifier(INJECTION_COL)
             con.execute(
-                f"CREATE TABLE t AS SELECT 1 AS id, ST_GeomFromText('POINT (1 2)') AS {quoted}"
+                f"CREATE TEMP TABLE t AS SELECT 1 AS id, ST_GeomFromText('POINT (1 2)') AS {quoted}"
             )
 
             wrapped = _wrap_query_with_wkb_conversion("SELECT * FROM t", INJECTION_COL)

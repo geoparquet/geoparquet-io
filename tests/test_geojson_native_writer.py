@@ -312,7 +312,7 @@ class TestFastPathPlumbing:
     def con(self):
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         con.execute(
-            "CREATE TABLE t AS SELECT 1 AS id, 'x' AS name, "
+            "CREATE TEMP TABLE t AS SELECT 1 AS id, 'x' AS name, "
             "ST_GeomFromText('POINT(1 2)') AS geometry, "
             "ST_GeomFromText('POINT(3 4)') AS geom2"
         )

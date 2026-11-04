@@ -317,6 +317,7 @@
     "query_schema",
     "quote_identifier",
     "register_arrow",
+    "register_shared_function",
     "require_community_extension",
     "resolve_load_spatial",
     "restore_duckdb_settings",
@@ -595,7 +596,6 @@
   ],
   "geoparquet_io.core.memory_limits": [
     "DEFAULT_MEMORY_FRACTION",
-    "bound_open_connection",
     "default_memory_limit",
     "memory_ceiling",
     "open_bounded_connection",

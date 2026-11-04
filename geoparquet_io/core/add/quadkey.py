@@ -14,6 +14,7 @@ from geoparquet_io.core.crs_utils import (
     is_geographic,
     is_projected,
 )
+from geoparquet_io.core.duckdb_utils import register_shared_function
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.geo_metadata import _non_finite_error
 from geoparquet_io.core.index_ops import IndexSpec, add_index_column, add_index_table
@@ -76,7 +77,8 @@ def register_quadkey_udf(con) -> None:
     a quadkey in SQL: add, sort and partition (through ``SPEC.register``), the
     partition resolution probe, and the overview tile probe.
     """
-    con.create_function(
+    register_shared_function(
+        con,
         "lat_lon_to_quadkey",
         _lat_lon_to_quadkey,
         ["DOUBLE", "DOUBLE", "INTEGER"],

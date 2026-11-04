@@ -1,10 +1,10 @@
-"""Production database ownership contracts, bypassing the temporary pytest shim."""
+"""Production database ownership contracts."""
 
 import gc
 import json
 import os
-import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 from threading import Barrier, Event
 from unittest.mock import Mock
 
@@ -17,20 +17,11 @@ from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 
 
 @pytest.fixture
-def production_factory(monkeypatch):
-    """Unwrap only the conftest prototype; fresh_duckdb will mean isolated later."""
-    factory = utils.get_duckdb_connection
-    real = getattr(factory, "__wrapped__", factory)
-    for module in tuple(sys.modules.values()):
-        if module and module.__name__.startswith("geoparquet_io."):
-            if getattr(module, "get_duckdb_connection", None) is factory:
-                monkeypatch.setattr(module, "get_duckdb_connection", real)
-    reset = getattr(utils, "_reset_shared_database_for_tests", None)
-    if reset:
-        reset()
-    yield real
-    if reset:
-        reset()
+def production_factory():
+    """Give ownership probes a fresh process root and clear it afterwards."""
+    utils._reset_shared_database_for_tests()
+    yield utils.get_duckdb_connection
+    utils._reset_shared_database_for_tests()
 
 
 @pytest.fixture
@@ -56,6 +47,7 @@ def _settings(con):
 def test_factory_loads_spatial_once(production_factory, spatial_loads):
     for _ in range(4):
         with production_factory() as con:
+            utils.load_spatial_extension(con)
             assert utils.fetch_one(con.execute("SELECT ST_X(ST_Point(1, 2))")) == (1.0,)
     assert spatial_loads == ["spatial"]
 
@@ -141,7 +133,13 @@ def test_fork_child_gets_a_new_root(production_factory):
         assert report == b"fresh"
 
 
-def test_owner_registered_udf_survives_cursor_close(production_factory):
+@pytest.mark.parametrize("profiled", [False, True])
+def test_owner_registered_udf_survives_cursor_close(
+    production_factory, monkeypatch, tmp_path, profiled
+):
+    if profiled:
+        monkeypatch.setenv("GPIO_DUCKDB_PROFILE", str(tmp_path / "profiles"))
+
     def increment(value: int) -> int:
         return value + 1
 
@@ -244,3 +242,37 @@ def test_gc_only_after_gdal_read(
     result = gpio.convert(str(source))
     assert result.num_rows == 1
     assert collect.call_count == int(gdal)
+
+
+@pytest.mark.parametrize("opening", ["factory", "bounded", "scoped"])
+@pytest.mark.parametrize("exit_mode", ["close", "exception"])
+def test_connection_limits_restore_on_close(production_factory, opening, exit_mode):
+    from geoparquet_io.core.memory_limits import open_bounded_connection
+
+    with production_factory() as observer:
+        before = (
+            *_settings(observer),
+            utils._current_setting(observer, "preserve_insertion_order"),
+        )
+        lifetime = ExitStack()
+        if opening == "factory":
+            con = production_factory(memory_limit="256MB", threads=1)
+        elif opening == "bounded":
+            con = open_bounded_connection(memory_limit="256MB")
+        else:
+            con = lifetime.enter_context(production_factory())
+            lifetime.enter_context(scoped_write_memory_limit(con, "256MB", False))
+        if opening != "scoped":
+            lifetime.enter_context(con)
+        assert _settings(observer)[0] != before[0]
+        if opening == "bounded":
+            assert utils._current_setting(observer, "preserve_insertion_order") is False
+        if exit_mode == "close":
+            lifetime.close()
+        else:
+            with pytest.raises(RuntimeError), lifetime:
+                raise RuntimeError("stop")
+        assert (
+            *_settings(observer),
+            utils._current_setting(observer, "preserve_insertion_order"),
+        ) == before

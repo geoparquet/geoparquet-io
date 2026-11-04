@@ -122,7 +122,7 @@ def test_geojson_geometry_column_fallback_needs_no_row(con):
     from geoparquet_io.core.duckdb_utils import describe_query
     from geoparquet_io.core.geometry_detection import primary_geometry_column
 
-    con.execute("CREATE TABLE t AS SELECT 1 AS id, ST_Point(0, 0) AS footprint_pt WHERE false")
+    con.execute("CREATE TEMP TABLE t AS SELECT 1 AS id, ST_Point(0, 0) AS footprint_pt WHERE false")
     assert primary_geometry_column(describe_query(con, "SELECT * FROM t")) == "footprint_pt"
 
 

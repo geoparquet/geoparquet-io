@@ -1577,7 +1577,8 @@ def open_admin_join_connection(
         temp_directory=spill_directory(temp_dir),
         threads=1,
     )
-    pin_duckdb_settings(con, {"preserve_insertion_order": False})
+    con = duckdb_utils._ManagedConnection(con)
+    con._scopes.enter_context(pin_duckdb_settings(con, {"preserve_insertion_order": False}))
     return con
 
 

@@ -18,6 +18,7 @@ connection is *opened* (#1179). Both draw the number from the same place.
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 from geoparquet_io.core.duckdb_utils import (
     _apply_memory_limit,
     _current_setting,
+    _ManagedConnection,
     get_duckdb_connection,
     pin_duckdb_settings,
     restore_duckdb_settings,
@@ -40,6 +42,8 @@ from geoparquet_io.core.sizing import (
     normalize_size_string,
     parse_size_string,
 )
+
+_settings_lock = threading.RLock()
 
 
 def validate_memory_limit(value: str) -> str:
@@ -264,28 +268,18 @@ def open_bounded_connection(
         threads=threads,
         memory_limit=limit,
     )
-    con.execute(f"SET preserve_insertion_order = {str(preserve_insertion_order).lower()}")
+    if not isinstance(con, _ManagedConnection):
+        con = _ManagedConnection(con)
+    con._scopes.enter_context(
+        _connection_settings_scope(
+            con, pinned={"preserve_insertion_order": preserve_insertion_order}
+        )
+    )
     if verbose and limit:
         debug(f"DuckDB memory limit: {limit}")
     if verbose and threads:
         debug(f"DuckDB threads: {threads} (for the memory limit)")
     return con
-
-
-def bound_open_connection(
-    con: duckdb.DuckDBPyConnection, memory_limit: str, verbose: bool = False
-) -> None:
-    """Hold an already-open connection to an explicit limit for the rest of its life.
-
-    For a caller that cannot reopen through :func:`open_bounded_connection`
-    and has no single statement for :func:`scoped_write_memory_limit` to wrap:
-    ``gpio extract bigquery`` opens its connection with the BigQuery extension
-    and credentials layered on, then materializes the scan client-side. The
-    limit and the thread cap it affords follow the same rule as a connection
-    opened bounded (``_connection_limit``); threads only ever come down.
-    """
-    limit, threads = _connection_limit(memory_limit)
-    _apply_memory_limit(con, limit, threads, verbose)
 
 
 def _resolve_limit(con: duckdb.DuckDBPyConnection, memory_limit: str | None) -> str | None:
@@ -336,18 +330,36 @@ def scoped_write_memory_limit(
     they are set after the limit, replace the thread cap when they pin
     ``threads``, and are restored with everything else.
     """
-    pinned = dict(pinned or {})
-    keys = dict.fromkeys(("memory_limit", "threads", *pinned))
-    saved = {key: _current_setting(con, key) for key in keys}
-    try:
-        _apply_memory_limit(con, _resolve_limit(con, memory_limit), None, verbose)
-        if "threads" not in pinned:
-            # The cap follows the limit now in force -- the one just SET, or a
-            # stricter one the caller had -- as DuckDB reports it.
-            limit_bytes = parse_size_string(str(_current_setting(con, "memory_limit")))
-            if limit_bytes:
-                _apply_memory_limit(con, None, _thread_cap(limit_bytes), verbose)
-        pin_duckdb_settings(con, pinned)
-        yield
-    finally:
-        restore_duckdb_settings(con, saved, verbose)
+    with _settings_lock:
+        pinned = dict(pinned or {})
+        keys = dict.fromkeys(("memory_limit", "threads", *pinned))
+        saved = {key: _current_setting(con, key) for key in keys}
+        try:
+            _apply_memory_limit(con, _resolve_limit(con, memory_limit), None, verbose)
+            if "threads" not in pinned:
+                # The cap follows the limit now in force -- the one just SET, or a
+                # stricter one the caller had -- as DuckDB reports it.
+                limit_bytes = parse_size_string(str(_current_setting(con, "memory_limit")))
+                if limit_bytes:
+                    _apply_memory_limit(con, None, _thread_cap(limit_bytes), verbose)
+            with pin_duckdb_settings(con, pinned):
+                yield
+        finally:
+            restore_duckdb_settings(con, saved, verbose)
+
+
+@contextmanager
+def _connection_settings_scope(con, memory_limit=None, threads=None, verbose=False, pinned=None):
+    """Keep connection-lifetime overrides serialized and restore them on close."""
+    with _settings_lock:
+        pinned = dict(pinned or {})
+        saved = {key: _current_setting(con, key) for key in ("memory_limit", "threads", *pinned)}
+        try:
+            limit = validate_memory_limit(memory_limit) if memory_limit is not None else None
+            _apply_memory_limit(con, limit, None, verbose)
+            if threads is not None:
+                pinned["threads"] = threads
+            with pin_duckdb_settings(con, pinned):
+                yield
+        finally:
+            restore_duckdb_settings(con, saved, verbose)
