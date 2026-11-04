@@ -281,6 +281,11 @@ class TestGeometryColumnArgument:
         pq.write_table(pa_table, out)
         preview = preview_bbox_filter(str(out), WORLD, geometry_column="id")
         assert not preview.has_estimate
+        automatic = preview_bbox_filter(str(out), WORLD)
+        assert automatic == preview
+        assert automatic.total_rows == 3
+        assert automatic.stats_source is None
+        assert automatic.est_rows is None
 
 
 class TestAntimeridianWrappedStats:

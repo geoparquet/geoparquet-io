@@ -21,7 +21,7 @@ import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     import duckdb
@@ -338,8 +338,7 @@ def scoped_write_memory_limit(
                 # The cap follows the limit now in force -- the one just SET, or a
                 # stricter one the caller had -- as DuckDB reports it.
                 limit_bytes = parse_size_string(str(_current_setting(con, "memory_limit")))
-                if limit_bytes:
-                    _apply_memory_limit(con, None, _thread_cap(limit_bytes), verbose)
+                _apply_memory_limit(con, None, _thread_cap(cast(int, limit_bytes)), verbose)
             with pin_duckdb_settings(con, pinned):
                 yield
         finally:

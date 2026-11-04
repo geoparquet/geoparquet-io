@@ -5,6 +5,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from functools import partial
 from threading import Barrier, Event, RLock, Thread
 from unittest.mock import Mock
 
@@ -143,7 +144,7 @@ def test_overlapping_thread_scopes_do_not_cross_restore(production_factory):
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is unavailable on Windows")
-def test_fork_child_gets_a_new_root(production_factory):
+def test_fork_child_gets_a_new_root(production_factory, monkeypatch):
     with production_factory() as parent:
         parent.execute("CREATE TABLE parent_catalog_marker AS SELECT 1")
         # A sibling must share the catalog before checking fork isolation.
@@ -171,6 +172,31 @@ def test_fork_child_gets_a_new_root(production_factory):
             _, status = os.waitpid(pid, 0)
         assert status == 0
         assert report == b"fresh"
+
+        # Exercise the PID fallback in-process too: child coverage is not merged.
+        from geoparquet_io.core import memory_limits
+
+        previous = utils._shared_state()
+        with monkeypatch.context() as case_patch:
+            for name in (
+                "_shared_database",
+                "_shared_cursors",
+                "_s3_cache_lock",
+                "_spill_locks_guard",
+            ):
+                case_patch.setattr(utils, name, getattr(utils, name))
+            case_patch.setattr(utils, "_inherited_databases", [])
+            old_lock = memory_limits._settings_lock
+            case_patch.setattr(memory_limits, "_settings_lock", old_lock)
+            case_patch.setattr(utils.os, "getpid", lambda: previous.pid + 1)
+            fresh = utils._shared_state()
+            assert fresh.pid == previous.pid + 1
+            assert fresh.root is None and fresh.spill is None and not fresh.loaded
+            assert utils._shared_state() is fresh
+            assert utils._inherited_databases == [previous]
+            assert not utils._shared_cursors
+            assert memory_limits._settings_lock is not old_lock
+            assert utils.fetch_one(parent.execute("SELECT * FROM parent_catalog_marker")) == (1,)
 
 
 def test_owner_registered_udf_survives_cursor_close(production_factory, monkeypatch, tmp_path):
@@ -275,7 +301,9 @@ def test_gc_only_after_isolated_gdal_read(
                     assert collect.call_count == int(gdal and isolated)
 
 
-def test_connection_limits_restore_on_exit_and_allow_out_of_order_close(production_factory):
+def test_connection_limits_restore_on_exit_and_allow_out_of_order_close(
+    production_factory, monkeypatch, tmp_path
+):
     for opening in ["factory", "bounded", "scoped"]:
         for exit_mode in ["close", "exception"]:
             from geoparquet_io.core.memory_limits import open_bounded_connection
@@ -327,6 +355,38 @@ def test_connection_limits_restore_on_exit_and_allow_out_of_order_close(producti
                 second.close()
             assert _settings(observer) == before
             assert remaining_limit == second_limit
+
+    from geoparquet_io.core import admin_datasets, memory_limits
+
+    # A setup error must close the newly opened connection and preserve the cause.
+    for opening in ("factory", "bounded", "admin"):
+        with monkeypatch.context() as case_patch:
+            raw = production_factory(load_spatial=False, isolated=True)
+            con = Mock(wraps=raw)
+            failure = RuntimeError("connection setup failed")
+            if opening == "factory":
+                case_patch.setattr(utils, "_open_shared_cursor", Mock(return_value=con))
+                case_patch.setattr(utils, "_apply_s3_settings", Mock(side_effect=failure))
+                factory = partial(production_factory, load_spatial=False)
+            else:
+                con.execute.side_effect = failure
+                case_patch.setattr(utils, "get_duckdb_connection", Mock(return_value=con))
+                if opening == "bounded":
+                    case_patch.setattr(
+                        memory_limits, "get_duckdb_connection", Mock(return_value=con)
+                    )
+                    factory = memory_limits.open_bounded_connection
+                else:
+                    case_patch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
+                    factory = partial(
+                        admin_datasets.open_admin_join_connection, spill_to_cache=True
+                    )
+            with pytest.raises(RuntimeError) as caught:
+                factory()
+            assert caught.value is failure
+            con.close.assert_called_once_with()
+            with pytest.raises(duckdb.ConnectionException):
+                raw.execute("SELECT 1")
 
 
 def test_limited_connection_cross_thread_cleanup_does_not_strand_settings_lock(
