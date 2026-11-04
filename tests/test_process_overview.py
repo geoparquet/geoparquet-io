@@ -420,6 +420,7 @@ class TestOutGeometryInference:
         assert _detect_file(str(src)).out_geometry == "centroid"
 
 
+@pytest.mark.fresh_duckdb
 class TestGridRollupStubbed:
     def test_create_overviews_explicit_level(self, tmp_path, monkeypatch):
         from geoparquet_io.core.memory_limits import open_bounded_connection

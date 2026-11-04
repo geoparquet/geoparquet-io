@@ -25,7 +25,6 @@ from geoparquet_io.core.duckdb_utils import (
     build_spatial_join_query,
     get_duckdb_connection,
     orphaned_spill_dirs,
-    pin_duckdb_settings,
     quote_identifier,
     s3_config_scope,
     spill_directory,
@@ -1577,7 +1576,11 @@ def open_admin_join_connection(
         temp_directory=spill_directory(temp_dir),
         threads=1,
     )
-    pin_duckdb_settings(con, {"preserve_insertion_order": False})
+    try:
+        con.execute("SET preserve_insertion_order = false")
+    except BaseException:
+        con.close()
+        raise
     return con
 
 

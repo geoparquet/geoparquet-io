@@ -103,6 +103,7 @@ class _CopySpy:
         return getattr(self._con, name)
 
 
+@pytest.mark.fresh_duckdb
 class TestConnectionDefault:
     """The ceiling-based default is applied once, where connections are opened."""
 

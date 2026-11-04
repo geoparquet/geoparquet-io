@@ -1066,7 +1066,7 @@ class TestBigQueryConnection:
         _setup_bigquery_connection()
 
         # Verify get_duckdb_connection was called with spatial=True
-        mock_get_con.assert_called_once_with(load_spatial=True, load_httpfs=False)
+        mock_get_con.assert_called_once_with(load_spatial=True, load_httpfs=False, isolated=True)
 
         # Verify bigquery extension is loaded
         calls = [call[0][0] for call in mock_con.execute.call_args_list]

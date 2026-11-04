@@ -133,6 +133,13 @@ class TestFastPathMemoryLimit:
         write_parquet_with_metadata(
             con, query, str(tmp_path / "out.parquet"), geoparquet_version="2.0", verbose=True
         )
+        # A zero limit cannot reach the thread-cap calculation: even reading
+        # the saved settings needs memory and fails before entering the scope.
+        with duckdb.connect() as empty:
+            empty.execute("SET memory_limit = '0B'")
+            with pytest.raises(duckdb.OutOfMemoryException):
+                with memory_limits.scoped_write_memory_limit(empty, None, verbose=False):
+                    pytest.fail("a zero-memory connection entered the write scope")
         assert "DuckDB memory limit" not in caplog.text
         assert (tmp_path / "out.parquet").exists()
 
@@ -166,6 +173,7 @@ class TestFastPathMemoryLimit:
             assert _setting(con, "memory_limit") == "953.6 MiB"
 
     def test_default_tightens_duckdbs_own_default(self, con, monkeypatch):
+        con.execute("RESET memory_limit")
         monkeypatch.setattr(memory_limits, "memory_ceiling", lambda: GIB)
         with memory_limits.scoped_write_memory_limit(con, None, verbose=False):
             assert _setting(con, "memory_limit") == "512.0 MiB"  # 512MiB
@@ -191,6 +199,7 @@ class TestFastPathMemoryLimit:
         assert (_setting(con, "memory_limit"), _setting(con, "threads")) == (before, 8)
 
 
+@pytest.mark.fresh_duckdb
 class TestResolveLimitReadsTheSessionThroughTheDisplay:
     """``current_setting`` truncates a size, so the session reads back smaller.
 
@@ -238,6 +247,11 @@ class TestRestoreSettings:
     def test_setting_names_are_checked(self, con):
         with pytest.raises(ValueError, match="setting name"):
             restore_duckdb_settings(con, {"threads; DROP TABLE x": 1})
+        before = _setting(con, "threads")
+        with pytest.raises(ValueError, match="setting name"):
+            with memory_limits.pin_duckdb_settings(con, {"threads; DROP TABLE x": 1}):
+                pytest.fail("invalid setting entered the scope")
+        assert _setting(con, "threads") == before
 
 
 class TestDisplayedSizeMax:
@@ -394,6 +408,7 @@ class TestCeilingWithoutPsutil:
         assert memory_limits.memory_ceiling() is None
         assert memory_limits.default_memory_limit() is None
 
+    @pytest.mark.fresh_duckdb
     def test_connection_opens_with_duckdbs_own_default(self, tmp_path, monkeypatch):
         self._point_at(monkeypatch, str(tmp_path / "missing"), str(tmp_path / "missing_root"))
         con = get_duckdb_connection(load_spatial=False, load_httpfs=False)

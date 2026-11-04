@@ -562,16 +562,24 @@ def _set_setting(con: duckdb.DuckDBPyConnection, key: str, value: object) -> Non
         con.execute(f"SET {key} = {value}")
 
 
-def pin_duckdb_settings(con: duckdb.DuckDBPyConnection, settings: Mapping[str, int | bool]) -> None:
-    """SET settings a write needs for its duration; the caller restores them.
+@contextmanager
+def pin_duckdb_settings(con: duckdb.DuckDBPyConnection, settings: Mapping[str, int | bool]):
+    """Hold global settings for one operation, then restore them under the same lock."""
+    from geoparquet_io.core.memory_limits import _settings_lock
 
-    The pair of :func:`restore_duckdb_settings`: ``settings`` keys are names from
-    gpio's own code, never user input.
-    """
-    for key, value in settings.items():
-        if not _SETTING_KEY_RE.fullmatch(key):
-            raise ValueError(f"Not a DuckDB setting name: {key!r}")
-        _set_setting(con, key, str(value).lower() if isinstance(value, bool) else int(value))
+    with _settings_lock:
+        for key in settings:
+            if not _SETTING_KEY_RE.fullmatch(key):
+                raise ValueError(f"Not a DuckDB setting name: {key!r}")
+        saved = {key: _current_setting(con, key) for key in settings}
+        try:
+            for key, value in settings.items():
+                _set_setting(
+                    con, key, str(value).lower() if isinstance(value, bool) else int(value)
+                )
+            yield
+        finally:
+            restore_duckdb_settings(con, saved)
 
 
 def sql_path(path: str | os.PathLike[str]) -> str:
@@ -1537,8 +1545,7 @@ def _apply_memory_limit(
 
     Every bounded connection goes through here: one freshly opened
     (:func:`_apply_connection_limits`), one write scoped on a caller's
-    connection (``memory_limits.scoped_write_memory_limit``) and an already-open
-    connection held to a limit (``memory_limits.bound_open_connection``). Either
+    connection (``memory_limits.scoped_write_memory_limit``). Either
     half is skipped when its value is ``None``. The cap only ever brings
     ``threads`` *down* from what the session has: a thread count is never raised
     to match a limit.
@@ -1734,6 +1741,88 @@ class ProfiledConnection:
         return self._con.__exit__(*exc_info)
 
 
+class _SharedDatabase:
+    def __init__(self):
+        self.pid = os.getpid()
+        self.lock = threading.RLock()
+        self.root = None
+        self.loaded = set()
+        self.spill = None
+
+
+_shared_database = _SharedDatabase()
+_shared_cursors = weakref.WeakKeyDictionary()
+# Retain inherited objects without closing DuckDB or releasing a parent's spill.
+_inherited_databases = []
+
+
+def _after_fork_child():
+    global _shared_database, _shared_cursors, _s3_cache_lock, _spill_locks_guard
+    _inherited_databases.append(_shared_database)
+    _shared_database = _SharedDatabase()
+    _shared_cursors = weakref.WeakKeyDictionary()
+    _s3_cache_lock = threading.Lock()
+    _spill_locks_guard = threading.Lock()
+    from geoparquet_io.core import memory_limits
+
+    memory_limits._settings_lock = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_child)
+
+
+def _shared_state():
+    if _shared_database.pid != os.getpid():
+        _after_fork_child()
+    return _shared_database
+
+
+def _reset_shared_database_for_tests():
+    state = _shared_state()
+    with state.lock:
+        if state.root is not None:
+            state.root.close()
+            state.root = None
+        if state.spill is not None:
+            _release_spill_lock(state.spill)
+            state.spill = None
+        state.loaded.clear()
+
+
+atexit.register(_reset_shared_database_for_tests)
+
+
+def _ensure_shared_extension(state, name):
+    if name not in state.loaded:
+        _install_and_load_extension(state.root, name)
+        state.loaded.add(name)
+
+
+def _registration_owner(con):
+    while isinstance(con, ProfiledConnection):
+        con = con._con
+    return _shared_cursors.get(con, con)
+
+
+def _is_shared_connection(con) -> bool:
+    """Whether closing this factory connection leaves its database alive."""
+    while isinstance(con, ProfiledConnection):
+        con = con._con
+    return con in _shared_cursors
+
+
+def register_shared_function(con, name, function, *args, **kwargs):
+    """Register once on the retained creator, so sibling cursors can use a UDF."""
+    state = _shared_state()
+    with state.lock:
+        owner = _registration_owner(con)
+        if not fetch_one(
+            owner.execute("SELECT 1 FROM duckdb_functions() WHERE function_name = ?", [name])
+        ):
+            owner.create_function(name, function, *args, **kwargs)
+
+
 def load_spatial_extension(con) -> None:
     """INSTALL and LOAD spatial on ``con``, with gpio's session settings.
 
@@ -1744,7 +1833,12 @@ def load_spatial_extension(con) -> None:
     ``duckdb_capabilities().core_geometry``) but then hit a function outside DuckDB's core
     set and load it on demand.
     """
-    _install_and_load_extension(con, "spatial")
+    state = _shared_state()
+    with state.lock:
+        if _registration_owner(con) is state.root and state.root is not None:
+            _ensure_shared_extension(state, "spatial")
+        else:
+            _install_and_load_extension(con, "spatial")
     # DuckDB 1.5+: ensure lon/lat = x/y axis order globally.
     # Replaces per-call always_xy := true in ST_Transform.
     con.execute("SET geometry_always_xy = true;")
@@ -1760,9 +1854,18 @@ def get_duckdb_connection(
     s3_use_ssl=None,
     temp_directory=None,
     memory_limit=None,
+    *,
+    isolated=False,
 ):
     """
-    Create a DuckDB connection with necessary extensions loaded.
+    Open a session on the process database, or a fresh database with isolated=True.
+
+    Defaults and extensions are initialized once on the retained root. TEMP
+    objects and Arrow registrations belong to each session. Explicit resource
+    limits use a private database for the connection lifetime. Scoped writes
+    serialize resource changes on the shared database. Other readers can observe
+    the active scoped limits. Persistent catalog changes require isolated=True.
+    Explicit temp directories and authenticated S3 credentials are isolated.
 
     By default, S3 access uses no credentials, which works for public buckets.
     DuckDB automatically handles region detection for public S3 buckets.
@@ -1771,6 +1874,7 @@ def get_duckdb_connection(
     discovery for private S3 buckets.
 
     Args:
+        isolated: Open an independent database, including its catalog and settings.
         load_spatial: Whether to load spatial extension (default: True).
                     If None, loads it only when DuckDB's core lacks the
                     GEOMETRY type (``not duckdb_capabilities().core_geometry``, #1353): the
@@ -1824,6 +1928,52 @@ def get_duckdb_connection(
         unannotated because the many helpers typed ``duckdb.DuckDBPyConnection``
         that receive it use only the methods the proxy forwards.
     """
+    s3_settings = _resolve_s3_settings(s3_endpoint, s3_region, s3_use_ssl)
+    isolated = (
+        isolated
+        or memory_limit is not None
+        or threads is not None
+        or temp_directory is not None
+        or bool(load_httpfs and (use_s3_auth or s3_settings["profile"]))
+    )
+    if isolated:
+        con = _open_isolated_database(temp_directory, memory_limit, threads)
+        if resolve_load_spatial(load_spatial):
+            load_spatial_extension(con)
+        if load_httpfs:
+            _install_and_load_extension(con, "httpfs")
+            if use_s3_auth or s3_settings["profile"]:
+                _create_s3_secret(con, s3_settings, required=use_s3_auth)
+    else:
+        con = _open_shared_cursor(load_spatial, load_httpfs)
+    try:
+        _apply_s3_settings(con, s3_settings)
+        profile_dir = _profile_directory()
+        return ProfiledConnection(con, profile_dir) if profile_dir is not None else con
+    except BaseException:
+        con.close()
+        raise
+
+
+def _open_shared_cursor(load_spatial, load_httpfs):
+    state = _shared_state()
+    with state.lock:
+        if state.root is None:
+            state.root = _open_isolated_database(None, None, None)
+            state.root.execute("SET enable_external_file_cache = true")
+            state.spill = _current_setting(state.root, "temp_directory")
+        if resolve_load_spatial(load_spatial):
+            _ensure_shared_extension(state, "spatial")
+        if load_httpfs:
+            _ensure_shared_extension(state, "httpfs")
+        con = state.root.cursor()
+        _shared_cursors[con] = state.root
+        if "spatial" in state.loaded:
+            con.execute("SET geometry_always_xy = true")
+        return con
+
+
+def _open_isolated_database(temp_directory, memory_limit, threads):
     import duckdb
 
     config = {}
@@ -1851,34 +2001,6 @@ def get_duckdb_connection(
         weakref.finalize(con, _release_spill_lock, effective_temp_dir)
     con.execute(f"SET temp_directory = {sql_path(effective_temp_dir)};")
     _apply_connection_limits(con, memory_limit, threads)
-
-    # Always load spatial extension by default (core use case). None is the
-    # auto mode: spatial only where DuckDB's own core lacks GEOMETRY (#1353).
-    if resolve_load_spatial(load_spatial):
-        load_spatial_extension(con)
-
-    # S3 config, resolved once (explicit kwargs over the ambient scope). The
-    # SET statements and the secret below are both built from it.
-    s3_settings = _resolve_s3_settings(s3_endpoint, s3_region, s3_use_ssl)
-
-    # Load httpfs for cloud storage support
-    if load_httpfs:
-        _install_and_load_extension(con, "httpfs")
-
-        # Only configure AWS credentials when asked for: use_s3_auth (private
-        # buckets) or a scoped AWS profile, which only the credential chain can
-        # honor. Public buckets work without any secret.
-        if use_s3_auth or s3_settings["profile"]:
-            _create_s3_secret(con, s3_settings, required=use_s3_auth)
-
-    _apply_s3_settings(con, s3_settings)
-
-    # GPIO_DUCKDB_PROFILE=<dir>: wrap the connection (after all setup, so the
-    # setup statements above are not profiled) to write one JSON profile per
-    # query into <dir>. An unusable directory warned and returned None.
-    profile_dir = _profile_directory()
-    if profile_dir is not None:
-        return ProfiledConnection(con, profile_dir)
 
     return con
 

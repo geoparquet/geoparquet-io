@@ -211,6 +211,7 @@ class TestGetDuckDBConnection:
         ) == (True,)
         con.close()
 
+    @pytest.mark.fresh_duckdb
     def test_get_connection_no_spatial(self):
         """Test connection without spatial."""
         import duckdb

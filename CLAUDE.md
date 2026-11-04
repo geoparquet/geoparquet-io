@@ -302,7 +302,7 @@ copies or compatibility wrappers. The guard set is in ADR-0008 and
 | Non-planar edges | `geoparquet_io/core/edges.py` | `detect_edges`, `edges_for_version`, `carry_edges`, `representative_point_sql`, `geoarrow_type_edges` |
 | Geometry identity and read expressions | `geoparquet_io/core/geometry_detection.py` | `primary_geometry_column`, `resolve_geometry_column`, `resolve_geometry_read`, `require_geometry_column`, `create_geometry_view` |
 | CRS | `geoparquet_io/core/crs_utils.py` | `crs_of`, `is_geographic`, `is_projected`, `crs_equal`, `projjson_for_label`, `load_crs` |
-| Memory ceilings and byte sizes | `geoparquet_io/core/memory_limits.py`, `geoparquet_io/core/sizing.py` | `bound_open_connection`, `scoped_write_memory_limit`, `parse_size_string`, `format_size`, `format_memory_limit`, `mb_to_bytes` |
+| Memory ceilings and byte sizes | `geoparquet_io/core/memory_limits.py`, `geoparquet_io/core/sizing.py` | `open_bounded_connection`, `scoped_write_memory_limit`, `parse_size_string`, `format_size`, `format_memory_limit`, `mb_to_bytes` |
 | SQL escaping and native type probes | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `sql_literal`, `sql_path`, `quote_identifier`, `native_geo_type`, `is_native_geo_column` |
 | Paths, overwrite and staging | `geoparquet_io/core/remote.py`, `geoparquet_io/core/file_utils.py` | `is_remote_url`, `has_glob_pattern`, `is_partition_path`, `handle_output_overwrite`, `atomic_write`, `scratch_file`, `scratch_path`, `scratch_dir` |
 | Column-name resolution | `geoparquet_io/core/column_selection.py` | `fold`, `find_column`, `matching_columns`, `unique_name`, `exclude_columns`, `resolve_columns_against_schema` |

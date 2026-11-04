@@ -30,6 +30,7 @@ from geoparquet_io.core.crs_utils import (
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     fetch_one,
+    quote_identifier,
     sql_literal,
     sql_path,
 )
@@ -579,8 +580,26 @@ def get_row_group_metadata(parquet_file: str, con=None) -> list[dict]:
     return _parquet_metadata_rows(parquet_file, con, "SELECT * FROM {source}", load_spatial=None)
 
 
+def _materialize_row_group_metadata(parquet_file: str, con, table_name: str) -> None:
+    """Read one footer into a TEMP table owned by the caller's cursor.
+
+    Pass ``table_name`` as ``metadata_table`` to the row-group readers to
+    derive several views without fetching the footer again. Closing the
+    cursor discards the snapshot; another call reads the current file.
+    """
+    con.execute(
+        f"CREATE TEMP TABLE {quote_identifier(table_name)} AS SELECT * FROM "
+        f"parquet_metadata({sql_path(_metadata_path(parquet_file))})"
+    )
+
+
 def _parquet_metadata_rows(
-    parquet_file: str, con, select: str | Callable[[str], str], *, load_spatial: bool | None
+    parquet_file: str,
+    con,
+    select: str | Callable[[str], str],
+    *,
+    load_spatial: bool | None,
+    metadata_table: str | None = None,
 ) -> list[dict]:
     """Rows of one query over the file's ``parquet_metadata()``, as dicts.
 
@@ -596,7 +615,11 @@ def _parquet_metadata_rows(
         parquet_file, con, load_spatial=load_spatial
     )
     try:
-        source = f"parquet_metadata({sql_path(metadata_path)})"
+        source = (
+            quote_identifier(metadata_table)
+            if metadata_table is not None
+            else f"parquet_metadata({sql_path(metadata_path)})"
+        )
         # A constant query names the table function as ``{source}``; a query that
         # interpolates a column name is a callable taking it, so no brace in the
         # name can reach ``str.format``.
@@ -1011,7 +1034,7 @@ def _bbox_stats_aggregates(bbox_column: str) -> str:
 
 
 def get_per_row_group_bbox_stats(
-    parquet_file: str, bbox_column: str = "bbox", con=None
+    parquet_file: str, bbox_column: str = "bbox", con=None, *, metadata_table: str | None = None
 ) -> list[dict]:
     """
     Get bbox statistics per row group.
@@ -1031,6 +1054,7 @@ def get_per_row_group_bbox_stats(
         """
         ),
         load_spatial=False,
+        metadata_table=metadata_table,
     )
     keys = ("xmin", "ymin", "xmax", "ymax")
     return [
@@ -1094,7 +1118,9 @@ def get_row_group_stats_summary(parquet_file: str, con=None) -> dict:
     }
 
 
-def get_row_group_sizes(parquet_file: str, con=None) -> list[dict]:
+def get_row_group_sizes(
+    parquet_file: str, con=None, *, metadata_table: str | None = None
+) -> list[dict]:
     """Per-row-group row counts and compressed byte sizes.
 
     The physical cost of touching each row group: what a reader downloads
@@ -1120,6 +1146,7 @@ def get_row_group_sizes(parquet_file: str, con=None) -> list[dict]:
             ORDER BY row_group_id
         """,
         load_spatial=False,
+        metadata_table=metadata_table,
     )
     return [
         {
@@ -1171,6 +1198,8 @@ def get_row_group_bbox_stats(
     *,
     bbox_column: Callable[[], str | None],
     native: Callable[[], list[dict]] | None = None,
+    con=None,
+    metadata_table: str | None = None,
 ) -> tuple[list[dict], Literal["native", "bbox_struct"] | None]:
     """Per-row-group bboxes and where they came from, or ``([], None)`` (#1367 concept 17).
 
@@ -1182,19 +1211,27 @@ def get_row_group_bbox_stats(
     reads one named column; by default it is the file's primary geometry
     (:func:`get_per_row_group_native_geo_stats`).
     """
-    stats = native() if native is not None else get_per_row_group_native_geo_stats(parquet_file)
+    stats = (
+        native()
+        if native is not None
+        else get_per_row_group_native_geo_stats(
+            parquet_file, con=con, metadata_table=metadata_table
+        )
+    )
     if stats:
         return stats, "native"
     column = bbox_column()
     if column:
-        stats = get_per_row_group_bbox_stats(parquet_file, column)
+        stats = get_per_row_group_bbox_stats(
+            parquet_file, column, con=con, metadata_table=metadata_table
+        )
         if stats:
             return stats, "bbox_struct"
     return [], None
 
 
 def get_native_geo_stats_by_row_group(
-    parquet_file: str, geometry_column: str, con=None
+    parquet_file: str, geometry_column: str, con=None, *, metadata_table: str | None = None
 ) -> list[dict] | None:
     """Native Parquet geospatial statistics for one column, per column chunk.
 
@@ -1229,6 +1266,7 @@ def get_native_geo_stats_by_row_group(
         """
         ),
         load_spatial=None,
+        metadata_table=metadata_table,
     )
     if not rows:
         return None
@@ -1314,7 +1352,12 @@ def _chunk_bboxes(chunks: list[dict]) -> list[dict]:
 
 
 def get_per_row_group_native_geo_stats(
-    parquet_file: str, geometry_column: str | None = None, con=None, *, strict: bool = False
+    parquet_file: str,
+    geometry_column: str | None = None,
+    con=None,
+    *,
+    strict: bool = False,
+    metadata_table: str | None = None,
 ) -> list[dict]:
     """
     Get per-row-group native Parquet geo_bbox statistics.
@@ -1345,7 +1388,9 @@ def get_per_row_group_native_geo_stats(
         if geometry_column is None:
             return []
     elif strict:
-        chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column, con)
+        chunks = get_native_geo_stats_by_row_group(
+            parquet_file, geometry_column, con, metadata_table=metadata_table
+        )
         if chunks is None:
             raise InvalidParameterError(
                 "geometry_column", f"the file has no column named {geometry_column!r}"
@@ -1353,7 +1398,9 @@ def get_per_row_group_native_geo_stats(
         return _chunk_bboxes(chunks)
 
     try:
-        chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column, con)
+        chunks = get_native_geo_stats_by_row_group(
+            parquet_file, geometry_column, con, metadata_table=metadata_table
+        )
     except Exception:
         return []
     return _chunk_bboxes(chunks or [])

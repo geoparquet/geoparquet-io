@@ -29,8 +29,8 @@ from pathlib import Path
 
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
-    fetch_one,
     quote_identifier,
+    register_shared_function,
     sql_literal,
 )
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
@@ -221,11 +221,7 @@ def _register_decoder(con, codec: str) -> str:
     from duckdb.sqltypes import VARCHAR
 
     name = "gpio_decode_" + re.sub(r"[^a-z0-9]", "_", codec.lower())
-    exists = fetch_one(
-        con.execute("SELECT 1 FROM duckdb_functions() WHERE function_name = ?", [name])
-    )
-    if not exists:
-        con.create_function(name, _decoder(codec), [VARCHAR], VARCHAR, type="arrow")
+    register_shared_function(con, name, _decoder(codec), [VARCHAR], VARCHAR, type="arrow")
     return name
 
 
