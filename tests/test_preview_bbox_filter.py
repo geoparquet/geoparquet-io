@@ -328,3 +328,46 @@ def test_preview_module_imports_without_duckdb():
         "assert 'duckdb' not in sys.modules, 'core.preview must defer its duckdb imports'\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True, timeout=120)
+
+
+@pytest.mark.parametrize(
+    ("source", "geometry_column", "stats_source", "rows"),
+    [
+        (GPQ2, None, "native", 100),
+        (PLACES, None, "bbox_struct", 766),
+        (BUILDINGS, None, None, 42),
+        (PLACES, "geometry", "bbox_struct", 766),
+    ],
+    ids=["native", "bbox-fallback", "no-stats", "explicit-geometry"],
+)
+def test_preview_opens_one_connection(monkeypatch, source, geometry_column, stats_source, rows):
+    """Count every factory alias, including helpers imported lazily by preview."""
+    from geoparquet_io.core import (
+        bbox_structure,
+        duckdb_metadata,
+        duckdb_utils,
+        geo_metadata,
+        geometry_detection,
+        preview,
+    )
+
+    factory = duckdb_utils.get_duckdb_connection
+    captured = []
+
+    def spy(*args, **kwargs):
+        captured.append(kwargs)
+        return factory(*args, **kwargs)
+
+    # Import the entire helper tree before patching module-level aliases.
+    for module in (bbox_structure, duckdb_metadata, geo_metadata, geometry_detection, preview):
+        assert module is not None
+    for module in tuple(sys.modules.values()):
+        if module and module.__name__.startswith("geoparquet_io."):
+            if getattr(module, "get_duckdb_connection", None) is factory:
+                monkeypatch.setattr(module, "get_duckdb_connection", spy)
+
+    result = preview_bbox_filter(str(source), WORLD, geometry_column=geometry_column)
+    assert result.total_rows == rows
+    assert result.stats_source == stats_source
+    assert result.has_estimate == (stats_source is not None)
+    assert len(captured) == 1, f"preview opened {len(captured)} connections: {captured}"
