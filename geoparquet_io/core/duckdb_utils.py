@@ -28,7 +28,7 @@ import threading
 import uuid
 import weakref
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, BinaryIO, TypeVar
@@ -1741,36 +1741,6 @@ class ProfiledConnection:
         return self._con.__exit__(*exc_info)
 
 
-class _ManagedConnection:
-    """A cursor whose resource scopes end before its session closes."""
-
-    def __init__(self, con, owner=None):
-        self._con = con
-        self._owner = owner
-        self._scopes = ExitStack()
-
-    def __getattr__(self, name):
-        return getattr(self._con, name)
-
-    def cursor(self):
-        cursor = self._con.cursor()
-        if self._owner is not None:
-            _shared_cursors[cursor] = self._owner
-        return cursor
-
-    def close(self):
-        try:
-            self._scopes.close()
-        finally:
-            self._con.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        self.close()
-
-
 class _SharedDatabase:
     def __init__(self):
         self.pid = os.getpid()
@@ -1830,11 +1800,16 @@ def _ensure_shared_extension(state, name):
 
 
 def _registration_owner(con):
-    while isinstance(con, (ProfiledConnection, _ManagedConnection)):
-        if isinstance(con, _ManagedConnection) and con._owner is not None:
-            return con._owner
+    while isinstance(con, ProfiledConnection):
         con = con._con
     return _shared_cursors.get(con, con)
+
+
+def is_shared_connection(con) -> bool:
+    """Whether closing this factory connection leaves its database alive."""
+    while isinstance(con, ProfiledConnection):
+        con = con._con
+    return con in _shared_cursors
 
 
 def register_shared_function(con, name, function, *args, **kwargs):
@@ -1887,9 +1862,9 @@ def get_duckdb_connection(
 
     Defaults and extensions are initialized once on the retained root. TEMP
     objects and Arrow registrations belong to each session. Explicit resource
-    limits hold a process-wide scope until close/exit; close them in the issuing
-    thread. Scoped writes serialize resource changes. Other readers can observe
-    the active limits. Persistent catalog changes require isolated=True.
+    limits use a private database for the connection lifetime. Scoped writes
+    serialize resource changes on the shared database. Other readers can observe
+    the active scoped limits. Persistent catalog changes require isolated=True.
     Explicit temp directories and authenticated S3 credentials are isolated.
 
     By default, S3 access uses no credentials, which works for public buckets.
@@ -1956,6 +1931,8 @@ def get_duckdb_connection(
     s3_settings = _resolve_s3_settings(s3_endpoint, s3_region, s3_use_ssl)
     isolated = (
         isolated
+        or memory_limit is not None
+        or threads is not None
         or temp_directory is not None
         or bool(load_httpfs and (use_s3_auth or s3_settings["profile"]))
     )
@@ -1969,15 +1946,6 @@ def get_duckdb_connection(
                 _create_s3_secret(con, s3_settings, required=use_s3_auth)
     else:
         con = _open_shared_cursor(load_spatial, load_httpfs)
-        if memory_limit is not None or threads is not None:
-            from geoparquet_io.core.memory_limits import _connection_settings_scope
-
-            con = _ManagedConnection(con, _shared_state().root)
-            try:
-                con._scopes.enter_context(_connection_settings_scope(con, memory_limit, threads))
-            except BaseException:
-                con.close()
-                raise
     try:
         _apply_s3_settings(con, s3_settings)
         profile_dir = _profile_directory()

@@ -5,7 +5,7 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
-from threading import Barrier, Event
+from threading import Barrier, Event, RLock, Thread
 from unittest.mock import Mock
 
 import duckdb
@@ -227,8 +227,10 @@ def test_two_api_chains_load_spatial_once(
 
 
 @pytest.mark.parametrize("gdal", [False, True], ids=["parquet", "gdal"])
-def test_gc_only_after_gdal_read(
-    monkeypatch, production_factory, one_point_geojson, tmp_path, gdal
+@pytest.mark.parametrize("isolated", [False, True], ids=["shared", "isolated"])
+@pytest.mark.parametrize("profiled", [False, True], ids=["plain", "profiled"])
+def test_gc_only_after_isolated_gdal_read(
+    monkeypatch, production_factory, one_point_geojson, tmp_path, gdal, isolated, profiled
 ):
     import geoparquet_io as gpio
     from geoparquet_io.core import convert
@@ -237,16 +239,23 @@ def test_gc_only_after_gdal_read(
     if not gdal:
         source = tmp_path / "source.parquet"
         gpio.convert(str(one_point_geojson)).write(str(source))
+    if profiled:
+        monkeypatch.setenv("GPIO_DUCKDB_PROFILE", str(tmp_path / "profiles"))
+    monkeypatch.setattr(
+        convert,
+        "get_duckdb_connection",
+        lambda **kwargs: production_factory(isolated=isolated, **kwargs),
+    )
     collect = Mock()
     monkeypatch.setattr(convert.gc, "collect", collect)
     result = gpio.convert(str(source))
     assert result.num_rows == 1
-    assert collect.call_count == int(gdal)
+    assert collect.call_count == int(gdal and isolated)
 
 
 @pytest.mark.parametrize("opening", ["factory", "bounded", "scoped"])
 @pytest.mark.parametrize("exit_mode", ["close", "exception"])
-def test_connection_limits_restore_on_close(production_factory, opening, exit_mode):
+def test_connection_limits_isolate_or_restore_on_exit(production_factory, opening, exit_mode):
     from geoparquet_io.core.memory_limits import open_bounded_connection
 
     with production_factory() as observer:
@@ -264,9 +273,11 @@ def test_connection_limits_restore_on_close(production_factory, opening, exit_mo
             lifetime.enter_context(scoped_write_memory_limit(con, "256MB", False))
         if opening != "scoped":
             lifetime.enter_context(con)
-        assert _settings(observer)[0] != before[0]
+        assert _settings(con)[0] != before[0]
+        if opening != "scoped":
+            assert _settings(observer) == before[:2]
         if opening == "bounded":
-            assert utils._current_setting(observer, "preserve_insertion_order") is False
+            assert utils._current_setting(con, "preserve_insertion_order") is False
         if exit_mode == "close":
             lifetime.close()
         else:
@@ -276,3 +287,80 @@ def test_connection_limits_restore_on_close(production_factory, opening, exit_mo
             *_settings(observer),
             utils._current_setting(observer, "preserve_insertion_order"),
         ) == before
+
+
+@pytest.mark.parametrize("opening", ["factory", "bounded", "threads"])
+@pytest.mark.parametrize("cleanup", ["close", "gc"])
+def test_limited_connection_cross_thread_cleanup_does_not_strand_settings_lock(
+    production_factory, monkeypatch, opening, cleanup
+):
+    from geoparquet_io.core import memory_limits
+
+    lock = RLock()
+    monkeypatch.setattr(memory_limits, "_settings_lock", lock)
+    if opening == "bounded":
+        con = memory_limits.open_bounded_connection(memory_limit="256MB", load_spatial=False)
+    else:
+        kwargs = {"threads": 1} if opening == "threads" else {"memory_limit": "256MB"}
+        con = production_factory(load_spatial=False, **kwargs)
+    pending = [con]
+    if cleanup == "gc":
+        cycle = [con]
+        cycle.append(cycle)
+        pending = [cycle]
+        del cycle
+    del con
+    errors = []
+
+    def dispose():
+        try:
+            if cleanup == "close":
+                pending.pop().close()
+            else:
+                pending.clear()
+                gc.collect()
+        except Exception as exc:
+            errors.append(exc)
+
+    disposer = Thread(target=dispose, daemon=True)
+    disposer.start()
+    disposer.join(timeout=5)
+    assert not disposer.is_alive()
+    wrote = Event()
+
+    def write():
+        with production_factory(load_spatial=False) as writer:
+            with scoped_write_memory_limit(writer, "256MB", False):
+                wrote.set()
+
+    writer = Thread(target=write, daemon=True)
+    writer.start()
+    writer.join(timeout=2)
+    completed = not writer.is_alive()
+    # Repair a stranded lock so the failing regression can exit cleanly.
+    while lock._is_owned():
+        lock.release()
+    writer.join(timeout=5)
+    assert completed, "cross-thread cleanup stranded the settings lock"
+    assert wrote.is_set()
+    assert not errors
+
+
+@pytest.mark.parametrize("opening", ["factory", "bounded"])
+def test_limited_connections_closed_out_of_order_leave_shared_defaults(production_factory, opening):
+    from geoparquet_io.core.memory_limits import open_bounded_connection
+
+    factory = production_factory if opening == "factory" else open_bounded_connection
+    with production_factory(load_spatial=False) as observer:
+        before = _settings(observer)
+        first = factory(memory_limit="256MB", load_spatial=False)
+        second = factory(memory_limit="512MB", load_spatial=False)
+        try:
+            second_limit = _settings(second)
+            first.close()
+            remaining_limit = _settings(second)
+        finally:
+            first.close()
+            second.close()
+        assert _settings(observer) == before
+        assert remaining_limit == second_limit

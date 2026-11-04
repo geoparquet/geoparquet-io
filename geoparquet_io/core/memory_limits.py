@@ -29,7 +29,6 @@ if TYPE_CHECKING:
 from geoparquet_io.core.duckdb_utils import (
     _apply_memory_limit,
     _current_setting,
-    _ManagedConnection,
     get_duckdb_connection,
     pin_duckdb_settings,
     restore_duckdb_settings,
@@ -267,14 +266,13 @@ def open_bounded_connection(
         load_httpfs=load_httpfs,
         threads=threads,
         memory_limit=limit,
+        isolated=True,
     )
-    if not isinstance(con, _ManagedConnection):
-        con = _ManagedConnection(con)
-    con._scopes.enter_context(
-        _connection_settings_scope(
-            con, pinned={"preserve_insertion_order": preserve_insertion_order}
-        )
-    )
+    try:
+        con.execute(f"SET preserve_insertion_order = {str(preserve_insertion_order).lower()}")
+    except BaseException:
+        con.close()
+        raise
     if verbose and limit:
         debug(f"DuckDB memory limit: {limit}")
     if verbose and threads:
@@ -342,23 +340,6 @@ def scoped_write_memory_limit(
                 limit_bytes = parse_size_string(str(_current_setting(con, "memory_limit")))
                 if limit_bytes:
                     _apply_memory_limit(con, None, _thread_cap(limit_bytes), verbose)
-            with pin_duckdb_settings(con, pinned):
-                yield
-        finally:
-            restore_duckdb_settings(con, saved, verbose)
-
-
-@contextmanager
-def _connection_settings_scope(con, memory_limit=None, threads=None, verbose=False, pinned=None):
-    """Keep connection-lifetime overrides serialized and restore them on close."""
-    with _settings_lock:
-        pinned = dict(pinned or {})
-        saved = {key: _current_setting(con, key) for key in ("memory_limit", "threads", *pinned)}
-        try:
-            limit = validate_memory_limit(memory_limit) if memory_limit is not None else None
-            _apply_memory_limit(con, limit, None, verbose)
-            if threads is not None:
-                pinned["threads"] = threads
             with pin_duckdb_settings(con, pinned):
                 yield
         finally:

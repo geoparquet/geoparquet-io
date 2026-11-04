@@ -99,18 +99,27 @@ def preview_bbox_filter(
     """
     query_bbox = parse_bbox(bbox)
 
-    from geoparquet_io.core.duckdb_metadata import _get_connection_for_file, get_row_group_sizes
+    from geoparquet_io.core.duckdb_metadata import (
+        _get_connection_for_file,
+        get_row_group_sizes,
+        materialize_row_group_metadata,
+    )
 
     con, _ = _get_connection_for_file(parquet_file)
     try:
-        sizes = get_row_group_sizes(parquet_file, con=con)
+        # A cursor owns its TEMP tables. Materialize this footer only for this
+        # preview, so repeated statistics queries cannot fetch it again.
+        materialize_row_group_metadata(parquet_file, con, "_gpio_preview_metadata")
+        sizes = get_row_group_sizes(parquet_file, con=con, metadata_table="_gpio_preview_metadata")
         totals = {
             "total_row_groups": len(sizes),
             "total_rows": sum(size["num_rows"] for size in sizes),
             "total_bytes": sum(size["compressed_bytes"] for size in sizes),
         }
 
-        stats, source = _row_group_spatial_stats(parquet_file, geometry_column, con=con)
+        stats, source = _row_group_spatial_stats(
+            parquet_file, geometry_column, con=con, metadata_table="_gpio_preview_metadata"
+        )
         if not stats:
             return BboxFilterPreview(
                 has_estimate=False,
@@ -138,55 +147,52 @@ def preview_bbox_filter(
 
 
 def _row_group_spatial_stats(
-    parquet_file: str, geometry_column: str | None, con=None
+    parquet_file: str, geometry_column: str | None, con, *, metadata_table: str
 ) -> tuple[list[dict], Literal["native", "bbox_struct"] | None]:
-    """The file's per-row-group bboxes and where they came from, or ``([], None)``.
-
-    Native Parquet geo statistics first, then a bbox covering column's chunk
-    statistics -- the same order and owners as ``ops.get_row_group_geo_stats``.
-    An explicit ``geometry_column`` is honored on both rungs: a name the file
-    does not have raises instead of reading as "the file has no statistics",
-    and the covering fallback only uses a covering that column itself declares
-    -- never the primary column's (#1171: a secondary's read must not be
-    pruned on the primary's extents).
-    """
+    """Resolve the geometry and covering once, using this preview's footer rows."""
+    from geoparquet_io.core.bbox_structure import (
+        bbox_covering_column_for,
+        bbox_structure_from_metadata,
+    )
     from geoparquet_io.core.duckdb_metadata import (
         get_per_row_group_native_geo_stats,
         get_row_group_bbox_stats,
+        get_schema_info,
     )
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
+    from geoparquet_io.core.parquet_schema import root_schema_columns
+
+    schema = get_schema_info(parquet_file, con=con)
+    raw_geo = raw_geo_of_file(parquet_file, con=con)
+    geo = raw_geo.block
+    columns = [(col["name"], col.get("logical_type")) for col in root_schema_columns(schema)]
+    primary = primary_geometry_column(columns, geo=raw_geo.value)
+    selected = geometry_column or primary
+
+    def native():
+        if not selected:
+            return []
+        return get_per_row_group_native_geo_stats(
+            parquet_file,
+            selected,
+            con=con,
+            strict=geometry_column is not None,
+            metadata_table=metadata_table,
+        )
+
+    def bbox_column():
+        if geometry_column is None or geometry_column == primary:
+            return bbox_structure_from_metadata(schema, geo).get("bbox_column_name")
+        return bbox_covering_column_for(geo, geometry_column)
 
     return get_row_group_bbox_stats(
         parquet_file,
-        # An explicit column the file lacks is the caller's typo: raise it.
-        native=lambda: get_per_row_group_native_geo_stats(
-            parquet_file, geometry_column, strict=True, con=con
-        ),
-        bbox_column=lambda: _prunable_bbox_column(parquet_file, geometry_column, con=con),
+        native=native,
+        bbox_column=bbox_column,
         con=con,
+        metadata_table=metadata_table,
     )
-
-
-def _prunable_bbox_column(parquet_file: str, geometry_column: str | None, con=None) -> str | None:
-    """The bbox covering column the preview may prune on, or ``None``.
-
-    With no explicit column (or the primary named explicitly) that is the
-    primary's covering, conventional-name fallback included. Any other column
-    may only be pruned on a covering its own ``geo`` entry declares.
-    """
-    from geoparquet_io.core.bbox_structure import bbox_covering_column_for, check_bbox_structure
-    from geoparquet_io.core.geometry_detection import primary_geometry_column
-
-    if geometry_column is not None:
-        try:
-            primary = primary_geometry_column(parquet_file, con=con)
-        except Exception:  # noqa: BLE001 - a pruning hint, never the preview's failure
-            primary = None
-    if geometry_column is None or geometry_column == primary:
-        return check_bbox_structure(parquet_file, con=con).get("bbox_column_name")
-
-    from geoparquet_io.core.geo_metadata import raw_geo_of_file
-
-    return bbox_covering_column_for(raw_geo_of_file(parquet_file, con=con).block, geometry_column)
 
 
 def _matching_row_groups(

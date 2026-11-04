@@ -371,3 +371,70 @@ def test_preview_opens_one_connection(monkeypatch, source, geometry_column, stat
     assert result.stats_source == stats_source
     assert result.has_estimate == (stats_source is not None)
     assert len(captured) == 1, f"preview opened {len(captured)} connections: {captured}"
+
+
+@pytest.mark.parametrize("fixture", [GPQ2, PLACES], ids=["native", "bbox"])
+def test_remote_preview_reads_each_footer_view_once(fixture):
+    """Loopback only: one metadata, key/value and schema read per preview."""
+    from contextlib import ExitStack
+
+    from tests._fake_s3 import fake_s3
+
+    with ExitStack() as stack:
+        try:
+            endpoint, requests = stack.enter_context(
+                fake_s3({"preview/data.parquet": fixture.read_bytes()})
+            )
+        except PermissionError:
+            pytest.skip("sandbox blocks loopback sockets")
+        result = preview_bbox_filter(f"http://{endpoint}/preview/data.parquet", WORLD)
+        assert result.has_estimate
+        assert len(requests) == 6
+
+
+@pytest.mark.parametrize("fixture", [GPQ2, PLACES], ids=["native", "bbox"])
+def test_preview_reads_each_footer_view_once(monkeypatch, fixture):
+    """Count real footer SQL even in sandboxes that prohibit loopback sockets."""
+    from geoparquet_io.core import duckdb_metadata
+
+    queries = []
+    original = duckdb_metadata._get_connection_for_file
+
+    class RecordingConnection:
+        def __init__(self, connection):
+            self.connection = connection
+
+        def __getattr__(self, name):
+            return getattr(self.connection, name)
+
+        def execute(self, query, *args, **kwargs):
+            queries.append(query)
+            return self.connection.execute(query, *args, **kwargs)
+
+        def sql(self, query, *args, **kwargs):
+            queries.append(query)
+            return self.connection.sql(query, *args, **kwargs)
+
+    def recording_connection(*args, **kwargs):
+        connection, owned = original(*args, **kwargs)
+        if not isinstance(connection, RecordingConnection):
+            connection = RecordingConnection(connection)
+        return connection, owned
+
+    monkeypatch.setattr(duckdb_metadata, "_get_connection_for_file", recording_connection)
+    assert preview_bbox_filter(str(fixture), WORLD).has_estimate
+    for table_function in ("parquet_metadata", "parquet_kv_metadata", "parquet_schema"):
+        assert sum(f"{table_function}(" in query for query in queries) == 1
+
+
+def test_preview_sees_rewritten_row_groups(sorted_places, tmp_path):
+    """The footer snapshot belongs to one call, even when a path is reused."""
+    table = pq.read_table(sorted_places)
+    path = str(tmp_path / "rewritten.parquet")
+    pq.write_table(table, path, row_group_size=100)
+    before = preview_bbox_filter(path, WORLD)
+    pq.write_table(table, path, row_group_size=table.num_rows)
+    after = preview_bbox_filter(path, WORLD)
+    assert before.total_row_groups > 1
+    assert after.total_row_groups == 1
+    assert after.total_rows == before.total_rows

@@ -40,6 +40,7 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     geom_from_wkb_sql,
     get_duckdb_connection,
+    is_shared_connection,
     quote_identifier,
     sql_literal,
     sql_path,
@@ -2627,11 +2628,9 @@ def read_spatial_to_arrow(
 
     finally:
         con.close()
-        # Force garbage collection to prevent segfaults/SIGABRT when reading
-        # multiple layers sequentially. GDAL's internal handles may not be
-        # fully released before the next connection opens.
-        # See: https://github.com/geoparquet/geoparquet-io/issues/322, #401
-        if not is_csv and not is_parquet:
+        # Keep the #322/#401 GDAL cleanup when a database is destroyed.
+        # Closing a shared cursor leaves that database alive.
+        if not is_csv and not is_parquet and not is_shared_connection(con):
             gc.collect()
 
 
