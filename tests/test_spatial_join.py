@@ -189,6 +189,35 @@ def _aggregate_admin(tmp_path, input_file):
 
 
 class TestOneMatchPerInput:
+    def test_native_polygon_overlap_does_not_multiply_with_input_size(self):
+        """No-bbox native polygons keep one assignment at both scales (#550, #543)."""
+        con = du.get_duckdb_connection(threads=1)
+        counts = []
+        try:
+            con.execute(
+                "CREATE TEMP TABLE admins AS SELECT code, ST_GeomFromText(wkt) AS geometry "
+                "FROM (VALUES ('BB', ?), ('AA', ?)) t(code, wkt)",
+                [BB, AA],
+            )
+            for size in (100, 400):
+                query = du.build_spatial_join_query(
+                    input_relation=(
+                        f"(SELECT i AS id, ST_Buffer(ST_Point(1.5, 1), 0.1) AS geometry "
+                        f"FROM range({size}) t(i))"
+                    ),
+                    target_relation="admins",
+                    target_select="b.code",
+                    condition=du.build_spatial_join_condition("geometry", "geometry"),
+                    match_order=["b.code"],
+                )
+                rows = con.execute(query).fetchall()
+                counts.append(len(rows))
+                assert [row[0] for row in rows] == list(range(size))
+                assert all(row[2] == "AA" for row in rows)
+            assert counts == [100, 400]
+        finally:
+            con.close()
+
     def test_add_admin_divisions_emits_each_feature_once(self, tmp_path, local_admin):
         local_admin()
         rows = _add_admin(tmp_path, _write_points(tmp_path / "in.parquet"))
