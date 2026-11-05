@@ -375,8 +375,6 @@ def test_every_answering_path_logs_exactly_one_traceback(monkeypatch, tmp_path, 
 def test_an_inspect_command_answers_a_gpio_error_without_a_usage_preamble(
     monkeypatch, tmp_path, argv, target
 ):
-    import sys
-
     import pyarrow as pa
     import pyarrow.parquet as pq
     from click.testing import CliRunner
