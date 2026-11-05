@@ -163,4 +163,4 @@ extract_bigquery_cmd  # unused function (geoparquet_io/cli/commands/extract.py:5
 extract_wfs_cmd  # unused function (geoparquet_io/cli/commands/extract.py:851) -- dynamic: Click command, registered by its decorator
 a5_from_query_farm  # unused variable (geoparquet_io/core/duckdb_utils.py:415) -- dynamic: field of the frozen DuckDBCapabilities, no reader yet by design (#1360 reads it)
 
-_.format_commands  # Click invokes the LazyGroup help-rendering override dynamically
+_.format_commands  # unused method (geoparquet_io/cli/main.py:65) -- dynamic: Click invokes the LazyGroup help-rendering override
