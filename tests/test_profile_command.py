@@ -277,11 +277,11 @@ def check_stdout_only_ratio_and_tied_order(tmp_path):
     assert comparable_bytes(path, "check-all") != first
     header = "Compression Ratios:\nheader\n"
     a, b = "│ a │ SNAPPY │ 10 │ 20 │ 2.0 │\n", "│ b │ SNAPPY │ 10 │ 20 │ 2.0 │\n"
-    path.write_text(header + a + b + "end\n", encoding="utf-8")
+    path.write_bytes((header + a + b + "end\n").encode())
     first = comparable_bytes(path, "inspect-stats")
-    path.write_text(header + b + a + "end\n", encoding="utf-8")
+    path.write_bytes((header + b + a + "end\n").encode())
     assert comparable_bytes(path, "inspect-stats") == first
-    path.write_text(header + b.replace("20", "30") + a + "end\n", encoding="utf-8")
+    path.write_bytes((header + b.replace("20", "30") + a + "end\n").encode())
     assert comparable_bytes(path, "inspect-stats") != first
 
 
