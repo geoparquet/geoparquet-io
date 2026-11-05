@@ -4070,14 +4070,9 @@ class _ReopeningConnection:
     def geometry_read(self, raw_url: str, column: str) -> GeometryRead:
         if raw_url not in self._descriptions:
             described = describe_query(self, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
-            by_name = dict(described)
-            by_fold = {}
-            for name in by_name:
-                if name:
-                    by_fold.setdefault(fold(name), []).append(name)
-            self._descriptions[raw_url] = by_name, by_fold
-        by_name, by_fold = self._descriptions[raw_url]
-        found = find_column(column, by_fold.get(fold(column), []))
+            self._descriptions[raw_url] = dict(described)
+        by_name = self._descriptions[raw_url]
+        found = find_column(column, (name for name in by_name if name))
         return GeometryRead.for_type(column, by_name[found] if found is not None else None)
 
     def execute(self, *args):
