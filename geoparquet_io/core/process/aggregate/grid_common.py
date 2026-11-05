@@ -539,21 +539,10 @@ def build_grid_query(
     # table rather than re-running the key-assignment expression twice. The
     # keying point is spent once the cell id exists, so it is dropped here: the
     # table is one row per input feature, and a POINT per row is pure weight.
-    breakdown_select = ""
     if breakdown:
         drop_pt = build_exclude_clause(con, f"({keyed_sql})", ("__pt",))
         con.execute(f"CREATE TEMP TABLE __agg_keyed AS SELECT *{drop_pt} FROM ({keyed_sql})")
         keyed_ref = "SELECT * FROM __agg_keyed"
-        breakdown_select = build_breakdown_pivot(
-            con,
-            keyed_ref,
-            breakdown,
-            breakdown_limit,
-            metrics=metrics,
-            spec=bd_metric,
-            nodata_values=nodata_values,
-            column_types=column_types,
-        )
     else:
         keyed_ref = keyed_sql
 
@@ -566,9 +555,21 @@ def build_grid_query(
     )
     if metric_select:
         agg_parts.append(metric_select)
-    if breakdown_select:
-        agg_parts.append(breakdown_select)
     agg_sql = f"SELECT {', '.join(agg_parts)} FROM ({keyed_ref}) GROUP BY __key"
+    if breakdown:
+        agg_sql = build_breakdown_pivot(
+            con,
+            keyed_ref,
+            breakdown,
+            breakdown_limit,
+            aggregate_sql=agg_sql,
+            key_expression="__key",
+            key_column=cell_column,
+            metrics=metrics,
+            spec=bd_metric,
+            nodata_values=nodata_values,
+            column_types=column_types,
+        )
 
     return wrap_grid_geometry(agg_sql, scheme, cell_column, out_geometry)
 

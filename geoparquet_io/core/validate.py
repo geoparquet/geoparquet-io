@@ -19,7 +19,7 @@ from rich.markup import escape
 
 from geoparquet_io.core.bbox_parse import BBox, within_wrapped_x_sql
 from geoparquet_io.core.check_verdict import validation_verdict
-from geoparquet_io.core.column_selection import fold
+from geoparquet_io.core.column_selection import find_column, fold
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
     DEFAULT_CRS_LABEL,
@@ -33,6 +33,7 @@ from geoparquet_io.core.crs_utils import (
     crs_equal,
     crs_from_column_meta,
     crs_of,
+    entry_crs_is_unknown,
     get_crs_display_name,
     is_geographic,
     is_unknown_type_crs,
@@ -51,6 +52,7 @@ from geoparquet_io.core.duckdb_metadata import (
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     as_wkb_sql,
+    describe_query,
     disable_geoparquet_conversion,
     fetch_one,
     geom_from_wkb_sql,
@@ -82,11 +84,13 @@ from geoparquet_io.core.geo_metadata import (
     bounds_of,
     covering_lacks_bbox,
     declares_covering_member,
+    geometry_stats_of,
     geometry_types_of,
     is_covering_path,
     is_geoparquet_1x,
     read_raw_geo,
     row_group_geometry_stats,
+    sanitized_carried_geo,
     split_zm_suffix,
 )
 from geoparquet_io.core.geometry_detection import (
@@ -105,6 +109,8 @@ from geoparquet_io.core.parquet_schema import (
     root_schema_index,
     schema_direct_children,
     schema_entry_is_group,
+    schema_root_offset,
+    schema_subtree_end,
 )
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs
@@ -876,7 +882,7 @@ def _check_geometry_not_grouped(
     that the column sits at the root of the schema.
     """
     # Find the geometry column in schema
-    index = root_schema_index(schema_info, geom_col)
+    index = _schema_index(schema_info, geom_col)
     if index is not None:
         col = schema_info[index]
         if _is_geoarrow_encoding(encoding):
@@ -1056,7 +1062,7 @@ def _check_geometry_byte_array(
     schema_info: list, geom_col: str, encoding: Any = "WKB"
 ) -> ValidationCheck:
     """Check 15: WKB geometry columns must be stored using BYTE_ARRAY parquet type."""
-    index = root_schema_index(schema_info, geom_col)
+    index = _schema_index(schema_info, geom_col)
     if index is not None:
         col = schema_info[index]
         # parquet_schema() reports a group node's type as an explicit None,
@@ -1089,7 +1095,7 @@ def _check_geometry_byte_array(
 
 def _check_geometry_not_repeated(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check 16: geometry columns must be required or optional, not repeated."""
-    index = root_schema_index(schema_info, geom_col)
+    index = _schema_index(schema_info, geom_col)
     if index is not None:
         col = schema_info[index]
         repetition = col.get("repetition_type", "").upper()
@@ -1304,11 +1310,17 @@ def _bad_wkb_message(geom_col: str, encoding: Any, presence: GeometryPresence, p
     return ". ".join(problems)
 
 
+def _validation_geometry_read(con, raw_url: str, geom_col: str) -> GeometryRead:
+    if isinstance(con, _ReopeningConnection):
+        return con.geometry_read(raw_url, geom_col)
+    return resolve_geometry_read(con, raw_url, geom_col)
+
+
 def _geometry_read(con, raw_url: str, geom_col: str) -> GeometryRead:
     """How the data checks read ``geom_col``, raising when it cannot be read.
 
     The owner describes the file and decides the read (#1367 concept 7)."""
-    read = resolve_geometry_read(con, raw_url, geom_col)
+    read = _validation_geometry_read(con, raw_url, geom_col)
     if not read.readable:
         raise ValueError(read.problem)
     return read
@@ -1368,7 +1380,7 @@ def _check_geoarrow_geometry_types(
     """
     quoted_geom = quote_identifier(geom_col)
     found = _GEOARROW_ENCODING_TYPE[encoding] + _geoarrow_zm_suffix(
-        resolve_geometry_read(con, raw_url, geom_col).duckdb_type
+        _validation_geometry_read(con, raw_url, geom_col).duckdb_type
     )
     count_query = f"""
         SELECT COUNT(*) FROM read_parquet({sql_path(raw_url)})
@@ -1421,8 +1433,17 @@ def _check_geometry_types_match_data(
         # "LineString ZM" are distinct geometry_types per spec), under the one
         # degenerate-geometry policy the writers use: an EMPTY geometry has no
         # type to declare, so it cannot be an undeclared one either.
-        found = set(geometry_types_of(QuerySource(con, sample), geom_col))
-        total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sample})"))[0]
+        facts = (
+            con.sampled_geometry_facts(raw_url, geom_col, limit_clause, sample)
+            if isinstance(con, _ReopeningConnection)
+            else None
+        )
+        if facts is None:
+            found = set(geometry_types_of(QuerySource(con, sample), geom_col))
+            total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sample})"))[0]
+        else:
+            stats, total_count = facts
+            found = set(stats.geometry_types)
         return _compare_geometry_types(found, declared_types, total_count, geom_col)
     except Exception as e:
         check_name = f"geometry_types_match_data_{geom_col}"
@@ -1758,7 +1779,7 @@ def _check_bbox_contains_data(
         )
 
     try:
-        col_type = resolve_geometry_read(con, raw_url, geom_col).duckdb_type
+        col_type = _validation_geometry_read(con, raw_url, geom_col).duckdb_type
         query = _build_bbox_query(raw_url, geom_col, col_type, xy, limit_clause, encoding)
         result = fetch_one(con.execute(query))
         check = _interpret_bbox_result(result, geom_col)
@@ -1869,7 +1890,7 @@ def _cover_bbox_column(
         return _cover_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
     if ref.problem is not None or ref.column is None:
         return _cover_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
-    index = root_schema_index(schema_info, ref.column)
+    index = _schema_index(schema_info, ref.column)
     if index is None:
         return _bbox_column_missing(check_name, ref.column, schema_info)
     return ref.column, index
@@ -2135,7 +2156,7 @@ def _check_file_extension(file_path: str) -> ValidationCheck:
 def _check_native_geo_type_present(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check PGO-1: GEOMETRY/GEOGRAPHY logical type must be present."""
 
-    index = root_schema_index(schema_info, geom_col)
+    index = _schema_index(schema_info, geom_col)
     if index is not None:
         col = schema_info[index]
         logical_type = col.get("logical_type") or ""
@@ -2165,7 +2186,7 @@ def _check_native_geo_type_present(schema_info: list, geom_col: str) -> Validati
 def _check_native_crs_format(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check PGO-3: optional CRS must be in valid format (srid:XXXX or inline PROJJSON)."""
 
-    index = root_schema_index(schema_info, geom_col)
+    index = _schema_index(schema_info, geom_col)
     if index is not None:
         col = schema_info[index]
         logical_type = col.get("logical_type") or ""
@@ -2226,7 +2247,7 @@ def _check_native_crs_format(schema_info: list, geom_col: str) -> ValidationChec
 def _check_geography_edges_valid(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check PGO-4: for GEOGRAPHY, edges must be valid algorithm."""
 
-    index = root_schema_index(schema_info, geom_col)
+    index = _schema_index(schema_info, geom_col)
     if index is not None:
         col = schema_info[index]
         logical_type = col.get("logical_type") or ""
@@ -2465,7 +2486,7 @@ def _geography_edge_algorithm(schema_info: list | None, geom_col: str) -> str:
     """The column's edge algorithm, read from its GEOGRAPHY logical type."""
     from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
 
-    index = root_schema_index(schema_info or [], geom_col)
+    index = _schema_index(schema_info or [], geom_col)
     if index is not None:
         col = schema_info[index]
         parsed = parse_geometry_logical_type(col.get("logical_type") or "") or {}
@@ -2499,7 +2520,7 @@ def _geography_geod(schema_info: list | None, geom_col: str, algorithm: str):
     if not is_ellipsoidal(algorithm):
         return Geod(a=6371008.8, f=0.0)
     crs = None
-    index = root_schema_index(schema_info or [], geom_col)
+    index = _schema_index(schema_info or [], geom_col)
     if index is not None:
         col = schema_info[index]
         crs = (parse_geometry_logical_type(col.get("logical_type") or "") or {}).get("crs")
@@ -3250,7 +3271,7 @@ def _check_geometry_types_match_stats(
 def _check_v2_uses_native_types(schema_info: list, geom_col: str) -> ValidationCheck:
     """Check V2-1: geometry columns MUST use Parquet GEOMETRY or GEOGRAPHY types."""
 
-    index = root_schema_index(schema_info, geom_col)
+    index = _schema_index(schema_info, geom_col)
     if index is not None:
         col = schema_info[index]
         logical_type = col.get("logical_type") or ""
@@ -3316,7 +3337,7 @@ def _check_v2_crs_in_parquet_type(
         )
 
     # Find the Parquet schema CRS
-    index = root_schema_index(schema_info, geom_col)
+    index = _schema_index(schema_info, geom_col)
     if index is not None:
         col = schema_info[index]
         logical_type = col.get("logical_type") or ""
@@ -3375,7 +3396,7 @@ def _schema_crs_for_consistency(schema_info: list, geom_col: str) -> Any:
     Conservative, but never a silent false PASS.
     """
 
-    index = root_schema_index(schema_info, geom_col)
+    index = _schema_index(schema_info, geom_col)
     if index is not None:
         col = schema_info[index]
         parsed = parse_geometry_logical_type(col.get("logical_type") or "")
@@ -3450,7 +3471,7 @@ def _schema_crs_display(schema_crs: Any) -> str:
 def _edges_schema_facts(schema_info: list, geom_col: str) -> tuple[bool, bool, str | None]:
     """Return (is_geography, is_planar_geometry, schema_algorithm) for a column."""
 
-    index = root_schema_index(schema_info, geom_col)
+    index = _schema_index(schema_info, geom_col)
     if index is not None:
         col = schema_info[index]
         logical_type = col.get("logical_type") or ""
@@ -3524,7 +3545,7 @@ def _check_parquet_geo_only_crs(
 ) -> ValidationCheck:
     """Check CRS for parquet-geo-only files (no GeoParquet metadata)."""
 
-    index = root_schema_index(schema_info, geom_col)
+    index = _schema_index(schema_info, geom_col)
     if index is not None:
         col = schema_info[index]
         logical_type = col.get("logical_type") or ""
@@ -3836,6 +3857,12 @@ def _get_geometry_bounds(
             WHERE {read.present_sql}
             {limit_clause}
         """
+        if isinstance(con, _ReopeningConnection):
+            facts = con._sampled_facts.get((raw_url, geom_col, limit_clause))
+            if facts is not None:
+                stats, total = facts
+                bbox = stats.bbox
+                return (bbox[0], bbox[2], bbox[1], bbox[3], total) if bbox is not None else None
     bbox = bounds_of(QuerySource(con, sample), geom_col)
     if bbox is None:
         return None
@@ -3999,6 +4026,52 @@ def _open_validation_connection(parquet_file: str):
     return con
 
 
+class _ValidationSchema(list):
+    """Immutable file facts shared by one validation's checks, never across files."""
+
+    def __init__(self, entries: list, kv_metadata: dict):
+        super().__init__(entries)
+        self.roots = {}
+        index = schema_root_offset(self)
+        while index < len(self):
+            self.roots.setdefault(self[index].get("name"), index)
+            index = schema_subtree_end(self, index)
+        self.kv_metadata = kv_metadata
+        self.raw_geo = read_raw_geo(kv_metadata).block or {}
+        self.carried_geo = None
+
+    def crs_is_unknown(self, parquet_file: str, column: str) -> bool:
+        # Missing declared columns retain the CRS owner's primary fallback.
+        if column not in self.roots:
+            return source_crs_is_unknown(parquet_file, column)
+        columns = self.raw_geo.get("columns")
+        entry = columns.get(column) if isinstance(columns, dict) else None
+        if entry_crs_is_unknown(entry):
+            return True
+        if self.carried_geo is None:
+            self.carried_geo = sanitized_carried_geo(self.kv_metadata, source=parquet_file)
+        entry = (self.carried_geo.get("columns") or {}).get(column)
+        logical_type = self[self.roots[column]].get("logical_type")
+        parsed = (
+            parse_geometry_logical_type(logical_type or "")
+            if is_geometry_column(logical_type)
+            else None
+        )
+        return entry_crs_is_unknown(entry, parsed.get("crs") if parsed else None)
+
+
+def _schema_index(schema_info: list, name: str) -> int | None:
+    if isinstance(schema_info, _ValidationSchema):
+        return schema_info.roots.get(name)
+    return root_schema_index(schema_info, name)
+
+
+def _validation_crs_unknown(parquet_file: str, column: str, schema_info: list) -> bool:
+    if isinstance(schema_info, _ValidationSchema):
+        return schema_info.crs_is_unknown(parquet_file, column)
+    return source_crs_is_unknown(parquet_file, column)
+
+
 class _ReopeningConnection:
     """Forwards to a validation connection, and replaces it once a statement has
     left it unusable (a DuckDB InternalException invalidates the database). One
@@ -4008,6 +4081,34 @@ class _ReopeningConnection:
     def __init__(self, parquet_file: str):
         self._parquet_file = parquet_file
         self._con = _open_validation_connection(parquet_file)
+        self._descriptions = {}
+        self._sampled_facts = {}
+
+    def sampled_geometry_facts(self, raw_url, column, limit_clause, sample):
+        """Share successful type/bounds facts for the identical present-value sample.
+
+        Bounds can fail where types succeed (non-finite coordinates). On any
+        failure the checks run their original independent queries and diagnostics.
+        """
+        key = (raw_url, column, limit_clause)
+        if key not in self._sampled_facts:
+            try:
+                stats = geometry_stats_of(QuerySource(self, sample), column)
+                total = fetch_one(self.execute(f"SELECT COUNT(*) FROM ({sample})"))[0]
+            except Exception as e:
+                if is_interrupt(e):
+                    raise KeyboardInterrupt(str(e)) from e
+                return None
+            self._sampled_facts[key] = (stats, total)
+        return self._sampled_facts[key]
+
+    def geometry_read(self, raw_url: str, column: str) -> GeometryRead:
+        if raw_url not in self._descriptions:
+            described = describe_query(self, f"SELECT * FROM read_parquet({sql_path(raw_url)})")
+            self._descriptions[raw_url] = dict(described)
+        by_name = self._descriptions[raw_url]
+        found = find_column(column, (name for name in by_name if name))
+        return GeometryRead.for_type(column, by_name[found] if found is not None else None)
 
     def execute(self, *args):
         import duckdb
@@ -4043,6 +4144,8 @@ class _ReopeningConnection:
     def _reopen(self) -> None:
         import duckdb
 
+        self._descriptions.clear()
+        self._sampled_facts.clear()
         with contextlib.suppress(duckdb.Error):
             self._con.close()
         self._con = _open_validation_connection(self._parquet_file)
@@ -4136,7 +4239,7 @@ def validate_geoparquet(
         raw_geo = read_raw_geo(kv_metadata)
         geo_entry_count = _geo_entry_count(parquet_file) if raw_geo.present else None
         geo_meta = raw_geo.value
-        schema_info = get_schema_info(parquet_file)
+        schema_info = _ValidationSchema(get_schema_info(parquet_file), kv_metadata)
         geo_columns = detect_geometry_columns(parquet_file)
     except (GeoParquetError, UnicodeDecodeError, ValueError) as e:
         result.checks.append(
@@ -4373,7 +4476,9 @@ def _run_parquet_geo_only_checks(
 
             # Unknown is distinct from the absent/default CRS for range validation.
             range_crs = (
-                PARQUET_UNKNOWN_CRS if source_crs_is_unknown(parquet_file, geom_col) else crs
+                PARQUET_UNKNOWN_CRS
+                if _validation_crs_unknown(parquet_file, geom_col, schema_info)
+                else crs
             )
             checks.append(
                 _check_coordinates_valid_for_crs(
@@ -4500,7 +4605,7 @@ def _run_geoparquet_checks(
             # null or empty crs, or no crs key over a srid:0 type) is spelled
             # the way the Parquet type spells it, so the check skips it rather
             # than reading it as the lon/lat default.
-            unknown = source_crs_is_unknown(parquet_file, col_name)
+            unknown = _validation_crs_unknown(parquet_file, col_name, schema_info)
             range_crs = PARQUET_UNKNOWN_CRS if unknown else crs
             checks.append(
                 _check_coordinates_valid_for_crs(

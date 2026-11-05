@@ -97,6 +97,8 @@ def _str_order_query(
     row_count: int,
     tile_size: int,
     output_expressions: list[str] | None = None,
+    *,
+    has_empty: bool = False,
 ) -> str:
     """Build the STR leaf-packing query used by all input/output paths."""
     _, _, strip_size = _str_layout(row_count, tile_size)
@@ -115,7 +117,7 @@ def _str_order_query(
         ", ".join(output_expressions) if output_expressions else f"* EXCLUDE ({input_order})"
     )
 
-    return f"""
+    query = f"""
         WITH indexed AS (
             SELECT *, row_number() OVER () AS {input_order}
             FROM {source}
@@ -146,28 +148,30 @@ def _str_order_query(
                 CASE WHEN {strip} % 2 = 0 THEN {center_y} ELSE -{center_y} END,
                 {center_x},
                 {input_order}
-        ),
-        empty_or_null AS (
-            SELECT *
-            FROM indexed
-            WHERE {geom} IS NULL OR ST_IsEmpty({geom})
         )
         SELECT {selected} FROM ordered
-        UNION ALL
-        SELECT {empty_selected} FROM empty_or_null
     """
+    # A second reference materializes all indexed rows, even when the tail is empty.
+    if has_empty:
+        query += f"""
+            UNION ALL
+            SELECT {empty_selected} FROM indexed
+            WHERE {geom} IS NULL OR ST_IsEmpty({geom})
+        """
+    return query
 
 
-def _count_spatial_rows(con: duckdb.DuckDBPyConnection, source: str, geometry_column: str) -> int:
+def _str_row_counts(
+    con: duckdb.DuckDBPyConnection, source: str, geometry_column: str
+) -> tuple[int, int]:
     geom = quote_identifier(geometry_column)
     result = fetch_one(
         con.execute(f"""
-        SELECT count(*)
+        SELECT count(*) FILTER (WHERE {geom} IS NOT NULL AND NOT ST_IsEmpty({geom})), count(*)
         FROM {source}
-        WHERE {geom} IS NOT NULL AND NOT ST_IsEmpty({geom})
     """)
     )
-    return int(result[0]) if result else 0
+    return (int(result[0]), int(result[1])) if result else (0, 0)
 
 
 def str_order_table(
@@ -196,7 +200,7 @@ def str_order_table(
         registered = register_arrow(con, "__input_table", table)
         source = create_geometry_view(con, "__input_table", geom_col)
 
-        row_count = _count_spatial_rows(con, source, geom_col)
+        row_count, total_count = _str_row_counts(con, source, geom_col)
         if row_count == 0:
             warn("All geometries are empty or null. Returning table without STR ordering.")
             return table
@@ -218,6 +222,7 @@ def str_order_table(
             row_count,
             tile_size,
             output_expressions=output_expressions,
+            has_empty=row_count < total_count,
         )
         return registered.read_back(con, query, table.schema.metadata)
     finally:
@@ -313,13 +318,15 @@ def _str_order_streaming(
         )
 
         source = create_geometry_view(con, source, geom_col)
-        row_count = _count_spatial_rows(con, source, geom_col)
+        row_count, total_count = _str_row_counts(con, source, geom_col)
         reordered = row_count > 0
         if not reordered:
             warn("All geometries are empty or null. Writing file without STR ordering.")
             query = f"SELECT * FROM {source}"
         else:
-            query = _str_order_query(source, geom_col, row_count, tile_size)
+            query = _str_order_query(
+                source, geom_col, row_count, tile_size, has_empty=row_count < total_count
+            )
             if verbose:
                 _, strip_count, strip_size = _str_layout(row_count, tile_size)
                 debug(
@@ -369,13 +376,19 @@ def _str_order_file_based(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
     try:
         geometry_source = create_geometry_view(con, source, geometry_column)
-        row_count = _count_spatial_rows(con, geometry_source, geometry_column)
+        row_count, total_count = _str_row_counts(con, geometry_source, geometry_column)
         reordered = row_count > 0
         if not reordered:
             warn("All geometries are empty or null. Writing file without STR ordering.")
             query = f"SELECT * FROM {geometry_source}"
         else:
-            query = _str_order_query(geometry_source, geometry_column, row_count, tile_size)
+            query = _str_order_query(
+                geometry_source,
+                geometry_column,
+                row_count,
+                tile_size,
+                has_empty=row_count < total_count,
+            )
             if verbose:
                 tile_count, strip_count, strip_size = _str_layout(row_count, tile_size)
                 debug(

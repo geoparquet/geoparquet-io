@@ -123,7 +123,7 @@ count = 1
 reason = "permanent: metadata serialization, not a report: ARROW:extension:metadata"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/geojson_stream.py"
-count = 5
+count = 3
 reason = "permanent: metadata serialization, not a report: GeoJSON output (the data, not a report)"
 [[G1.json_dumps]]
 path = "geoparquet_io/core/metadata_utils.py"

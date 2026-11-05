@@ -19,6 +19,17 @@ on:
         description: 'Previous version to compare against'
         required: true
         default: 'v0.9.0'
+      size:
+        description: 'Seeded workload size'
+        required: false
+        default: 'full'
+        type: choice
+        options: [small, full]
+      command:
+        description: 'Matrix command ID (must exist on both versions)'
+        required: false
+        default: 'sort-hilbert'
+        type: string
 
 permissions:
   contents: read
@@ -34,6 +45,8 @@ jobs:
       # Use environment variables to safely pass user inputs to shell commands
       INPUT_CURRENT: ${{ inputs.current_version }}
       INPUT_BASELINE: ${{ inputs.baseline_version }}
+      SIZE: ${{ inputs.size || 'full' }}
+      COMMAND: ${{ inputs.command || 'sort-hilbert' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,11 +57,11 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: |
           # Validate version inputs are valid git ref format
-          if ! [[ "$INPUT_CURRENT" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+          if ! [[ "$INPUT_CURRENT" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*$ ]]; then
             echo "Error: current_version must be a valid git ref"
             exit 1
           fi
-          if ! [[ "$INPUT_BASELINE" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+          if ! [[ "$INPUT_BASELINE" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*$ ]]; then
             echo "Error: baseline_version must be a valid git ref"
             exit 1
           fi
@@ -94,6 +107,10 @@ jobs:
             echo "No baseline version for comparison"
           fi
 
+      - name: Save profiling harness for historical checkouts
+        run: |
+          bash scripts/run_matrix.sh save
+
       - name: Install system dependencies (GDAL for import operations)
         run: |
           sudo apt-get update
@@ -103,8 +120,7 @@ jobs:
         env:
           CURRENT_VERSION: ${{ steps.versions.outputs.current }}
         run: |
-          git checkout "$CURRENT_VERSION"
-          uv sync --all-extras
+          bash scripts/run_matrix.sh checkout "$CURRENT_VERSION"
 
       - name: Pre-install DuckDB extensions
         run: |
@@ -183,46 +199,34 @@ jobs:
         env:
           CURRENT_VERSION: ${{ steps.versions.outputs.current }}
         run: |
-          uv run python scripts/version_benchmark.py \
-            --version-label "$CURRENT_VERSION" \
-            -o results_current.json \
-            -n 5 \
-            --files full \
-            --ops full
+          bash scripts/run_matrix.sh run "$COMMAND" "$SIZE" 5 "$CURRENT_VERSION" current results_current.json
 
       - name: Install baseline version
+        if: steps.versions.outputs.baseline != ''
         env:
           BASELINE_VERSION: ${{ steps.versions.outputs.baseline }}
         run: |
-          git checkout "$BASELINE_VERSION"
-          uv sync --all-extras
+          bash scripts/run_matrix.sh checkout "$BASELINE_VERSION"
 
       - name: Run baseline benchmarks
+        if: steps.versions.outputs.baseline != ''
         env:
-          CURRENT_VERSION: ${{ steps.versions.outputs.current }}
           BASELINE_VERSION: ${{ steps.versions.outputs.baseline }}
         run: |
-          # Copy the benchmark script from current (baseline may not have it)
-          git show "$CURRENT_VERSION":scripts/version_benchmark.py > /tmp/version_benchmark.py
-
-          uv run python /tmp/version_benchmark.py \
-            --version-label "$BASELINE_VERSION" \
-            -o results_baseline.json \
-            -n 5 \
-            --files full \
-            --ops full
+          # Unsupported historical commands fail; retain partial data and logs.
+          bash scripts/run_matrix.sh run "$COMMAND" "$SIZE" 5 "$BASELINE_VERSION" baseline results_baseline.json
 
       - name: Generate comparison report
+        if: steps.versions.outputs.baseline != ''
         id: comparison
         env:
           CURRENT_VERSION: ${{ steps.versions.outputs.current }}
           BASELINE_VERSION: ${{ steps.versions.outputs.baseline }}
         run: |
-          git checkout "$CURRENT_VERSION"
-          uv sync --all-extras
+          bash scripts/run_matrix.sh checkout "$CURRENT_VERSION"
 
           # Generate comparison
-          uv run python scripts/version_benchmark.py \
+          uv run python -m scripts.benchmark_history \
             --compare results_baseline.json results_current.json > comparison.txt
 
           # Check for regressions (>25% slower) - write to file for multiline handling
@@ -284,6 +288,12 @@ jobs:
             echo "\`\`\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Record missing comparison baseline
+        if: steps.versions.outputs.baseline == ''
+        run: |
+          echo 'No previous release exists; current measurements only.' > comparison.txt
+          cat comparison.txt >> "$GITHUB_STEP_SUMMARY"
+
       - name: Analyze trends across releases
         id: trends
         if: steps.download-baselines.outputs.baseline_count > 0
@@ -301,7 +311,7 @@ jobs:
           BASELINE_FILES+=(results_current.json)
 
           # Run trend analysis
-          uv run python scripts/version_benchmark.py \
+          uv run python -m scripts.benchmark_history \
             --trend "${BASELINE_FILES[@]}" \
             -o trend_analysis.json
 
@@ -361,11 +371,16 @@ jobs:
           fi
 
       - name: Upload results
+        if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-benchmark-${{ steps.versions.outputs.current }}
           path: |
             results_*.json
+            current/**/*.json
+            current/**/*.log
+            baseline/**/*.json
+            baseline/**/*.log
             comparison.txt
             trend_analysis.json
           retention-days: 400
@@ -387,7 +402,9 @@ jobs:
             let benchmarkSection = '\n\n---\n\n## Performance\n\n';
 
             // Add point-in-time comparison
-            if (regressions !== 'none') {
+            if (!process.env.BASELINE_VERSION) {
+              benchmarkSection += 'No previous release exists; current measurements only.\n\n';
+            } else if (regressions !== 'none') {
               benchmarkSection += '⚠️ **Regressions detected:**\n```\n' + regressions + '\n```\n\n';
             } else {
               benchmarkSection += `✅ No significant performance regressions compared to ${process.env.BASELINE_VERSION}\n\n`;
@@ -440,7 +457,7 @@ jobs:
             });
 
       - name: Warn on regressions
-        if: steps.comparison.outputs.regressions != 'none'
+        if: steps.comparison.outputs.regressions != '' && steps.comparison.outputs.regressions != 'none'
         env:
           REGRESSIONS: ${{ steps.comparison.outputs.regressions }}
         run: |

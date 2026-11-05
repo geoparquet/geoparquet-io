@@ -2033,10 +2033,17 @@ def _query_stats(
     if measured is None:
         return _NO_STATS, None
     located = f"SELECT * FROM ({measured}) WHERE {_located_sql('__x0', '__y0', '__x1', '__y1')}"
+    # Keep unlocated rows for their types; aggregate filters avoid pushing the
+    # envelope predicate through the source and re-evaluating its geometry.
+    is_located = _located_sql("__x0", "__y0", "__x1", "__y1")
     rows = con.execute(f"""
-        SELECT __t, MIN(__x0), MIN(__y0), MAX(__x1), MAX(__y1),
-               COUNT(*) FILTER (WHERE NOT ({_FINITE_SQL}))
-        FROM ({located})
+        SELECT __t,
+               MIN(__x0) FILTER (WHERE {is_located}),
+               MIN(__y0) FILTER (WHERE {is_located}),
+               MAX(__x1) FILTER (WHERE {is_located}),
+               MAX(__y1) FILTER (WHERE {is_located}),
+               COUNT(*) FILTER (WHERE {is_located} AND NOT ({_FINITE_SQL}))
+        FROM ({measured})
         GROUP BY 1
     """).fetchall()
     if need_bbox and any(r[5] for r in rows):
@@ -2049,10 +2056,8 @@ def _query_stats(
         )
         raise _non_finite_error(geometry_column, example[0] if example else "")
     # EMPTY geometries still name a type; only the envelope excludes unlocated rows.
-    type_rows = con.execute(
-        f"SELECT DISTINCT __t FROM ({measured}) WHERE __t IS NOT NULL"
-    ).fetchall()
-    types = sorted({n for n in (geometry_type_name(r[0]) for r in type_rows) if n})
+    types = sorted({n for n in (geometry_type_name(r[0]) for r in rows) if n})
+    rows = [r for r in rows if r[1] is not None]
     if not rows:
         return GeometryStats(None, types), located
     bbox = [

@@ -169,9 +169,9 @@ BRACKET_INPUT_COMMANDS = {
 
 @pytest.mark.parametrize("command", sorted(BRACKET_INPUT_COMMANDS))
 def test_every_command_reads_a_bracket_named_file_as_one_file(
-    command, bracket_file, tmp_path, monkeypatch
+    command, bracket_file, tmp_path, monkeypatch, isolated_aws
 ):
-    # publish upload's dry run checks that credentials exist; it opens no connection
+    # publish upload's dry run checks credentials, independently of local SSO.
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
     monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
     out = tmp_path / "out"

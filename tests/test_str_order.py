@@ -14,9 +14,10 @@ import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 import pytest
 
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows
-from geoparquet_io.core.str_order import _str_layout, str_order, str_order_table
+from geoparquet_io.core.str_order import _str_layout, _str_order_query, str_order, str_order_table
 from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 
@@ -167,6 +168,7 @@ def test_str_order_beats_lexicographic_order_on_candidate_tiles():
     str_area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in str_boxes)
     lex_area = sum((b[2] - b[0]) * (b[3] - b[1]) for b in lex_boxes)
     assert str_area > lex_area * 0.9
+    _assert_str_materialized_scan_bounds()
 
 
 def test_str_order_places_empty_and_null_geometries_last():
@@ -188,6 +190,35 @@ def test_str_order_places_empty_and_null_geometries_last():
     result = str_order_table(table, tile_size=1)
 
     assert result["id"].to_pylist() == ["low", "high", "null", "empty"]
+
+    # Repeated centers cross strip boundaries; the tail spans several strips.
+    coords = [(i, i % 5, i % 3) for i in range(90)]
+    points = _point_table(coords)
+    table = pa.concat_tables(
+        [
+            points.slice(0, 30),
+            pa.table(
+                {
+                    "id": list(range(90, 150)),
+                    "geometry": pa.array([None, _empty_collection_wkb()] * 30, type=pa.binary()),
+                }
+            ),
+            points.slice(30),
+        ]
+    )
+    _, _, strip_size = _str_layout(90, 7)
+    x_sorted = sorted(coords, key=lambda row: (row[1], row[2], row[0]))
+    expected = []
+    for strip_index, start in enumerate(range(0, 90, strip_size)):
+        direction = -1 if strip_index % 2 else 1
+        expected.extend(
+            row[0]
+            for row in sorted(
+                x_sorted[start : start + strip_size],
+                key=lambda row: (direction * row[2], row[1], row[0]),
+            )
+        )
+    assert str_order_table(table, tile_size=7)["id"].to_pylist() == expected + list(range(90, 150))
 
 
 def test_str_order_all_empty_returns_input_unchanged():
@@ -467,3 +498,29 @@ def test_str_order_file_write_preserves_the_in_memory_ordering(tmp_path):
     expected = str_order_table(table, tile_size=resolve_row_group_rows(20, None))
     assert written["id"].to_pylist() == expected["id"].to_pylist()
     assert written["geometry"].to_pylist() == expected["geometry"].to_pylist()
+
+
+def _assert_str_materialized_scan_bounds():
+    """Wide rows must not be replayed through two materialized CTE scans."""
+    with get_duckdb_connection(load_spatial=True, load_httpfs=False) as con:
+        con.execute("""
+            CREATE TEMP TABLE str_cost AS
+            SELECT i AS id, repeat('payload', 1024) AS payload,
+                   ST_Point(i % 31, i % 17) AS geometry
+            FROM range(4096) t(i)
+        """)
+        query = _str_order_query("str_cost", "geometry", 4096, 64)
+        profile = json.loads(
+            con.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + query).fetchall()[0][1]
+        )
+        scans = []
+
+        def visit(node):
+            if node.get("operator_type") == "CTE_SCAN":
+                scans.append(node)
+            for child in node.get("children", []):
+                visit(child)
+
+        visit(profile)
+        assert sum(node["operator_cardinality"] for node in scans) <= 4096
+        assert sum(node["result_set_size"] for node in scans) <= 4096 * 48

@@ -154,12 +154,43 @@ def test_failed_conversion_never_touches_a_pre_existing_output(tmp_path, overwri
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith(("tmp", ".gpio"))] == []
 
 
-def test_shapefile_converts_through_staging_and_leaves_no_stage_dir(with_geo, tmp_path):
-    out = tmp_path / "out.shp"
-    result = _run("shapefile", with_geo, out)
-    assert result.exit_code == 0, result.output
-    assert out.exists() and (tmp_path / "out.dbf").exists()
+def test_unfiltered_exports_avoid_table_materialization(with_geo, tmp_path, monkeypatch):
+    from geoparquet_io.core import format_writers
+
+    materialized_rows = []
+    factory = format_writers.get_duckdb_connection
+
+    class MeasuredConnection:
+        def __init__(self, con):
+            self.con = con
+
+        def __getattr__(self, name):
+            return getattr(self.con, name)
+
+        def close(self):
+            try:
+                materialized_rows.append(
+                    self.con.sql(
+                        "SELECT coalesce(sum(estimated_size), 0) FROM duckdb_tables() "
+                        "WHERE temporary AND NOT internal"
+                    ).fetchall()[0][0]
+                )
+            finally:
+                self.con.close()
+
+    monkeypatch.setattr(
+        format_writers,
+        "get_duckdb_connection",
+        lambda *args, **kwargs: MeasuredConnection(factory(*args, **kwargs)),
+    )
+    for fmt, suffix in (("shapefile", "shp"), ("flatgeobuf", "fgb")):
+        out = tmp_path / f"out.{suffix}"
+        result = _run(fmt, with_geo, out)
+        assert result.exit_code == 0, result.output
+        assert out.exists()
+    assert (tmp_path / "out.dbf").exists()
     assert not [p for p in tmp_path.iterdir() if p.name.startswith(".gpio")]
+    assert materialized_rows == [0, 0]
 
 
 def test_overwrite_removes_a_stale_shapefile_sidecar(with_geo, tmp_path):

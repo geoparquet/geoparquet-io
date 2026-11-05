@@ -8,7 +8,6 @@ but the ``credential_process`` case proves the resolution is botocore's chain an
 not a hand-rolled read of ``~/.aws/credentials``.
 """
 
-import os
 import sys
 import textwrap
 from pathlib import Path
@@ -20,16 +19,9 @@ from geoparquet_io.core.aws_credentials import resolve_aws_credentials, resolve_
 
 
 @pytest.fixture
-def aws_home(monkeypatch, tmp_path):
-    """Point botocore at empty temporary config files and cut off every ambient source."""
-    for name in list(os.environ):
-        if name.startswith("AWS_"):
-            monkeypatch.delenv(name, raising=False)
-    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
-    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
-    # Without this a machine with no credentials would try the EC2 metadata service.
-    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
-    return tmp_path
+def aws_home(isolated_aws):
+    """Use the shared ambient-credential isolation for resolution tests."""
+    return isolated_aws
 
 
 def _write_credentials(aws_home: Path, body: str) -> None:

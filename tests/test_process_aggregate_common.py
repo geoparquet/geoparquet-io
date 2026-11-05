@@ -6,7 +6,7 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.process.aggregate.common import (
     MetricSpec,
     build_breakdown_column_names,
-    build_breakdown_select,
+    build_breakdown_pivot,
     build_metric_select,
     parse_metrics,
     resolve_breakdown_values,
@@ -112,8 +112,19 @@ def test_resolve_breakdown_values_no_other():
 
 def test_build_breakdown_select_counts_and_other():
     con = _crop_con()
-    colmap = build_breakdown_column_names(["wheat", "corn"], reserved={"count_other"})
-    select = build_breakdown_select("crop", colmap, has_other=True)
-    row = fetch_one(con.execute(f"SELECT {select} FROM features"))
+    sql = build_breakdown_pivot(
+        con,
+        "SELECT * FROM features",
+        "crop",
+        2,
+        aggregate_sql="SELECT 1 AS cell",
+        key_expression="1",
+        key_column="cell",
+        metrics=[],
+        spec=None,
+        nodata_values=None,
+        column_types=None,
+    )
+    row = fetch_one(con.execute(sql))[1:]
     # wheat=3, corn=2, other(rice+barley+null)=3
     assert row == (3, 2, 3)

@@ -2,148 +2,100 @@
 
 gpio includes a benchmark suite for measuring performance and detecting regressions across versions.
 
+The seeded CI harness gates wall time and comparable output hashes. CPU time and
+peak RSS are retained for diagnosis; they are not regression thresholds. Only
+#1111's breakdown PIVOT and #1123's overview rollup permit output changes.
+The existing `gpio benchmark suite` remains a separate public CLI; the seeded
+harness lives under `scripts/profile_matrix/` and is copied into historical checkouts.
+
 ## Quick Start
 
-Run benchmarks comparing current version against a previous release:
+The local profile harness runs seeded inputs in a fresh process for each repetition.
+Install the profiling tools and run the full matrix with at least three repetitions:
 
-<!-- doctest: skip="runs a script that ships outside the guide" -->
+<!-- doctest: skip="runs the full performance matrix" -->
 ```bash
-# Run benchmarks on current version
-python scripts/version_benchmark.py --version-label "current" -o results_current.json
-
-# Compare against previous results
-python scripts/version_benchmark.py --compare results_baseline.json results_current.json
+uv sync --extra profile
+uv run python -m scripts.profile_command --size full --runs 3 --output matrix.json
 ```
 
-## Benchmark Operations
+For a focused run, add `--command sort-str`. The matrix definition is `scripts/profile_matrix/matrix.py`,
+the single list of command/workload pairs.
 
-The suite tests these operations covering most gpio capabilities:
+For separate diagnostic runs (DuckDB operators and call counters for every
+command, py-spy and native memray for the slowest 20):
 
-### Extract Operations
+<!-- doctest: skip="runs full diagnostic profiling" -->
+```bash
+uv run python -m scripts.profile_costs matrix.json
+```
 
-| Operation | Description |
-|-----------|-------------|
-| `inspect` | Read and display file metadata |
-| `extract-limit` | Extract first 100 rows |
-| `extract-columns` | Extract specific columns (includes geometry) |
-| `extract-bbox` | Spatial bounding box filtering |
+The diagnostics produce `costs.md`, `costs.json` and raw captures beside the
+matrix. Their overhead is excluded from baseline timing. Operator shares use
+summed operator CPU; sampled symbols cover the child lifetime. Memray measures
+allocation high water, which can include reserved, nonresident memory; it does
+not attribute process RSS to symbols. Memray requires Linux or macOS.
 
-### Add Column Operations
+`--child --command NAME --work-dir DIR --output ROW.json` runs one command
+in-process. Add `--spies`, `--memray CAPTURE.bin`, or `--pyinstrument REPORT.html`
+for diagnostics, and `--input-path INPUT` to use a fixture generated outside the
+child. `GPIO_DUCKDB_PROFILE=DIR` enables per-query operator JSON.
 
-| Operation | Description |
-|-----------|-------------|
-| `add-bbox` | Add bounding box column |
-| `add-quadkey` | Add quadkey column (resolution 12) |
-| `add-h3` | Add H3 cell ID column (resolution 8) |
+## Command Coverage
 
-### Sort Operations
+The single profiling matrix is `scripts/profile_matrix/matrix.py`. It covers
+CLI import, conversion and GDAL exports, indexes, sorting, partitioning, checks,
+inspection, extraction and streaming, aggregate breakdowns, admin joins and
+overviews, plus the corresponding eager Table API paths. The stdout producer
+and stdin GeoJSON consumer are measured separately, with IPC fixture generation
+outside the measured child; simultaneous pipeline RSS is not inferred. Admin variants exercise
+WKB without bbox, native geometry and reprojected input. Remote fixtures use a
+local HTTP server with range requests; WFS uses a local paginated service.
 
-| Operation | Description |
-|-----------|-------------|
-| `sort-hilbert` | Sort by Hilbert curve for spatial locality |
-| `sort-quadkey` | Sort by quadkey spatial index |
-
-### Transform Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `reproject` | Reproject to Web Mercator (EPSG:3857) |
-
-### Partition Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `partition-quadkey` | Partition by quadkey (resolution 4) |
-| `partition-h3` | Partition by H3 cells (resolution 4) |
-
-### Convert/Export Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `convert-geojson` | Convert to GeoJSON format |
-| `convert-flatgeobuf` | Convert to FlatGeobuf format |
-| `convert-geopackage` | Convert to GeoPackage format |
-
-### Import Operations
-
-| Operation | Description |
-|-----------|-------------|
-| `import-geojson` | Import from GeoJSON to GeoParquet |
-| `import-geopackage` | Import from GeoPackage to GeoParquet |
-
-Note: Import operations only run on tiny/small file sizes as source format files are only available in those sizes.
-
-### Chain Operations (Multi-step Workflows)
-
-| Operation | Description |
-|-----------|-------------|
-| `chain-extract-bbox-sort` | Extract columns → Add bbox → Hilbert sort |
-| `chain-filter-sort` | Bbox filter → Hilbert sort |
-
-### Operation Presets
-
-| Preset | Operations |
-|--------|------------|
-| `quick` | inspect, extract-limit, add-bbox |
-| `standard` | inspect, extract-limit, extract-columns, add-bbox, sort-hilbert |
-| `full` | All 19 operations including imports and chains |
-
-## Test Data
-
-Benchmark files are hosted on source.coop with different size tiers:
-
-| Tier | Rows | Geometry | CRS | Source |
-|------|------|----------|-----|--------|
-| tiny | 1,000 | Polygon | EPSG:4326 | Overture Buildings (Singapore) |
-| small | 10,000 | Polygon | EPSG:4326 | Overture Buildings (Singapore) |
-| medium | 100,000 | Polygon | EPSG:4326 | Overture Buildings (Singapore) |
-| large | 809,000 | Polygon | EPSG:3794 | fiboa field boundaries (Slovenia) |
-| points-tiny | 1,000 | Point | EPSG:3857 | Building centroids (Web Mercator) |
-| points-small | 10,000 | Point | EPSG:3857 | Building centroids (Web Mercator) |
-
-The points files provide variation in geometry type and CRS for regression testing.
-
-### File Presets
-
-| Preset | Files |
-|--------|-------|
-| `quick` | tiny, small |
-| `standard` | small, medium |
-| `full` | tiny, small, medium, large, points-tiny, points-small |
-
-Files are automatically downloaded and cached locally in `/tmp/gpio-benchmark-cache/`.
+Select one matrix command with `--command`; omit it for the complete matrix.
+The earlier version script's operation and file presets are replaced by these
+command IDs and the seeded `small`/`full` workloads below. Existing multi-engine
+comparisons remain available through `gpio benchmark suite`.
 
 ## Running Benchmarks Locally
 
-### Version Comparison Script
+### Seeded Profile Workloads
 
-The `scripts/version_benchmark.py` script works with any gpio version:
+`scripts/profile_matrix/workloads.py` owns the generators. Small inputs are
+for harness checks; full inputs are for comparisons. Reuse the same seed and
+size on both revisions, and generate outside the timed process.
 
-<!-- doctest: skip="runs a script that ships outside the guide" -->
+| Workload | Shape | Full size |
+|----------|-------|-----------|
+| W1 | Points, ID, category, numeric value | 1,000,000 rows |
+| W2 | Small square polygons | 1,000,000 rows |
+| W2-skew | Polygons, 95% in a small cluster | 1,000,000 rows |
+| W3 | Many tiny Parquet files | 1,000 files × 100 rows |
+| W4 | Points over localhost HTTP with byte ranges | 1,000,000 rows |
+| W5 | 500 declared WKB geometry columns | 2 rows |
+| W6 | Local paginated WFS service | 1,000 features |
+
+=== "CLI"
+    <!-- doctest: skip="runs an external profiling script" -->
+    ```bash
+    uv run python -m scripts.profile_command --command sort-str --size small --runs 3 --output sort-str.json
+    ```
+
+=== "Python"
+    ```python
+    from scripts.profile_matrix.workloads import generate_workload, serve_workload
+
+    path = generate_workload("W4", "profile-inputs", size="small", seed=1368)
+    with serve_workload(path) as url:
+        print(url)  # Use the URL while this context is open.
+    ```
+
+Archived release JSON still supports comparison and trend analysis:
+
+<!-- doctest: skip="needs archived benchmark files" -->
 ```bash
-# Run full benchmarks (all files, all operations)
-python scripts/version_benchmark.py --version-label "v0.9.0" -o results.json
-
-# Run quick benchmarks (smaller file set, fewer operations)
-python scripts/version_benchmark.py --version-label "v0.9.0" -o results.json --files quick --ops quick
-
-# Run benchmarks with more iterations for accuracy
-python scripts/version_benchmark.py --version-label "main" -o results.json -n 5
-
-# Run specific operations on specific files
-python scripts/version_benchmark.py --version-label "test" --files small,medium --ops add-bbox,sort-hilbert
-
-# Compare two result files
-python scripts/version_benchmark.py --compare results_baseline.json results_current.json
-
-# Analyze trends across multiple baselines (oldest to newest)
-python scripts/version_benchmark.py --trend results_v0.7.0.json results_v0.8.0.json results_v0.9.0.json
-
-# Customize degradation threshold for trend detection (default: 0.05 = 5%)
-python scripts/version_benchmark.py --trend baseline1.json baseline2.json baseline3.json --trend-threshold 0.10
-
-# Skip local caching (test remote file performance)
-python scripts/version_benchmark.py --version-label "remote-test" --no-cache
+uv run python scripts/benchmark_history.py --compare baseline.json current.json
+uv run python scripts/benchmark_history.py --trend baseline1.json baseline2.json baseline3.json
 ```
 
 ### Managing Historical Baselines
@@ -221,13 +173,12 @@ Overall Statistics:
 
 gpio also includes built-in benchmark commands:
 
-<!-- doctest: skip="needs path/to/file.parquet, which the harness does not seed" -->
 ```bash
-# Run benchmark suite on specific files
-gpio benchmark suite --files path/to/file.parquet --operations core
+# Run a focused benchmark suite on a local file
+gpio benchmark suite --files input.parquet --operations core --iterations 1
 
 # Compare converter performance on a single file
-gpio benchmark compare path/to/file.parquet
+gpio benchmark compare input.parquet
 ```
 
 ## Profiling Integration
@@ -400,10 +351,11 @@ The benchmark workflow automatically suggests profiling when regressions are det
 ⚠️ Performance regression detected (+25% slower on sort-hilbert)
 
 💡 To diagnose, run locally with profiling:
-   gpio benchmark suite --files large.parquet --operations sort-hilbert --profile
+   uv run python -m scripts.profile_costs current/matrix.json
 ```
 
-Profile artifacts are uploaded with 30-day retention when profiling is enabled.
+Raw measurements and command logs are uploaded with 30-day retention. Local
+profiling provides the detailed diagnostics.
 
 ## GitHub Actions Workflows
 
@@ -423,14 +375,23 @@ Run benchmarks manually from the Actions tab:
 2. Click **Run workflow**
 3. Configure options:
    - **iterations**: Number of runs per operation (default: 3)
-   - **files**: File preset or comma-separated list (default: full)
-   - **ops**: Operation preset or comma-separated list (default: full)
+   - **size**: Seeded workload size, `small` or `full` (default: full)
+   - **command**: One matrix command ID (default: `sort-hilbert`)
    - **compare_version**: Optional version to compare against (e.g., `v0.9.0`)
 4. View results in the workflow summary
 
+These existing workflows use the same seeded harness as local profiling. They
+run one command, which must be supported by both revisions. The default
+`sort-hilbert` works across historical releases; selecting a newer command on
+an older release fails visibly and retains partial measurements and logs.
+Current harness files are copied into each historical checkout, while the
+production package comes from the selected revision.
+
 ### Release Benchmarks
 
-When a release is created, benchmarks automatically:
+When a release is created, the workflow measures `sort-hilbert` on the full
+seeded polygon workload. Manual release runs can select another command and
+size. Benchmarks automatically:
 
 1. Run on the new release version
 2. Compare against the previous release tag
@@ -448,6 +409,10 @@ When a release is created, benchmarks automatically:
 
 **Baseline Storage:**
 - Baselines are stored as GitHub Actions artifacts
+- Archived public-dataset results remain readable. Seeded results use distinct
+  workload/size keys such as `W2/full`; only matching keys are compared or
+  included in a current trend. A legacy `small` dataset is never compared with
+  the new seeded `W2/small` workload.
 - Retention: 400 days (covers ~5-10 releases)
 - Artifact naming: `release-benchmark-{version}`
 - Contains: benchmark results JSON, comparison text, trend analysis
@@ -503,20 +468,9 @@ Trend analysis helps detect gradual performance drift that might be missed when 
 
 Before releasing a new version:
 
-1. **Run benchmarks locally** against the previous release:
-   <!-- doctest: skip="runs a script that ships outside the guide" -->
-   ```bash
-   # Install previous version
-   git checkout v0.9.0 && pip install -e .
-   python scripts/version_benchmark.py --version-label "v0.9.0" -o baseline.json -n 5
-
-   # Install new version
-   git checkout main && pip install -e .
-   python scripts/version_benchmark.py --version-label "new" -o current.json -n 5
-
-   # Compare
-   python scripts/version_benchmark.py --compare baseline.json current.json
-   ```
+1. **Run the seeded matrix** in isolated clones of the previous release and
+   candidate, using the same inputs, core affinity, size and repetition count:
+   use the full matrix command in Quick Start above.
 
 2. **Check for regressions** (>25% slower on large files)
 

@@ -347,7 +347,7 @@ def test_admin_agg_sql_wraps_metrics_with_nodata():
     from geoparquet_io.core.process.aggregate.by_admin import _build_agg_sql
 
     metrics = parse_metrics("avg:height")
-    sql = _build_agg_sql("SELECT 1", metrics, "", ["-999"])
+    sql = _build_agg_sql("SELECT 1", metrics, ["-999"])
     assert 'AVG(NULLIF("height", -999)) AS "avg_height"' in sql
 
 
@@ -497,7 +497,7 @@ def test_admin_agg_sql_casts_real_sentinel():
     from geoparquet_io.core.process.aggregate.by_admin import _build_agg_sql
 
     sql = _build_agg_sql(
-        "SELECT 1", parse_metrics("avg:height"), "", ["-3.4028235e+38"], {"height": "FLOAT"}
+        "SELECT 1", parse_metrics("avg:height"), ["-3.4028235e+38"], {"height": "FLOAT"}
     )
     assert "CAST(-3.4028235e+38 AS REAL)" in sql
 

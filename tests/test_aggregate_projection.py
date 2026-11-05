@@ -433,12 +433,15 @@ def _admin_result(con, src, admin_path, *, narrow: bool, breakdown=None, where=N
             joined,
             breakdown,
             20,
+            aggregate_sql=_build_agg_sql(joined, metrics),
+            key_expression="COALESCE(__admin_code, 'unassigned')",
+            key_column="admin_code",
             metrics=metrics,
             spec=None,
             nodata_values=None,
             column_types=None,
         )
-    sql = _wrap_admin_geometry(_build_agg_sql(joined, metrics, breakdown_select), "polygon")
+    sql = _wrap_admin_geometry(breakdown_select or _build_agg_sql(joined, metrics), "polygon")
     table = con.sql(sql).arrow().read_all()
     con.execute("DROP TABLE IF EXISTS __agg_joined")
     return table

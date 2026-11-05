@@ -1066,3 +1066,17 @@ def remote_parts(monkeypatch):
         s3_config_scope({"s3_endpoint": served[0], "s3_use_ssl": False}),
     ):
         yield served
+
+
+@pytest.fixture
+def isolated_aws(monkeypatch, tmp_path):
+    """Keep offline credential tests independent of the developer's AWS setup."""
+    import os
+
+    for name in list(os.environ):
+        if name.startswith("AWS_"):
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+    monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+    monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+    return tmp_path
