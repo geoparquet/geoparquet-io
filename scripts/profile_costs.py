@@ -203,8 +203,8 @@ def render_costs(directory, summaries):
     lines = [
         "# Baseline costs",
         "",
-        f"Timing/RSS: three fresh, uninstrumented processes, {', '.join(sorted({r['size'] for r in summaries}))} size, cores 0–15.",
-        "Wall is the minimum; RSS is the maximum Linux ru_maxrss (includes process startup).",
+        f"Timing/RSS: fresh, uninstrumented processes, {', '.join(sorted({r['size'] for r in summaries}))} size.",
+        "Wall is the minimum; RSS is the maximum ru_maxrss (includes process startup).",
         "Diagnostics are separate runs. Operator seconds sum thread CPU and can exceed wall time;",
         "operator share below is of profiled operator CPU, not a wall-time attribution.",
         "py-spy shares are leaf samples of the full child lifetime, including startup; native waiting frames can dominate.",

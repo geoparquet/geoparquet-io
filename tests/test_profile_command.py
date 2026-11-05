@@ -99,6 +99,7 @@ def test_resume_rejects_a_measurement_from_another_revision(tmp_path, monkeypatc
     from scripts.profile_command import run_matrix
     from scripts.profile_matrix import matrix, workloads
 
+    check_explain_report(tmp_path)
     spec = {"id": "cli-import", "workload": "W1", "argv": ["--help"]}
     monkeypatch.setattr(matrix, "COMMANDS", [spec])
     monkeypatch.setattr(workloads, "generate_workload", lambda *args: tmp_path / "input.parquet")
@@ -125,6 +126,9 @@ def test_resume_rejects_a_measurement_from_another_revision(tmp_path, monkeypatc
     # Comparison acceptance belongs to measurement validation too. Keep these
     # small cases within this item so the fast-suite collection ratchet holds.
 
+    with monkeypatch.context() as context:
+        check_prepared_fixture_identity(tmp_path, context)
+    check_cost_report_context(tmp_path)
     check_operator_costs_do_not_double_count_parent_cpu(tmp_path)
     check_dbf_only_date_bytes(tmp_path)
     check_gpkg_only_last_change(tmp_path)
@@ -279,3 +283,86 @@ def check_stdout_only_ratio_and_tied_order(tmp_path):
     assert comparable_bytes(path, "inspect-stats") == first
     path.write_text(header + b.replace("20", "30") + a + "end\n")
     assert comparable_bytes(path, "inspect-stats") != first
+
+
+def check_prepared_fixture_identity(tmp_path, monkeypatch):
+    import argparse
+    import json
+    import subprocess
+
+    import pytest
+
+    from scripts.profile_command import run_child, run_matrix
+    from scripts.profile_matrix import matrix, workloads
+
+    spec = {"id": "overview", "workload": "W2", "kind": "overview"}
+    monkeypatch.setattr(matrix, "COMMANDS", [spec])
+    source = tmp_path / "input.parquet"
+    monkeypatch.setattr(workloads, "generate_workload", lambda *args: source)
+    fixture = tmp_path / "fixtures" / "overview"
+    fixture.mkdir(parents=True)
+    metadata = fixture / "prepared.json"
+    args = argparse.Namespace(
+        command="overview",
+        work_dir=str(fixture),
+        input_path=str(source),
+        prepared_path=None,
+        prepare_only=True,
+        output=str(metadata),
+        size="small",
+    )
+    from scripts import profile_command
+
+    monkeypatch.setattr(profile_command, "invoke", lambda *a, **kw: fixture / "aggregate.parquet")
+    run_child(args)
+    original = json.loads(metadata.read_text())
+    assert original["size"] == "small"
+    assert original["input_path"] == str(source.resolve())
+    assert original["workload"] == "W2"
+    monkeypatch.setattr(subprocess, "check_output", lambda *a, **kw: original["revision"])
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: pytest.fail("reused stale fixture"))
+    args.output = str(tmp_path / "matrix.json")
+    args.runs = 3
+    for field, value in [("size", "full"), ("input_path", "other.parquet"), ("workload", "W1")]:
+        metadata.write_text(json.dumps({**original, field: value}))
+        with pytest.raises(RuntimeError, match="Stale fixture"):
+            run_matrix(args)
+
+
+def check_explain_report(tmp_path):
+    import json
+
+    from scripts.profile_command import invoke, output_hashes
+    from scripts.profile_matrix.matrix import COMMANDS
+    from scripts.profile_matrix.output_comparison import comparable_bytes
+    from scripts.profile_matrix.workloads import generate_workload
+
+    spec = next(row for row in COMMANDS if row["id"] == "benchmark-explain")
+    source = generate_workload("W4", tmp_path / "explain-input")
+    output = tmp_path / "explain-output"
+    output.mkdir()
+    prepared = invoke(spec, source, output, None, prepare=True)
+    invoke(spec, prepared, output, None)
+    path = output / "report.json"
+    report = json.loads(path.read_text())
+    assert report["operators"]
+    assert "report.json" in output_hashes(output, "benchmark-explain")
+    first = comparable_bytes(path, "benchmark-explain")
+    report["total_time"] += 1
+    for operator in report["operators"]:
+        operator["timing"] += 1
+    path.write_text(json.dumps(report))
+    assert comparable_bytes(path, "benchmark-explain") == first
+    report["operators"][0]["cardinality"] += 1
+    path.write_text(json.dumps(report))
+    assert comparable_bytes(path, "benchmark-explain") != first
+
+
+def check_cost_report_context(tmp_path):
+    from scripts.profile_costs import render_costs
+
+    render_costs(tmp_path, [])
+    report = (tmp_path / "costs.md").read_text()
+    assert "three" not in report
+    assert "cores 0–15" not in report
+    assert "Linux" not in report

@@ -4,6 +4,7 @@ Raw outputs remain untouched. This policy applies only to the seeded matrix;
 all other commands and files retain their literal byte comparison.
 """
 
+import json
 import re
 import sqlite3
 from collections import Counter
@@ -13,6 +14,12 @@ from itertools import groupby
 def comparable_bytes(path, command):
     """Keep every byte except the documented base nondeterminism below."""
     data = path.read_bytes()
+    if command == "benchmark-explain" and path.name == "report.json":
+        report = json.loads(data)
+        del report["total_time"]
+        for operator in report["operators"]:
+            del operator["timing"]
+        return json.dumps(report, sort_keys=True).encode()
     if command == "convert-shapefile" and path.suffix == ".dbf":
         # DBF header offsets 1..3 are the year/month/day of the write.
         return data[:1] + b"\0\0\0" + data[4:]

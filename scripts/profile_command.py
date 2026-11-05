@@ -287,6 +287,7 @@ def invoke(spec, input_path, output, url, *, prepare=False, prepared=None):
         "output": str(output / "result.parquet"),
         "directory": str(output / "parts"),
         "geojson": str(output / "result.geojson"),
+        "report": str(output / "report.json"),
         "fgb": str(output / "result.fgb"),
         "gpkg": str(output / "result.gpkg"),
         "shp": str(output / "result.shp"),
@@ -438,7 +439,16 @@ def run_child(args):
     with serve_workload(input_path) as served:
         if args.prepare_only:
             prepared = invoke(spec, input_path, output, served, prepare=True)
-            write_json(args.output, {"prepared": str(prepared), "revision": revision})
+            write_json(
+                args.output,
+                {
+                    "prepared": str(prepared),
+                    "revision": revision,
+                    "workload": spec["workload"],
+                    "size": args.size,
+                    "input_path": str(input_path.resolve()),
+                },
+            )
             return
         prepared = args.prepared_path
         spies = CallSpies()
@@ -518,7 +528,12 @@ def run_matrix(args):
                     timeout=args.timeout,
                 )
             prepared_metadata = json.loads(prepared_result.read_text())
-            if prepared_metadata.get("revision") != revision:
+            if (
+                prepared_metadata.get("revision"),
+                prepared_metadata.get("workload"),
+                prepared_metadata.get("size"),
+                prepared_metadata.get("input_path"),
+            ) != (revision, spec["workload"], args.size, str(input_path.resolve())):
                 raise RuntimeError(f"Stale fixture {prepared_result}; use a fresh output directory")
             prepared_flags = ["--prepared-path", prepared_metadata["prepared"]]
         for repeat in range(max(3, args.runs)):
