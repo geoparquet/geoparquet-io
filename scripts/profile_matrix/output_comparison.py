@@ -16,6 +16,7 @@ def comparable_bytes(path, command):
     data = path.read_bytes()
     if command == "benchmark-explain" and path.name == "report.json":
         report = json.loads(data)
+        del report["raw_plan"]
         del report["total_time"]
         for operator in report["operators"]:
             del operator["timing"]

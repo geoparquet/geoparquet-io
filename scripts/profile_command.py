@@ -416,9 +416,20 @@ def output_hashes(directory, command=None):
     return hashes
 
 
-def run_child(args):
+def peak_rss_bytes():
+    if sys.platform == "win32":
+        import psutil
+
+        return psutil.Process().memory_info().peak_wset
+
     import resource
 
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (
+        1 if sys.platform == "darwin" else 1024
+    )
+
+
+def run_child(args):
     from scripts.profile_matrix.matrix import COMMANDS
     from scripts.profile_matrix.workloads import generate_workload, serve_workload
 
@@ -474,8 +485,7 @@ def run_child(args):
             "size": args.size,
             "wall_seconds": time.perf_counter() - start,
             "cpu_seconds": time.process_time() - start_cpu,
-            "peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            * (1 if sys.platform == "darwin" else 1024),
+            "peak_rss_bytes": peak_rss_bytes(),
             "counters": dict(spies.counts),
             "output_sha256": output_hashes(output, args.command),
             "raw_output_sha256": output_hashes(output),

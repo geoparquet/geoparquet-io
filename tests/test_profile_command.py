@@ -314,6 +314,26 @@ def check_prepared_fixture_identity(tmp_path, monkeypatch):
     from scripts import profile_command
 
     monkeypatch.setattr(profile_command, "invoke", lambda *a, **kw: fixture / "aggregate.parquet")
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    assert profile_command.peak_rss_bytes() > 0
+    monkeypatch.setitem(sys.modules, "resource", None)
+    with monkeypatch.context() as context:
+        context.setattr(sys, "platform", "win32")
+        context.setitem(
+            sys.modules,
+            "psutil",
+            SimpleNamespace(
+                Process=Mock(
+                    return_value=SimpleNamespace(
+                        memory_info=lambda: SimpleNamespace(peak_wset=123456)
+                    )
+                )
+            ),
+        )
+        assert profile_command.peak_rss_bytes() == 123456
     run_child(args)
     original = json.loads(metadata.read_text())
     assert original["size"] == "small"
@@ -348,6 +368,9 @@ def check_explain_report(tmp_path):
     assert report["operators"]
     assert "report.json" in output_hashes(output, "benchmark-explain")
     first = comparable_bytes(path, "benchmark-explain")
+    invoke(spec, prepared, output, None)
+    assert comparable_bytes(path, "benchmark-explain") == first
+    report["raw_plan"] = "independent plan with different timings"
     report["total_time"] += 1
     for operator in report["operators"]:
         operator["timing"] += 1
