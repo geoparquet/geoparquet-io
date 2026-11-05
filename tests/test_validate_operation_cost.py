@@ -31,7 +31,7 @@ def test_wide_validation_bounds_file_work(tmp_path):
         visits += 1
         return original(*args)
 
-    for width in (4, 24):
+    for width in (4, 40):
         path = tmp_path / f"wide-{width}.parquet"
         columns = {
             f"geom_{i}": {"encoding": "WKB", "geometry_types": ["Point"]} for i in range(width)
@@ -61,7 +61,7 @@ def test_wide_validation_bounds_file_work(tmp_path):
                 check = next(check for check in result.checks if check.name == f"{kind}_{name}")
                 assert check.status == validate.CheckStatus.PASSED, check.message
         assert spies.counts["footer_reads"] <= 8
-        assert spies.counts["execute"] <= 5 * width + 12
+        assert spies.counts["execute"] <= 3 * width + 14
         assert visits <= 8 * width
         assert descriptions.call_count == 1
 
@@ -70,6 +70,7 @@ def test_wide_validation_bounds_file_work(tmp_path):
     import shapely
 
     for values in (
+        [],
         [None, "POINT EMPTY", "POINT (3 4)", "POINT (1000 1000)"],
         [None, None],
         ["POINT (Infinity 2)", "POINT (3 4)"],
@@ -80,16 +81,41 @@ def test_wide_validation_bounds_file_work(tmp_path):
             shapely.to_wkb(shapely.from_wkt(value)) if isinstance(value, str) else value
             for value in values
         ]
-        table = pa.table({"geometry": pa.array(wkbs, pa.binary())})
-        metadata = _metadata({"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}})
+        table = pa.table(
+            {
+                "geometry": pa.array(wkbs, pa.binary()),
+                'other"geometry': pa.array(list(reversed(wkbs)), pa.binary()),
+            }
+        )
+        metadata = _metadata(
+            {
+                name: {"encoding": "WKB", "geometry_types": ["Point"]}
+                for name in ("geometry", 'other"geometry', "missing")
+            }
+        )
         pq.write_table(table.replace_schema_metadata(metadata), path)
         for sample_size in (1, 2, 0):
             shared = validate_geoparquet(str(path), sample_size=sample_size)
-            with patch.object(
-                validate._ReopeningConnection, "sampled_geometry_facts", return_value=None
+            with (
+                patch.object(
+                    validate._ReopeningConnection, "sampled_geometry_facts", return_value=None
+                ),
+                patch.object(validate._ReopeningConnection, "prepare_geometry_presences"),
             ):
                 independent = validate_geoparquet(str(path), sample_size=sample_size)
             assert shared == independent
+            with patch.object(
+                validate, "count_geometry_presences", side_effect=ValueError("bad batch")
+            ):
+                # The independent entry point uses the same owner; fail only
+                # the multi-column attempt, not each column's fallback.
+                original_presence = validate.count_geometry_presence
+                with patch.object(
+                    validate, "count_geometry_presence", wraps=original_presence
+                ) as fallback:
+                    recovered = validate_geoparquet(str(path), sample_size=sample_size)
+                assert fallback.call_count == 2
+            assert shared == recovered
 
     # The cached file facts retain the schema and CRS owners' semantics.
     from geoparquet_io.core.crs_utils import source_crs_is_unknown
@@ -177,7 +203,9 @@ def test_wide_validation_bounds_file_work(tmp_path):
                 )
             assert descriptions.call_count == 1
             con._sampled_facts[(str(path), "geometry", "")] = (None, 0)
+            con._presences[(str(path), "geometry", "")] = None
             con._reopen()
+            assert not con._presences
             assert not con._sampled_facts
             assert con.geometry_read(str(path), "geometry") == resolve_geometry_read(
                 con, str(path), "geometry"
@@ -187,5 +215,22 @@ def test_wide_validation_bounds_file_work(tmp_path):
             with patch.object(validate, "geometry_stats_of", side_effect=interrupt):
                 with pytest.raises(KeyboardInterrupt):
                     con.sampled_geometry_facts(str(path), "geometry", "", "SELECT 1")
+        # A failed batch falls back per column, and interrupts never become verdicts.
+        with patch.object(
+            validate, "count_geometry_presences", side_effect=ValueError("bad batch")
+        ):
+            con.prepare_geometry_presences(str(path), {"geometry": {}, "GEOMETRY": {}}, 1)
+        assert not con._presences
+        for interrupt in (KeyboardInterrupt(), RuntimeError("Query interrupted")):
+            with patch.object(validate, "count_geometry_presences", side_effect=interrupt):
+                with pytest.raises(KeyboardInterrupt):
+                    con.prepare_geometry_presences(str(path), {"geometry": {}, "GEOMETRY": {}}, 1)
+        con._presences[(str(path), "geometry", "")] = None
+        with patch.object(
+            validate, "_open_validation_connection", side_effect=RuntimeError("reopen")
+        ):
+            with pytest.raises(RuntimeError, match="reopen"):
+                con._reopen()
+        assert not con._presences
     finally:
         con.close()

@@ -97,6 +97,7 @@ from geoparquet_io.core.geometry_detection import (
     GeometryPresence,
     GeometryRead,
     count_geometry_presence,
+    count_geometry_presences,
     resolve_geometry_read,
 )
 from geoparquet_io.core.json_output import dumps_json
@@ -1238,7 +1239,11 @@ def _check_encoding_matches_data(
             return ValidationCheck(
                 name=name, status=CheckStatus.FAILED, message=mismatch, category="data_validation"
             )
-        presence = count_geometry_presence(con, raw_url, read, limit_clause)
+        presence = (
+            con.geometry_presence(raw_url, read, limit_clause)
+            if isinstance(con, _ReopeningConnection)
+            else count_geometry_presence(con, raw_url, read, limit_clause)
+        )
     except Exception as e:
         return ValidationCheck(
             name=name,
@@ -4083,6 +4088,42 @@ class _ReopeningConnection:
         self._con = _open_validation_connection(parquet_file)
         self._descriptions = {}
         self._sampled_facts = {}
+        self._presences = {}
+
+    def prepare_geometry_presences(self, raw_url, columns, sample_size):
+        """Batch compatible encoding checks; a failed batch keeps independent checks."""
+        limit = f"LIMIT {sample_size}" if sample_size > 0 else ""
+        reads = []
+        for column, metadata in columns.items():
+            if metadata.get("encoding", "WKB") != "WKB":
+                continue
+            try:
+                read = self.geometry_read(raw_url, column)
+                if read.kind == "wkb":
+                    reads.append(read)
+            except Exception as e:
+                if is_interrupt(e):
+                    raise KeyboardInterrupt(str(e)) from e
+        # Bound each aggregate's size on very wide files. Native decoding and
+        # unlike samples retain their independent error isolation.
+        for offset in range(0, len(reads), 32):
+            batch = reads[offset : offset + 32]
+            if len(batch) < 2:
+                continue
+            try:
+                presences = count_geometry_presences(self, raw_url, batch, limit)
+            except Exception as e:
+                if is_interrupt(e):
+                    raise KeyboardInterrupt(str(e)) from e
+                continue
+            for read, presence in zip(batch, presences, strict=True):
+                self._presences[(raw_url, read.column, limit)] = presence
+
+    def geometry_presence(self, raw_url, read, limit):
+        key = (raw_url, read.column, limit)
+        if key in self._presences:
+            return self._presences[key]
+        return count_geometry_presence(self, raw_url, read, limit)
 
     def sampled_geometry_facts(self, raw_url, column, limit_clause, sample):
         """Share successful type/bounds facts for the identical present-value sample.
@@ -4146,6 +4187,7 @@ class _ReopeningConnection:
 
         self._descriptions.clear()
         self._sampled_facts.clear()
+        self._presences.clear()
         with contextlib.suppress(duckdb.Error):
             self._con.close()
         self._con = _open_validation_connection(self._parquet_file)
@@ -4538,6 +4580,11 @@ def _run_geoparquet_checks(
     geo_version = (
         file_type_info.get("geo_version") or GEOPARQUET_VERSIONS["1.0"]["metadata_version"]
     )
+
+    if validate_data and isinstance(con, _ReopeningConnection) and len(columns) > 1:
+        con.prepare_geometry_presences(
+            resolve_file_url(parquet_file, verbose=False), columns, sample_size
+        )
 
     # Column metadata checks for each geometry column
     for col_name, col_meta in columns.items():
