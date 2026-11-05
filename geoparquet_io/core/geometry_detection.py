@@ -747,41 +747,21 @@ def count_geometry_presence(
     con, raw_url: str, read: GeometryRead, limit_clause: str
 ) -> GeometryPresence:
     """Count rows, NULL, zero-length and unparsable values over the sampled rows."""
-    return count_geometry_presences(con, raw_url, [read], limit_clause)[0]
-
-
-def count_geometry_presences(
-    con, raw_url: str, reads: list[GeometryRead], limit_clause: str
-) -> list[GeometryPresence]:
-    """Count several columns over the same all-row sample, before filtering values."""
-    if not reads:
-        return []
-    aggregates = []
-    for read in reads:
-        q = read.quoted
-        empty, bad = read.empty_sql, read.unparsable_sql
-        aggregates.extend(
-            [
-                "COUNT(*)",
-                f"COUNT(*) FILTER (WHERE {q} IS NULL)",
-                f"COUNT(*) FILTER (WHERE {empty})",
-                f"MIN(file_row_number) FILTER (WHERE {empty})",
-                f"COUNT(*) FILTER (WHERE {bad})",
-                f"MIN(file_row_number) FILTER (WHERE {bad})",
-            ]
-        )
-    projection = ", ".join(read.quoted for read in reads)
-    aggregate_sql = ",\n               ".join(aggregates)
+    q = read.quoted
+    empty, bad = read.empty_sql, read.unparsable_sql
     row = fetch_one(
         con.execute(f"""
-        SELECT {aggregate_sql}
+        SELECT COUNT(*),
+               COUNT(*) FILTER (WHERE {q} IS NULL),
+               COUNT(*) FILTER (WHERE {empty}),
+               MIN(file_row_number) FILTER (WHERE {empty}),
+               COUNT(*) FILTER (WHERE {bad}),
+               MIN(file_row_number) FILTER (WHERE {bad})
         FROM (
-            SELECT {projection}, file_row_number
+            SELECT {q}, file_row_number
             FROM read_parquet({sql_path(raw_url)}, file_row_number = true)
             {limit_clause}
         )
     """)
     )
-    if row is None:
-        return [GeometryPresence(0, 0, 0, None) for _ in reads]
-    return [GeometryPresence(*row[i : i + 6]) for i in range(0, len(row), 6)]
+    return GeometryPresence(*row) if row else GeometryPresence(0, 0, 0, None)
