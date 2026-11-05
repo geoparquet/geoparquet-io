@@ -10,7 +10,8 @@
 # Round-0 profiling: +11 independent regressions (3 workloads, 6 profiler, 2 archive).
 # Seven deterministic generator cases share one property test and fixture lifetime.
 # FeatureCollection streaming: +1 live-decoded-object bound with byte and atomicity checks.
-max_collected = 14226
+# Wide validation: +1 operation-local file-work bound, including schema/CRS parity.
+max_collected = 14227
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
