@@ -83,8 +83,8 @@ def _build_joined_sql(
     is used directly in ST_Intersects.  ``input_pt_expr`` is a SQL expression
     yielding the per-feature POINT used for the join (geometry centroid by
     default; bbox center or an existing point column for --bucket-point, #567).
-    The admin geometry is stored as WKB (ST_AsWKB) so that _wrap_admin_geometry
-    can treat __admin_geom uniformly as WKB binary.
+    ``admin_ref`` contains a stable ``__bnd`` row key. Only that key travels
+    through the join; the polygon is attached after aggregation.
 
     When admin_bbox_col is provided, a cheap point-in-bbox prefilter is added
     to the ON clause so ST_Intersects is only evaluated for admin polygons whose
@@ -103,7 +103,7 @@ def _build_joined_sql(
     relation so a geometry-less bbox-only input never trips a binder error on a
     column it does not have.
     """
-    boundary_columns = list(dict.fromkeys((code_col, name_col)))
+    boundary_columns = list(dict.fromkeys((code_col, name_col, "__bnd")))
     code_ref = admin_column_ref(0, code_col)
     name_ref = admin_column_ref(boundary_columns.index(name_col), name_col)
     return build_admin_join_query(
@@ -116,7 +116,7 @@ def _build_joined_sql(
         admin_select_clause=(
             f"{code_ref} AS __admin_code, "
             f"{name_ref} AS __admin_name, "
-            f"{as_wkb_sql(f'b.{quote_identifier(admin_geom_col)}')} AS __admin_geom"
+            f"{admin_column_ref(boundary_columns.index('__bnd'), '__bnd')} AS __bnd"
         ),
         input_geom_col="__cen",
         admin_geom_col=admin_geom_col,
@@ -138,7 +138,7 @@ def _build_agg_sql(
     agg_parts = [
         "COALESCE(__admin_code, 'unassigned') AS admin_code",
         "ANY_VALUE(__admin_name) AS admin_name",
-        "ANY_VALUE(__admin_geom) AS __admin_geom",
+        "ANY_VALUE(__bnd) AS __bnd",
         "COUNT(*) AS count",
     ]
     metric_select = build_metric_select(
@@ -152,12 +152,19 @@ def _build_agg_sql(
     )
 
 
-def _wrap_admin_geometry(agg_sql: str, out_geometry: str) -> str:
-    """Add geometry/centroid columns derived from the per-region admin polygon (WKB)."""
+def _wrap_admin_geometry(
+    agg_sql: str, out_geometry: str, admin_ref: str, admin_geom_col: str
+) -> str:
+    """Attach the matched boundary polygon once per aggregate, using its row key."""
     if out_geometry == "none":
-        return f"SELECT a.* EXCLUDE (__admin_geom) FROM ({agg_sql}) a"
+        return f"SELECT a.* EXCLUDE (__bnd) FROM ({agg_sql}) a"
 
-    geom_wkb = "a.__admin_geom"  # WKB binary stored in __admin_geom
+    # A scalar lookup preserves aggregate row order when DuckDB would flip a LEFT JOIN.
+    with_geometry = (
+        f"SELECT a.*, (SELECT {as_wkb_sql(f'b.{quote_identifier(admin_geom_col)}')} "
+        f"FROM {admin_ref} b WHERE b.__bnd = a.__bnd) AS __admin_geom FROM ({agg_sql}) a"
+    )
+    geom_wkb = "a.__admin_geom"
     # The admin polygons are planar, so their centroid is the planar point.
     point = representative_point_sql(geom_from_wkb_sql(geom_wkb), PLANAR)
     centroid = as_wkb_sql(point)
@@ -167,7 +174,7 @@ def _wrap_admin_geometry(agg_sql: str, out_geometry: str) -> str:
         geom_cols = f"{centroid} AS geometry"
     else:  # both
         geom_cols = f"{geom_wkb} AS geometry, {centroid} AS centroid"
-    return f"SELECT a.* EXCLUDE (__admin_geom), {geom_cols} FROM ({agg_sql}) a"
+    return f"SELECT a.* EXCLUDE (__bnd, __admin_geom), {geom_cols} FROM ({with_geometry}) a"
 
 
 def aggregate_by_admin(
@@ -296,7 +303,12 @@ def aggregate_by_admin(
             )
             validate_agg_columns(cols, metrics, breakdown, bd_metric)
 
-        admin_ref = _get_admin_ref(admin_dataset, level)
+        # Freeze boundary-row identity: codes can repeat across distinct polygons.
+        con.execute(
+            "CREATE TEMP TABLE __agg_admin AS "
+            f"SELECT row_number() OVER () AS __bnd, * FROM {_get_admin_ref(admin_dataset, level)}"
+        )
+        admin_ref = "__agg_admin"
 
         # Resolve metric column types from the input so sentinel literals match the
         # column's actual precision (REAL vs DOUBLE, #613) and non-numeric metric
@@ -356,7 +368,7 @@ def aggregate_by_admin(
             )
         else:
             agg_sql = _build_agg_sql(joined_sql, metrics, nodata_values, column_types)
-        final_sql = _wrap_admin_geometry(agg_sql, out_geometry)
+        final_sql = _wrap_admin_geometry(agg_sql, out_geometry, admin_ref, admin_geom_col)
 
         if show_sql or verbose:
             debug(final_sql)
