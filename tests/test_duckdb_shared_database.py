@@ -449,3 +449,30 @@ def _assert_cross_thread_cleanup(production_factory, monkeypatch, opening, clean
     assert completed, "cross-thread cleanup stranded the settings lock"
     assert wrote.is_set()
     assert not errors
+
+
+def test_remote_crs_and_validator_reuse_database(production_factory, monkeypatch):
+    from pathlib import Path
+
+    from geoparquet_io.core.crs_utils import crs_of
+    from geoparquet_io.core.validate import validate_geoparquet
+    from tests._fake_s3 import fake_s3
+
+    source = Path(__file__).parent / "data" / "buildings_test.parquet"
+    connections = Mock(wraps=duckdb.connect)
+    loads = Mock(wraps=utils._install_and_load_extension)
+    monkeypatch.setattr(duckdb, "connect", connections)
+    monkeypatch.setattr(utils, "_install_and_load_extension", loads)
+
+    with fake_s3({"bucket/input.parquet": source.read_bytes()}) as (endpoint, _):
+        url = f"http://{endpoint}/bucket/input.parquet"
+        expected_crs = crs_of(url)
+        expected_validation = validate_geoparquet(str(source))
+        initial_connections = connections.call_count
+        initial_loads = loads.call_count
+        assert initial_connections == 1
+        for _ in range(5):
+            assert crs_of(url) == expected_crs
+            assert validate_geoparquet(str(source)) == expected_validation
+        assert connections.call_count == initial_connections
+        assert loads.call_count == initial_loads
