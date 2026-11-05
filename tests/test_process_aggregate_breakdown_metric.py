@@ -272,6 +272,19 @@ def test_real_category_values_reach_their_pivot():
     )
     assert fetch_one(con.execute(sql)) == (1, 2, 1.0, 8.0)
 
+    # Adjacent 128-bit values must not merge through DOUBLE lookup inference.
+    low = 2**127 - 1
+    high = 2**127
+    source = (
+        f"SELECT * FROM (VALUES ('{low}'::UHUGEINT, 3), ('{high}'::UHUGEINT, 7)) AS t(cat, peak)"
+    )
+    for spec, expected in ((None, (1, 2, 1, 1)), ("sum:peak", (1, 2, 3, 7))):
+        with duckdb.connect() as category_con:
+            sql = _grid_query(
+                category_con, source, breakdown="cat", breakdown_spec=parse_breakdown_metric(spec)
+            )
+            assert fetch_one(category_con.execute(sql)) == expected
+
 
 def test_a_blob_breakdown_column_is_refused():
     con = duckdb.connect()

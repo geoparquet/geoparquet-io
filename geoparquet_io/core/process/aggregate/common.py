@@ -645,8 +645,12 @@ def build_breakdown_pivot(
         return aggregate_sql
     other = breakdown_other_name(colmap, reserved, prefix)
     buckets = [name for _, name in colmap] + ([other] if has_other else [])
+    (_, category_type), *_ = describe_query(
+        con, f"SELECT {quote_identifier(breakdown)} FROM ({source_sql})"
+    )
+    # Cast before VALUES finds a common type: HUGEINT + UHUGEINT would become DOUBLE.
     lookup = ", ".join(
-        f"({sql_literal(value) if value is not None else 'NULL'}, {i})"
+        f"(CAST({sql_literal(value) if value is not None else 'NULL'} AS {category_type}), {i})"
         for i, (value, _) in enumerate(colmap)
     )
     value_expr = _aggregated_column_expr(spec.column, nodata_values, column_types) if spec else "1"
