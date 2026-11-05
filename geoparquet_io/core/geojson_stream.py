@@ -625,50 +625,51 @@ def _stream_feature_collection(
         Number of features written
     """
     import json
+    import shutil
+    import tempfile
+
+    from geoparquet_io.core.file_utils import atomic_write
 
     result = con.execute(query)
-    features = []
-    count = 0
-
-    # Collect all features
-    while True:
-        row = result.fetchone()  # drains to None; guard: open-result ok
-        if row is None:
-            break
-        features.append(json.loads(row[0]))
-        count += 1
-
-    # Build FeatureCollection
-    fc: dict = {
-        "type": "FeatureCollection",
-    }
-
-    if description:
-        fc["description"] = description
-
-    fc["features"] = features
-
-    # Output to file or stdout
-    if output_path:
-        # newline="\n" keeps the output byte-identical across platforms. Text mode
-        # would translate every "\n" to os.linesep, so Windows produced CRLF
-        # GeoJSON - a different file for the same input, which breaks checksum
-        # comparisons and any consumer reading the stream as bytes.
-        with open(output_path, "w", encoding="utf-8", newline="\n") as f:
+    # Stage stdout too: a query or encoding failure must publish no partial JSON.
+    with contextlib.ExitStack() as stack:
+        if output_path:
+            staged = stack.enter_context(atomic_write(output_path, suffix=".geojson"))
+            output = stack.enter_context(open(staged, "w", encoding="utf-8", newline="\n"))
+        else:
+            output = stack.enter_context(
+                tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="\n")
+            )
+        header = {"type": "FeatureCollection"}
+        if description:
+            header["description"] = description
+        header["features"] = []
+        # Keep json's exact separators, escaping and member order, including [].
+        prefix = json.dumps(header, indent=2 if pretty else None)
+        output.write(prefix[:-4] if pretty else prefix[:-3])
+        count = 0
+        while True:
+            row = result.fetchone()  # drains to None; guard: open-result ok
+            if row is None:
+                break
+            feature = json.loads(row[0])
+            encoded = json.dumps(feature, indent=2 if pretty else None)
             if pretty:
-                json.dump(fc, f, indent=2)
+                output.write(",\n" if count else "[\n")
+                output.write("    " + encoded.replace("\n", "\n    "))
             else:
-                json.dump(fc, f)
-            f.write("\n")
-    else:
-        with _utf8_stdout() as output:
-            if pretty:
-                output.write(json.dumps(fc, indent=2))
-            else:
-                output.write(json.dumps(fc))
-            output.write("\n")
-            output.flush()
-
+                output.write(", " if count else "[")
+                output.write(encoded)
+            count += 1
+        if pretty:
+            output.write("\n  ]\n}\n" if count else "[]\n}\n")
+        else:
+            output.write("]}\n" if count else "[]}\n")
+        if not output_path:
+            output.seek(0)
+            with _utf8_stdout() as stdout:
+                shutil.copyfileobj(output, stdout)
+                stdout.flush()
     return count
 
 

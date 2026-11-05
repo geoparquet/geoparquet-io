@@ -889,3 +889,102 @@ class TestFeatureMembersEmitValidJson:
         features = [json.loads(row) for row in rows]
         assert features[0]["bbox"] == [1, 2, 1, 2]
         assert "bbox" not in features[1]
+
+
+def test_feature_collection_bounded_decoding(tmp_path, monkeypatch):
+    """Collection size must not determine the number of live decoded features."""
+    from geoparquet_io.core.geojson_stream import _stream_feature_collection
+
+    loads = json.loads
+    live = peak = 0
+
+    class Feature(dict):
+        def __init__(self, value):
+            nonlocal live, peak
+            super().__init__(value)
+            live += 1
+            peak = max(peak, live)
+
+        def __del__(self):
+            nonlocal live
+            live -= 1
+
+    def decode(value):
+        return Feature(loads(value))
+
+    monkeypatch.setattr(json, "loads", decode)
+    feature = {
+        "type": "Feature",
+        "geometry": None,
+        "properties": {"name": '東京\n"\\', "v": [1, {}]},
+    }
+    raw = json.dumps(feature)
+    for pretty in (False, True):
+        for size in (0, 1, 1000):
+            rows = iter([(raw,)] * size + [None])
+            con = SimpleNamespace(
+                execute=lambda query, rows=rows: SimpleNamespace(fetchone=lambda: next(rows))
+            )
+            destination = tmp_path / "collection.json"
+            assert _stream_feature_collection(con, "query", "é\n", pretty, str(destination)) == size
+            expected = (
+                json.dumps(
+                    {
+                        "type": "FeatureCollection",
+                        "description": "é\n",
+                        "features": [feature] * size,
+                    },
+                    indent=2 if pretty else None,
+                )
+                + "\n"
+            )
+            assert destination.read_bytes() == expected.encode()
+            rows = iter([(raw,)] * size + [None])
+            con = SimpleNamespace(
+                execute=lambda query, rows=rows: SimpleNamespace(fetchone=lambda: next(rows))
+            )
+            stdout = io.StringIO()
+            monkeypatch.setattr(sys, "stdout", stdout)
+            assert _stream_feature_collection(con, "query", "é\n", pretty) == size
+            assert stdout.getvalue().encode() == expected.encode()
+    assert peak <= 2, f"retained {peak} decoded features"
+
+    monkeypatch.setattr(json, "loads", lambda value: {"unencodable": object()})
+    for to_file in (False, True):
+        destination.write_bytes(b"original")
+        stdout = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", stdout)
+        rows = iter([(raw,), None])
+        con = SimpleNamespace(
+            execute=lambda query, rows=rows: SimpleNamespace(fetchone=lambda: next(rows))
+        )
+        with pytest.raises(TypeError):
+            _stream_feature_collection(
+                con, "query", output_path=str(destination) if to_file else None
+            )
+        assert destination.read_bytes() == b"original"
+        assert stdout.getvalue() == ""
+    monkeypatch.setattr(json, "loads", decode)
+
+    for failure in (ValueError("query failed"), ("invalid JSON",)):
+        for to_file in (False, True):
+            rows = iter([(raw,), failure, None])
+
+            def fetch(rows=rows):
+                row = next(rows)
+                if isinstance(row, Exception):
+                    raise row
+                return row
+
+            con = SimpleNamespace(
+                execute=lambda query, fetch=fetch: SimpleNamespace(fetchone=fetch)
+            )
+            destination.write_bytes(b"original")
+            stdout = io.StringIO()
+            monkeypatch.setattr(sys, "stdout", stdout)
+            with pytest.raises(ValueError):
+                _stream_feature_collection(
+                    con, "query", output_path=str(destination) if to_file else None
+                )
+            assert destination.read_bytes() == b"original"
+            assert stdout.getvalue() == ""
