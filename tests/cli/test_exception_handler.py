@@ -241,9 +241,8 @@ def test_a_gpio_error_from_a_real_subcommand_answers_like_a_plain_command(monkey
     def boom(*_a, **_k):
         raise InvalidParameterError("tolerance", "must be positive")
 
-    monkeypatch.setattr(
-        __import__("sys").modules["geoparquet_io.cli.commands.process"], "simplify_file_impl", boom
-    )
+    # A dotted target imports the module, which lazy CLI loading may not have done yet.
+    monkeypatch.setattr("geoparquet_io.cli.commands.process.simplify_file_impl", boom)
 
     @click.group(cls=ErrorBoundaryGroup)
     def plain_root():
@@ -376,8 +375,6 @@ def test_every_answering_path_logs_exactly_one_traceback(monkeypatch, tmp_path, 
 def test_an_inspect_command_answers_a_gpio_error_without_a_usage_preamble(
     monkeypatch, tmp_path, argv, target
 ):
-    import sys
-
     import pyarrow as pa
     import pyarrow.parquet as pq
     from click.testing import CliRunner
@@ -390,7 +387,7 @@ def test_an_inspect_command_answers_a_gpio_error_without_a_usage_preamble(
     def boom(*_a, **_k):
         raise InvalidParameterError("count", "must be positive")
 
-    monkeypatch.setattr(sys.modules["geoparquet_io.cli.commands.inspect"], target, boom)
+    monkeypatch.setattr(f"geoparquet_io.cli.commands.inspect.{target}", boom)
 
     result = CliRunner().invoke(cli, [a.format(src=src) for a in argv])
 

@@ -378,7 +378,8 @@ def _write_admin(path: str) -> None:
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     con.execute(
         f"""COPY (
-            SELECT code, ST_MakeEnvelope(xmin, ymin, xmax, ymax) AS geometry
+            SELECT row_number() OVER () AS __bnd, code,
+                   ST_MakeEnvelope(xmin, ymin, xmax, ymax) AS geometry
             FROM (VALUES ('AA', -25.0, -25.0, 5.0, 5.0), ('BB', 5.0, -25.0, 40.0, 30.0))
                  AS t(code, xmin, ymin, xmax, ymax)
         ) TO '{path}' (FORMAT PARQUET)"""
@@ -441,7 +442,12 @@ def _admin_result(con, src, admin_path, *, narrow: bool, breakdown=None, where=N
             nodata_values=None,
             column_types=None,
         )
-    sql = _wrap_admin_geometry(breakdown_select or _build_agg_sql(joined, metrics), "polygon")
+    sql = _wrap_admin_geometry(
+        breakdown_select or _build_agg_sql(joined, metrics),
+        "polygon",
+        f"read_parquet({sql_path(str(admin_path))})",
+        "geometry",
+    )
     table = con.sql(sql).arrow().read_all()
     con.execute("DROP TABLE IF EXISTS __agg_joined")
     return table
@@ -499,7 +505,7 @@ def test_admin_join_materialization_holds_only_the_aggregated_columns(
         columns = sorted(r[0] for r in con.execute("DESCRIBE __agg_joined").fetchall())
     finally:
         con.execute("DROP TABLE IF EXISTS __agg_joined")
-    assert columns == ["__admin_code", "__admin_geom", "__admin_name", "crop", "height"]
+    assert columns == ["__admin_code", "__admin_name", "__bnd", "crop", "height"]
 
 
 # ---------------------------------------------------------------------------

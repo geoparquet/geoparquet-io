@@ -154,7 +154,7 @@ def test_failed_conversion_never_touches_a_pre_existing_output(tmp_path, overwri
     assert [p.name for p in tmp_path.iterdir() if p.name.startswith(("tmp", ".gpio"))] == []
 
 
-def test_unfiltered_exports_avoid_table_materialization(with_geo, tmp_path, monkeypatch):
+def test_exports_only_stage_filtered_geopackage(with_geo, tmp_path, monkeypatch):
     from geoparquet_io.core import format_writers
 
     materialized_rows = []
@@ -183,14 +183,20 @@ def test_unfiltered_exports_avoid_table_materialization(with_geo, tmp_path, monk
         "get_duckdb_connection",
         lambda *args, **kwargs: MeasuredConnection(factory(*args, **kwargs)),
     )
-    for fmt, suffix in (("shapefile", "shp"), ("flatgeobuf", "fgb")):
-        out = tmp_path / f"out.{suffix}"
-        result = _run(fmt, with_geo, out)
-        assert result.exit_code == 0, result.output
-        assert out.exists()
+    for fmt, suffix in (("shapefile", "shp"), ("flatgeobuf", "fgb"), ("geopackage", "gpkg")):
+        for filtered in (False, True):
+            out = tmp_path / f"out.{suffix}"
+            format_writers.write_gdal_format(
+                str(with_geo),
+                str(out),
+                fmt,
+                overwrite=True,
+                where="id % 2 = 0" if filtered else None,
+            )
+            assert out.exists()
     assert (tmp_path / "out.dbf").exists()
     assert not [p for p in tmp_path.iterdir() if p.name.startswith(".gpio")]
-    assert materialized_rows == [0, 0]
+    assert materialized_rows == [0, 0, 0, 0, 0, 2]
 
 
 def test_overwrite_removes_a_stale_shapefile_sidecar(with_geo, tmp_path):

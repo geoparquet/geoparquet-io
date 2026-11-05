@@ -109,8 +109,7 @@ from geoparquet_io.core.parquet_schema import (
     root_schema_index,
     schema_direct_children,
     schema_entry_is_group,
-    schema_root_offset,
-    schema_subtree_end,
+    schema_name_indexes,
 )
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.remote import is_remote_url, needs_httpfs
@@ -2014,7 +2013,11 @@ def _check_cover_bbox_paths(col_meta: dict, col_name: str) -> ValidationCheck:
 
 def _bbox_column_missing(check_name: str, bbox_col_name: str, schema_info: list) -> ValidationCheck:
     """FAILED for a covering bbox column that is not a root-level column."""
-    nested = nested_schema_index(schema_info, bbox_col_name) is not None
+    nested = (
+        bbox_col_name in schema_info.nested
+        if isinstance(schema_info, _ValidationSchema)
+        else nested_schema_index(schema_info, bbox_col_name) is not None
+    )
     detail = (
         "it exists only as a nested field; GeoParquet 1.1 requires the bounding "
         "box column at the root of the schema"
@@ -4031,11 +4034,7 @@ class _ValidationSchema(list):
 
     def __init__(self, entries: list, kv_metadata: dict):
         super().__init__(entries)
-        self.roots = {}
-        index = schema_root_offset(self)
-        while index < len(self):
-            self.roots.setdefault(self[index].get("name"), index)
-            index = schema_subtree_end(self, index)
+        self.roots, self.nested = schema_name_indexes(self)
         self.kv_metadata = kv_metadata
         self.raw_geo = read_raw_geo(kv_metadata).block or {}
         self.carried_geo = None

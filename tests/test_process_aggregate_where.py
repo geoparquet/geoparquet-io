@@ -421,7 +421,7 @@ def test_admin_joined_sql_can_filter_on_hive_partition_column(tmp_path):
     try:
         con.execute(
             f"""
-            COPY (SELECT 'XX' AS country,
+            COPY (SELECT 1 AS __bnd, 'XX' AS country,
                          ST_GeomFromText('POLYGON((0 0, 20 0, 20 60, 0 60, 0 0))') AS geometry)
             TO '{admin}' (FORMAT PARQUET)
             """

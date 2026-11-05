@@ -163,9 +163,9 @@ class TestGoldenSQL:
         out = tmp_path / "out.gpkg"
         write_geopackage(PLACES, str(out))
 
-        staged = [s for s in recorded_statements if "CREATE OR REPLACE TEMP TABLE" in s]
-        assert len(staged) == 1
-        assert "WHERE" not in staged[0].upper().replace("WKB_GEOMETRY", "")
+        copies = [s for s in recorded_statements if "FORMAT GDAL" in s]
+        assert len(copies) == 1
+        assert "WHERE" not in copies[0].upper().replace("WKB_GEOMETRY", "")
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,6 @@ Never add a line to make a new finding go away.
 This module is never imported; vulture only parses it.
 """
 
-_.__class__  # unused attribute (geoparquet_io/__init__.py:120) -- dynamic: PEP 562 module hook / module class swap
 issue_severity  # unused variable (geoparquet_io/core/check_bbox_values.py:152) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 checked_rows  # unused variable (geoparquet_io/core/check_bbox_values.py:164) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 undersized_rows  # unused variable (geoparquet_io/core/check_bbox_values.py:167) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
@@ -163,3 +162,5 @@ partition_quadkey  # unused function (geoparquet_io/cli/commands/partition.py:92
 extract_bigquery_cmd  # unused function (geoparquet_io/cli/commands/extract.py:590) -- dynamic: Click command, registered by its decorator
 extract_wfs_cmd  # unused function (geoparquet_io/cli/commands/extract.py:851) -- dynamic: Click command, registered by its decorator
 a5_from_query_farm  # unused variable (geoparquet_io/core/duckdb_utils.py:415) -- dynamic: field of the frozen DuckDBCapabilities, no reader yet by design (#1360 reads it)
+
+_.format_commands  # unused method (geoparquet_io/cli/main.py:65) -- dynamic: Click invokes the LazyGroup help-rendering override

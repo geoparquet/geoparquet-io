@@ -2,6 +2,24 @@
 
 gpio provides a fluent Python API for GeoParquet transformations. This API offers the best performance by keeping data in memory as Arrow tables, avoiding file I/O entirely.
 
+`geoparquet_io.cli` is the CLI package. Code that previously imported the Click
+group with `from geoparquet_io import cli` must now import it from its owner:
+
+=== "CLI"
+
+    ```bash
+    gpio --help
+    ```
+
+=== "Python"
+
+    ```python
+    from geoparquet_io.cli.main import cli
+
+    cli(["--help"], standalone_mode=False)
+    ```
+
+
 ## Installation
 
 === "CLI"

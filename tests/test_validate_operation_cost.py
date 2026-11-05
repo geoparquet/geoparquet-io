@@ -65,6 +65,8 @@ def test_wide_validation_bounds_file_work(tmp_path):
         assert visits <= 8 * width
         assert descriptions.call_count == 1
 
+    _assert_missing_covering_schema_work_is_linear(tmp_path)
+
     # The shared scan must preserve the independent checks' sample and verdicts,
     # including bounds failures that must not prevent a successful type check.
     import shapely
@@ -93,7 +95,7 @@ def test_wide_validation_bounds_file_work(tmp_path):
 
     # The cached file facts retain the schema and CRS owners' semantics.
     from geoparquet_io.core.crs_utils import source_crs_is_unknown
-    from geoparquet_io.core.parquet_schema import root_schema_index
+    from geoparquet_io.core.parquet_schema import nested_schema_index, root_schema_index
 
     listings = [
         [],
@@ -117,6 +119,7 @@ def test_wide_validation_bounds_file_work(tmp_path):
         indexed = validate._ValidationSchema(listing, {})
         for name in ("meta", "broken", "geometry", "missing", ""):
             assert validate._schema_index(indexed, name) == root_schema_index(listing, name)
+            assert indexed.nested.get(name) == nested_schema_index(listing, name)
 
     from geoparquet_io.core.duckdb_metadata import get_kv_metadata, get_schema_info
 
@@ -189,3 +192,44 @@ def test_wide_validation_bounds_file_work(tmp_path):
                     con.sampled_geometry_facts(str(path), "geometry", "", "SELECT 1")
     finally:
         con.close()
+
+
+def _assert_missing_covering_schema_work_is_linear(tmp_path):
+    from geoparquet_io.core import parquet_schema, validate
+
+    costs = []
+    for width in (8, 32):
+        columns = {
+            f"geom_{i}": {
+                "encoding": "WKB",
+                "geometry_types": [],
+                "covering": {
+                    "bbox": {
+                        key: ["missing" if i % 2 else "nested_bbox", key]
+                        for key in ("xmin", "ymin", "xmax", "ymax")
+                    }
+                },
+            }
+            for i in range(width)
+        }
+        table = pa.table(
+            {name: pa.array([None, None], pa.binary()) for name in columns}
+            | {"meta": [{"nested_bbox": 1}, {"nested_bbox": 2}]}
+        )
+        path = tmp_path / f"covering-{width}.parquet"
+        pq.write_table(table.replace_schema_metadata(_metadata(columns)), path)
+        original = parquet_schema.schema_subtree_end
+        with patch.object(parquet_schema, "schema_subtree_end", wraps=original) as walks:
+            result = validate_geoparquet(str(path), validate_data=False)
+        costs.append(walks.call_count)
+        for i in range(width):
+            for kind in ("column_exists", "structure", "field_types"):
+                check = next(
+                    check
+                    for check in result.checks
+                    if check.name == f"covering_bbox_{kind}_geom_{i}"
+                )
+                assert check.status == validate.CheckStatus.FAILED
+                expected = "no root-level column" if i % 2 else "exists only as a nested field"
+                assert expected in check.message
+    assert costs[1] <= costs[0] * 5
