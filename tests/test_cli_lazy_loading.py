@@ -45,7 +45,13 @@ def test_lazy_help_matches_loaded_commands_and_preserves_plugins():
     import click
     from click.testing import CliRunner
 
+    from geoparquet_io.cli import main
     from geoparquet_io.cli.main import LazyGroup
+
+    for name in main._GROUP_HELP:
+        assert getattr(main, name) is main.cli.commands[name]
+    with pytest.raises(AttributeError):
+        main.missing_command
 
     group = LazyGroup("gpio")
     plugin = click.Command("plugin", help="A plugin command.", deprecated=True)

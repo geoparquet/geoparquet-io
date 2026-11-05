@@ -93,14 +93,14 @@ def root_schema_columns(schema_info: list) -> list[dict]:
 
 def schema_name_indexes(schema_info: list) -> tuple[dict, dict]:
     """First root and nested indices by name, for repeated lookups within one file."""
-    roots = {}
+    roots: dict = {}
     root_indices = set()
     index = schema_root_offset(schema_info)
     while index < len(schema_info):
         roots.setdefault(schema_info[index].get("name"), index)
         root_indices.add(index)
         index = schema_subtree_end(schema_info, index)
-    nested = {}
+    nested: dict = {}
     for index, entry in enumerate(schema_info):
         if index not in root_indices:
             nested.setdefault(entry.get("name"), index)

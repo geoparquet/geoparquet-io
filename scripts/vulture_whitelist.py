@@ -15,7 +15,6 @@ Never add a line to make a new finding go away.
 This module is never imported; vulture only parses it.
 """
 
-_.__class__  # unused attribute (geoparquet_io/__init__.py:120) -- dynamic: PEP 562 module hook / module class swap
 issue_severity  # unused variable (geoparquet_io/core/check_bbox_values.py:152) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 checked_rows  # unused variable (geoparquet_io/core/check_bbox_values.py:164) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 undersized_rows  # unused variable (geoparquet_io/core/check_bbox_values.py:167) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape

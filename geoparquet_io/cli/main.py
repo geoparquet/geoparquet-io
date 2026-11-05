@@ -29,6 +29,12 @@ _GROUP_HELP = {
 }
 
 
+def __getattr__(name):
+    if name in _GROUP_HELP:
+        return cli.commands[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 class _LazyCommands(dict):
     """Keep Click's command mapping introspectable while deferring imports."""
 
@@ -60,6 +66,7 @@ class LazyGroup(ErrorBoundaryGroup):
         # Click's implementation calls get_command for every row, loading all groups.
         commands = []
         for name in self.list_commands(ctx):
+            assert isinstance(self.commands, _LazyCommands)
             command = dict.get(self.commands, name)
             if command is None:
                 command = click.Command(name, help=_GROUP_HELP[name])
