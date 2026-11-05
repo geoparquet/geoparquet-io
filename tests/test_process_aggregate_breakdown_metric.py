@@ -10,6 +10,7 @@ through a real rollup to pin that.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import duckdb
 import pyarrow as pa
@@ -170,13 +171,6 @@ def test_grid_engine_pivots_the_metric_per_category(spec, row):
     assert fetch_one(con.execute(sql)) == row
 
 
-def test_grid_engine_without_a_breakdown_metric_is_unchanged():
-    con = duckdb.connect()
-    sql = _grid_query(con)
-    assert _columns(con, sql) == ["cell", "count", "count_202605", "count_202606", "count_202607"]
-    assert fetch_one(con.execute(sql)) == (1, 4, 2, 1, 1)
-
-
 def test_grid_engine_names_the_remainder_bucket_for_the_metric():
     con = duckdb.connect()
     sql = _grid_query(con, breakdown_limit=1, breakdown_spec=parse_breakdown_metric("sum:peak"))
@@ -303,6 +297,9 @@ def test_the_pivot_builder_is_the_one_both_engines_use():
         "SELECT * FROM d",
         "month",
         1,
+        aggregate_sql="SELECT 1 AS cell",
+        key_expression="1",
+        key_column="cell",
         metrics=parse_metrics("sum:peak_other"),
         spec=parse_breakdown_metric("sum:peak"),
         nodata_values=None,
@@ -472,3 +469,78 @@ def test_a_breakdown_limit_below_one_is_refused():
     con = duckdb.connect()
     with pytest.raises(InvalidParameterError, match="at least 1"):
         _grid_query(con, breakdown_limit=0)
+
+
+def test_breakdown_projection_bytes_do_not_scale_with_categories():
+    """Bound bytes emitted by operators, rather than timing or query spelling."""
+    con = duckdb.connect()
+    sql = _grid_query(con)
+    assert _columns(con, sql) == ["cell", "count", "count_202605", "count_202606", "count_202607"]
+    assert fetch_one(con.execute(sql)) == (1, 4, 2, 1, 1)
+
+    rows = 100_000
+    with duckdb.connect(config={"threads": 1}) as con:
+        source = f"SELECT i % 128 AS month FROM range({rows}) t(i)"
+        sql = _grid_query(con, source, breakdown_limit=128)
+        profile = json.loads(con.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + sql).fetchall()[0][1])
+
+        def emitted_bytes(node):
+            return node.get("result_set_size", 0) + sum(
+                emitted_bytes(child) for child in node.get("children", [])
+            )
+
+        # Narrow key/category streams plus the tiny 128-category result. The
+        # former per-category boolean projection alone emits 128 bytes/row.
+        assert emitted_bytes(profile) < rows * 100
+        result = con.sql(sql).arrow().read_all()
+        assert result.column("count").to_pylist() == [rows]
+        assert sum(result.column(i)[0].as_py() for i in range(2, 130)) == rows
+
+    # The same owner must keep an empty source empty and retain deterministic
+    # top-N ties, NULL, and the disambiguated literal "other" category.
+    for source, limit, names, values in [
+        ("SELECT NULL::VARCHAR AS month WHERE false", 2, ["cell", "count"], []),
+        (
+            "SELECT * FROM (VALUES ('b'), ('a'), (NULL)) t(month)",
+            1,
+            ["cell", "count", "count_a", "count_other"],
+            [(1, 3, 1, 2)],
+        ),
+        (
+            "SELECT * FROM (VALUES (NULL), (NULL), ('other')) t(month)",
+            1,
+            ["cell", "count", "count_null", "count_other"],
+            [(1, 3, 2, 1)],
+        ),
+        (
+            "SELECT * FROM (VALUES ('other'), ('other'), (NULL)) t(month)",
+            1,
+            ["cell", "count", "count_other_2", "count_other"],
+            [(1, 3, 2, 1)],
+        ),
+    ]:
+        with duckdb.connect() as con:
+            sql = _grid_query(con, source, breakdown_limit=limit)
+            assert _columns(con, sql) == names
+            assert con.execute(sql).fetchall() == values
+
+    # Missing categories in a cell count zero, while missing metric values
+    # stay NULL. The unassigned (NULL) key must survive the pivot join too.
+    for spec, expected in [
+        (None, [(2, 1, 0, 1), (None, 1, 1, 0)]),
+        (parse_breakdown_metric("sum:peak"), [(2, 1, None, 3), (None, 1, 2, None)]),
+    ]:
+        with duckdb.connect() as con:
+            sql = build_grid_query(
+                con,
+                replace(_DUMMY_SCHEME, key_template="CASE WHEN month = 'a' THEN NULL ELSE 2 END"),
+                "SELECT * FROM (VALUES ('a', 2), ('b', 3)) t(month, peak)",
+                1,
+                "cell",
+                None,
+                "month",
+                20,
+                "none",
+                breakdown_spec=spec,
+            )
+            assert con.execute(f"SELECT * FROM ({sql}) ORDER BY cell").fetchall() == expected

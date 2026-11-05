@@ -131,7 +131,6 @@ def _build_joined_sql(
 def _build_agg_sql(
     joined_sql: str,
     metrics: list[MetricSpec],
-    breakdown_select: str,
     nodata_values: list[str] | None = None,
     column_types: dict[str, str] | None = None,
 ) -> str:
@@ -147,8 +146,6 @@ def _build_agg_sql(
     )
     if metric_select:
         agg_parts.append(metric_select)
-    if breakdown_select:
-        agg_parts.append(breakdown_select)
     return (
         f"SELECT {', '.join(agg_parts)} FROM ({joined_sql}) "
         f"GROUP BY COALESCE(__admin_code, 'unassigned')"
@@ -339,27 +336,26 @@ def aggregate_by_admin(
         # table rather than re-running the expensive ST_Intersects join twice. The
         # join point has done its work by then -- the table is one row per input
         # feature, so a POINT per row is pure weight.
-        breakdown_select = ""
         if breakdown:
             con.execute(
                 f"CREATE TEMP TABLE __agg_joined AS SELECT * EXCLUDE (__cen) FROM ({joined_sql})"
             )
             joined_ref = "SELECT * FROM __agg_joined"
-            breakdown_select = build_breakdown_pivot(
+            agg_sql = build_breakdown_pivot(
                 con,
                 joined_ref,
                 breakdown,
                 breakdown_limit,
+                aggregate_sql=_build_agg_sql(joined_ref, metrics, nodata_values, column_types),
+                key_expression="COALESCE(__admin_code, 'unassigned')",
+                key_column="admin_code",
                 metrics=metrics,
                 spec=bd_metric,
                 nodata_values=nodata_values,
                 column_types=column_types,
             )
-            agg_sql = _build_agg_sql(
-                joined_ref, metrics, breakdown_select, nodata_values, column_types
-            )
         else:
-            agg_sql = _build_agg_sql(joined_sql, metrics, "", nodata_values, column_types)
+            agg_sql = _build_agg_sql(joined_sql, metrics, nodata_values, column_types)
         final_sql = _wrap_admin_geometry(agg_sql, out_geometry)
 
         if show_sql or verbose:

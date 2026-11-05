@@ -581,7 +581,7 @@ def resolve_breakdown_values(con, source_sql: str, column: str, limit: int) -> t
     """Find the top-N most frequent values of ``column`` in the source.
 
     Returns (top_values, has_other). NULL is treated as its own value here; it is
-    rolled into the remainder bucket by build_breakdown_select unless it makes
+    rolled into the remainder bucket by build_breakdown_pivot unless it makes
     the cut. A column whose values cannot be spelled as a SQL literal (BLOB,
     STRUCT, LIST, MAP) is refused: its pivots would silently match no rows.
     """
@@ -616,86 +616,60 @@ def _is_scalar_sql_type(col_type: str) -> bool:
     )
 
 
-def _breakdown_other_condition(qcol: str, value_colmap: list[tuple[object, str]]) -> str:
-    """WHERE condition matching every row the kept-value pivots did not match."""
-    kept_non_null = [v for v, _ in value_colmap if v is not None]
-    in_list = ", ".join(sql_literal(v) for v in kept_non_null)
-    if any(v is None for v, _ in value_colmap):
-        # NULL is explicitly kept, so "other" is NOT(kept values including NULL).
-        kept_conds = ([f"{qcol} IN ({in_list})"] if kept_non_null else []) + [f"{qcol} IS NULL"]
-        return f"NOT ({' OR '.join(kept_conds)})"
-    if not kept_non_null:
-        # No non-null values kept (shouldn't happen, but handle gracefully).
-        return "TRUE"
-    # NULL is not explicitly kept, so it belongs in "other". It needs spelling
-    # out: `NULL NOT IN (...)` is NULL, not TRUE.
-    return f"{qcol} NOT IN ({in_list}) OR {qcol} IS NULL"
-
-
-def build_breakdown_select(
-    column: str,
-    value_colmap: list[tuple[object, str]],
-    has_other: bool,
-    *,
-    spec: MetricSpec | None = None,
-    other_name: str | None = None,
-    nodata_values: list[str] | None = None,
-    column_types: dict[str, str] | None = None,
-) -> str:
-    """Build one filtered aggregate per kept value, plus the remainder bucket.
-
-    ``spec`` chooses what each pivot holds: None gives ``COUNT(*) FILTER (...)
-    AS count_<value>``, a spec gives ``SUM(peak) FILTER (...) AS
-    sum_peak_<value>`` (#1100). A metric pivot over a category with no rows, or
-    only NULL/sentinel values, is NULL, as ``--metric sum:`` reports for the
-    same cell. ``nodata_values``/``column_types`` apply ``--metric-nodata`` to
-    the metric column the way :func:`build_metric_select` does.
-    """
-    qcol = quote_identifier(column)
-    if spec is None:
-        agg_of = lambda cond: f"COUNT(*) FILTER (WHERE {cond})"  # noqa: E731
-    else:
-        value_expr = _aggregated_column_expr(spec.column, nodata_values, column_types)
-        agg_of = lambda cond: f"{spec.func.upper()}({value_expr}) FILTER (WHERE {cond})"  # noqa: E731
-    parts = [
-        f"{agg_of(f'{qcol} IS NULL' if value is None else f'{qcol} = {sql_literal(value)}')} "
-        f"AS {quote_identifier(colname)}"
-        for value, colname in value_colmap
-    ]
-    if has_other:
-        name = other_name or f"{breakdown_prefix(spec)}_other"
-        parts.append(
-            f"{agg_of(_breakdown_other_condition(qcol, value_colmap))} AS {quote_identifier(name)}"
-        )
-    return ", ".join(parts)
-
-
 def build_breakdown_pivot(
     con,
     source_sql: str,
     breakdown: str,
     limit: int,
     *,
+    aggregate_sql: str,
+    key_expression: str,
+    key_column: str,
     metrics: list[MetricSpec],
     spec: MetricSpec | None,
     nodata_values: list[str] | None,
     column_types: dict[str, str] | None,
 ) -> str:
-    """The whole ``--breakdown`` SELECT fragment: top-N values, names, aggregates.
+    """Attach a category pivot to the grid/admin aggregates at their group key.
 
-    Shared by the grid and admin engines so the two cannot drift on naming or
-    on what a pivot holds.
+    DuckDB groups categories before its wide pivot for high cardinalities,
+    avoiding one boolean per category per feature.
+    A typed lookup keeps NULL and non-string scalar categories distinct without
+    converting values to names; only the final projection uses public names.
     """
-    reserved = {m.output_name for m in metrics}
+    reserved = {m.output_name for m in metrics} | {key_column, "count"}
     prefix = breakdown_prefix(spec)
     top_values, has_other = resolve_breakdown_values(con, source_sql, breakdown, limit)
     colmap = build_breakdown_column_names(top_values, reserved, prefix)
-    return build_breakdown_select(
-        breakdown,
-        colmap,
-        has_other,
-        spec=spec,
-        other_name=breakdown_other_name(colmap, reserved, prefix),
-        nodata_values=nodata_values,
-        column_types=column_types,
+    if not colmap:
+        return aggregate_sql
+    other = breakdown_other_name(colmap, reserved, prefix)
+    buckets = [name for _, name in colmap] + ([other] if has_other else [])
+    lookup = ", ".join(
+        f"({sql_literal(value) if value is not None else 'NULL'}, {i})"
+        for i, (value, _) in enumerate(colmap)
+    )
+    value_expr = _aggregated_column_expr(spec.column, nodata_values, column_types) if spec else "1"
+    agg = f"{spec.func.upper()}(__value)" if spec else "COUNT(*)"
+    pivot_values = ", ".join(str(i) for i in range(len(buckets)))
+    columns = []
+    for i, name in enumerate(buckets):
+        value = f"p.{quote_identifier(str(i))}"
+        # A missing category counts zero, but a missing metric stays NULL.
+        if spec is None:
+            value = f"COALESCE({value}, 0)"
+        columns.append(f"{value} AS {quote_identifier(name)}")
+    qkey = quote_identifier(key_column)
+    return (
+        f"WITH __bd_source AS (SELECT {key_expression} AS __group, "
+        f"{quote_identifier(breakdown)} AS __category, {value_expr} AS __value "
+        f"FROM ({source_sql})), "
+        f"__bd_buckets AS (SELECT s.__group, COALESCE(m.__bucket, {len(colmap)}) AS __bucket, "
+        f"s.__value FROM __bd_source s "
+        f"LEFT JOIN (VALUES {lookup}) m(__category, __bucket) "
+        f"ON s.__category IS NOT DISTINCT FROM m.__category), "
+        f"__bd_pivot AS (PIVOT __bd_buckets ON __bucket IN ({pivot_values}) "
+        f"USING {agg} GROUP BY __group) "
+        f"SELECT a.*, {', '.join(columns)} FROM ({aggregate_sql}) a "
+        f"LEFT JOIN __bd_pivot p ON a.{qkey} IS NOT DISTINCT FROM p.__group"
     )
