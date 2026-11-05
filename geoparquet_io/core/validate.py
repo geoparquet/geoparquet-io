@@ -84,6 +84,7 @@ from geoparquet_io.core.geo_metadata import (
     bounds_of,
     covering_lacks_bbox,
     declares_covering_member,
+    geometry_stats_of,
     geometry_types_of,
     is_covering_path,
     is_geoparquet_1x,
@@ -1432,8 +1433,17 @@ def _check_geometry_types_match_data(
         # "LineString ZM" are distinct geometry_types per spec), under the one
         # degenerate-geometry policy the writers use: an EMPTY geometry has no
         # type to declare, so it cannot be an undeclared one either.
-        found = set(geometry_types_of(QuerySource(con, sample), geom_col))
-        total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sample})"))[0]
+        facts = (
+            con.sampled_geometry_facts(raw_url, geom_col, limit_clause, sample)
+            if isinstance(con, _ReopeningConnection)
+            else None
+        )
+        if facts is None:
+            found = set(geometry_types_of(QuerySource(con, sample), geom_col))
+            total_count = fetch_one(con.execute(f"SELECT COUNT(*) FROM ({sample})"))[0]
+        else:
+            stats, total_count = facts
+            found = set(stats.geometry_types)
         return _compare_geometry_types(found, declared_types, total_count, geom_col)
     except Exception as e:
         check_name = f"geometry_types_match_data_{geom_col}"
@@ -3847,6 +3857,12 @@ def _get_geometry_bounds(
             WHERE {read.present_sql}
             {limit_clause}
         """
+        if isinstance(con, _ReopeningConnection):
+            facts = con._sampled_facts.get((raw_url, geom_col, limit_clause))
+            if facts is not None:
+                stats, total = facts
+                bbox = stats.bbox
+                return (bbox[0], bbox[2], bbox[1], bbox[3], total) if bbox is not None else None
     bbox = bounds_of(QuerySource(con, sample), geom_col)
     if bbox is None:
         return None
@@ -4066,6 +4082,25 @@ class _ReopeningConnection:
         self._parquet_file = parquet_file
         self._con = _open_validation_connection(parquet_file)
         self._descriptions = {}
+        self._sampled_facts = {}
+
+    def sampled_geometry_facts(self, raw_url, column, limit_clause, sample):
+        """Share successful type/bounds facts for the identical present-value sample.
+
+        Bounds can fail where types succeed (non-finite coordinates). On any
+        failure the checks run their original independent queries and diagnostics.
+        """
+        key = (raw_url, column, limit_clause)
+        if key not in self._sampled_facts:
+            try:
+                stats = geometry_stats_of(QuerySource(self, sample), column)
+                total = fetch_one(self.execute(f"SELECT COUNT(*) FROM ({sample})"))[0]
+            except Exception as e:
+                if is_interrupt(e):
+                    raise KeyboardInterrupt(str(e)) from e
+                return None
+            self._sampled_facts[key] = (stats, total)
+        return self._sampled_facts[key]
 
     def geometry_read(self, raw_url: str, column: str) -> GeometryRead:
         if raw_url not in self._descriptions:
@@ -4109,10 +4144,11 @@ class _ReopeningConnection:
     def _reopen(self) -> None:
         import duckdb
 
+        self._descriptions.clear()
+        self._sampled_facts.clear()
         with contextlib.suppress(duckdb.Error):
             self._con.close()
         self._con = _open_validation_connection(self._parquet_file)
-        self._descriptions.clear()
 
     def close(self) -> None:
         self._con.close()

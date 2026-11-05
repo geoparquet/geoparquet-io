@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from geoparquet_io.core.validate import validate_geoparquet
 from scripts.profile_command import CallSpies
@@ -60,9 +61,35 @@ def test_wide_validation_bounds_file_work(tmp_path):
                 check = next(check for check in result.checks if check.name == f"{kind}_{name}")
                 assert check.status == validate.CheckStatus.PASSED, check.message
         assert spies.counts["footer_reads"] <= 8
-        assert spies.counts["execute"] <= 8 * width + 12
+        assert spies.counts["execute"] <= 5 * width + 12
         assert visits <= 8 * width
         assert descriptions.call_count == 1
+
+    # The shared scan must preserve the independent checks' sample and verdicts,
+    # including bounds failures that must not prevent a successful type check.
+    import shapely
+
+    for values in (
+        [None, "POINT EMPTY", "POINT (3 4)", "POINT (1000 1000)"],
+        [None, None],
+        ["POINT (Infinity 2)", "POINT (3 4)"],
+        [b"", b"bad WKB", "POINT (3 4)"],
+    ):
+        path = tmp_path / "samples.parquet"
+        wkbs = [
+            shapely.to_wkb(shapely.from_wkt(value)) if isinstance(value, str) else value
+            for value in values
+        ]
+        table = pa.table({"geometry": pa.array(wkbs, pa.binary())})
+        metadata = _metadata({"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}})
+        pq.write_table(table.replace_schema_metadata(metadata), path)
+        for sample_size in (1, 2, 0):
+            shared = validate_geoparquet(str(path), sample_size=sample_size)
+            with patch.object(
+                validate._ReopeningConnection, "sampled_geometry_facts", return_value=None
+            ):
+                independent = validate_geoparquet(str(path), sample_size=sample_size)
+            assert shared == independent
 
     # The cached file facts retain the schema and CRS owners' semantics.
     from geoparquet_io.core.crs_utils import source_crs_is_unknown
@@ -149,10 +176,16 @@ def test_wide_validation_bounds_file_work(tmp_path):
                     con, str(path), column
                 )
             assert descriptions.call_count == 1
+            con._sampled_facts[(str(path), "geometry", "")] = (None, 0)
             con._reopen()
+            assert not con._sampled_facts
             assert con.geometry_read(str(path), "geometry") == resolve_geometry_read(
                 con, str(path), "geometry"
             )
             assert descriptions.call_count == 2
+        for interrupt in (KeyboardInterrupt(), RuntimeError("Query interrupted")):
+            with patch.object(validate, "geometry_stats_of", side_effect=interrupt):
+                with pytest.raises(KeyboardInterrupt):
+                    con.sampled_geometry_facts(str(path), "geometry", "", "SELECT 1")
     finally:
         con.close()
