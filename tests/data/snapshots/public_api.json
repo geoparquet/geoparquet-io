@@ -538,6 +538,7 @@
     "GeometryRead",
     "STANDARD_GEOMETRY_NAMES",
     "count_geometry_presence",
+    "count_geometry_presences",
     "create_geometry_view",
     "native_geometry_types_from_query",
     "primary_geometry_column",
