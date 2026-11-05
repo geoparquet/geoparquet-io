@@ -359,9 +359,6 @@ _FACADE_CALLS = {"without_geometry_dictionary", "get_pyarrow_kwargs"}
 #: pyarrow writes that may keep pyarrow's own dictionary default, and why.
 #: Keyed by (path under geoparquet_io/, enclosing function).
 _EXEMPT = {
-    ("benchmarks/workloads.py", "generate_workload"): (
-        "synthetic benchmark inputs preserve the baseline encoding, not gpio outputs"
-    ),
     ("core/add/kdtree.py", "add_kdtree_table"): "scratch copy, read back by DuckDB",
     ("core/streaming.py", "read_stdin_to_temp_file"): "scratch copy of stdin, read by DuckDB",
     ("core/arcgis.py", "_stream_features_to_parquet"): "scratch file, rewritten by a second pass",

@@ -75,8 +75,8 @@ def allocation_site(path):
 
 
 def diagnose(matrix):
-    from geoparquet_io.benchmarks.matrix import COMMANDS
-    from geoparquet_io.benchmarks.workloads import generate_workload
+    from scripts.profile_matrix.matrix import COMMANDS
+    from scripts.profile_matrix.workloads import generate_workload
 
     rows = json.loads(matrix.read_text())
     groups = defaultdict(list)

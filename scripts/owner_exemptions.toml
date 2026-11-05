@@ -515,23 +515,3 @@ reason = "permanent: dry-run display of the resolved facade COPY statement"
 path = "geoparquet_io/core/partition/staging.py"
 count = 1
 reason = "permanent: scratch or cache Parquet staging; codec comes from resolve_codec, not a final output"
-
-# Profile fixtures deliberately preserve their measured input bytes. These are
-# synthetic inputs outside the timed process, never gpio output writers.
-[[G1.tid251]]
-path = "geoparquet_io/benchmarks/workloads.py"
-name = "pyarrow.parquet.write_table"
-reason = "permanent: deterministic benchmark input, preserving baseline dictionary encoding"
-[[G1.tid251]]
-path = "geoparquet_io/benchmarks/workloads.py"
-name = "pyarrow.parquet.ParquetWriter"
-reason = "permanent: bounded batches of deterministic benchmark input, not a gpio output"
-[[G1.geo_compose]]
-path = "geoparquet_io/benchmarks/workloads.py"
-name = "_batch"
-reason = "permanent: synthetic declared fixture metadata, independent of the production composer being measured"
-[[G1.retry_status_sets]]
-path = "geoparquet_io/benchmarks/matrix.py"
-name = "<module>"
-count = 2
-reason = "permanent: issue numbers 543 and 550, not HTTP status codes or retry policy"

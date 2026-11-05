@@ -640,7 +640,7 @@ def _stream_feature_collection(
             output = stack.enter_context(
                 tempfile.TemporaryFile(mode="w+", encoding="utf-8", newline="\n")
             )
-        header = {"type": "FeatureCollection"}
+        header: dict[str, object] = {"type": "FeatureCollection"}
         if description:
             header["description"] = description
         header["features"] = []

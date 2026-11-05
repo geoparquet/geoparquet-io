@@ -248,7 +248,7 @@ def test_analyze_trends_skips_failed_operations(tmp_path):
     assert result["operations_tracked"] == 1  # Only "test" operation tracked
 
 
-def test_matrix_summary_preserves_distinct_workloads_and_legacy(tmp_path):
+def check_matrix_summary_preserves_distinct_workloads_and_legacy(tmp_path):
     from scripts.benchmark_history import load_results, normalize_matrix
 
     rows = [
@@ -277,6 +277,7 @@ def test_matrix_summary_preserves_distinct_workloads_and_legacy(tmp_path):
 
 
 def test_seeded_history_does_not_attribute_legacy_trends_to_new_inputs(sample_baselines, tmp_path):
+    check_matrix_summary_preserves_distinct_workloads_and_legacy(tmp_path)
     current = tmp_path / "seeded.json"
     current.write_text(
         json.dumps(
@@ -291,3 +292,45 @@ def test_seeded_history_does_not_attribute_legacy_trends_to_new_inputs(sample_ba
     result = analyze_trends([*sample_baselines, str(current)])
     assert result["warnings"] == []
     assert result["improvements"] == []
+
+
+def test_faster_changed_output_is_rejected(tmp_path):
+    import pytest
+
+    from scripts.benchmark_history import compare_results
+
+    row = {
+        "command": "sort-hilbert",
+        "workload": "W2",
+        "size": "small",
+        "wall_seconds": 1,
+        "cpu_seconds": 1,
+        "peak_rss_bytes": 100,
+        "output_sha256": {"result.parquet": "before"},
+        "raw_output_sha256": {"result.parquet": "before"},
+    }
+    base, head = tmp_path / "base.json", tmp_path / "head.json"
+    base.write_text(json.dumps([row] * 3))
+    head.write_text(
+        json.dumps([dict(row, wall_seconds=0.5, output_sha256={"result.parquet": "after"})] * 3)
+    )
+    with pytest.raises(ValueError, match="Output bytes changed"):
+        compare_results(str(base), str(head))
+
+    from scripts.benchmark_history import load_results
+
+    saved = load_results(base)["benchmarks"][0]
+    assert saved["raw_output_sha256"] == [row["raw_output_sha256"]] * 3
+    head.write_text(json.dumps([dict(row, wall_seconds=0.5)] * 3))
+    compare_results(str(base), str(head))
+    for command in ["overview", "aggregate-breakdown"]:
+        base.write_text(json.dumps([dict(row, command=command)] * 3))
+        head.write_text(
+            json.dumps(
+                [dict(row, command=command, output_sha256={"result.parquet": "approved"})] * 3
+            )
+        )
+        compare_results(str(base), str(head))
+    head.write_text(json.dumps([dict(row, command="aggregate-breakdown", output_sha256=None)] * 3))
+    with pytest.raises(ValueError, match="Missing output hashes"):
+        compare_results(str(base), str(head))

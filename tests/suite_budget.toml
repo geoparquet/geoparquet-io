@@ -3,15 +3,7 @@
 # with #1360 (a5 from Query.Farm), less the 12 CODEOWNERS wiring tests removed.
 # Add two owner regressions for DuckDB's timeout units and Carto's retry budget.
 [fast_suite]
-# Round 4: consolidated all branch-added matrices and shared-setup checks (14246 -> 14214).
-# Seven above baseline preserve plan/review regressions with independent root/lock
-# lifetimes and platform/socket skip conditions; further merging mixes those lifetimes.
-# Full justification: scratchpad/final/budget_reason.md in the verification artifacts.
-# Round-0 profiling: +11 independent regressions (3 workloads, 6 profiler, 2 archive).
-# Seven deterministic generator cases share one property test and fixture lifetime.
-# FeatureCollection streaming: +1 live-decoded-object bound with byte and atomicity checks.
-# Wide validation: +1 operation-local file-work bound, including schema/CRS parity.
-max_collected = 14227
+max_collected = 14214
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

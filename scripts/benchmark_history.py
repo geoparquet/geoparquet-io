@@ -31,6 +31,8 @@ def normalize_matrix(rows: list[dict], version: str) -> dict:
                 "peak_rss_bytes": max(run["peak_rss_bytes"] for run in runs),
                 "success_count": len(runs),
                 "fail_count": 0,
+                "output_sha256": [run.get("output_sha256") for run in runs],
+                "raw_output_sha256": [run.get("raw_output_sha256") for run in runs],
             }
         )
     from importlib.metadata import version as package_version
@@ -51,6 +53,36 @@ def load_results(path) -> dict:
     return normalize_matrix(result, Path(path).stem) if isinstance(result, list) else result
 
 
+def validate_outputs(base: dict, head: dict):
+    """Reject changed comparable bytes before reporting timing improvements.
+
+    Only #1111 PIVOT and #1123 rollup have approved behavioral changes.
+    Raw hashes remain in summaries for auditing known nondeterministic fields.
+    """
+    if base.get("measurement") != "seeded-profile-v1":
+        return  # Legacy archives contain no output hashes.
+    lookup = {(b["file_size"], b["operation"]): b for b in head["benchmarks"]}
+    approved = {
+        "overview",
+        "aggregate-breakdown",
+        "aggregate-admin",
+        "aggregate-admin-native",
+        "aggregate-admin-reprojected",
+    }
+    for before in base["benchmarks"]:
+        key = (before["file_size"], before["operation"])
+        after = lookup.get(key)
+        if after is None:
+            raise ValueError(f"Missing output measurement: {key}")
+        hashes = before.get("output_sha256", []) + after.get("output_sha256", [])
+        if not hashes or any(value is None for value in hashes):
+            raise ValueError(f"Missing output hashes: {key}")
+        if before["operation"] in approved:
+            continue
+        if len({json.dumps(value, sort_keys=True) for value in hashes}) != 1:
+            raise ValueError(f"Output bytes changed: {key}")
+
+
 def compare_results(file1: str, file2: str):
     """Compare two benchmark result files."""
     results1 = load_results(file1)
@@ -59,6 +91,8 @@ def compare_results(file1: str, file2: str):
     print(f"\n{'=' * 70}")
     print(f"Comparison: {results1['version']} vs {results2['version']}")
     print(f"{'=' * 70}\n")
+
+    validate_outputs(results1, results2)
 
     # Build lookup for results2
     lookup2 = {}

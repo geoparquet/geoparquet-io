@@ -121,34 +121,22 @@ jobs:
 
       - name: Save profiling harness for historical checkouts
         run: |
-          tar --exclude=__pycache__ -cf "$RUNNER_TEMP/profile-harness.tar" \
-            scripts/profile_command.py scripts/benchmark_history.py geoparquet_io/benchmarks
+          bash scripts/run_matrix.sh save
 
       - name: Run benchmarks (current)
         run: |
-          uv run python -m scripts.profile_command --command "$COMMAND" --size "$SIZE" \
-            --runs "$ITERATIONS" --output current/matrix.json
-          uv run python -m scripts.benchmark_history --matrix current/matrix.json \
-            --version-label "$CURRENT_SHA" --output results_current.json
+          bash scripts/run_matrix.sh run "$COMMAND" "$SIZE" "$ITERATIONS" "$CURRENT_SHA" current results_current.json
 
       - name: Checkout and benchmark comparison version
         if: inputs.compare_version != ''
         run: |
-          BASE_SHA=$(git rev-parse --verify --end-of-options "$COMPARE_VERSION^{commit}")
-          git checkout --detach --force "$BASE_SHA"
-          tar -xf "$RUNNER_TEMP/profile-harness.tar"
-          uv sync --all-extras
+          bash scripts/run_matrix.sh checkout "$COMPARE_VERSION"
 
           # An unsupported historical command fails visibly; partial measurements
           # and logs are retained rather than treated as successful comparisons.
-          uv run python -m scripts.profile_command --command "$COMMAND" --size "$SIZE" \
-            --runs "$ITERATIONS" --output baseline/matrix.json
-          uv run python -m scripts.benchmark_history --matrix baseline/matrix.json \
-            --version-label "$COMPARE_VERSION" --output results_baseline.json
+          bash scripts/run_matrix.sh run "$COMMAND" "$SIZE" "$ITERATIONS" "$COMPARE_VERSION" baseline results_baseline.json
 
-          git checkout --detach --force "$CURRENT_SHA"
-          tar -xf "$RUNNER_TEMP/profile-harness.tar"
-          uv sync --all-extras
+          bash scripts/run_matrix.sh checkout "$CURRENT_SHA"
           {
             echo "## Benchmark Comparison"
             echo ""
@@ -176,7 +164,7 @@ jobs:
         run: |
           # Parse comparison output to detect regressions > 10%
           COMPARISON_OUTPUT=$(uv run python -m scripts.benchmark_history \
-            --compare results_baseline.json results_current.json 2>&1 || true)
+            --compare results_baseline.json results_current.json 2>&1)
 
           echo "$COMPARISON_OUTPUT"
 
@@ -187,13 +175,13 @@ jobs:
           MAX_REGRESSION=$(echo "$COMPARISON_OUTPUT" \
             | grep -oE '\+[0-9]+\.[0-9]+% slower' \
             | grep -oE '[0-9]+\.[0-9]+' \
-            | sort -rn | head -1)
+            | sort -rn | head -1 || true)
 
           if [ -n "$MAX_REGRESSION" ] && awk "BEGIN { exit !($MAX_REGRESSION >= 10) }"; then
             echo "::error::Performance regression detected: ${MAX_REGRESSION}% slower (threshold: 10%)"
             echo ""
             echo "To diagnose, run profiling locally:"
-            echo "  gpio benchmark suite --files <file> --profile --profile-dir ./profiles"
+            echo "  python -m scripts.profile_costs current/matrix.json"
             exit 1
           fi
 
@@ -244,7 +232,7 @@ jobs:
             body += '\n\n---\n';
             body += '💡 **Profiling available**: To diagnose performance bottlenecks, run:\n';
             body += '```bash\n';
-            body += 'gpio benchmark suite --files <file> --profile --profile-dir ./profiles\n';
+            body += 'python -m scripts.profile_costs current/matrix.json\n';
             body += '```\n';
 
             github.rest.issues.createComment({

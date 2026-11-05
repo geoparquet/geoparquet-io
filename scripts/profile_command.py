@@ -408,7 +408,7 @@ def output_hashes(directory, command=None):
                 with path.open("rb") as stream:
                     digest = hashlib.file_digest(stream, "sha256").hexdigest()
             else:
-                from geoparquet_io.benchmarks.output_comparison import comparable_bytes
+                from scripts.profile_matrix.output_comparison import comparable_bytes
 
                 digest = hashlib.sha256(comparable_bytes(path, command)).hexdigest()
             hashes[str(path.relative_to(directory))] = digest
@@ -418,8 +418,8 @@ def output_hashes(directory, command=None):
 def run_child(args):
     import resource
 
-    from geoparquet_io.benchmarks.matrix import COMMANDS
-    from geoparquet_io.benchmarks.workloads import generate_workload, serve_workload
+    from scripts.profile_matrix.matrix import COMMANDS
+    from scripts.profile_matrix.workloads import generate_workload, serve_workload
 
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
     spec = next(c for c in COMMANDS if c["id"] == args.command)
@@ -480,8 +480,8 @@ def run_child(args):
 
 
 def run_matrix(args):
-    from geoparquet_io.benchmarks.matrix import COMMANDS
-    from geoparquet_io.benchmarks.workloads import generate_workload
+    from scripts.profile_matrix.matrix import COMMANDS
+    from scripts.profile_matrix.workloads import generate_workload
 
     target = Path(args.output).resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -571,7 +571,7 @@ def run_matrix(args):
 
 
 def main():
-    from geoparquet_io.benchmarks.matrix import COMMANDS
+    from scripts.profile_matrix.matrix import COMMANDS
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--command", choices=[spec["id"] for spec in COMMANDS])

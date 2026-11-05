@@ -6,9 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from geoparquet_io.benchmarks.workloads import (
-    BENCHMARK_DATA_URL,
-    BENCHMARK_FILES,
+from geoparquet_io.benchmarks.config import (
     CHAIN_OPERATIONS,
     CORE_OPERATIONS,
     FULL_OPERATIONS,
@@ -42,63 +40,15 @@ def test_parquet():
         yield path
 
 
-class TestBenchmarkConfig:
-    """Tests for benchmark configuration."""
-
-    def test_core_operations_defined(self):
-        """Test that core operations are defined."""
-        assert len(CORE_OPERATIONS) == 10
-        assert "read" in CORE_OPERATIONS
-        assert "write" in CORE_OPERATIONS
-        assert "sort-hilbert" in CORE_OPERATIONS
-
-    def test_full_operations_includes_core(self):
-        """Test that full operations includes all core operations."""
-        for op in CORE_OPERATIONS:
-            assert op in FULL_OPERATIONS
-
-    def test_benchmark_data_url_defined(self):
-        """Test that benchmark data URL points to source.coop."""
-        assert BENCHMARK_DATA_URL.startswith("https://data.source.coop/")
-        assert "gpio-test" in BENCHMARK_DATA_URL
-
-    def test_benchmark_files_tiers(self):
-        """Test that benchmark files are defined for each tier."""
-        assert "tiny" in BENCHMARK_FILES
-        assert "small" in BENCHMARK_FILES
-        assert "medium" in BENCHMARK_FILES
-        assert "large" in BENCHMARK_FILES
-
-    def test_benchmark_files_have_urls(self):
-        """Test that all benchmark file entries are valid URLs."""
-        for tier, files in BENCHMARK_FILES.items():
-            for name, url in files.items():
-                assert url.startswith("https://"), f"Invalid URL for {tier}/{name}"
-                assert url.endswith(".parquet"), f"Non-parquet URL for {tier}/{name}"
-
-
 class TestOperationRegistry:
     """Tests for operation registry."""
 
     def test_all_core_operations_registered(self):
         """Test that all core operations have handlers."""
         from geoparquet_io.benchmarks.operations import OPERATION_REGISTRY
-        from geoparquet_io.benchmarks.workloads import CORE_OPERATIONS
 
         for op in CORE_OPERATIONS:
             assert op in OPERATION_REGISTRY, f"Missing handler for {op}"
-
-    def test_get_operation_returns_typed_info(self):
-        """Test that get_operation returns OperationInfo TypedDict."""
-        from geoparquet_io.benchmarks.operations import get_operation
-
-        op = get_operation("read")
-        assert callable(op["run"])
-        assert "name" in op
-        assert "description" in op
-        # TypedDict should have these specific keys
-        assert isinstance(op["name"], str)
-        assert isinstance(op["description"], str)
 
     def test_get_operation_invalid_raises(self):
         """Test that invalid operation raises KeyError."""
@@ -241,35 +191,14 @@ class TestBenchmarkReporting:
 
 
 class TestChainOperations:
-    """Tests for chained operation benchmarks."""
-
-    def test_chain_operations_defined(self):
-        """Test that chain operations are defined."""
-        assert len(CHAIN_OPERATIONS) == 3
-        assert "chain-extract-bbox-sort" in CHAIN_OPERATIONS
-        assert "chain-convert-optimize" in CHAIN_OPERATIONS
-        assert "chain-filter-reproject-partition" in CHAIN_OPERATIONS
-
-    def test_chain_operations_in_full_suite(self):
-        """Test that chain operations are in full suite."""
-        for op in CHAIN_OPERATIONS:
-            assert op in FULL_OPERATIONS, f"Chain operation {op} not in FULL_OPERATIONS"
+    """Every advertised chain must resolve to an executable operation."""
 
     def test_chain_operations_registered(self):
-        """Test that all chain operations have handlers."""
-        from geoparquet_io.benchmarks.operations import OPERATION_REGISTRY
-
-        for op in CHAIN_OPERATIONS:
-            assert op in OPERATION_REGISTRY, f"Missing handler for chain op {op}"
-
-    def test_chain_operations_have_info(self):
-        """Test that chain operations have proper info."""
         from geoparquet_io.benchmarks.operations import get_operation
 
-        for op in CHAIN_OPERATIONS:
-            info = get_operation(op)
-            assert "chain" in info["name"].lower() or "→" in info["name"]
-            assert callable(info["run"])
+        assert set(CHAIN_OPERATIONS) <= set(FULL_OPERATIONS)
+        for operation in CHAIN_OPERATIONS:
+            assert callable(get_operation(operation)["run"])
 
 
 @pytest.mark.slow

@@ -1,6 +1,6 @@
 """Benchmark suite for geoparquet-io."""
 
-from geoparquet_io.benchmarks.workloads import (
+from geoparquet_io.benchmarks.config import (
     BENCHMARK_DATA_URL,
     BENCHMARK_FILES,
     CHAIN_OPERATIONS,

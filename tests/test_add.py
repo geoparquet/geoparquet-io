@@ -91,7 +91,7 @@ class TestAddCommands:
         assert input_count == output_count
 
     def test_add_bbox_copy_to_s3_uses_the_configured_endpoint(
-        self, places_with_covering_file, monkeypatch, tmp_path
+        self, places_with_covering_file, monkeypatch, tmp_path, isolated_aws
     ):
         """--s3-endpoint reaches the copy, not only the recompute path (#810).
 
@@ -105,10 +105,6 @@ class TestAddCommands:
         from geoparquet_io.cli.main import cli
 
         # This test exercises endpoint plumbing, independently of local SSO.
-        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
-        monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
-        monkeypatch.delenv("AWS_PROFILE", raising=False)
-        monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)
         monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
         monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
         runner = CliRunner()

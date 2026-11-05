@@ -109,8 +109,7 @@ jobs:
 
       - name: Save profiling harness for historical checkouts
         run: |
-          tar --exclude=__pycache__ -cf "$RUNNER_TEMP/profile-harness.tar" \
-            scripts/profile_command.py scripts/benchmark_history.py geoparquet_io/benchmarks
+          bash scripts/run_matrix.sh save
 
       - name: Install system dependencies (GDAL for import operations)
         run: |
@@ -121,10 +120,7 @@ jobs:
         env:
           CURRENT_VERSION: ${{ steps.versions.outputs.current }}
         run: |
-          CURRENT_SHA=$(git rev-parse --verify --end-of-options "$CURRENT_VERSION^{commit}")
-          git checkout --detach --force "$CURRENT_SHA"
-          tar -xf "$RUNNER_TEMP/profile-harness.tar"
-          uv sync --all-extras
+          bash scripts/run_matrix.sh checkout "$CURRENT_VERSION"
 
       - name: Pre-install DuckDB extensions
         run: |
@@ -203,20 +199,14 @@ jobs:
         env:
           CURRENT_VERSION: ${{ steps.versions.outputs.current }}
         run: |
-          uv run python -m scripts.profile_command --command "$COMMAND" --size "$SIZE" \
-            --runs 5 --output current/matrix.json
-          uv run python -m scripts.benchmark_history --matrix current/matrix.json \
-            --version-label "$CURRENT_VERSION" --output results_current.json
+          bash scripts/run_matrix.sh run "$COMMAND" "$SIZE" 5 "$CURRENT_VERSION" current results_current.json
 
       - name: Install baseline version
         if: steps.versions.outputs.baseline != ''
         env:
           BASELINE_VERSION: ${{ steps.versions.outputs.baseline }}
         run: |
-          BASE_SHA=$(git rev-parse --verify --end-of-options "$BASELINE_VERSION^{commit}")
-          git checkout --detach --force "$BASE_SHA"
-          tar -xf "$RUNNER_TEMP/profile-harness.tar"
-          uv sync --all-extras
+          bash scripts/run_matrix.sh checkout "$BASELINE_VERSION"
 
       - name: Run baseline benchmarks
         if: steps.versions.outputs.baseline != ''
@@ -224,10 +214,7 @@ jobs:
           BASELINE_VERSION: ${{ steps.versions.outputs.baseline }}
         run: |
           # Unsupported historical commands fail; retain partial data and logs.
-          uv run python -m scripts.profile_command --command "$COMMAND" --size "$SIZE" \
-            --runs 5 --output baseline/matrix.json
-          uv run python -m scripts.benchmark_history --matrix baseline/matrix.json \
-            --version-label "$BASELINE_VERSION" --output results_baseline.json
+          bash scripts/run_matrix.sh run "$COMMAND" "$SIZE" 5 "$BASELINE_VERSION" baseline results_baseline.json
 
       - name: Generate comparison report
         if: steps.versions.outputs.baseline != ''
@@ -236,10 +223,7 @@ jobs:
           CURRENT_VERSION: ${{ steps.versions.outputs.current }}
           BASELINE_VERSION: ${{ steps.versions.outputs.baseline }}
         run: |
-          CURRENT_SHA=$(git rev-parse --verify --end-of-options "$CURRENT_VERSION^{commit}")
-          git checkout --detach --force "$CURRENT_SHA"
-          tar -xf "$RUNNER_TEMP/profile-harness.tar"
-          uv sync --all-extras
+          bash scripts/run_matrix.sh checkout "$CURRENT_VERSION"
 
           # Generate comparison
           uv run python -m scripts.benchmark_history \

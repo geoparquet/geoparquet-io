@@ -2,6 +2,12 @@
 
 gpio includes a benchmark suite for measuring performance and detecting regressions across versions.
 
+The seeded CI harness gates wall time and comparable output hashes. CPU time and
+peak RSS are retained for diagnosis; they are not regression thresholds. Only
+#1111's breakdown PIVOT and #1123's overview rollup permit output changes.
+The existing `gpio benchmark suite` remains a separate public CLI; the seeded
+harness lives under `scripts/profile_matrix/` and is copied into historical checkouts.
+
 ## Quick Start
 
 The local profile harness runs seeded inputs in a fresh process for each repetition.
@@ -13,7 +19,7 @@ uv sync --extra profile
 uv run python -m scripts.profile_command --size full --runs 3 --output matrix.json
 ```
 
-For a focused run, add `--command sort-str`. The matrix definition is `geoparquet_io/benchmarks/matrix.py`,
+For a focused run, add `--command sort-str`. The matrix definition is `scripts/profile_matrix/matrix.py`,
 the single list of command/workload pairs.
 
 For separate diagnostic runs (DuckDB operators and call counters for every
@@ -37,7 +43,7 @@ child. `GPIO_DUCKDB_PROFILE=DIR` enables per-query operator JSON.
 
 ## Command Coverage
 
-The single profiling matrix is `geoparquet_io/benchmarks/matrix.py`. It covers
+The single profiling matrix is `scripts/profile_matrix/matrix.py`. It covers
 CLI import, conversion and GDAL exports, indexes, sorting, partitioning, checks,
 inspection, extraction and streaming, aggregate breakdowns, admin joins and
 overviews, plus the corresponding eager Table API paths. The stdout producer
@@ -55,7 +61,7 @@ comparisons remain available through `gpio benchmark suite`.
 
 ### Seeded Profile Workloads
 
-`geoparquet_io/benchmarks/workloads.py` owns the generators. Small inputs are
+`scripts/profile_matrix/workloads.py` owns the generators. Small inputs are
 for harness checks; full inputs are for comparisons. Reuse the same seed and
 size on both revisions, and generate outside the timed process.
 
@@ -77,7 +83,7 @@ size on both revisions, and generate outside the timed process.
 
 === "Python"
     ```python
-    from geoparquet_io.benchmarks.workloads import generate_workload, serve_workload
+    from scripts.profile_matrix.workloads import generate_workload, serve_workload
 
     path = generate_workload("W4", "profile-inputs", size="small", seed=1368)
     with serve_workload(path) as url:
@@ -345,7 +351,7 @@ The benchmark workflow automatically suggests profiling when regressions are det
 ⚠️ Performance regression detected (+25% slower on sort-hilbert)
 
 💡 To diagnose, run locally with profiling:
-   gpio benchmark suite --files large.parquet --operations sort-hilbert --profile
+   uv run python -m scripts.profile_costs current/matrix.json
 ```
 
 Raw measurements and command logs are uploaded with 30-day retention. Local
