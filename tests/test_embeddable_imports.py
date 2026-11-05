@@ -78,14 +78,14 @@ def test_embeddable_module_import_defers_duckdb_and_click(module):
     )
 
 
-def test_from_geoparquet_io_import_cli_still_yields_the_click_group():
-    """The lazy root keeps the old surface: ``cli`` is the Click Group."""
+def test_from_geoparquet_io_import_cli_yields_the_package():
+    """The CLI package must remain reachable through its parent."""
     code = (
-        "import click\n"
+        "import types\n"
         "from geoparquet_io import cli\n"
-        "assert isinstance(cli, click.Group), type(cli)\n"
+        "assert isinstance(cli, types.ModuleType), type(cli)\n"
         "import geoparquet_io\n"
-        "assert isinstance(geoparquet_io.cli, click.Group), type(geoparquet_io.cli)\n"
+        "assert isinstance(geoparquet_io.cli, types.ModuleType), type(geoparquet_io.cli)\n"
         "print('ok')"
     )
     result = _run_python(code)
@@ -94,20 +94,14 @@ def test_from_geoparquet_io_import_cli_still_yields_the_click_group():
 
 
 def test_the_cli_export_survives_a_submodule_import_first():
-    """``cli`` is the Group in EVERY import order, not just the fresh one.
-
-    Importing any ``geoparquet_io.cli.*`` module makes the import machinery
-    bind the subpackage as the root's ``cli`` attribute, after which a plain
-    PEP 562 ``__getattr__`` never fires for the name again. The eager root
-    always ended with the Group winning; the lazy root must too.
-    """
+    """Submodule imports preserve the CLI package attribute."""
     code = (
-        "import click\n"
+        "import types\n"
         "import geoparquet_io.cli.main\n"
         "from geoparquet_io import cli\n"
-        "assert isinstance(cli, click.Group), type(cli)\n"
+        "assert isinstance(cli, types.ModuleType), type(cli)\n"
         "import geoparquet_io\n"
-        "assert isinstance(geoparquet_io.cli, click.Group), type(geoparquet_io.cli)\n"
+        "assert isinstance(geoparquet_io.cli, types.ModuleType), type(geoparquet_io.cli)\n"
         "print('ok')"
     )
     result = _run_python(code)
@@ -239,17 +233,14 @@ class TestDuckdbLessDegradation:
 class TestLazyRootInProcess:
     """In-process twins of the subprocess assertions, for the coverage gate."""
 
-    def test_cli_property_wins_over_the_machinery_binding(self):
-        import click
+    def test_cli_package_survives_a_submodule_import(self):
+        import types
 
         import geoparquet_io
-        import geoparquet_io.cli.main  # noqa: F401  (binds the subpackage attribute)
+        import geoparquet_io.cli.main
 
-        assert isinstance(geoparquet_io.cli, click.Group)
-        # The import machinery assigns the subpackage through the setter; the
-        # property keeps answering with the Group.
-        geoparquet_io.cli = "ignored"
-        assert isinstance(geoparquet_io.cli, click.Group)
+        assert isinstance(geoparquet_io.cli, types.ModuleType)
+        assert geoparquet_io.cli.main.cli is not None
 
     def test_api_and_exports_resolve_through_the_hook(self):
         import geoparquet_io

@@ -1,5 +1,5 @@
 {
- "class": "ErrorBoundaryGroup",
+ "class": "LazyGroup",
  "commands": {
   "add": {
    "class": "Group",

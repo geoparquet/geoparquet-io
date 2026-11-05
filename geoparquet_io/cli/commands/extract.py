@@ -40,7 +40,7 @@ from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.logging_config import configure_verbose
-from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
+from geoparquet_io.core.wfs_defaults import DEFAULT_WFS_PAGE_SIZE
 
 ExtractDefaultGroup = create_default_group(
     "geoparquet",
