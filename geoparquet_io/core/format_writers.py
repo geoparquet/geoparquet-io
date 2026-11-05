@@ -202,10 +202,7 @@ def _get_srs_parameter(input_path: str, verbose: bool = False) -> str | None:
     return json.dumps(crs)
 
 
-#: The temp table a GDAL write stages its features into. COPY ... (FORMAT GDAL)
-#: scans on one thread; staging first lets DuckDB read the row groups in
-#: parallel (adapted from portolan-registry-qgis core/parquet_query.py,
-#: Apache-2.0). The table lives and dies with the writer's own connection.
+#: Filtered GeoPackage staging preserves GDAL batch sizes and SQLite header bytes.
 _STAGED_TABLE = "__gpio_convert_staged"
 
 #: Single geometry type -> the multi type of its family.
@@ -526,14 +523,14 @@ def write_gdal_format(
         # Note: DuckDB's COPY statement doesn't support parameterized paths,
         # so sql_path() supplies the quoted, escaped literal.
         source_query = (
-            f"SELECT {', '.join(compatible_cols)} FROM read_parquet({sql_path(input_path)})"
+            f"SELECT {', '.join(compatible_cols)} FROM read_parquet({sql_path(input_url)})"
         )
         if where_filter:
             source_query += f" WHERE {where_filter}"
 
         staging = None
-        # Retain filtered materialization and the existing GeoPackage write path.
-        if where_filter or format_name == "geopackage":
+        # Filtered GeoPackage COPY changes SQLite header counters without staging.
+        if where_filter and format_name == "geopackage":
             staging = f"CREATE OR REPLACE TEMP TABLE {_STAGED_TABLE} AS {source_query}"
             source_query = f"SELECT * FROM {_STAGED_TABLE}"
 
