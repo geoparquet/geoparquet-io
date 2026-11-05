@@ -244,7 +244,7 @@ def render_costs(directory, summaries):
         lines.append(
             "| " + " | ".join(str(c).replace("|", "/").replace("\n", " ") for c in cells) + " |"
         )
-    (directory / "costs.md").write_text("\n".join(lines) + "\n")
+    (directory / "costs.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def main():
