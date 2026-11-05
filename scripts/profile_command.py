@@ -399,15 +399,19 @@ def write_json(path, value):
     temporary.replace(target)
 
 
-def output_hashes(directory):
+def output_hashes(directory, command=None):
     """Hash output bytes, independent of the temporary directory's name."""
     hashes = {}
     for path in sorted(directory.rglob("*")):
         if path.is_file():
-            with path.open("rb") as stream:
-                hashes[str(path.relative_to(directory))] = hashlib.file_digest(
-                    stream, "sha256"
-                ).hexdigest()
+            if command is None:
+                with path.open("rb") as stream:
+                    digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            else:
+                from geoparquet_io.benchmarks.output_comparison import comparable_bytes
+
+                digest = hashlib.sha256(comparable_bytes(path, command)).hexdigest()
+            hashes[str(path.relative_to(directory))] = digest
     return hashes
 
 
@@ -463,7 +467,8 @@ def run_child(args):
             "peak_rss_bytes": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             * (1 if sys.platform == "darwin" else 1024),
             "counters": dict(spies.counts),
-            "output_sha256": output_hashes(output),
+            "output_sha256": output_hashes(output, args.command),
+            "raw_output_sha256": output_hashes(output),
             "diagnostic": bool(
                 args.spies or args.memray or args.pyinstrument or os.getenv("GPIO_DUCKDB_PROFILE")
             ),

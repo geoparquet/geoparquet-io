@@ -76,7 +76,6 @@ size on both revisions, and generate outside the timed process.
     ```
 
 === "Python"
-    <!-- doctest: skip="creates local profiling inputs" -->
     ```python
     from geoparquet_io.benchmarks.workloads import generate_workload, serve_workload
 
@@ -168,13 +167,12 @@ Overall Statistics:
 
 gpio also includes built-in benchmark commands:
 
-<!-- doctest: skip="needs path/to/file.parquet, which the harness does not seed" -->
 ```bash
-# Run benchmark suite on specific files
-gpio benchmark suite --files path/to/file.parquet --operations core
+# Run a focused benchmark suite on a local file
+gpio benchmark suite --files input.parquet --operations core --iterations 1
 
 # Compare converter performance on a single file
-gpio benchmark compare path/to/file.parquet
+gpio benchmark compare input.parquet
 ```
 
 ## Profiling Integration
@@ -466,10 +464,7 @@ Before releasing a new version:
 
 1. **Run the seeded matrix** in isolated clones of the previous release and
    candidate, using the same inputs, core affinity, size and repetition count:
-   <!-- doctest: skip="runs the full performance matrix" -->
-   ```bash
-   uv run python -m scripts.profile_command --size full --runs 3 --output matrix.json
-   ```
+   use the full matrix command in Quick Start above.
 
 2. **Check for regressions** (>25% slower on large files)
 

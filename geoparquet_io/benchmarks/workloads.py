@@ -225,6 +225,8 @@ def serve_workload(path):
     from threading import Thread
     from urllib.parse import parse_qs, urlsplit
 
+    from geoparquet_io.core.sizing import BYTES_PER_MIB
+
     path = Path(path)
 
     def respond(self, head=False):
@@ -263,7 +265,7 @@ def serve_workload(path):
                 source.seek(start)
                 remaining = end - start + 1
                 while remaining:
-                    chunk = source.read(min(remaining, 1024 * 1024))
+                    chunk = source.read(min(remaining, BYTES_PER_MIB))
                     self.wfile.write(chunk)
                     remaining -= len(chunk)
 

@@ -122,6 +122,20 @@ def test_resume_rejects_a_measurement_from_another_revision(tmp_path, monkeypatc
         run_matrix(args)
     assert not (tmp_path / "matrix.json").exists()
 
+    # Comparison acceptance belongs to measurement validation too. Keep these
+    # small cases within this item so the fast-suite collection ratchet holds.
+    from tests._profile_output_checks import (
+        check_dbf_only_date_bytes,
+        check_gpkg_only_last_change,
+        check_kdtree_only_sampled_cell,
+        check_stdout_only_ratio_and_tied_order,
+    )
+
+    check_dbf_only_date_bytes(tmp_path)
+    check_gpkg_only_last_change(tmp_path)
+    check_kdtree_only_sampled_cell(tmp_path)
+    check_stdout_only_ratio_and_tied_order(tmp_path)
+
 
 def test_api_convert_profiles_one_read(tmp_path, monkeypatch):
     from unittest.mock import Mock

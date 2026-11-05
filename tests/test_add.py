@@ -90,7 +90,9 @@ class TestAddCommands:
         output_count = fetch_one(conn.execute(f'SELECT COUNT(*) FROM "{temp_output_file}"'))[0]
         assert input_count == output_count
 
-    def test_add_bbox_copy_to_s3_uses_the_configured_endpoint(self, places_with_covering_file):
+    def test_add_bbox_copy_to_s3_uses_the_configured_endpoint(
+        self, places_with_covering_file, monkeypatch, tmp_path
+    ):
         """--s3-endpoint reaches the copy, not only the recompute path (#810).
 
         The copy that answers an input which already has a bbox opened its own
@@ -102,6 +104,13 @@ class TestAddCommands:
 
         from geoparquet_io.cli.main import cli
 
+        # This test exercises endpoint plumbing, independently of local SSO.
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "config"))
+        monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
+        monkeypatch.delenv("AWS_PROFILE", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_PROFILE", raising=False)
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test")
         runner = CliRunner()
         with (
             patch("geoparquet_io.core.upload.S3Store") as mock_s3store,
