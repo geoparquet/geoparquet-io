@@ -246,7 +246,7 @@ def _one_file(path, command: str) -> str:
     return path
 
 
-def _not_geoparquet(path: str, check_type: str) -> CheckResult | None:
+def _not_geoparquet(path: str, check_type: str, categorised: bool) -> CheckResult | None:
     """The failure ``gpio check`` gives a file that is not GeoParquet, before any check runs."""
     from geoparquet_io.core.check_verdict import not_geoparquet_result
 
@@ -254,24 +254,28 @@ def _not_geoparquet(path: str, check_type: str) -> CheckResult | None:
     if refused is None:
         return None
     # check_all's categories are its checks; the refusal is the file's, so it is its own.
-    results = {"geoparquet": refused} if check_type == "all" else refused
+    results = {"geoparquet": refused} if categorised else refused
     return CheckResult(results, check_type=check_type, source_path=path)
 
 
-def _one_file_only(command: str, check_type: str | None = None):
+def _one_file_only(command: str, *, gate: bool = True, categorised: bool = False):
     """Refuse a directory or glob before the check runs; ``__wrapped__`` is the check itself.
 
-    With a ``check_type``, a file that is not GeoParquet fails as ``gpio check
-    <command>`` fails it, before the check runs (``check spec`` has no such gate).
+    With ``gate``, a file that is not GeoParquet fails before the check runs,
+    as ``gpio check`` refuses it (``check spec`` has no such gate). The refusal's
+    ``check_type`` is the function's name less ``check_``, the label its
+    check gives; ``categorised`` nests it as one category, as ``check_all``'s.
     ``Table.check_*`` calls ``__wrapped__``: a Table read from a directory hands
     it to core, which measures the dataset.
     """
 
     def decorate(check):
+        label = check.__name__.removeprefix("check_")
+
         @functools.wraps(check)
         def one_file_check(path, *args, **kwargs):
             path = _one_file(path, command)
-            refused = _not_geoparquet(path, check_type) if check_type else None
+            refused = _not_geoparquet(path, label, categorised) if gate else None
             # Not `or`: a CheckResult is falsy when it did not pass.
             return refused if refused is not None else check(path, *args, **kwargs)
 
@@ -287,14 +291,20 @@ def _structure_check(path, check_type: str, func, **kwargs) -> CheckResult:
 
 
 def _check_structure(path: str | os.PathLike, profile: CheckProfile | None = None) -> CheckResult:
-    """The structure checks (row groups, bbox, covering, compression, bloom filters): ``Table.check``."""
+    """The structure checks: row groups, bbox, covering, compression, bloom filters.
+
+    What :meth:`Table.check` runs.
+    """
     from geoparquet_io.core import check_parquet_structure as core
 
     return _structure_check(path, "all", core.check_all, profile=profile)
 
 
 def _stage(check, path, stage: str, **kwargs) -> dict:
-    """One stage's results, or why it could not run: one dying check does not take the rest (#1082)."""
+    """One stage's results, or why it could not run.
+
+    One dying check does not take the rest down (#1082).
+    """
     from geoparquet_io.core.check_verdict import could_not_run
     from geoparquet_io.core.duckdb_utils import is_interrupt
     from geoparquet_io.core.exceptions import clean_error_text
@@ -307,7 +317,7 @@ def _stage(check, path, stage: str, **kwargs) -> dict:
         return could_not_run(stage, clean_error_text(str(e)))
 
 
-@_one_file_only("all", "all")
+@_one_file_only("all", categorised=True)
 def check_all(
     path: str | os.PathLike,
     profile: CheckProfile | None = None,
@@ -317,8 +327,9 @@ def check_all(
     """Run what ``gpio check all`` runs: the structure checks, spatial order and spec validation.
 
     One category per check -- the structure checks of :meth:`Table.check`,
-    then ``spatial`` (spatial order, as ``check all`` runs it: no pushdown block) and ``spec`` (:func:`validate`,
-    data sampled) -- each with the CLI's defaults. ``verdict()`` is the worst
+    then ``spatial`` (spatial order, as ``check all`` runs it: no pushdown
+    block) and ``spec`` (:func:`validate`, data sampled) -- each with the
+    CLI's defaults. ``verdict()`` is the worst
     of them, the answer ``gpio check all`` exits on. As there, a spatial or
     spec check that raises is reported as a failure that could not run.
 
@@ -350,7 +361,7 @@ def check_all(
     return CheckResult(results, check_type="all", source_path=path)
 
 
-@_one_file_only("compression", "compression")
+@_one_file_only("compression")
 def check_compression(path: str | os.PathLike) -> CheckResult:
     """Check the geometry column's compression; ZSTD is recommended. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
@@ -358,7 +369,7 @@ def check_compression(path: str | os.PathLike) -> CheckResult:
     return _structure_check(path, "compression", core.check_compression)
 
 
-@_one_file_only("row-group", "row_groups")
+@_one_file_only("row-group")
 def check_row_groups(path: str | os.PathLike, profile: CheckProfile | None = None) -> CheckResult:
     """Check row-group sizes for cloud-native access. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
@@ -366,7 +377,7 @@ def check_row_groups(path: str | os.PathLike, profile: CheckProfile | None = Non
     return _structure_check(path, "row_groups", core.check_row_groups, profile=profile)
 
 
-@_one_file_only("bbox", "bbox")
+@_one_file_only("bbox")
 def check_bbox(
     path: str | os.PathLike, sample_rows: int = DEFAULT_BBOX_SAMPLE_ROWS, all_rows: bool = False
 ) -> CheckResult:
@@ -385,7 +396,7 @@ def check_bbox(
     )
 
 
-@_one_file_only("all", "bloom_filters")
+@_one_file_only("all")
 def check_bloom_filters(path: str | os.PathLike) -> CheckResult:
     """Check which columns carry bloom filters for point lookups. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
@@ -393,7 +404,7 @@ def check_bloom_filters(path: str | os.PathLike) -> CheckResult:
     return _structure_check(path, "bloom_filters", core.check_bloom_filters)
 
 
-@_one_file_only("optimization", "optimization")
+@_one_file_only("optimization")
 def check_optimization(path: str | os.PathLike) -> CheckResult:
     """Score a file's spatial-query optimization (geo types, stats, order, row groups, codec)."""
     from geoparquet_io.core import check_optimization as core
@@ -416,7 +427,7 @@ def _check_spatial_order(
     )
 
 
-@_one_file_only("spatial", "spatial")
+@_one_file_only("spatial")
 def check_spatial(
     path: str | os.PathLike, sample_size: int = 100, limit_rows: int = 500000
 ) -> CheckResult:
@@ -449,7 +460,7 @@ def _pushdown_readiness(path: str | os.PathLike) -> CheckResult:
     return CheckResult(results, check_type="spatial_pushdown", source_path=path)
 
 
-@_one_file_only("spatial", "spatial_pushdown")
+@_one_file_only("spatial")
 def check_spatial_pushdown(path: str | os.PathLike) -> CheckResult:
     """Estimate how many row groups a regional query can skip, as ``gpio check spatial`` judges it.
 
@@ -463,7 +474,7 @@ def check_spatial_pushdown(path: str | os.PathLike) -> CheckResult:
     return CheckResult(judged_pushdown(path), check_type="spatial_pushdown", source_path=path)
 
 
-@_one_file_only("spec")
+@_one_file_only("spec", gate=False)
 def validate(
     path: str | os.PathLike,
     version: str | None = None,
