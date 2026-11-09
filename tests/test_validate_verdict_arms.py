@@ -31,6 +31,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from geoparquet_io.core.validate import (
     CheckStatus,
     ValidationCheck,
@@ -299,7 +300,8 @@ def test_covering_bbox_checks_skip_a_column_with_no_covering(check, name):
     """``_run_geoparquet_checks`` gates on the same condition, so these SKIPPED arms
     are only reachable by calling the check directly -- but a caller that stops
     gating must still get a skip rather than a crash."""
-    args = ({}, "geometry") if check is _check_cover_bbox_paths else ({}, "geometry", [])
+    meta = parse_column_meta("geometry", {})
+    args = (meta, "geometry") if check is _check_cover_bbox_paths else (meta, "geometry", [])
     result = check(*args)
     assert result.name == name
     assert result.status == CheckStatus.SKIPPED

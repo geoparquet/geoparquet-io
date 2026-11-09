@@ -13,6 +13,7 @@ import pytest
 from geoparquet_io.core.crs_utils import merge_longitude_ranges
 from geoparquet_io.core.duckdb_metadata import aggregate_native_geo_stats
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from geoparquet_io.core.inspect_utils import (
     extract_partition_summary,
     format_partition_markdown_output,
@@ -116,24 +117,36 @@ def con():
 class TestBboxValid:
     @pytest.mark.parametrize("n", [4, 6])
     def test_accepts_spec_lengths(self, n):
-        check = _check_bbox_valid({"bbox": [float(i) for i in range(n)]}, "geometry")
+        check = _check_bbox_valid(
+            parse_column_meta("geometry", {"bbox": [float(i) for i in range(n)]}), "geometry"
+        )
         assert check.status == CheckStatus.PASSED, check.message
 
     def test_accepts_xyzm_bbox_on_2_0(self):
-        check = _check_bbox_valid({"bbox": [float(i) for i in range(8)]}, "geometry", "2.0.0")
+        check = _check_bbox_valid(
+            parse_column_meta("geometry", {"bbox": [float(i) for i in range(8)]}),
+            "geometry",
+            "2.0.0",
+        )
         assert check.status == CheckStatus.PASSED, check.message
 
     @pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
     def test_rejects_xyzm_bbox_below_2_0(self, version):
         # The XYZM bbox is spec text only on the 2.0 line; the released 1.1.0
         # schema allows only 4 or 6 elements.
-        check = _check_bbox_valid({"bbox": [float(i) for i in range(8)]}, "geometry", version)
+        check = _check_bbox_valid(
+            parse_column_meta("geometry", {"bbox": [float(i) for i in range(8)]}),
+            "geometry",
+            version,
+        )
         assert check.status == CheckStatus.FAILED
         assert "2.0" in check.message
 
     @pytest.mark.parametrize("n", [1, 2, 3, 5, 7, 9])
     def test_rejects_other_lengths(self, n):
-        check = _check_bbox_valid({"bbox": [float(i) for i in range(n)]}, "geometry")
+        check = _check_bbox_valid(
+            parse_column_meta("geometry", {"bbox": [float(i) for i in range(n)]}), "geometry"
+        )
         assert check.status == CheckStatus.FAILED
         assert "4, 6 or 8" in check.message
 

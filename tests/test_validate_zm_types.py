@@ -8,6 +8,7 @@ suffixed names as valid and detect dimensionality when scanning data.
 import pytest
 
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_geometry_types_list,
@@ -28,7 +29,9 @@ class TestGeometryTypesListAcceptsSuffixes:
         ],
     )
     def test_suffixed_types_valid(self, types):
-        check = _check_geometry_types_list({"geometry_types": types}, "geometry")
+        check = _check_geometry_types_list(
+            parse_column_meta("geometry", {"geometry_types": types}), "geometry"
+        )
         assert check.status == CheckStatus.PASSED, check.message
 
     @pytest.mark.parametrize(
@@ -42,7 +45,9 @@ class TestGeometryTypesListAcceptsSuffixes:
         ],
     )
     def test_invalid_types_still_rejected(self, types):
-        check = _check_geometry_types_list({"geometry_types": types}, "geometry")
+        check = _check_geometry_types_list(
+            parse_column_meta("geometry", {"geometry_types": types}), "geometry"
+        )
         assert check.status == CheckStatus.FAILED, check.message
 
 

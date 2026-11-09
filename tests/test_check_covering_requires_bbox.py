@@ -22,6 +22,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.check_fixes import fix_bboxless_cover
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from geoparquet_io.core.parquet_footer import _patch_footer_file
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 
@@ -393,7 +394,7 @@ class TestOnePredicateBehindAllThreeVerdicts:
 
         col_meta = {"encoding": "WKB", "covering": covering}
 
-        verdict = _check_cover_has_bbox(col_meta, "geometry")
+        verdict = _check_cover_has_bbox(parse_column_meta("geometry", col_meta), "geometry")
 
         assert (verdict.status == CheckStatus.FAILED) is covering_lacks_bbox(col_meta)
 

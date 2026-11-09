@@ -20,6 +20,7 @@ from pyproj import CRS as PyprojCRS
 
 from geoparquet_io.core.crs_utils import crs_equal
 from geoparquet_io.core.exceptions import GeoParquetError
+from geoparquet_io.core.geo_metadata import ColumnMeta, parse_column_meta
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_crs_valid,
@@ -139,11 +140,11 @@ GEOGRAPHY_SCHEMA = [{"name": "geometry", "logical_type": "GeographyType()", "typ
 WKB_SCHEMA = [{"name": "geometry", "logical_type": "", "type": "binary"}]
 
 
-def _edges_meta(edges=None):
+def _edges_meta(edges=None) -> ColumnMeta:
     col: dict = {"encoding": "WKB"}
     if edges is not None:
         col["edges"] = edges
-    return {"columns": {"geometry": col}}
+    return parse_column_meta("geometry", col)
 
 
 class TestEdgesOnPlanarGeometry:
@@ -186,7 +187,9 @@ class TestEpochCrsHandling:
     """042: explicit-null CRS and unresolvable CRSs must surface as WARNING."""
 
     def test_explicit_null_crs_with_epoch_warns(self):
-        check = _check_epoch_valid({"epoch": 2020.0, "crs": None}, "geometry")
+        check = _check_epoch_valid(
+            parse_column_meta("geometry", {"epoch": 2020.0, "crs": None}), "geometry"
+        )
         assert check.status == CheckStatus.WARNING, check.message
 
     def test_unresolvable_crs_with_epoch_warns_not_passes(self):
@@ -195,12 +198,16 @@ class TestEpochCrsHandling:
             "name": "Site grid",
             "id": {"authority": "EPSG", "code": 5817},
         }
-        check = _check_epoch_valid({"epoch": 2020.0, "crs": crs}, "geometry")
+        check = _check_epoch_valid(
+            parse_column_meta("geometry", {"epoch": 2020.0, "crs": crs}), "geometry"
+        )
         assert check.status == CheckStatus.WARNING, check.message
 
     def test_garbage_crs_with_epoch_warns_not_passes(self):
         crs = {"id": {"authority": "XYZ", "code": 1}}
-        check = _check_epoch_valid({"epoch": 2020.0, "crs": crs}, "geometry")
+        check = _check_epoch_valid(
+            parse_column_meta("geometry", {"epoch": 2020.0, "crs": crs}), "geometry"
+        )
         assert check.status == CheckStatus.WARNING, check.message
 
 
@@ -341,7 +348,9 @@ class TestProjjsonTypeMember:
     """046-V7: the PROJJSON 'type' value must come from the schema's known set."""
 
     def test_made_up_type_fails(self):
-        check = _check_crs_valid({"crs": {"type": "TotallyMadeUp"}}, "geometry")
+        check = _check_crs_valid(
+            parse_column_meta("geometry", {"crs": {"type": "TotallyMadeUp"}}), "geometry"
+        )
         assert check.status == CheckStatus.FAILED
         assert "TotallyMadeUp" in check.message
 
@@ -360,7 +369,9 @@ class TestProjjsonTypeMember:
         ],
     )
     def test_known_types_pass(self, crs_type):
-        check = _check_crs_valid({"crs": {"type": crs_type}}, "geometry")
+        check = _check_crs_valid(
+            parse_column_meta("geometry", {"crs": {"type": crs_type}}), "geometry"
+        )
         assert check.status == CheckStatus.PASSED, check.message
 
 

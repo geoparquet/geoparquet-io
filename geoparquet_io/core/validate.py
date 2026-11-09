@@ -394,10 +394,9 @@ def _column_verdict(check_name: str, status: CheckStatus, message: str) -> Valid
 
 
 def _check_encoding_valid(
-    col_meta: ColumnMeta | dict, col_name: str, geo_version: Any = "1.0.0"
+    meta: ColumnMeta, col_name: str, geo_version: Any = "1.0.0"
 ) -> ValidationCheck:
     """Check 7: column metadata must include a valid 'encoding' string."""
-    meta = parse_column_meta(col_name, col_meta)
     if (problem := meta.problems.get("encoding")) is not None:
         return _column_verdict(f"encoding_valid_{col_name}", CheckStatus.FAILED, problem)
     encoding = meta.encoding
@@ -427,9 +426,8 @@ def _strip_zm_suffix(geometry_type: str) -> str:
     return split_zm_suffix(geometry_type)[0]
 
 
-def _check_geometry_types_list(col_meta: ColumnMeta | dict, col_name: str) -> ValidationCheck:
+def _check_geometry_types_list(meta: ColumnMeta, col_name: str) -> ValidationCheck:
     """Check 8: column metadata must include a 'geometry_types' list."""
-    meta = parse_column_meta(col_name, col_meta)
     if (problem := meta.problems.get("geometry_types")) is not None:
         return _column_verdict(f"geometry_types_list_{col_name}", CheckStatus.FAILED, problem)
     geometry_types = meta.geometry_types
@@ -475,13 +473,12 @@ def _check_geometry_types_list(col_meta: ColumnMeta | dict, col_name: str) -> Va
 _PROJJSON_CRS_TYPES = PROJJSON_CRS_TYPES
 
 
-def _check_crs_valid(col_meta: ColumnMeta | dict, col_name: str) -> ValidationCheck:
+def _check_crs_valid(meta: ColumnMeta, col_name: str) -> ValidationCheck:
     """Check 9: optional 'crs' must be null or a PROJJSON object.
 
     Note the spec distinction: an omitted ``crs`` key defaults to OGC:CRS84,
     while an explicit ``"crs": null`` means the CRS is *unknown*.
     """
-    meta = parse_column_meta(col_name, col_meta)
     if (problem := meta.problems.get("crs")) is not None:
         return _column_verdict(f"crs_valid_{col_name}", CheckStatus.FAILED, problem)
     # Key omitted entirely -> defaults to OGC:CRS84 (the common, correct case).
@@ -540,9 +537,8 @@ def _check_crs_valid(col_meta: ColumnMeta | dict, col_name: str) -> ValidationCh
     )
 
 
-def _check_orientation_valid(col_meta: ColumnMeta | dict, col_name: str) -> ValidationCheck:
+def _check_orientation_valid(meta: ColumnMeta, col_name: str) -> ValidationCheck:
     """Check 10: optional 'orientation' must be a valid string."""
-    meta = parse_column_meta(col_name, col_meta)
     if (problem := meta.problems.get("orientation")) is not None:
         return _column_verdict(f"orientation_valid_{col_name}", CheckStatus.FAILED, problem)
     orientation = meta.orientation
@@ -587,7 +583,7 @@ def _version_at_least(version: Any, major: int, minor: int = 0) -> bool:
 
 
 def _check_edges_valid(
-    col_meta: ColumnMeta | dict, col_name: str, geo_version: str = "1.0.0"
+    col_meta: ColumnMeta, col_name: str, geo_version: str = "1.0.0"
 ) -> ValidationCheck:
     """Check 11: optional 'edges' must be a valid string.
 
@@ -596,7 +592,7 @@ def _check_edges_valid(
     """
     # The owner's reader, not the model's typed value: a wrong-typed edges is
     # judged against the version's vocabulary, which only this check knows.
-    edges = edges_of(parse_column_meta(col_name, col_meta).raw)
+    edges = edges_of(col_meta.raw)
 
     if edges is None:
         return ValidationCheck(
@@ -620,7 +616,7 @@ def _check_edges_valid(
 
 
 def _check_edges_spherical_on_projected_crs(
-    parquet_file: str, col_meta: ColumnMeta | dict, col_name: str
+    parquet_file: str, meta: ColumnMeta, col_name: str
 ) -> ValidationCheck | None:
     """Warn when a non-planar ``edges`` sits on a projected CRS (#601).
 
@@ -634,7 +630,6 @@ def _check_edges_spherical_on_projected_crs(
     Returns ``None`` when there is nothing to say (planar or absent edges, or a
     geographic/unknown CRS), so conformant files gain no output line.
     """
-    meta = parse_column_meta(col_name, col_meta)
     edges = meta.edges
     if not is_geodesic(edges):
         return None
@@ -658,14 +653,13 @@ def _check_edges_spherical_on_projected_crs(
 
 
 def _check_bbox_valid(
-    col_meta: ColumnMeta | dict, col_name: str, geo_version: str = "1.0.0"
+    meta: ColumnMeta, col_name: str, geo_version: str = "1.0.0"
 ) -> ValidationCheck:
     """Check 12: optional 'bbox' must be an array of 4, 6 or 8 numbers.
 
     The 8-element (XYZM) form is spec text only on the 2.0 line; the released
     1.x schemas allow only 4 or 6 elements.
     """
-    meta = parse_column_meta(col_name, col_meta)
     if (problem := meta.problems.get("bbox")) is not None:
         return _column_verdict(f"bbox_valid_{col_name}", CheckStatus.FAILED, problem)
     bbox = meta.bbox
@@ -705,9 +699,8 @@ def _resolve_datum_type(crs: Any) -> str | None:
     return loaded.datum.type_name if loaded.datum else ""
 
 
-def _check_epoch_valid(col_meta: ColumnMeta | dict, col_name: str) -> ValidationCheck:
+def _check_epoch_valid(meta: ColumnMeta, col_name: str) -> ValidationCheck:
     """Check 13: optional 'epoch' must be a number on a dynamic CRS."""
-    meta = parse_column_meta(col_name, col_meta)
     if (problem := meta.problems.get("epoch")) is not None:
         return _column_verdict(f"epoch_valid_{col_name}", CheckStatus.FAILED, problem)
 
@@ -1820,9 +1813,8 @@ def _cover_bbox_column(
     return ref.column, index
 
 
-def _check_cover_is_object(col_meta: ColumnMeta | dict, col_name: str) -> ValidationCheck:
+def _check_cover_is_object(meta: ColumnMeta, col_name: str) -> ValidationCheck:
     """Check 1.1-1: optional 'covering' must be an object if present."""
-    meta = parse_column_meta(col_name, col_meta)
     problem = meta.problems.get("covering")
     if problem is not None:
         return _cover_verdict(f"covering_is_object_{col_name}", CheckStatus.FAILED, problem)
@@ -1835,7 +1827,7 @@ def _check_cover_is_object(col_meta: ColumnMeta | dict, col_name: str) -> Valida
     )
 
 
-def _check_cover_has_bbox(col_meta: ColumnMeta | dict, col_name: str) -> ValidationCheck:
+def _check_cover_has_bbox(meta: ColumnMeta, col_name: str) -> ValidationCheck:
     """Check 1.1-1b: a 'covering' object must carry the 'bbox' encoding.
 
     GeoParquet 1.1, ``covering``: "The keys of the 'covering' object MUST be a
@@ -1860,7 +1852,6 @@ def _check_cover_has_bbox(col_meta: ColumnMeta | dict, col_name: str) -> Validat
     what it fails here, and what it repairs cannot drift apart.
     """
     check_name = f"covering_has_bbox_{col_name}"
-    meta = parse_column_meta(col_name, col_meta)
     covering = meta.covering
 
     if "covering" in meta.problems:
@@ -1883,10 +1874,10 @@ def _check_cover_has_bbox(col_meta: ColumnMeta | dict, col_name: str) -> Validat
     )
 
 
-def _check_cover_bbox_paths(col_meta: ColumnMeta | dict, col_name: str) -> ValidationCheck:
+def _check_cover_bbox_paths(col_meta: ColumnMeta, col_name: str) -> ValidationCheck:
     """Check 1.1-2: covering 'bbox' encoding must have valid xmin/ymin/xmax/ymax paths."""
     check_name = f"covering_bbox_paths_{col_name}"
-    ref = parse_column_meta(col_name, col_meta).covering_bbox
+    ref = col_meta.covering_bbox
     if ref is None:
         return _cover_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
     if ref.paths is None:
@@ -1951,11 +1942,11 @@ def _bbox_column_missing(check_name: str, bbox_col_name: str, schema_info: list)
 
 
 def _check_cover_bbox_column_exists(
-    col_meta: ColumnMeta | dict, col_name: str, schema_info: list
+    col_meta: ColumnMeta, col_name: str, schema_info: list
 ) -> ValidationCheck:
     """Check 1.1-3: covering bbox column must exist at root of schema."""
     check_name = f"covering_bbox_column_exists_{col_name}"
-    resolved = _cover_bbox_column(parse_column_meta(col_name, col_meta), check_name, schema_info)
+    resolved = _cover_bbox_column(col_meta, check_name, schema_info)
     if isinstance(resolved, ValidationCheck):
         return resolved
     bbox_col_name, _ = resolved
@@ -1976,12 +1967,12 @@ _BBOX_FIELDS = {len(order): list(order) for order in BBOX_COVERING_FIELD_ORDERS}
 
 
 def _check_cover_bbox_structure(
-    col_meta: ColumnMeta | dict, col_name: str, schema_info: list
+    col_meta: ColumnMeta, col_name: str, schema_info: list
 ) -> ValidationCheck:
     """Check 1.1-4/5: covering bbox column is a struct of xmin/ymin/xmax/ymax or
     xmin/ymin/zmin/xmax/ymax/zmax, in that order."""
     check_name = f"covering_bbox_structure_{col_name}"
-    resolved = _cover_bbox_column(parse_column_meta(col_name, col_meta), check_name, schema_info)
+    resolved = _cover_bbox_column(col_meta, check_name, schema_info)
     if isinstance(resolved, ValidationCheck):
         return resolved
     _, index = resolved
@@ -2004,11 +1995,11 @@ def _check_cover_bbox_structure(
 
 
 def _check_cover_bbox_field_types(
-    col_meta: ColumnMeta | dict, col_name: str, schema_info: list
+    col_meta: ColumnMeta, col_name: str, schema_info: list
 ) -> ValidationCheck:
     """Check 1.1-6/7: covering bbox fields must be FLOAT or DOUBLE and same type."""
     check_name = f"covering_bbox_field_types_{col_name}"
-    resolved = _cover_bbox_column(parse_column_meta(col_name, col_meta), check_name, schema_info)
+    resolved = _cover_bbox_column(col_meta, check_name, schema_info)
     if isinstance(resolved, ValidationCheck):
         return resolved
     _, index = resolved
@@ -3227,14 +3218,6 @@ def _check_v2_uses_native_types(schema_info: list, geom_col: str) -> ValidationC
     )
 
 
-def _v2_column(column: ColumnMeta | dict, geom_col: str) -> ColumnMeta:
-    """``geom_col``'s model; a whole ``geo`` block is parsed here (the v2 checks' old input)."""
-    if isinstance(column, ColumnMeta):
-        return column
-    columns = column.get("columns")
-    return parse_column_meta(geom_col, columns.get(geom_col) if isinstance(columns, dict) else None)
-
-
 def _v2_skipped_for_problem(meta: ColumnMeta, key: str, check: str) -> ValidationCheck | None:
     """SKIPPED when ``key`` is wrong-typed: the key's own check FAILs it, once."""
     if key not in meta.problems:
@@ -3248,11 +3231,10 @@ def _v2_skipped_for_problem(meta: ColumnMeta, key: str, check: str) -> Validatio
 
 
 def _check_v2_crs_in_parquet_type(
-    column: ColumnMeta | dict, schema_info: list, geom_col: str
+    meta: ColumnMeta, schema_info: list, geom_col: str
 ) -> ValidationCheck:
     """Check V2-2: if non-default CRS, must be inline PROJJSON in Parquet geo type."""
 
-    meta = _v2_column(column, geom_col)
     if skipped := _v2_skipped_for_problem(meta, "crs", "v2_crs_in_parquet_type"):
         return skipped
     # Extract absent-vs-null faithfully: they mean different things here.
@@ -3328,7 +3310,7 @@ def _check_v2_crs_in_parquet_type(
 # a GeoParquet 2.0 file can declare an unknown CRS, so it has to compare equal.
 
 
-def _schema_crs_for_consistency(schema_info: list, geom_col: str, parquet_file: str = "") -> Any:
+def _schema_crs_for_consistency(schema_info: list, geom_col: str, parquet_file: str) -> Any:
     """The Parquet geo type's CRS, expressed in the geo-metadata vocabulary.
 
     Returns :data:`CRS_ABSENT` when the logical type declares no CRS (the
@@ -3368,10 +3350,9 @@ def _schema_crs_for_consistency(schema_info: list, geom_col: str, parquet_file: 
 
 
 def _check_v2_crs_consistency(
-    column: ColumnMeta | dict, schema_info: list, geom_col: str, parquet_file: str = ""
+    meta: ColumnMeta, schema_info: list, geom_col: str, parquet_file: str
 ) -> ValidationCheck:
     """Check V2-3: CRS in geo metadata must match CRS in Parquet schema."""
-    meta = _v2_column(column, geom_col)
     if skipped := _v2_skipped_for_problem(meta, "crs", "v2_crs_consistency"):
         return skipped
     metadata_crs = crs_from_column_meta(meta.raw)
@@ -3440,10 +3421,9 @@ def _edges_schema_facts(schema_info: list, geom_col: str) -> tuple[bool, bool, s
 
 
 def _check_v2_edges_consistency(
-    column: ColumnMeta | dict, schema_info: list, geom_col: str
+    meta: ColumnMeta, schema_info: list, geom_col: str
 ) -> ValidationCheck:
     """Check V2-5: edges in metadata must match algorithm in Parquet GEOGRAPHY type."""
-    meta = _v2_column(column, geom_col)
     if skipped := _v2_skipped_for_problem(meta, "edges", "v2_edges_consistency"):
         return skipped
     metadata_edges = declared_edges(meta.raw)
@@ -3986,12 +3966,11 @@ def _open_validation_connection(parquet_file: str):
 class _ValidationSchema(list):
     """Immutable file facts shared by one validation's checks, never across files."""
 
-    def __init__(self, entries: list, kv_metadata: dict, raw_geo: RawGeo | None = None):
+    def __init__(self, entries: list, kv_metadata: dict, raw_geo: RawGeo):
         super().__init__(entries)
         self.roots, self.nested = schema_name_indexes(self)
         self.kv_metadata = kv_metadata
-        # validate_geoparquet hands in the block it decoded; decode only when not given.
-        self.raw_geo = (raw_geo or read_raw_geo(kv_metadata)).block or {}
+        self.raw_geo = raw_geo.block or {}
         self.carried_geo = None
 
     def crs_is_unknown(self, parquet_file: str, column: str) -> bool:

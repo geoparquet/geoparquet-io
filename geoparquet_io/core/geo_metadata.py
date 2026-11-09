@@ -815,10 +815,7 @@ def parse_column_meta(name: str, raw: object) -> ColumnMeta:
     Type rules are :data:`_COLUMN_VALUE_CHECKS`', except ``bbox``
     (:func:`_bbox_problem`). JSON null reads as absent. An entry that is not an
     object reads as an empty one: ``validate``'s ``columns_present`` reports it.
-    A :class:`ColumnMeta` is returned as it is.
     """
-    if isinstance(raw, ColumnMeta):
-        return raw
     entry = raw if isinstance(raw, dict) else {}
     problems = {}
     for key, describe in _PROBLEM_TEXT.items():

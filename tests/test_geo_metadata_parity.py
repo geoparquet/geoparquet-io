@@ -43,7 +43,7 @@ import pytest
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import CRS_ABSENT, crs_equal, crs_from_column_meta
-from geoparquet_io.core.geo_metadata import raw_geo_of_file, read_raw_geo
+from geoparquet_io.core.geo_metadata import parse_column_meta, raw_geo_of_file, read_raw_geo
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_crs_valid,
@@ -576,8 +576,14 @@ def test_absent_and_explicit_null_survive_the_helper_boundary():
     null_col = CRS_COLUMN_META["null"]
 
     # Production path that has always distinguished them: different outcomes.
-    assert _check_crs_valid(absent_col, "geometry").status is CheckStatus.PASSED
-    assert _check_crs_valid(null_col, "geometry").status is CheckStatus.WARNING
+    assert (
+        _check_crs_valid(parse_column_meta("geometry", absent_col), "geometry").status
+        is CheckStatus.PASSED
+    )
+    assert (
+        _check_crs_valid(parse_column_meta("geometry", null_col), "geometry").status
+        is CheckStatus.WARNING
+    )
 
     assert "crs" not in absent_col and "crs" in null_col, (
         "fixture shapes must differ, otherwise the assertions below are trivial"

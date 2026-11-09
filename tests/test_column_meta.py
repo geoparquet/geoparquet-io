@@ -59,11 +59,10 @@ def test_well_typed_values_are_kept():
     assert meta.covering_bbox == CoveringBbox(paths=PATHS, column="bbox")
 
 
-def test_null_reads_as_absent_and_an_entry_is_parsed_once():
+def test_null_reads_as_absent_and_a_non_object_as_empty():
     meta = parse_column_meta("g", dict.fromkeys(("orientation", "edges", "bbox", "epoch", "crs")))
     assert meta.problems == {}
     assert meta.crs is None and meta.bbox is None
-    assert parse_column_meta("g", meta) is meta
     empty = parse_column_meta("g", "not an object")
     assert isinstance(empty, ColumnMeta) and empty.raw == {} and empty.problems == {}
 

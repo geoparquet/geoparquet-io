@@ -4,6 +4,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_crs_valid,
@@ -55,22 +56,26 @@ class TestVersionFeatures:
 class TestCrsRequiresType:
     def test_projjson_missing_type_fails(self):
         crs = {"id": {"authority": "XYZ", "code": 999}, "name": "Not a real CRS"}
-        check = _check_crs_valid({"crs": crs}, "geometry")
+        check = _check_crs_valid(parse_column_meta("geometry", {"crs": crs}), "geometry")
         assert check.status == CheckStatus.FAILED
 
     def test_projjson_with_type_passes(self):
-        check = _check_crs_valid({"crs": EPSG_4326}, "geometry")
+        check = _check_crs_valid(parse_column_meta("geometry", {"crs": EPSG_4326}), "geometry")
         assert check.status == CheckStatus.PASSED
 
 
 class TestEpochRequiresDynamicDatum:
     def test_epoch_on_datum_ensemble_fails(self):
         """EPSG:4326 is a datum ensemble — no single frame an epoch can refer to."""
-        check = _check_epoch_valid({"epoch": 2020.0, "crs": EPSG_4326}, "geometry")
+        check = _check_epoch_valid(
+            parse_column_meta("geometry", {"epoch": 2020.0, "crs": EPSG_4326}), "geometry"
+        )
         assert check.status == CheckStatus.FAILED
 
     def test_epoch_on_dynamic_datum_passes(self):
-        check = _check_epoch_valid({"epoch": 2020.0, "crs": ITRF2014}, "geometry")
+        check = _check_epoch_valid(
+            parse_column_meta("geometry", {"epoch": 2020.0, "crs": ITRF2014}), "geometry"
+        )
         assert check.status == CheckStatus.PASSED, check.message
 
     def test_epoch_on_static_frame_warns(self):
@@ -81,16 +86,18 @@ class TestEpochRequiresDynamicDatum:
             "name": "GDA2020",
             "id": {"authority": "EPSG", "code": 7843},
         }
-        check = _check_epoch_valid({"epoch": 2020.0, "crs": gda2020}, "geometry")
+        check = _check_epoch_valid(
+            parse_column_meta("geometry", {"epoch": 2020.0, "crs": gda2020}), "geometry"
+        )
         assert check.status == CheckStatus.WARNING, check.message
 
     def test_epoch_on_default_crs84_fails(self):
         """No crs key = OGC:CRS84 default = WGS 84 ensemble."""
-        check = _check_epoch_valid({"epoch": 2020.0}, "geometry")
+        check = _check_epoch_valid(parse_column_meta("geometry", {"epoch": 2020.0}), "geometry")
         assert check.status == CheckStatus.FAILED
 
     def test_no_epoch_passes(self):
-        check = _check_epoch_valid({"crs": EPSG_4326}, "geometry")
+        check = _check_epoch_valid(parse_column_meta("geometry", {"crs": EPSG_4326}), "geometry")
         assert check.status == CheckStatus.PASSED
 
 

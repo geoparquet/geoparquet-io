@@ -33,6 +33,7 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
+from geoparquet_io.core.geo_metadata import ColumnMeta, parse_column_meta
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_native_crs_format,
@@ -55,8 +56,8 @@ def _schema(logical_type: str) -> list[dict]:
     return [{"name": "geometry", "logical_type": logical_type}]
 
 
-def _geo_meta(col_meta: dict) -> dict:
-    return {"version": "2.0.0", "primary_column": "geometry", "columns": {"geometry": col_meta}}
+def _column_meta(col_meta: dict) -> ColumnMeta:
+    return parse_column_meta("geometry", col_meta)
 
 
 # =============================================================================
@@ -161,38 +162,40 @@ class TestV2CrsConsistencyVerdicts:
     def test_metadata_crs84_against_a_compact_utm_type_is_a_mismatch(self):
         """Was PASSED: the unrecognized form read as a positive CRS84 claim."""
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": CRS84_ID}), _schema("GeometryType(crs=EPSG:32633)"), "geometry"
+            _column_meta({"crs": CRS84_ID}), _schema("GeometryType(crs=EPSG:32633)"), "geometry", ""
         )
         assert check.status is CheckStatus.FAILED
 
     def test_omitted_metadata_crs_against_a_compact_utm_type_is_a_mismatch(self):
         """An omitted metadata crs means CRS84, which EPSG:32633 is not."""
         check = _check_v2_crs_consistency(
-            _geo_meta({}), _schema("GeometryType(crs=EPSG:32633)"), "geometry"
+            _column_meta({}), _schema("GeometryType(crs=EPSG:32633)"), "geometry", ""
         )
         assert check.status is CheckStatus.FAILED
 
     def test_matching_crs_on_both_sides_passes(self):
         """Was FAILED: the same CRS, rejected."""
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": EPSG3857_PROJJSON}),
+            _column_meta({"crs": EPSG3857_PROJJSON}),
             _schema("GeometryType(crs=EPSG:3857)"),
             "geometry",
+            "",
         )
         assert check.status is CheckStatus.PASSED
 
     def test_compact_crs84_matches_explicit_epsg_4326_metadata(self):
         """CRS84/EPSG:4326 equivalence still holds through the new branch."""
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": PyprojCRS.from_epsg(4326).to_json_dict()}),
+            _column_meta({"crs": PyprojCRS.from_epsg(4326).to_json_dict()}),
             _schema("GeometryType(crs=OGC:CRS84)"),
             "geometry",
+            "",
         )
         assert check.status is CheckStatus.PASSED
 
     def test_srid_zero_still_means_unknown_not_an_authority_code(self):
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": None}), _schema("GeometryType(crs=srid:0)"), "geometry"
+            _column_meta({"crs": None}), _schema("GeometryType(crs=srid:0)"), "geometry", ""
         )
         assert check.status is CheckStatus.PASSED
 
@@ -208,48 +211,53 @@ class TestSridReferenceInConsistency:
     def test_matching_srid_reference_passes(self):
         """Was FAILED: the raw ``srid:5070`` string never equals its own PROJJSON."""
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": EPSG5070_PROJJSON}),
+            _column_meta({"crs": EPSG5070_PROJJSON}),
             _schema("GeometryType(crs=srid:5070)"),
             "geometry",
+            "",
         )
         assert check.status is CheckStatus.PASSED
 
     def test_mismatching_srid_reference_fails(self):
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": PyprojCRS.from_epsg(4326).to_json_dict()}),
+            _column_meta({"crs": PyprojCRS.from_epsg(4326).to_json_dict()}),
             _schema("GeometryType(crs=srid:5070)"),
             "geometry",
+            "",
         )
         assert check.status is CheckStatus.FAILED
 
     def test_uppercase_srid_reference_behaves_like_lowercase(self):
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": EPSG5070_PROJJSON}),
+            _column_meta({"crs": EPSG5070_PROJJSON}),
             _schema("GeometryType(crs=SRID:5070)"),
             "geometry",
+            "",
         )
         assert check.status is CheckStatus.PASSED
 
     def test_uppercase_srid_zero_still_means_unknown(self):
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": None}), _schema("GeometryType(crs=SRID:0)"), "geometry"
+            _column_meta({"crs": None}), _schema("GeometryType(crs=SRID:0)"), "geometry", ""
         )
         assert check.status is CheckStatus.PASSED
 
     def test_unresolvable_srid_reference_still_fails_closed(self):
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": EPSG5070_PROJJSON}),
+            _column_meta({"crs": EPSG5070_PROJJSON}),
             _schema("GeometryType(crs=srid:99999999)"),
             "geometry",
+            "",
         )
         assert check.status is CheckStatus.FAILED
 
     def test_projjson_reference_is_a_conservative_mismatch(self):
         """The named key cannot be read here, so report a mismatch, never a guess."""
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": EPSG5070_PROJJSON}),
+            _column_meta({"crs": EPSG5070_PROJJSON}),
             _schema("GeometryType(crs=projjson:my_crs)"),
             "geometry",
+            "",
         )
         assert check.status is CheckStatus.FAILED
 
@@ -404,7 +412,7 @@ class TestFreeformCrsFailsClosedInConsistency:
     def test_an_absent_metadata_crs_is_a_mismatch_not_a_shared_crs84_claim(self, value):
         """Was PASSED "both are OGC:CRS84" — a claim neither carrier ever made."""
         check = _check_v2_crs_consistency(
-            _geo_meta({}), _schema(f"GeometryType(crs={value})"), "geometry"
+            _column_meta({}), _schema(f"GeometryType(crs={value})"), "geometry", ""
         )
         assert check.status is CheckStatus.FAILED
         assert value in (check.details or "")
@@ -412,9 +420,10 @@ class TestFreeformCrsFailsClosedInConsistency:
     @pytest.mark.parametrize("value", FREEFORM_CRS_VALUES)
     def test_a_named_metadata_crs_is_a_mismatch_showing_the_literal(self, value):
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": EPSG3857_PROJJSON}),
+            _column_meta({"crs": EPSG3857_PROJJSON}),
             _schema(f"GeometryType(crs={value})"),
             "geometry",
+            "",
         )
         assert check.status is CheckStatus.FAILED
         assert value in (check.details or "")
@@ -423,7 +432,7 @@ class TestFreeformCrsFailsClosedInConsistency:
     @pytest.mark.parametrize("value", FREEFORM_CRS_VALUES)
     def test_an_explicit_crs84_metadata_crs_is_still_a_mismatch(self, value):
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": CRS84_ID}), _schema(f"GeometryType(crs={value})"), "geometry"
+            _column_meta({"crs": CRS84_ID}), _schema(f"GeometryType(crs={value})"), "geometry", ""
         )
         assert check.status is CheckStatus.FAILED
 

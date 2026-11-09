@@ -87,7 +87,10 @@ def test_the_fixture_lists_the_decoy_before_the_root_column(decoy_file):
 def test_schema_crs_is_the_root_columns(decoy_file):
     from geoparquet_io.core.validate import CRS_ABSENT, _schema_crs_for_consistency
 
-    assert _schema_crs_for_consistency(get_schema_info(decoy_file), "geometry") is not CRS_ABSENT
+    assert (
+        _schema_crs_for_consistency(get_schema_info(decoy_file), "geometry", decoy_file)
+        is not CRS_ABSENT
+    )
 
 
 def test_edges_facts_are_the_root_columns(decoy_file):
