@@ -319,3 +319,19 @@ def test_spec_warnings_reach_the_result(tmp_path, unsorted_test_file):
     assert set(spec.warnings()) <= {
         w.removeprefix("[spec] ") for w in gpio.check_all(path).warnings()
     }
+
+
+@pytest.mark.parametrize("checks", [None, []], ids=["all", "none"])
+def test_fix_on_a_table_read_from_a_directory_fixes_its_rows(tmp_path, unsorted_test_file, checks):
+    """A dataset is fixed as one scratch write of its rows; its files are untouched."""
+    dataset = tmp_path / "dataset"
+    dataset.mkdir()
+    for name in ("a.parquet", "b.parquet"):
+        shutil.copy(unsorted_test_file, dataset / name)
+    before = {p.name: p.read_bytes() for p in dataset.iterdir()}
+
+    fixed = gpio.read(str(dataset)).fix(checks=checks)
+
+    assert fixed.num_rows == 2 * 1445
+    assert fixed.source_path is None
+    assert {p.name: p.read_bytes() for p in dataset.iterdir()} == before
