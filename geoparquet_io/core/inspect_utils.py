@@ -1233,7 +1233,7 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
             - geoparquet_versions: Set of versions found
             - per_file_info: List of per-file details
     """
-    from geoparquet_io.core.validate import _bbox_xy
+    from geoparquet_io.core.geo_metadata import bbox_xy_or_none
 
     total_rows = 0
     total_size_bytes = 0
@@ -1276,8 +1276,8 @@ def extract_partition_summary(files: list[str], verbose: bool = False) -> dict[s
 
         # Merge bbox. A GeoParquet bbox interleaves its dimensions -- the 6- and
         # 8-element forms read [xmin, ymin, zmin, ...], so indices 2 and 3 are
-        # not xmax/ymax; _bbox_xy pulls the X/Y bounds out of any of the three.
-        xy = _bbox_xy(geo_info.get("bbox") or [])
+        # not xmax/ymax; bbox_xy_or_none pulls the X/Y bounds out of any of the three.
+        xy = bbox_xy_or_none(geo_info.get("bbox"))
         if xy:
             file_boxes.append(GeometryStats(list(xy), []))
             all_geographic = all_geographic and is_geographic(geo_info.get("crs"))

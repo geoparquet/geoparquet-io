@@ -23,6 +23,9 @@ from __future__ import annotations
 
 import copy
 import json
+import math
+import re
+import reprlib
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache, lru_cache
@@ -38,6 +41,7 @@ from geoparquet_io.core.duckdb_utils import (
     sql_literal,
 )
 from geoparquet_io.core.edges import (
+    COUNTERCLOCKWISE,
     EDGES,
     carry_edges,
     declares_edges,
@@ -674,6 +678,164 @@ def read_raw_geo(metadata) -> RawGeo:
         return RawGeo(present=False)
     value, problem, detail = _decode_geo_json(raw)
     return RawGeo(present=True, value=value, error=problem and f"{problem}: {detail}")
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+_SHORT = reprlib.Repr()
+_SHORT.maxstring = 80
+_SHORT.maxlist = _SHORT.maxdict = 8
+_SHORT.maxother = 80
+
+
+def short_repr(value: object) -> str:
+    """``repr`` of a metadata value, bounded and printable.
+
+    The value came out of the file, not out of gpio: it is capped so a 10 MB
+    string cannot become a 40 MB report, and control characters are stripped
+    so it cannot carry terminal escapes into the output.
+    """
+    return _CONTROL_CHARS.sub("", _SHORT.repr(value))
+
+
+def is_finite_number(value: object) -> bool:
+    """A real, finite JSON number that fits a double: not a bool, NaN, infinity or a 400-digit int."""
+    if not _is_json_number(value):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:  # an int too large for float(): json.loads makes those
+        return False
+
+
+def _bbox_problem(bbox: object) -> str | None:
+    """Why a declared ``bbox`` is not 4, 6 or 8 finite numbers; None when it is.
+
+    The read side's bbox rule. The write table (:data:`_COLUMN_VALUE_CHECKS`)
+    keeps 4 or 6: an 8-value (XYZM, 2.0 only) bbox it dropped would otherwise be
+    carried into outputs that omit it today. The 8-value version gate is
+    ``validate._check_bbox_valid``'s, which knows the file's version.
+    """
+    if not isinstance(bbox, list):
+        return "bbox must be an array"
+    if len(bbox) not in (4, 6, 8):
+        return f"bbox must have 4, 6 or 8 elements (got {len(bbox)})"
+    if not all(is_finite_number(value) for value in bbox):
+        return f"bbox elements must be numbers (found: {short_repr(bbox)})"
+    return None
+
+
+def _geometry_types_problem(value: list | object) -> str:
+    if not isinstance(value, list):
+        return 'must have a "geometry_types" list'
+    return f"has invalid geometry_types: {short_repr([t for t in value if not isinstance(t, str)])}"
+
+
+#: The FAILED text for a value :data:`_COLUMN_VALUE_CHECKS` rejects, per key.
+#: Worded as ``check spec`` has always reported these values.
+_PROBLEM_TEXT: dict[str, Callable[[object], str]] = {
+    "encoding": lambda v: f"must have valid encoding (got: {short_repr(v)})",
+    "geometry_types": _geometry_types_problem,
+    "crs": lambda v: "CRS must be null or valid PROJJSON object",
+    "orientation": lambda v: f"orientation must be one of {[COUNTERCLOCKWISE]}",
+    "edges": lambda v: f"edges must be a string (found: {short_repr(v)})",
+    "epoch": lambda v: "epoch must be a number",
+    "covering": lambda v: f"covering must be an object (found: {short_repr(v)})",
+}
+
+
+@dataclass(frozen=True)
+class CoveringBbox:
+    """What a column's ``covering.bbox`` says, parsed once for the four covering checks."""
+
+    paths: dict | None = None
+    #: Root column named by the ``xmin`` path, once it is known to be one.
+    column: str | None = None
+    #: Why the covering cannot be used, as the FAILED message; None when it can.
+    problem: str | None = None
+
+
+@dataclass(frozen=True)
+class ColumnMeta:
+    """One ``geo`` column entry, parsed once for the checks that read it (#1089).
+
+    Each typed field is the value when the key is present and well-typed, else
+    None (absent, JSON null, or wrong-typed). A wrong-typed value is not dropped
+    silently: ``problems`` maps its key to the FAILED message the check that
+    owns the key reports, so no other check reads it as if it were well-typed.
+    ``raw`` is the entry as the file holds it, for the readers that need absent
+    and null apart (``crs_utils.crs_from_column_meta``).
+    """
+
+    name: str
+    raw: dict
+    problems: dict[str, str]
+    encoding: str | None = None
+    geometry_types: list[str] | None = None
+    crs: dict | str | None = None
+    orientation: str | None = None
+    edges: str | None = None
+    bbox: list | None = None
+    epoch: int | float | None = None
+    covering: dict | None = None
+    #: None when the column declares no bbox covering.
+    covering_bbox: CoveringBbox | None = None
+
+
+def _covering_bbox(covering: dict | None) -> CoveringBbox | None:
+    """Parse ``covering.bbox`` without indexing anything whose shape is unproven.
+
+    A value whose *type* is wrong is recorded as a problem and never indexed:
+    a string path passes every length test and reads character-wise, which is
+    how a verdict once named a column ``"b"`` the file never mentions (#1062).
+    """
+    if covering is None or "bbox" not in covering:
+        return None
+    paths = covering["bbox"]
+    if not isinstance(paths, dict):
+        return CoveringBbox(
+            problem="covering bbox must be an object of [column, field] paths "
+            f"(found: {short_repr(paths)})"
+        )
+    xmin = paths.get("xmin")
+    if not is_covering_path(xmin):
+        detail = (
+            "it has no xmin path"
+            if "xmin" not in paths
+            else f"its xmin must be a path array [column, field] (found: {short_repr(xmin)})"
+        )
+        return CoveringBbox(
+            paths=paths, problem=f"cannot determine bbox column name from covering: {detail}"
+        )
+    return CoveringBbox(paths=paths, column=xmin[0])
+
+
+def parse_column_meta(name: str, raw: object) -> ColumnMeta:
+    """``raw``, one ``geo`` ``columns`` entry, as a :class:`ColumnMeta`.
+
+    Type rules are :data:`_COLUMN_VALUE_CHECKS`', except ``bbox``
+    (:func:`_bbox_problem`). JSON null reads as absent. An entry that is not an
+    object reads as an empty one: ``validate``'s ``columns_present`` reports it.
+    A :class:`ColumnMeta` is returned as it is.
+    """
+    if isinstance(raw, ColumnMeta):
+        return raw
+    entry = raw if isinstance(raw, dict) else {}
+    problems = {}
+    for key, describe in _PROBLEM_TEXT.items():
+        value = entry.get(key)
+        if value is not None and not _COLUMN_VALUE_CHECKS[key][0](value):
+            problems[key] = f'column "{name}" {describe(value)}'
+    bbox_problem = None if entry.get("bbox") is None else _bbox_problem(entry["bbox"])
+    if bbox_problem:
+        problems["bbox"] = f'column "{name}" {bbox_problem}'
+    typed = {key: None if key in problems else entry.get(key) for key in (*_PROBLEM_TEXT, "bbox")}
+    return ColumnMeta(
+        name=name,
+        raw=entry,
+        covering_bbox=_covering_bbox(typed["covering"]),
+        problems=problems,
+        **typed,
+    )
 
 
 def _article(type_name: str) -> str:
@@ -1902,6 +2064,17 @@ def bbox_xy(bbox) -> tuple[float, float, float, float]:
     """
     half = len(bbox) // 2
     return float(bbox[0]), float(bbox[1]), float(bbox[half]), float(bbox[half + 1])
+
+
+def bbox_xy_or_none(bbox: object) -> tuple[float, float, float, float] | None:
+    """:func:`bbox_xy` of a declared bbox; None unless it is 4, 6 or 8 finite numbers.
+
+    The shape is tested, not the length: a four-key object and a four-character
+    string both have ``len()`` 4 and used to be indexed as one (#1062). Only a
+    list of finite numbers is accepted, so nothing else reaches the SQL or the
+    arithmetic the values go into.
+    """
+    return bbox_xy(bbox) if _bbox_problem(bbox) is None else None
 
 
 def row_group_geometry_stats(chunks, *, geographic: bool) -> GeometryStats:

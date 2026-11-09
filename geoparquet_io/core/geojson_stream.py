@@ -70,7 +70,6 @@ from geoparquet_io.core.file_utils import (
     resolve_file_url,
 )
 from geoparquet_io.core.geo_metadata import (
-    bbox_xy,
     sanitized_carried_geo,
     sanitized_carried_geo_of_file,
 )
@@ -681,7 +680,7 @@ _LONLAT_TOLERANCE = 1e-6
 def _extent_of(source, geometry_column: str):
     """The declared block extent, else the bounds owner's measurement."""
     from geoparquet_io.core.exceptions import GeometryError
-    from geoparquet_io.core.geo_metadata import bounds_of
+    from geoparquet_io.core.geo_metadata import bbox_xy_or_none, bounds_of
 
     geo = (
         sanitized_carried_geo(source.schema.metadata)
@@ -689,11 +688,8 @@ def _extent_of(source, geometry_column: str):
         else sanitized_carried_geo_of_file(source)
     )
     declared = geo.get("columns", {}).get(geometry_column, {}).get("bbox")
-    if isinstance(declared, list) and len(declared) in (4, 6, 8):
-        try:
-            return bbox_xy(declared)
-        except (TypeError, ValueError):
-            pass
+    if (xy := bbox_xy_or_none(declared)) is not None:
+        return xy
     try:
         return bounds_of(source, geometry_column)
     except GeometryError:
