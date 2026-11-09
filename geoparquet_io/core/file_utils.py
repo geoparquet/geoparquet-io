@@ -12,7 +12,7 @@ import tempfile
 import uuid
 from collections.abc import Iterable, Iterator
 from pathlib import Path, PurePath
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from geoparquet_io.core.duckdb_utils import get_active_s3_config
 from geoparquet_io.core.exceptions import (
@@ -51,36 +51,29 @@ def has_glob_pattern(path: str) -> bool:
     return is_remote_url(path) or not os.path.isfile(path)
 
 
-def without_http_query(path: str) -> str:
-    """*path* without an http(s) query or fragment, which are not part of the object's name.
+def http_url_path(path: str) -> str:
+    """The part of *path* that names the object: an http(s) URL's path, any other *path* whole.
 
-    A signed URL's ``?`` and ``=`` are neither a glob nor a hive key. Every other
-    scheme is returned as written: for an object store DuckDB reads ``?`` as a
-    glob wildcard. A malformed http URL (``http://[bad/x``) is returned as written.
+    An http URL's authority (an IPv6 ``[::1]``), query and fragment are neither a
+    glob nor a hive key. For an object store DuckDB reads ``?`` as a glob wildcard,
+    so its URL is scanned as written, as is a malformed http URL (``http://[bad/x``).
     """
     if not is_http_url(path):
         return path
     try:
-        return urlunsplit(urlsplit(path)._replace(query="", fragment=""))
+        return urlsplit(path).path
     except ValueError:
         return path
 
 
 def is_partition_path(path: str) -> bool:
-    path = without_http_query(path)
-    if has_glob_pattern(path):
-        return True
-
-    if not is_remote_url(path) and os.path.isdir(path):
-        return True
-
-    if is_remote_url(path):
-        path_parts = path.split("/")
-        for part in path_parts[3:]:
-            if "=" in part and not part.endswith(".parquet"):
-                return True
-
-    return False
+    if not is_remote_url(path):
+        return has_glob_pattern(path) or os.path.isdir(path)
+    # A scheme or bucket segment never holds '=', so every segment can be scanned.
+    name = http_url_path(path)
+    return _has_glob_characters(name) or any(
+        "=" in part and not part.endswith(".parquet") for part in name.split("/")
+    )
 
 
 def resolve_partition_path(path: str, hive_partitioning: bool | None = None) -> tuple[str, dict]:

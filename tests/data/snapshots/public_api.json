@@ -422,6 +422,7 @@
     "guard_output_not_read_as_input",
     "handle_output_overwrite",
     "has_glob_pattern",
+    "http_url_path",
     "is_partition_path",
     "is_same_file_path",
     "output_exists_error",
@@ -435,8 +436,7 @@
     "scratch_path",
     "unlink_released_file",
     "validate_output_path",
-    "validate_parquet_extension",
-    "without_http_query"
+    "validate_parquet_extension"
   ],
   "geoparquet_io.core.format_writers": [
     "ERROR_CONVERSION_FAILED",

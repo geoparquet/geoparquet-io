@@ -110,6 +110,20 @@ class TestIsPartitionPath:
         """A signed URL's ``?`` and ``=`` are the query, not a glob or a hive key."""
         assert is_partition_path(url) is False
 
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("http://[::1]/data.parquet", False),
+            ("http://[::1]:8080/d/data.parquet?sig=a", False),
+            ("http://[::1]/d/*.parquet", True),
+            ("http://[::1]/d/year=2024/data.parquet", True),
+        ],
+        ids=["ipv6", "ipv6_port_query", "ipv6_glob", "ipv6_hive"],
+    )
+    def test_an_http_authority_is_not_scanned(self, url, expected):
+        """An IPv6 host's ``[`` is the authority, not a glob; only the URL path is scanned."""
+        assert is_partition_path(url) is expected
+
     def test_a_malformed_http_url_keeps_its_path(self):
         """``urlsplit`` raises on it; the path is then classified as written."""
         assert is_partition_path("http://[bad/x.parquet") is True
