@@ -19,6 +19,7 @@ that arm sees each spelling the old sites used.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 
@@ -26,6 +27,7 @@ import pytest
 
 from geoparquet_io.core.geo_metadata import (
     RawGeo,
+    declared_write_metadata,
     read_raw_geo,
     reset_malformed_geo_warnings,
     sanitized_carried_geo,
@@ -389,3 +391,21 @@ def test_the_owner_guard_sees_each_spelling_of_a_raw_decode(tmp_path):
     )
     repo = _plant(tmp_path, "geo_parse", source)
     assert sorted(hit.name for hit in arm_hits(repo, "geo_parse")) == ["a", "b", "c", "e"]
+
+
+def test_declared_write_metadata_leaves_a_decoded_geo_dict_unchanged():
+    """A dict-valued ``geo`` comes back from the decoder as the caller's own object;
+    stripping its step keys must build a new block, not rewrite that one."""
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "g",
+        "columns": {
+            "g": {"encoding": "WKB", "orientation": "counterclockwise"},
+            "o": {"encoding": "WKB", "crs": {"id": {"authority": "EPSG", "code": 3857}}},
+        },
+    }
+    metadata = {"geo": geo}
+    before = copy.deepcopy(metadata)
+    declared = declared_write_metadata(metadata)
+    assert metadata == before
+    assert "crs" not in declared["geo"]["columns"]["o"]

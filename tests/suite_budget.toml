@@ -4,12 +4,13 @@
 # Add two owner regressions for DuckDB's timeout units and Carto's retry budget.
 [fast_suite]
 # Targeted perf regressions add 18 selected cases across the retained lanes.
-# +192 for the geo-block owner consolidation: the two-geometry write-path matrix
+# +197 for the geo-block owner consolidation: the two-geometry write-path matrix
 # (226 cells, about 3s under -n auto) replaces 56 per-path secondary-geometry
 # tests it catches more regressions than, plus #1089's one-defect verdict table
-# and #1014's one-sided CRS id cases, plus 8 rebuild cells (secondary kept or
-# projected away x geo-only or ARROW:schema footer x 1.1/2.0).
-max_collected = 14424
+# and #1014's one-sided CRS id cases, plus 12 rebuild cells (secondary kept or
+# projected away x geo-only, ARROW:schema or decoded-dict footer x 1.1/2.0),
+# plus 1 for declared_write_metadata leaving a decoded geo dict unchanged.
+max_collected = 14429
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

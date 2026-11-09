@@ -311,29 +311,46 @@ def test_a4_two_geometry_contract(entry, shape, version, two_geometry_sources, t
     _adjudicate(failed, divergence)
 
 
+#: footer -> (shape, whether ARROW:schema stays, which step probes the output columns)
+REBUILD_FOOTERS = {
+    # `geo` the only key: the stripped metadata is empty, so pruning has nothing
+    # to probe for and the CRS restore probes.
+    "geo_only": ("wkb_primary_first", False, "restore secondary crs"),
+    # pyarrow's ARROW:schema keeps the stripped metadata non-empty: pruning probes.
+    "with_arrow_schema": ("wkb_primary_first", True, "prune geo metadata"),
+    # `geo` handed over already decoded; the orientation keeps the stripped block
+    # non-empty, so stripping it in place lost the secondary's crs.
+    "decoded_geo_dict": ("orientation_projected_secondary", False, "prune geo metadata"),
+}
+
+
 @pytest.fixture(scope="module")
 def rebuild_footer_sources(tmp_path_factory) -> dict[str, str]:
-    """``wkb_primary_first`` with ``geo`` as its only kv key, and beside pyarrow's
-    ``ARROW:schema``, which keeps a rebuild's stripped metadata non-empty."""
     tmp = tmp_path_factory.mktemp("rebuild_footer")
-    shape = SHAPES["wkb_primary_first"]
     return {
-        footer: _build_source(tmp / f"{footer}.parquet", shape, arrow_schema=footer != "geo_only")
-        for footer in ("geo_only", "with_arrow_schema")
+        footer: _build_source(tmp / f"{footer}.parquet", SHAPES[shape], arrow_schema=keep)
+        for footer, (shape, keep, _) in REBUILD_FOOTERS.items()
     }
 
 
+def _rebuild_metadata(source: str, footer: str) -> dict:
+    metadata = get_kv_metadata(source)
+    if footer == "decoded_geo_dict":
+        return {"geo": json.loads(metadata[b"geo"])}
+    return metadata
+
+
 @pytest.mark.parametrize("version", VERSIONS)
-@pytest.mark.parametrize("footer", ["geo_only", "with_arrow_schema"])
+@pytest.mark.parametrize("footer", REBUILD_FOOTERS)
 @pytest.mark.parametrize("keep_secondary", [True, False], ids=["kept", "projected_away"])
 def test_rebuild_declares_a_secondary_crs_only_when_emitted(
     keep_secondary, footer, version, rebuild_footer_sources, tmp_path, monkeypatch
 ):
     """A rebuild restores a secondary's declared CRS only if the query emits it.
 
-    Probed once per write either way: by the pruning step when ``ARROW:schema``
-    keeps the stripped metadata non-empty, by the CRS restore when ``geo`` was
-    the only key and pruning had nothing to probe for.
+    Probed once per write: by the pruning step when the stripped metadata is
+    non-empty, by the CRS restore when ``geo`` was the only key and pruning had
+    nothing to probe for.
     """
     from geoparquet_io.core import write_funnels
 
@@ -354,18 +371,18 @@ def test_rebuild_declares_a_secondary_crs_only_when_emitted(
             con,
             f"SELECT {projection} FROM read_parquet({sql_path(source)})",
             out,
-            original_metadata=get_kv_metadata(source),
+            original_metadata=_rebuild_metadata(source, footer),
             geoparquet_version=version,
             input_file=source,
             rebuild_geo_metadata=True,
         )
     finally:
         con.close()
-    expected_purpose = "restore secondary crs" if footer == "geo_only" else "prune geo metadata"
+    shape, _, expected_purpose = REBUILD_FOOTERS[footer]
     assert probes == [expected_purpose]
     columns = _geo_metadata(out)["columns"]
     if keep_secondary:
-        declared = _declared(SHAPES["wkb_primary_first"])["columns"][SECONDARY]
+        declared = _declared(SHAPES[shape])["columns"][SECONDARY]
         _assert_column(SECONDARY, columns[SECONDARY], declared)
     else:
         assert set(columns) == {PRIMARY}

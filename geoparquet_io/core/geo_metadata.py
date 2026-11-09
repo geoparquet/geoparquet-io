@@ -1629,7 +1629,8 @@ def declared_write_metadata(metadata: dict | None) -> dict | None:
         carried.keys() - {"version", "primary_column", "columns"}
     ):
         return result
-    carried["columns"] = columns
+    # A dict-valued `geo` decodes to the caller's own object: build a new block.
+    carried = {**carried, "columns": columns}
     return _rewrite_geo_metadata(metadata, lambda _: carried)
 
 
