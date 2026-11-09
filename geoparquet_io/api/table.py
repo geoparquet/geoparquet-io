@@ -47,14 +47,19 @@ if TYPE_CHECKING:
 
 
 def _object_name(source: str) -> str:
-    """The basename of *source* as an object key: a URL's path, sans query and fragment."""
-    from pathlib import Path, PurePosixPath
-    from urllib.parse import urlparse
+    """The basename of *source* as an object key; a URL's is percent-decoded.
 
+    Only an http(s) URL has a query and fragment to drop; in any other scheme a
+    ``?`` is part of the name.
+    """
+    from pathlib import Path, PurePosixPath
+    from urllib.parse import unquote
+
+    from geoparquet_io.core.file_utils import without_http_query
     from geoparquet_io.core.remote import is_remote_url
 
     if is_remote_url(source):
-        return PurePosixPath(urlparse(source).path).name
+        return unquote(PurePosixPath(without_http_query(source)).name)
     return Path(source).name
 
 
@@ -2719,16 +2724,19 @@ class Table:
         from pathlib import Path
 
         from geoparquet_io.core.exceptions import InvalidParameterError
-        from geoparquet_io.core.file_utils import scratch_dir
+        from geoparquet_io.core.file_utils import is_partition_path, scratch_dir
         from geoparquet_io.core.upload import upload as do_upload
 
         # A destination ending in '/' names the object after the source file.
-        if destination.endswith("/") and self._source_path is None:
+        if destination.endswith("/") and (
+            self._source_path is None or is_partition_path(self._source_path)
+        ):
             raise InvalidParameterError(
                 "destination",
                 f"'{destination}' ends in '/', so the object would be named after "
                 "the file this Table was read from, and it has none (it was built "
-                "in memory or derived). Give a full object key, e.g. "
+                "in memory or derived, or read from a directory or glob). Give a "
+                "full object key, e.g. "
                 f"'{destination}data.parquet'.",
             )
         if destination.endswith("/"):

@@ -1531,8 +1531,34 @@ class TestTableUpload:
     @pytest.mark.parametrize(
         ("source", "name"),
         [
+            ("https://h.example/d/a%20b.parquet?X-Amz-Signature=x#f", "a b.parquet"),
+            ("s3://b/d/a%20b.parquet", "a b.parquet"),
+            ("s3://b/a?b.parquet", "a?b.parquet"),
+            ("data/a%20b.parquet", "a%20b.parquet"),
+        ],
+        ids=["http", "s3_encoded", "s3_question_mark", "local"],
+    )
+    def test_object_name_of_a_source(self, source, name):
+        """A URL's key is percent-decoded; only an http(s) URL has a query to drop."""
+        from geoparquet_io.api.table import _object_name
+
+        assert _object_name(source) == name
+
+    def test_upload_to_a_prefix_from_a_glob_source_is_refused(self, sample_table):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        sample_table._source_path = "s3://test-bucket/data/*.parquet"
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            with pytest.raises(InvalidParameterError, match="full object key"):
+                sample_table.upload("s3://test-bucket/prefix/", dry_run=True)
+        mock_upload.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("source", "name"),
+        [
             ("https://host/d/f.parquet?sig=a:b*c", "f.parquet"),
-            ("s3://bucket/d/w*e:i.rd.parquet", "w*e:i.rd.parquet"),
+            # ':' is unsafe on Windows; a '*' would make the source a glob, refused above.
+            ("s3://bucket/d/w:e:i.rd.parquet", "w:e:i.rd.parquet"),
         ],
         ids=["query_string", "unsafe_basename"],
     )
