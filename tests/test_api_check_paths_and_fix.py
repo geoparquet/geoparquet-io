@@ -160,7 +160,9 @@ def test_a_single_remote_object_is_one_file(url):
 
 
 @pytest.mark.parametrize(
-    "url", ["s3://bucket/year=2026/", "s3://bucket/data/*.parquet"], ids=["prefix", "glob"]
+    "url",
+    ["s3://bucket/year=2026/", "s3://bucket/data/*.parquet", "s3://bucket/data.v?.parquet"],
+    ids=["prefix", "glob", "object_store_question_mark"],
 )
 def test_a_remote_prefix_or_glob_is_still_refused(url):
     with pytest.raises(gpio.InvalidParameterError, match="directory or glob"):

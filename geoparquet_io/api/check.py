@@ -220,17 +220,18 @@ def _names_one_remote_object(path: str) -> bool:
 
     Core reads ``s3://b/year=2026/f.parquet`` as a hive dataset, which its
     multi-file callers rely on; a path-level check is handed that one object.
+    Only an http(s) query is dropped first: elsewhere ``?`` is a glob.
     """
     from pathlib import PurePosixPath
-    from urllib.parse import urlsplit
 
+    from geoparquet_io.core.file_utils import without_http_query
     from geoparquet_io.core.remote import is_remote_url
 
-    url_path = urlsplit(path).path
+    url = without_http_query(path)
     return (
         is_remote_url(path)
-        and bool(PurePosixPath(url_path).suffix)
-        and not any(c in url_path for c in "*[")
+        and bool(PurePosixPath(url).suffix)
+        and not any(c in url for c in "*?[")
     )
 
 

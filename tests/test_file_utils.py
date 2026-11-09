@@ -110,6 +110,10 @@ class TestIsPartitionPath:
         """A signed URL's ``?`` and ``=`` are the query, not a glob or a hive key."""
         assert is_partition_path(url) is False
 
+    def test_a_malformed_http_url_keeps_its_path(self):
+        """``urlsplit`` raises on it; the path is then classified as written."""
+        assert is_partition_path("http://[bad/x.parquet") is True
+
     def test_http_url_not_partition(self):
         """HTTP URLs without hive partitioning are not partition paths."""
         url = "https://example.com/data.parquet"

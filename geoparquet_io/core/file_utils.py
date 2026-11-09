@@ -51,12 +51,23 @@ def has_glob_pattern(path: str) -> bool:
     return is_remote_url(path) or not os.path.isfile(path)
 
 
+def without_http_query(path: str) -> str:
+    """*path* without an http(s) query or fragment, which are not part of the object's name.
+
+    A signed URL's ``?`` and ``=`` are neither a glob nor a hive key. Every other
+    scheme is returned as written: for an object store DuckDB reads ``?`` as a
+    glob wildcard. A malformed http URL (``http://[bad/x``) is returned as written.
+    """
+    if not is_http_url(path):
+        return path
+    try:
+        return urlunsplit(urlsplit(path)._replace(query="", fragment=""))
+    except ValueError:
+        return path
+
+
 def is_partition_path(path: str) -> bool:
-    if is_http_url(path):
-        # An http(s) query or fragment is not part of the object's name: a signed
-        # URL's ``?`` and ``=`` are neither a glob nor a hive key. Object-store
-        # schemes are left alone, where ``?`` is a glob wildcard.
-        path = urlunsplit(urlsplit(path)._replace(query="", fragment=""))
+    path = without_http_query(path)
     if has_glob_pattern(path):
         return True
 
