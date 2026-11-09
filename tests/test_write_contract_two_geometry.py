@@ -151,7 +151,7 @@ def _geometry_array(shape: Shape, points, crs: dict | None) -> pa.Array:
     return pa.ExtensionArray.from_storage(geo_type, storage)
 
 
-def _build_source(path, shape: Shape) -> str:
+def _build_source(path, shape: Shape, arrow_schema: bool = False) -> str:
     declared = _declared(shape)
     geometries = {
         PRIMARY: _geometry_array(shape, POINTS, None),
@@ -166,10 +166,11 @@ def _build_source(path, shape: Shape) -> str:
             type=pa.struct([(ax, pa.float64()) for ax in AXES]),
         )
     table = pa.table(columns).replace_schema_metadata({b"geo": json.dumps(declared).encode()})
-    # No ARROW:schema: `geo` is the only kv key, as in a DuckDB-written file, so a
-    # rebuild's stripped metadata can come out empty.
     pq.write_table(table, str(path))
-    _patch_footer_file(str(path), {"ARROW:schema": None})
+    if not arrow_schema:
+        # `geo` as the only kv key, as in a DuckDB-written file, so a rebuild's
+        # stripped metadata can come out empty.
+        _patch_footer_file(str(path), {"ARROW:schema": None})
     return str(path)
 
 
@@ -310,18 +311,48 @@ def test_a4_two_geometry_contract(entry, shape, version, two_geometry_sources, t
     _adjudicate(failed, divergence)
 
 
+@pytest.fixture(scope="module")
+def rebuild_footer_sources(tmp_path_factory) -> dict[str, str]:
+    """``wkb_primary_first`` with ``geo`` as its only kv key, and beside pyarrow's
+    ``ARROW:schema``, which keeps a rebuild's stripped metadata non-empty."""
+    tmp = tmp_path_factory.mktemp("rebuild_footer")
+    shape = SHAPES["wkb_primary_first"]
+    return {
+        footer: _build_source(tmp / f"{footer}.parquet", shape, arrow_schema=footer != "geo_only")
+        for footer in ("geo_only", "with_arrow_schema")
+    }
+
+
 @pytest.mark.parametrize("version", VERSIONS)
-def test_rebuild_does_not_declare_a_projected_away_secondary(
-    version, two_geometry_sources, tmp_path
+@pytest.mark.parametrize("footer", ["geo_only", "with_arrow_schema"])
+@pytest.mark.parametrize("keep_secondary", [True, False], ids=["kept", "projected_away"])
+def test_rebuild_declares_a_secondary_crs_only_when_emitted(
+    keep_secondary, footer, version, rebuild_footer_sources, tmp_path, monkeypatch
 ):
-    """A rebuild restores a secondary's declared CRS only if the query emits it."""
-    source = two_geometry_sources["wkb_primary_first"]
+    """A rebuild restores a secondary's declared CRS only if the query emits it.
+
+    Probed once per write either way: by the pruning step when ``ARROW:schema``
+    keeps the stripped metadata non-empty, by the CRS restore when ``geo`` was
+    the only key and pruning had nothing to probe for.
+    """
+    from geoparquet_io.core import write_funnels
+
+    probes = []
+    real_probe = write_funnels._probe_output_columns
+
+    def spy(*args, **kwargs):
+        probes.append(args[3])
+        return real_probe(*args, **kwargs)
+
+    monkeypatch.setattr(write_funnels, "_probe_output_columns", spy)
+    source = rebuild_footer_sources[footer]
+    projection = f"id, {PRIMARY}, {SECONDARY}" if keep_secondary else f"id, {PRIMARY}"
     out = str(tmp_path / "out.parquet")
     con = get_duckdb_connection()
     try:
         write_parquet_with_metadata(
             con,
-            f"SELECT id, {PRIMARY} FROM read_parquet({sql_path(source)})",
+            f"SELECT {projection} FROM read_parquet({sql_path(source)})",
             out,
             original_metadata=get_kv_metadata(source),
             geoparquet_version=version,
@@ -330,6 +361,13 @@ def test_rebuild_does_not_declare_a_projected_away_secondary(
         )
     finally:
         con.close()
-    assert set(_geo_metadata(out)["columns"]) == {PRIMARY}
+    expected_purpose = "restore secondary crs" if footer == "geo_only" else "prune geo metadata"
+    assert probes == [expected_purpose]
+    columns = _geo_metadata(out)["columns"]
+    if keep_secondary:
+        declared = _declared(SHAPES["wkb_primary_first"])["columns"][SECONDARY]
+        _assert_column(SECONDARY, columns[SECONDARY], declared)
+    else:
+        assert set(columns) == {PRIMARY}
     result = validate_geoparquet(out, validate_data=True, sample_size=0)
     assert [c.name for c in result.checks if c.status == CheckStatus.FAILED] == []
