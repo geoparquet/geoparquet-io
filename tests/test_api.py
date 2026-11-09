@@ -2760,6 +2760,26 @@ class TestTableCheck:
 class TestTableAddBboxMetadata:
     """Tests for add_bbox_metadata() method."""
 
+    @staticmethod
+    def _covering_column(arrow_table) -> str:
+        geo = json.loads(arrow_table.schema.metadata[b"geo"])
+        return geo["columns"][geo["primary_column"]]["covering"]["bbox"]["xmin"][0]
+
+    @pytest.mark.parametrize(
+        "call",
+        [lambda t: ops.add_bbox_metadata(t.to_arrow()), lambda t: t.add_bbox_metadata().to_arrow()],
+        ids=["ops", "table"],
+    )
+    def test_default_detects_the_bbox_column_like_the_cli(self, austria_bbox_covering_file, call):
+        """No name means detect, as `gpio add bbox-metadata` does: the covering's column."""
+        assert self._covering_column(call(read(austria_bbox_covering_file))) == "geometry_bbox"
+
+    def test_explicit_bbox_column_is_honoured(self, austria_bbox_covering_file):
+        """A named column wins over the one detection would pick."""
+        arrow = read(austria_bbox_covering_file).to_arrow()
+        arrow = arrow.append_column("my_box", arrow.column("geometry_bbox"))
+        assert self._covering_column(ops.add_bbox_metadata(arrow, bbox_column="my_box")) == "my_box"
+
     @pytest.fixture
     def sample_table(self):
         """Create a sample Table from test data."""

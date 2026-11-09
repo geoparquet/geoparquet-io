@@ -3478,7 +3478,7 @@ class Table:
         )
         return self._wrap(result_table, self._geometry_column)
 
-    def add_bbox_metadata(self, bbox_column: str = "bbox") -> Table:
+    def add_bbox_metadata(self, bbox_column: str | None = None) -> Table:
         """
         Add bbox covering metadata to the table schema.
 
@@ -3496,7 +3496,8 @@ class Table:
         `gpio add bbox-metadata` refuses the file.
 
         Args:
-            bbox_column: Name of the bbox column (default "bbox")
+            bbox_column: Name of the bbox column. None (the default) detects it
+                as `gpio add bbox-metadata` does: the covering's column, else "bbox".
 
         Returns:
             Table with updated metadata

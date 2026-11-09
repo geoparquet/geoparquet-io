@@ -443,17 +443,6 @@ KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
         "Table.simplify passes the column the Table already tracks. Same column, resolved "
         "where each front end knows it -- the `sort hilbert` gap, one command over."
     ),
-    **{
-        ("add bbox-metadata", side, "bbox_column", "None", "'bbox'"): (
-            "A real gap (#1085). CLI --bbox-name defaults to None, which auto-detects: the "
-            "column the geometry's existing covering already names, else a struct called "
-            "'bbox'. The API defaults to the literal 'bbox', so on a table whose covering "
-            "names another column (a GDAL 'geometry_bbox') the CLI reports the covering "
-            "present while add_bbox_metadata_table raises 'Bbox column 'bbox' not found'. "
-            "Closing it means giving add_bbox_metadata_table the file core's detection."
-        )
-        for side in ("ops", "table")
-    },
 }
 
 

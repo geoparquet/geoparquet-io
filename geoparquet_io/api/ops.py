@@ -77,7 +77,7 @@ def add_bbox(
 
 def add_bbox_metadata(
     table: pa.Table,
-    bbox_column: str = "bbox",
+    bbox_column: str | None = None,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -90,7 +90,8 @@ def add_bbox_metadata(
 
     Args:
         table: Input PyArrow Table, carrying GeoParquet `geo` metadata
-        bbox_column: Name of the existing bbox column (default: 'bbox')
+        bbox_column: Name of the existing bbox column (None: detect it as
+            `gpio add bbox-metadata` does -- the covering's column, else 'bbox')
         geometry_column: Geometry column name (auto-detected if None)
 
     Returns:
