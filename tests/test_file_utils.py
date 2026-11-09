@@ -99,6 +99,17 @@ class TestIsPartitionPath:
         url = "s3://bucket/data/file.parquet"
         assert is_partition_path(url) is False
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://b.s3.amazonaws.com/d/f.parquet?X-Amz-Signature=abc",
+            "https://example.com/d/f.parquet?a=1&b=2#frag=x",
+        ],
+    )
+    def test_http_query_and_fragment_are_not_partition_markers(self, url):
+        """A signed URL's ``?`` and ``=`` are the query, not a glob or a hive key."""
+        assert is_partition_path(url) is False
+
     def test_http_url_not_partition(self):
         """HTTP URLs without hive partitioning are not partition paths."""
         url = "https://example.com/data.parquet"

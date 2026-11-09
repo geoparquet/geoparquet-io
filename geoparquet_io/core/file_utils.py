@@ -12,6 +12,7 @@ import tempfile
 import uuid
 from collections.abc import Iterable, Iterator
 from pathlib import Path, PurePath
+from urllib.parse import urlsplit, urlunsplit
 
 from geoparquet_io.core.duckdb_utils import get_active_s3_config
 from geoparquet_io.core.exceptions import (
@@ -51,6 +52,11 @@ def has_glob_pattern(path: str) -> bool:
 
 
 def is_partition_path(path: str) -> bool:
+    if is_http_url(path):
+        # An http(s) query or fragment is not part of the object's name: a signed
+        # URL's ``?`` and ``=`` are neither a glob nor a hive key. Object-store
+        # schemes are left alone, where ``?`` is a glob wildcard.
+        path = urlunsplit(urlsplit(path)._replace(query="", fragment=""))
     if has_glob_pattern(path):
         return True
 

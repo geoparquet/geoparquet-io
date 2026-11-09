@@ -147,6 +147,26 @@ def test_check_all_reports_a_stage_that_could_not_run(monkeypatch, unsorted_test
 
 
 # --------------------------------------------------------------------------
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://b.s3.amazonaws.com/d/f.parquet?X-Amz-Signature=abc",
+        "s3://bucket/year=2026/data.parquet",
+    ],
+    ids=["presigned", "hive_prefix_object"],
+)
+def test_a_single_remote_object_is_one_file(url):
+    assert check_api._one_file(url, "compression") == url
+
+
+@pytest.mark.parametrize(
+    "url", ["s3://bucket/year=2026/", "s3://bucket/data/*.parquet"], ids=["prefix", "glob"]
+)
+def test_a_remote_prefix_or_glob_is_still_refused(url):
+    with pytest.raises(gpio.InvalidParameterError, match="directory or glob"):
+        check_api._one_file(url, "compression")
+
+
 # Table.fix
 # --------------------------------------------------------------------------
 

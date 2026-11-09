@@ -215,13 +215,32 @@ class CheckResult:
 # --------------------------------------------------------------------------
 
 
+def _names_one_remote_object(path: str) -> bool:
+    """A remote URL whose path ends in a file name with an extension and no glob.
+
+    Core reads ``s3://b/year=2026/f.parquet`` as a hive dataset, which its
+    multi-file callers rely on; a path-level check is handed that one object.
+    """
+    from pathlib import PurePosixPath
+    from urllib.parse import urlsplit
+
+    from geoparquet_io.core.remote import is_remote_url
+
+    url_path = urlsplit(path).path
+    return (
+        is_remote_url(path)
+        and bool(PurePosixPath(url_path).suffix)
+        and not any(c in url_path for c in "*[")
+    )
+
+
 def _one_file(path, command: str) -> str:
     """*path* as a string, refused when it names a directory or glob of files."""
     from geoparquet_io.core.exceptions import InvalidParameterError
     from geoparquet_io.core.file_utils import is_partition_path
 
     path = os.fspath(path)
-    if is_partition_path(path):
+    if is_partition_path(path) and not _names_one_remote_object(path):
         raise InvalidParameterError(
             "path",
             f"{path} is a directory or glob; a path-level check reads one file. "
