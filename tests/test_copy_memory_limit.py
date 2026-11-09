@@ -235,8 +235,49 @@ class TestEveryStrategyHonoursTheLimit:
         )
         assert "DuckDB memory limit: 517MB" in caplog.text
 
+    @pytest.mark.parametrize(
+        ("module", "table"),
+        [("write_funnels", False), ("write_strategies.disk_rewrite", True)],
+        ids=["funnel_query", "disk_rewrite_table"],
+    )
+    def test_the_row_group_sample_is_bounded(self, tmp_path, con, monkeypatch, module, table):
+        """An MB target samples the query before any strategy's scope was entered."""
+        import importlib
+
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        owner = importlib.import_module(f"geoparquet_io.core.{module}")
+        real = owner.resolve_row_group_rows_for_query
+        sampled: list[str] = []
+
+        def recording(con_, query, row_group_rows, *args, **kwargs):
+            if row_group_rows is None:  # a sample is taken only without a row count
+                sampled.append(_setting(con_, "memory_limit"))
+            return real(con_, query, row_group_rows, *args, **kwargs)
+
+        monkeypatch.setattr(owner, "resolve_row_group_rows_for_query", recording)
+        query = _points_parquet(con, str(tmp_path / "src.parquet"))
+        out = str(tmp_path / "out.parquet")
+        if table:
+            write_geoparquet_table(
+                con.sql(query).arrow().read_all(),
+                out,
+                write_strategy="disk-rewrite",
+                row_group_size_mb=1,
+                memory_limit="517MB",
+            )
+        else:
+            write_parquet_with_metadata(
+                con, query, out, geoparquet_version="2.0", row_group_size_mb=1, memory_limit="517MB"
+            )
+        bounded = duckdb.connect()
+        bounded.execute("SET memory_limit='517MB'")
+        expected = _setting(bounded, "memory_limit")
+        bounded.close()
+        assert sampled and set(sampled) == {expected}
+
     def test_disk_rewrite_bounds_every_scan_of_the_write(self, tmp_path, con, monkeypatch):
-        """The row-group sample and stats scan before the COPY, and the type scan after it, ran unbounded."""
+        """The stats scan before the COPY and the type scan after it ran unbounded."""
         from geoparquet_io.core.write_strategies import disk_rewrite
 
         seen: dict[str, list[str]] = {}
@@ -250,7 +291,6 @@ class TestEveryStrategyHonoursTheLimit:
 
             monkeypatch.setattr(disk_rewrite, name, recording)
 
-        spy("resolve_row_group_rows_for_query")
         spy("geometry_stats_of")
         spy("missing_geometry_types")
         query = _points_parquet(con, str(tmp_path / "src.parquet"))
@@ -267,11 +307,7 @@ class TestEveryStrategyHonoursTheLimit:
         bounded.execute("SET memory_limit='517MB'")
         expected = _setting(bounded, "memory_limit")
         bounded.close()
-        assert seen.keys() == {
-            "resolve_row_group_rows_for_query",
-            "geometry_stats_of",
-            "missing_geometry_types",
-        }
+        assert seen.keys() == {"geometry_stats_of", "missing_geometry_types"}
         assert {v for values in seen.values() for v in values} == {expected}
 
     def test_streaming_closes_its_reader_before_restoring_settings(

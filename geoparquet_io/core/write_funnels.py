@@ -1572,9 +1572,16 @@ def write_parquet_with_metadata(
     # An MB target is measured here, once, so the plain-COPY fast path a 2.0
     # input takes honours it too -- it used to reach DuckDB's own 122,880-row
     # default while the strategies measured it each for themselves (#1215).
-    row_group_rows = resolve_row_group_rows_for_query(
-        con, query, row_group_rows, row_group_size_mb, verbose
-    )
+    # The sample runs before any strategy's scope, so it takes the write's cap.
+    samples = row_group_rows is None and row_group_size_mb is not None
+    with (
+        scoped_write_memory_limit(con, memory_limit, verbose)
+        if samples
+        else contextlib.nullcontext()
+    ):
+        row_group_rows = resolve_row_group_rows_for_query(
+            con, query, row_group_rows, row_group_size_mb, verbose
+        )
     geoparquet_version = resolve_output_geoparquet_version(
         geoparquet_version,
         input_file=input_file,
