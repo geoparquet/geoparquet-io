@@ -47,6 +47,7 @@ import pytest
 from geoparquet_io.core.crs_utils import crs_equal, crs_from_column_meta
 from geoparquet_io.core.duckdb_metadata import get_kv_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.parquet_footer import _patch_footer_file
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
 from geoparquet_io.core.write_funnels import write_geoparquet_table, write_parquet_with_metadata
 from tests.test_write_contract import (
@@ -165,7 +166,10 @@ def _build_source(path, shape: Shape) -> str:
             type=pa.struct([(ax, pa.float64()) for ax in AXES]),
         )
     table = pa.table(columns).replace_schema_metadata({b"geo": json.dumps(declared).encode()})
+    # No ARROW:schema: `geo` is the only kv key, as in a DuckDB-written file, so a
+    # rebuild's stripped metadata can come out empty.
     pq.write_table(table, str(path))
+    _patch_footer_file(str(path), {"ARROW:schema": None})
     return str(path)
 
 
