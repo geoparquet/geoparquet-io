@@ -11,7 +11,6 @@ Speed: Slower (reads file twice, writes twice)
 
 from __future__ import annotations
 
-from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
@@ -44,7 +43,7 @@ from geoparquet_io.core.parquet_writer import (
     output_schema_metadata,
     regroup,
     resolve_output_geoparquet_version,
-    resolve_row_group_rows_for_query,
+    resolve_row_group_rows_for_write,
     write_arrow_table,
 )
 from geoparquet_io.core.remote import remote_write_context, upload_if_remote
@@ -150,13 +149,11 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # DuckDB COPY TO sizes row groups by row count, so translate any MB target
         # into rows before it can take effect on this strategy (fixes #689 — both
         # sizing options were accepted and then ignored entirely).
-        # Its own scope: an MB target samples the query, which the plain path
-        # below and the geo path's scope would otherwise leave unbounded.
-        samples = row_group_rows is None and row_group_size_mb is not None
-        with scoped_write_memory_limit(con, memory_limit, verbose) if samples else nullcontext():
-            resolved_row_group_rows = resolve_row_group_rows_for_query(
-                con, query, row_group_rows, row_group_size_mb, verbose
-            )
+        # An MB target samples the query, which the plain path below and the geo
+        # path's scope would otherwise leave unbounded.
+        resolved_row_group_rows = resolve_row_group_rows_for_write(
+            con, query, row_group_rows, row_group_size_mb, memory_limit, verbose
+        )
 
         # Handle non-geo queries: write plain Parquet without geo metadata
         if geometry_column is None:

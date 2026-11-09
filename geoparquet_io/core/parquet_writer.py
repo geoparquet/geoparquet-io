@@ -86,6 +86,7 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
 from geoparquet_io.core.logging_config import debug, info, success
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.sizing import mb_to_bytes
 
 if TYPE_CHECKING:
@@ -575,6 +576,27 @@ def resolve_row_group_rows_for_query(
         return DEFAULT_ROW_GROUP_ROWS
     # resolve answers None only for an MB target, so there is one here.
     return resolve_row_group_rows_for_table(sample, None, row_group_size_mb, verbose=verbose)
+
+
+def resolve_row_group_rows_for_write(
+    con: duckdb.DuckDBPyConnection,
+    query: str,
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    memory_limit: str | None,
+    verbose: bool = False,
+) -> int:
+    """:func:`resolve_row_group_rows_for_query` for a write, its MB sample under the write's cap.
+
+    The sample runs before any strategy's memory scope, so it takes its own,
+    entered only when there is a sample to take.
+    """
+    if row_group_rows is not None or row_group_size_mb is None:
+        return resolve_row_group_rows_for_query(
+            con, query, row_group_rows, row_group_size_mb, verbose
+        )
+    with scoped_write_memory_limit(con, memory_limit, verbose):
+        return resolve_row_group_rows_for_query(con, query, None, row_group_size_mb, verbose)
 
 
 def resolve_row_group_rows_for_rewrite(num_rows: int, input_row_groups: int) -> int:

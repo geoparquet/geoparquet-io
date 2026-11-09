@@ -646,6 +646,7 @@
     "resolve_row_group_rows_for_rewrite",
     "resolve_row_group_rows_for_sample",
     "resolve_row_group_rows_for_table",
+    "resolve_row_group_rows_for_write",
     "sized_stream",
     "version_to_describe",
     "without_geometry_dictionary",

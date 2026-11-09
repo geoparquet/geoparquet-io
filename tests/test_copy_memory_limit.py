@@ -235,19 +235,13 @@ class TestEveryStrategyHonoursTheLimit:
         )
         assert "DuckDB memory limit: 517MB" in caplog.text
 
-    @pytest.mark.parametrize(
-        ("module", "table"),
-        [("write_funnels", False), ("write_strategies.disk_rewrite", True)],
-        ids=["funnel_query", "disk_rewrite_table"],
-    )
-    def test_the_row_group_sample_is_bounded(self, tmp_path, con, monkeypatch, module, table):
+    @pytest.mark.parametrize("table", [False, True], ids=["funnel_query", "disk_rewrite_table"])
+    def test_the_row_group_sample_is_bounded(self, tmp_path, con, monkeypatch, table):
         """An MB target samples the query before any strategy's scope was entered."""
-        import importlib
-
+        from geoparquet_io.core import parquet_writer
         from geoparquet_io.core.write_funnels import write_geoparquet_table
 
-        owner = importlib.import_module(f"geoparquet_io.core.{module}")
-        real = owner.resolve_row_group_rows_for_query
+        real = parquet_writer.resolve_row_group_rows_for_query
         sampled: list[str] = []
 
         def recording(con_, query, row_group_rows, *args, **kwargs):
@@ -255,7 +249,7 @@ class TestEveryStrategyHonoursTheLimit:
                 sampled.append(_setting(con_, "memory_limit"))
             return real(con_, query, row_group_rows, *args, **kwargs)
 
-        monkeypatch.setattr(owner, "resolve_row_group_rows_for_query", recording)
+        monkeypatch.setattr(parquet_writer, "resolve_row_group_rows_for_query", recording)
         query = _points_parquet(con, str(tmp_path / "src.parquet"))
         out = str(tmp_path / "out.parquet")
         if table:
