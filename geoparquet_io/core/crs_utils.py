@@ -229,6 +229,8 @@ def _is_crs84_equivalent(crs) -> bool:
         # No id member (allowed in PROJJSON): fall back to a semantic
         # comparison. Axis order is ignored because GeoParquet fixes
         # coordinate order to (x, y) regardless of the CRS definition.
+        if not _is_projjson_crs(crs):
+            return False
         try:
             from pyproj import CRS as PyprojCRS
 
@@ -383,7 +385,7 @@ def horizontal_crs(crs):
         if "$schema" in crs and "$schema" not in result:
             result = {"$schema": crs["$schema"], **result}
         return result
-    if _axis_count(crs) == 3:
+    if _axis_count(crs) == 3 and _is_projjson_crs(crs):
         try:
             from pyproj import CRS as PyprojCRS
 
@@ -610,6 +612,18 @@ PROJJSON_CRS_TYPES = frozenset(
         "DerivedTemporalCRS",
     }
 )
+
+
+def _is_projjson_crs(value: object) -> bool:
+    """Whether ``value`` is a PROJJSON CRS object, the only dict pyproj is handed.
+
+    pyproj reads a dict with a ``proj`` or ``init`` member (or JSON text that
+    decodes to one) as PROJ parameters, and PROJ opens the file an ``init``
+    names; a CRS value comes from a file's metadata or a server.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("type"), str):
+        return False
+    return value["type"] in PROJJSON_CRS_TYPES and not {"proj", "init"} & value.keys()
 
 
 # PROJJSON members that define a CRS rather than merely identify or annotate it.
@@ -1430,10 +1444,12 @@ def _load_crs_cached(kind: str, key: str):
     from pyproj import CRS
 
     try:
-        if kind == "json":
-            return CRS.from_json(key)
         if kind == "authority":
             return CRS.from_authority(*key.split(":", 1))
+        if kind == "json" or "{" in key:
+            # Classified by its decoded shape: pyproj decodes any text with a
+            # "{" and reads a non-PROJJSON dict as PROJ parameters.
+            return CRS.from_json(key) if _is_projjson_crs(json.loads(key)) else None
         # PROJ opens (or fetches) whatever an init= parameter names, and this
         # text comes from files and servers: refused before pyproj sees it.
         if names_proj_init_file(key):
@@ -1795,6 +1811,8 @@ def _canonical_projjson(key: str) -> tuple[bool, str | None]:
     from pyproj.exceptions import CRSError
 
     try:
+        if not _is_projjson_crs(json.loads(key)):
+            return False, None
         parsed = CRS.from_json(key)
     except (CRSError, TypeError, ValueError):
         return False, None

@@ -14,7 +14,9 @@
 # (#1400's probe kept two; the owner read keeps all ten).
 # +3: load_crs, projjson_for_label and the #1014 disagreement probe never read
 # a PROJ init= file a CRS string names.
-max_collected = 14442
+# +4: a {"init": ...} dict, or JSON text decoding to one, is never read
+# (owner reads and a write).
+max_collected = 14446
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
