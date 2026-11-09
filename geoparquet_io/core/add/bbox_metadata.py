@@ -159,6 +159,24 @@ def add_bbox_metadata_table(
     if problem is not None:
         raise ValueError(_cannot_declare_message(problem, None))
 
+    # Another column's covering bounds that column's geometry, not this one (#953).
+    carried = sanitized_carried_geo(table.schema.metadata)
+    columns = carried.get("columns") if isinstance(carried, dict) else None
+    owner = next(
+        (
+            name
+            for name in (columns if isinstance(columns, dict) else {})
+            if name != geom_col and bbox_covering_column_for(carried, name) == bbox_column
+        ),
+        None,
+    )
+    if owner is not None:
+        raise ValueError(
+            f"Cannot add bbox covering metadata: '{bbox_column}' is the covering of "
+            f"'{owner}', so its values bound that column's geometry, not '{geom_col}'. "
+            f"Compute '{geom_col}''s own bbox column first."
+        )
+
     schema_metadata = dict(table.schema.metadata) if table.schema.metadata else {}
 
     # A write path: this block is re-serialized onto the returned table, so a

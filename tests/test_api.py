@@ -2864,6 +2864,16 @@ class TestTableAddBboxMetadata:
         arrow = arrow.append_column("my_box", arrow.column("geometry_bbox"))
         assert self._covering_column(ops.add_bbox_metadata(arrow, bbox_column="my_box")) == "my_box"
 
+    def test_explicit_bbox_column_of_another_geometry_is_refused(self, austria_bbox_covering_file):
+        """`geometry_bbox` bounds the primary; declaring it on `boundary` would lie (#953)."""
+        arrow = self._two_geometries(austria_bbox_covering_file, boundary_covering=False)
+        with pytest.raises(ValueError, match="covering of 'geometry'"):
+            ops.add_bbox_metadata(arrow, bbox_column="geometry_bbox", geometry_column="boundary")
+        # A struct that is nobody's covering yet is still the caller's to name.
+        out = ops.add_bbox_metadata(arrow, bbox_column="bbox", geometry_column="boundary")
+        geo = json.loads(out.schema.metadata[b"geo"])
+        assert geo["columns"]["boundary"]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
+
     @pytest.fixture
     def sample_table(self):
         """Create a sample Table from test data."""
