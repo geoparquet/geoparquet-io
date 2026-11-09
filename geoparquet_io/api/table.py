@@ -2593,6 +2593,7 @@ class Table:
         s3_region: str | None = None,
         s3_use_ssl: bool = True,
         chunk_concurrency: int = 12,
+        dry_run: bool = False,
     ) -> None:
         """
         Write and upload the table to cloud object storage.
@@ -2616,6 +2617,9 @@ class Table:
             s3_region: S3 region (default: us-east-1 when using custom endpoint)
             s3_use_ssl: Whether to use HTTPS for S3 endpoint (default: True)
             chunk_concurrency: Max concurrent chunks per file upload (default: 12)
+            dry_run: Write the file and print what would be uploaded (source,
+                size, destination, target key) without uploading. Mirrors
+                ``--dry-run``.
 
         Example:
             >>> gpio.read('data.parquet').sort_hilbert().upload(
@@ -2649,9 +2653,102 @@ class Table:
                 s3_region=s3_region,
                 s3_use_ssl=s3_use_ssl,
                 chunk_concurrency=chunk_concurrency,
+                dry_run=dry_run,
             )
         finally:
             unlink_released_file(temp_path)
+
+    def create_pmtiles(
+        self,
+        output: str,
+        *,
+        layer: str | None = None,
+        min_zoom: int | None = None,
+        max_zoom: int | None = None,
+        bbox: str | None = None,
+        where: str | None = None,
+        include_cols: str | None = None,
+        precision: int = 6,
+        verbose: bool = False,
+        src_crs: str | None = None,
+        attribution: str | None = None,
+        layer_by_column: str | None = None,
+        simplify_only_low_zooms: bool = True,
+        no_simplification_of_shared_nodes: bool = True,
+        no_tile_size_limit: bool = True,
+        drop_densest_as_needed: bool = True,
+        maximum_tile_bytes: int | None = None,
+        force: bool = False,
+        repair_geometry: bool = True,
+        temporary_directory: str | None = None,
+        chunks: str | None = None,
+    ) -> None:
+        """
+        Create PMTiles from the table using tippecanoe.
+
+        Tiles the file this Table was read from when it is still a view of it;
+        otherwise writes the rows to a scratch file first and removes it after.
+        Takes the options of ``ops.create_pmtiles`` (see it for each one),
+        less ``profile``, which ``gpio.read()`` already took. Mirrors
+        ``gpio pmtiles create``. Requires tippecanoe in PATH.
+
+        Args:
+            output: Path for the output PMTiles file
+
+        Example:
+            >>> gpio.read('buildings.parquet').create_pmtiles('buildings.pmtiles')
+            >>> gpio.read('data.parquet').extract(where="kind = 'road'").create_pmtiles(
+            ...     'roads.pmtiles', layer='roads', max_zoom=14
+            ... )
+        """
+        # Every keyword is forwarded to ops unchanged (captured before the import).
+        options = {k: v for k, v in locals().items() if k not in ("self", "output")}
+        from geoparquet_io.api.ops import create_pmtiles
+
+        self._check_file(create_pmtiles, output, **options)
+
+    def create_pmtiles_pyramid(
+        self,
+        output: str,
+        *,
+        levels: str | list[int | str] | None = None,
+        bands: str | None = None,
+        max_tile_kb: int = 500,
+        bytes_per_cell: float | None = None,
+        layer_mode: str = "grouped",
+        include_features: bool = False,
+        features_source: str | None = None,
+        features_min_zoom: int | None = None,
+        max_zoom: int | None = None,
+        attribution: str | None = None,
+        force: bool = False,
+        verbose: bool = False,
+        temporary_directory: str | None = None,
+        memory_limit: str | None = None,
+    ) -> None:
+        """
+        Create a banded multi-level PMTiles pyramid from an aggregate table.
+
+        Tiles the file this Table was read from when it is still a view of it,
+        which also reuses that file's overview siblings; otherwise writes the
+        rows to a scratch file first and removes it after (missing levels are
+        built in the run's own scratch either way). Takes the options of
+        ``ops.create_pmtiles_pyramid`` (see it for each one). Mirrors
+        ``gpio pmtiles pyramid``. Requires tippecanoe and tile-join in PATH.
+
+        Args:
+            output: Path for the output PMTiles archive
+
+        Example:
+            >>> gpio.read('buildings.parquet').aggregate_a5(resolution=10).create_pmtiles_pyramid(
+            ...     'cells.pmtiles'
+            ... )
+        """
+        # Every keyword is forwarded to ops unchanged (captured before the import).
+        options = {k: v for k, v in locals().items() if k not in ("self", "output")}
+        from geoparquet_io.api.ops import create_pmtiles_pyramid
+
+        self._check_file(create_pmtiles_pyramid, output, **options)
 
     def head(self, n: int = 10) -> Table:
         """

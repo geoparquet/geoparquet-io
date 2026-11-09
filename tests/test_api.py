@@ -752,6 +752,11 @@ NOT_TABLE_IN_TABLE_OUT: dict[str, str] = {
     "partition_by_quadkey": "writes a partition tree; covered by TestOpsPartition",
     "partition_by_s2": "writes a partition tree; covered by TestOpsPartition",
     "partition_by_string": "writes a partition tree; covered by TestOpsPartition",
+    # Table/file in, PMTiles out: no table comes back to compare. The Table door
+    # hands ops the source file or a scratch copy; both doors are pinned against
+    # the CLI by the call-parity scaffold's `pmtiles create`/`pmtiles pyramid`.
+    "create_pmtiles": "PMTiles out through tippecanoe; call parity in the scaffold",
+    "create_pmtiles_pyramid": "banded PMTiles out; call parity in the scaffold",
 }
 
 
@@ -835,8 +840,6 @@ OPS_ONLY_SURFACE: dict[str, str] = {
     "handed back in memory cannot carry",
     "create_overviews": "`Table.overview` <-> `ops.create_overviews`, differently spelled "
     "twin: the method rolls one level in memory, the function writes a whole pyramid",
-    "create_pmtiles": "file in, PMTiles out through tippecanoe: no table on either end",
-    "create_pmtiles_pyramid": "file in, banded PMTiles out: no table on either end",
     "from_arcgis": "reader: fetches a service over the network, no input table",
     "from_carto": "reader: fetches a service over the network, no input table",
     "from_wfs_layers": "reader: writes many layers to a directory, so there is no single "
@@ -1489,6 +1492,11 @@ class TestTableUpload:
             assert len(captured_paths) == 1
             temp_path = captured_paths[0]
             assert not Path(temp_path).exists(), "Temp file should be deleted after error"
+
+    def test_upload_forwards_dry_run(self, sample_table):
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            sample_table.upload("s3://test-bucket/test.parquet", dry_run=True)
+        assert mock_upload.call_args.kwargs["dry_run"] is True
 
 
 class TestTableMetadataProperties:

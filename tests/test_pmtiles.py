@@ -869,3 +869,67 @@ class TestRunPipelineErrorSurfacing:
             f"upstream stderr '{sentinel}' lost behind tippecanoe error: {msg!r}"
         )
         assert "exit code 5" in msg
+
+
+class TestTablePMTilesFrontDoor:
+    """`Table.create_pmtiles` / `Table.create_pmtiles_pyramid` (#1108).
+
+    Core is patched, so tippecanoe never runs: these pin which file core is
+    handed and that a derived Table's scratch copy does not outlive the call.
+    """
+
+    # (method, core module, core function, one option and the value to forward)
+    DOORS = [
+        ("create_pmtiles", "pmtiles", "create_pmtiles_from_geoparquet", "layer", "roads"),
+        ("create_pmtiles_pyramid", "pmtiles_pyramid", "create_pmtiles_pyramid", "max_tile_kb", 7),
+    ]
+
+    @staticmethod
+    def _recorder(calls, fail=False):
+        def record(*args, **kwargs):
+            source = kwargs.get("input_path", args[0] if args else None)
+            calls.append((source, Path(source).exists(), kwargs))
+            if fail:
+                raise RuntimeError("tippecanoe failed")
+
+        return record
+
+    @pytest.mark.parametrize("door", DOORS, ids=[d[0] for d in DOORS])
+    def test_a_view_of_its_file_tiles_that_file(self, door, places_test_file, tmp_path):
+        from unittest.mock import patch
+
+        import geoparquet_io as gpio
+
+        method, module, core_fn, option, value = door
+        calls = []
+        with patch(f"geoparquet_io.core.{module}.{core_fn}", self._recorder(calls)):
+            getattr(gpio.read(places_test_file), method)(
+                str(tmp_path / "out.pmtiles"), **{option: value}
+            )
+
+        (source, _existed, kwargs) = calls[0]
+        assert Path(source).resolve() == Path(places_test_file).resolve()
+        assert kwargs[option] == value
+
+    @pytest.mark.parametrize("door", DOORS, ids=[d[0] for d in DOORS])
+    def test_a_derived_table_tiles_a_scratch_copy_then_removes_it(
+        self, door, places_test_file, tmp_path
+    ):
+        from unittest.mock import patch
+
+        import geoparquet_io as gpio
+
+        method, module, core_fn, _option, _value = door
+        derived = gpio.read(places_test_file).head(5)
+        calls = []
+        target = f"geoparquet_io.core.{module}.{core_fn}"
+        with patch(target, self._recorder(calls)):
+            getattr(derived, method)(str(tmp_path / "ok.pmtiles"))
+        with patch(target, self._recorder(calls, fail=True)):
+            with pytest.raises(RuntimeError, match="tippecanoe failed"):
+                getattr(derived, method)(str(tmp_path / "err.pmtiles"))
+
+        for source, existed, _kwargs in calls:
+            assert Path(source).resolve() != Path(places_test_file).resolve()
+            assert existed, "core was handed a scratch file that was not written"
+            assert not Path(source).exists(), "scratch file outlived the call"

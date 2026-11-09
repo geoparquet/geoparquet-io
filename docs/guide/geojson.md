@@ -139,6 +139,21 @@ For a simpler PMTiles workflow, use the built-in `gpio pmtiles` command. It prov
     )
     ```
 
+    The same options are methods on a `Table`, so tiling can end a chain. A
+    Table that is still a view of the file it was read from tiles that file;
+    one derived by an operation is written to a scratch file first, which is
+    removed afterwards.
+
+    <!-- doctest: needs-tippecanoe -->
+    ```python
+    import geoparquet_io as gpio
+
+    gpio.read("buildings.parquet").create_pmtiles("buildings.pmtiles", max_zoom=14)
+
+    # A derived table: tiled from a scratch copy of its rows
+    gpio.read("data.parquet").head(50).create_pmtiles("sample.pmtiles", max_zoom=10)
+    ```
+
 The command handles the entire pipeline internally (reprojection → filtering → conversion → tippecanoe) with optimal settings.
 
 #### Tuning tile generation (dense data)

@@ -1662,6 +1662,31 @@ table.upload('gs://bucket/data.parquet')
 
 # Upload as GeoParquet 2.0
 table.upload('s3://bucket/data.parquet', geoparquet_version='2.0')
+
+# Preview the upload (prints source, size, destination, target key)
+table.upload('s3://bucket/dataset/', dry_run=True)
+```
+
+#### `create_pmtiles(output, layer=None, min_zoom=None, max_zoom=None, bbox=None, where=None, include_cols=None, ...)`
+
+Tile the table into a PMTiles archive with tippecanoe. Takes the options of
+`ops.create_pmtiles` except `profile`. A Table still a view of its source file
+tiles that file; otherwise the rows go through a scratch file that is removed
+afterwards.
+
+```python
+gpio.read('buildings.parquet').create_pmtiles('buildings.pmtiles', max_zoom=14)
+```
+
+#### `create_pmtiles_pyramid(output, levels=None, bands=None, max_tile_kb=500, layer_mode='grouped', ...)`
+
+Build a zoom-banded PMTiles pyramid from an aggregate table (tippecanoe and
+tile-join). Takes the options of `ops.create_pmtiles_pyramid`. Read from the
+aggregate file, it reuses that file's overview siblings; missing levels are
+built in the run's scratch.
+
+```python
+gpio.read('cells.parquet').create_pmtiles_pyramid('cells.pmtiles')
 ```
 
 ## Converting Other Formats
