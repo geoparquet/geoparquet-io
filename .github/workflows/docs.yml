@@ -42,6 +42,11 @@ jobs:
       - name: Build documentation
         run: zensical build --clean --strict
 
+      # Zensical cuts a heading's TOC entry at any "id=" text and can leave a
+      # tag open, which breaks the layout of the whole page (#1329).
+      - name: Check TOC entries are well-formed
+        run: python scripts/check_toc_html.py site
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
