@@ -155,7 +155,6 @@ _ONE_DOOR = (
     "door, nothing to diff."
 )
 _NETWORK = "Reaches a live service; the network lane covers it."
-_DEFERRED = "Worth a case; not written yet (#1085)."
 _BENCHMARK = (
     "Benchmarking is a CLI reporting workflow, not a data operation: there is no "
     "GeoParquet input/output to hang a Table method or ops function off."
@@ -189,26 +188,6 @@ EXEMPT: dict[str, dict[str, str]] = {
         "TestAddGeometryMetricsParity, on the computed values rather than the call."
     },
     **{leaf: {"call_case": _NETWORK} for leaf in ("extract arcgis", "extract wfs")},
-    **{
-        leaf: {"call_case": _DEFERRED}
-        for leaf in (
-            "extract carto",
-            "extract bigquery",
-            "add admin-divisions",
-            "partition admin",
-            "convert reproject",
-            "convert geojson",
-            "convert shapefile",
-            "partition string",
-            "partition kdtree",
-            "partition s2",
-            "partition a5",
-            "add bbox-metadata",
-            "process simplify",
-            "process polygonize",
-            "process contour",
-        )
-    },
 }
 
 
@@ -451,6 +430,28 @@ KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
         f"Table.write resolves. tests/test_write_facade_row_groups.py asserts the thing this "
         f"case cannot see: that the two front ends write the same row-group layout."
     ),
+    (
+        "process simplify",
+        "table",
+        "geometry_column",
+        "None",
+        "'geometry'",
+    ): (
+        "CLI --geometry-column defaults to None, the file's primary geometry column; "
+        "Table.simplify passes the column the Table already tracks. Same column, resolved "
+        "where each front end knows it -- the `sort hilbert` gap, one command over."
+    ),
+    **{
+        ("add bbox-metadata", side, "bbox_column", "None", "'bbox'"): (
+            "A real gap (#1085). CLI --bbox-name defaults to None, which auto-detects: the "
+            "column the geometry's existing covering already names, else a struct called "
+            "'bbox'. The API defaults to the literal 'bbox', so on a table whose covering "
+            "names another column (a GDAL 'geometry_bbox') the CLI reports the covering "
+            "present while add_bbox_metadata_table raises 'Bbox column 'bbox' not found'. "
+            "Closing it means giving add_bbox_metadata_table the file core's detection."
+        )
+        for side in ("ops", "table")
+    },
 }
 
 
