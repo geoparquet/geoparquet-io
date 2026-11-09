@@ -18,7 +18,7 @@ from geoparquet_io.cli.decorators import (
     linearize_curves_options,
     output_format_options,
     overwrite_option,
-    parse_row_group_options,
+    pack_write_options,
     repair_geometry_option,
     show_sql_option,
     spatial_filter_options,
@@ -199,6 +199,7 @@ def convert(ctx):
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def convert_to_geoparquet_cmd(
     ctx,
     input_file,
@@ -219,13 +220,8 @@ def convert_to_geoparquet_cmd(
     repair_geometry,
     linearize_curves,
     max_angle_deg,
-    geoparquet_version,
+    write,
     verbose,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
     aws_profile,
     any_extension,
     show_sql,
@@ -253,7 +249,7 @@ def convert_to_geoparquet_cmd(
     if csv_max_line_size is not None:
         set_csv_max_line_size(csv_max_line_size)
 
-    row_group_mb = prepare_output(output_file, any_extension, row_group_size, row_group_size_mb)
+    prepare_output(output_file, any_extension)
 
     # Check for streaming output
     with _activate_s3(ctx, aws_profile=aws_profile):
@@ -272,15 +268,10 @@ def convert_to_geoparquet_cmd(
                 skip_invalid=skip_invalid,
                 allow_no_geometry=allow_no_geometry,
                 profile=aws_profile,
-                geoparquet_version=geoparquet_version,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_rows=row_group_size,
-                row_group_size_mb=row_group_mb,
+                write=write,
                 repair_geometry=repair_geometry,
                 linearize_curves=linearize_curves,
                 max_angle_deg=max_angle_deg,
-                memory_limit=write_memory,
                 encoding=encoding,
                 force_2d=force_2d,
             )
@@ -293,10 +284,6 @@ def convert_to_geoparquet_cmd(
                 output_file,
                 skip_hilbert=skip_hilbert,
                 verbose=verbose,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_rows=row_group_size,
-                row_group_size_mb=row_group_mb,
                 wkt_column=wkt_column,
                 lat_column=lat_column,
                 lon_column=lon_column,
@@ -306,13 +293,12 @@ def convert_to_geoparquet_cmd(
                 skip_invalid=skip_invalid,
                 allow_no_geometry=allow_no_geometry,
                 profile=aws_profile,
-                geoparquet_version=geoparquet_version,
                 repair_geometry=repair_geometry,
                 linearize_curves=linearize_curves,
                 max_angle_deg=max_angle_deg,
-                memory_limit=write_memory,
                 encoding=encoding,
                 force_2d=force_2d,
+                **write.funnel_kwargs(),
             )
 
 
@@ -328,15 +314,10 @@ def _convert_streaming(
     skip_invalid,
     allow_no_geometry,
     profile,
-    geoparquet_version,
-    compression=None,
-    compression_level=None,
-    row_group_rows=None,
-    row_group_size_mb=None,
+    write,
     repair_geometry=True,
     linearize_curves=True,
     max_angle_deg=None,
-    memory_limit=None,
     encoding=None,
     force_2d=False,
 ):
@@ -360,10 +341,6 @@ def _convert_streaming(
             skip_hilbert=skip_hilbert,
             verbose=False,
             allow_no_geometry=allow_no_geometry,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_rows=row_group_rows,
-            row_group_size_mb=row_group_size_mb,
             wkt_column=wkt_column,
             lat_column=lat_column,
             lon_column=lon_column,
@@ -372,13 +349,12 @@ def _convert_streaming(
             crs=crs,
             skip_invalid=skip_invalid,
             profile=profile,
-            geoparquet_version=geoparquet_version,
             repair_geometry=repair_geometry,
             linearize_curves=linearize_curves,
             max_angle_deg=max_angle_deg,
-            memory_limit=memory_limit,
             encoding=encoding,
             force_2d=force_2d,
+            **write.funnel_kwargs(),
         )
 
         # Read and stream to stdout. Through `ParquetFile` so the file handle is
@@ -402,12 +378,7 @@ def _reproject_impl_cli(
     overwrite,
     verbose,
     aws_profile,
-    compression,
-    compression_level,
-    geoparquet_version,
-    row_group_size_mb=None,
-    row_group_rows=None,
-    memory_limit=None,
+    write,
     assume_crs84=False,
 ):
     """Shared reproject CLI implementation."""
@@ -426,14 +397,9 @@ def _reproject_impl_cli(
             target_crs=dst_crs,
             source_crs=src_crs,
             overwrite=overwrite,
-            compression=compression,
-            compression_level=compression_level,
             verbose=verbose,
-            geoparquet_version=geoparquet_version,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            memory_limit=memory_limit,
             assume_crs84=assume_crs84,
+            **write.funnel_kwargs(),
         )
     except ValueError as e:
         raise click_error_for(e) from None
@@ -483,6 +449,7 @@ def _reproject_impl_cli(
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def convert_reproject(
     ctx,
     input_file,
@@ -493,12 +460,7 @@ def convert_reproject(
     overwrite,
     verbose,
     aws_profile,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     any_extension,
     show_sql,
 ):
@@ -521,9 +483,6 @@ def convert_reproject(
     # Validate .parquet extension
     validate_parquet_extension(output_file, any_extension)
 
-    # Validate mutual exclusivity of row group options and get MB value
-    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
     with _activate_s3(ctx, aws_profile=aws_profile):
         _reproject_impl_cli(
             input_file,
@@ -533,12 +492,7 @@ def convert_reproject(
             overwrite,
             verbose,
             aws_profile,
-            compression,
-            compression_level,
-            geoparquet_version,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            memory_limit=write_memory,
+            write,
             assume_crs84=assume_crs84,
         )
 

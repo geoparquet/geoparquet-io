@@ -1297,6 +1297,8 @@ _FUNNEL_FIELDS = (
     "geoparquet_version",
     "memory_limit",
 )
+#: CLI parameter -> WriteOptions field, where the two spell it differently.
+_CLI_SPELLINGS = {"row_group_size": "row_group_rows", "write_memory": "memory_limit"}
 #: The fields that decide the written bytes (:meth:`WriteOptions.sets_output_layout`).
 _LAYOUT_FIELDS = (
     "compression",
@@ -1311,7 +1313,8 @@ _LAYOUT_FIELDS = (
 class WriteOptions:
     """How a GeoParquet file is written, as one value (``gpio.WriteOptions``, #761).
 
-    ``Table.write(path, options)`` takes it. Inside the core, a public entry point
+    ``Table.write(path, options)`` takes it, and every CLI write command builds
+    one from its flags (:meth:`from_cli`). Inside the core, a public entry point
     keeps its keyword signature and builds one with :meth:`pick` from its own
     parameters; the drivers pass it along, and the funnel call expands it once
     (:meth:`funnel_kwargs`).
@@ -1349,6 +1352,19 @@ class WriteOptions:
     def pick(cls, values: Mapping[str, Any]) -> WriteOptions:
         """The options named in *values*; other keys are ignored, absent fields stay unset."""
         return cls(**{f.name: values[f.name] for f in fields(cls) if f.name in values})
+
+    @classmethod
+    def from_cli(cls, **params: Any) -> WriteOptions:
+        """The one ``WriteOptions`` a CLI write command builds from its Click parameters.
+
+        ``--row-group-size`` is ``row_group_rows`` and ``--write-memory`` is
+        ``memory_limit``; ``--row-group-size-mb`` arrives in MB, parsed by the
+        packer (``cli.decorators.pack_write_options``). A flag left unset is
+        None, "not asked". Every other parameter is ignored -- ``threads``
+        above all: ``process simplify --threads`` is its coarsen workers, not
+        a write setting.
+        """
+        return cls.pick({_CLI_SPELLINGS.get(name, name): value for name, value in params.items()})
 
     def sets_output_layout(self) -> bool:
         """Whether any option that decides the written bytes was asked for.

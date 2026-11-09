@@ -403,3 +403,185 @@ def test_default_options_on_another_format_are_fine(places, tmp_path):
 def test_table_write_honours_memory_limit(places, tmp_path, caplog):
     places.write(tmp_path / "out.parquet", memory_limit="517MB", verbose=True)
     assert "DuckDB memory limit: 517MB" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The CLI builds one WriteOptions per write command (#761)
+# ---------------------------------------------------------------------------
+
+
+def test_from_cli_maps_the_cli_spellings():
+    built = WriteOptions.from_cli(
+        compression="GZIP",
+        compression_level=3,
+        row_group_size=4096,
+        row_group_size_mb=None,
+        write_memory="1GB",
+        geoparquet_version="2.0",
+        write_strategy="streaming",
+    )
+    assert built == WriteOptions(
+        compression="GZIP",
+        compression_level=3,
+        row_group_rows=4096,
+        memory_limit="1GB",
+        geoparquet_version="2.0",
+        write_strategy="streaming",
+    )
+
+
+def test_from_cli_keeps_an_unset_flag_unset_and_never_reads_threads():
+    """`process simplify --threads` is its coarsen workers, not a write setting."""
+    built = WriteOptions.from_cli(compression=None, threads=8, verbose=True)
+    assert built == WriteOptions(compression=None)
+    assert not built.sets_output_layout()
+
+
+def _packed(**params):
+    from geoparquet_io.cli.decorators import pack_write_options
+
+    return pack_write_options(lambda **kwargs: kwargs)(**params)
+
+
+def test_the_packer_hands_over_one_write_and_keeps_the_rest():
+    got = _packed(compression="LZ4", row_group_size=None, row_group_size_mb="2MB", verbose=True)
+    assert got == {"verbose": True, "write": WriteOptions(compression="LZ4", row_group_size_mb=2.0)}
+
+
+def test_the_packer_refuses_rows_and_megabytes_together():
+    import click
+
+    with pytest.raises(click.UsageError, match="mutually exclusive"):
+        _packed(row_group_size=4096, row_group_size_mb="2MB")
+
+
+#: The Click parameters the write decorators declare.
+RAW_WRITE_PARAMS = frozenset(
+    {
+        "compression",
+        "compression_level",
+        "row_group_size",
+        "row_group_size_mb",
+        "write_memory",
+        "geoparquet_version",
+        "write_strategy",
+    }
+)
+
+#: Leaves that carry a write flag but build no WriteOptions, and why.
+NOT_WRITE_LEAVES = {
+    "check spec": "--geoparquet-version names the version to validate against; nothing is written.",
+    "pmtiles pyramid": (
+        "--write-memory bounds the DuckDB queries that build the tiles; the output is "
+        "PMTiles, with no GeoParquet write for a WriteOptions to describe."
+    ),
+}
+
+
+def _write_leaves():
+    import click
+
+    from geoparquet_io.cli.main import cli
+
+    out = {}
+
+    def walk(cmd, path):
+        if isinstance(cmd, click.Group):
+            for name, sub in cmd.commands.items():
+                walk(sub, (*path, name))
+        elif {p.name for p in cmd.params} & RAW_WRITE_PARAMS:
+            out[" ".join(path)] = cmd
+
+    walk(cli, ())
+    return {leaf: cmd for leaf, cmd in out.items() if leaf not in NOT_WRITE_LEAVES}
+
+
+def test_no_write_leaf_takes_raw_write_flags():
+    """Structural: each write command's body gets one `write`, never the flags.
+
+    A body that takes the flags can drop one on the way to core (#627, #663);
+    a body that takes only `write` passes it whole.
+    """
+    offenders = {}
+    for leaf, cmd in _write_leaves().items():
+        params = set(inspect.signature(inspect.unwrap(cmd.callback)).parameters)
+        if params & RAW_WRITE_PARAMS or "write" not in params:
+            offenders[leaf] = sorted(params & RAW_WRITE_PARAMS)
+    assert len(_write_leaves()) >= 30
+    assert not offenders, offenders
+
+
+def test_the_exempt_leaves_still_carry_a_write_flag():
+    from geoparquet_io.cli.main import cli
+
+    for leaf in NOT_WRITE_LEAVES:
+        group, name = leaf.split()
+        params = {p.name for p in cli.commands[group].commands[name].params}
+        assert params & RAW_WRITE_PARAMS, f"{leaf} is no longer exempt; drop it"
+
+
+def test_the_packer_takes_every_write_flag():
+    from geoparquet_io.cli.decorators import WRITE_OPTION_PARAMS
+
+    assert set(WRITE_OPTION_PARAMS) == RAW_WRITE_PARAMS
+
+
+#: A non-default value per write flag, and the core keyword it must arrive as.
+NON_DEFAULT_FLAGS = {
+    "compression": (("--compression", "GZIP"), "compression", "GZIP"),
+    "compression_level": (("--compression-level", "5"), "compression_level", 5),
+    "row_group_size": (("--row-group-size", "4096"), "row_group_rows", 4096),
+    "geoparquet_version": (("--geoparquet-version", "1.0"), "geoparquet_version", "1.0"),
+    "write_memory": (("--write-memory", "1GB"), "memory_limit", "1GB"),
+    "write_strategy": (("--write-strategy", "in-memory"), "write_strategy", "in-memory"),
+}
+
+
+def _write_cases():
+    from tests.test_cli_api_call_parity_scaffold import CASES_BY_ID
+
+    return sorted(leaf for leaf in _write_leaves() if leaf in CASES_BY_ID)
+
+
+@pytest.mark.parametrize("leaf", _write_cases())
+def test_every_write_flag_reaches_core(leaf, places_test_file, geojson_input, tmp_path):
+    """Behavioural: each flag a write leaf declares arrives at its core call.
+
+    The leaf's `ParityCase` names the core boundary; the run adds a non-default
+    value for every write flag the leaf has.
+    """
+    from tests.test_cli_api_call_parity_scaffold import (
+        CASES_BY_ID,
+        MISSING,
+        Ctx,
+        _capture,
+    )
+
+    declared = {p.name for p in _write_leaves()[leaf].params}
+    flags = {name: spec for name, spec in NON_DEFAULT_FLAGS.items() if name in declared}
+    extra = [word for argv, _core, _value in flags.values() for word in argv]
+
+    class FlaggedCtx(Ctx):
+        def run_cli(self, args):
+            return super().run_cli([*args, *extra])
+
+    import pyarrow.parquet as pq
+    from click.testing import CliRunner
+
+    ctx = FlaggedCtx(
+        input_file=places_test_file,
+        convert_input=geojson_input,
+        output_file=str(tmp_path / "out.parquet"),
+        output_dir=str(tmp_path / "out_dir"),
+        table=pq.read_table(places_test_file),
+        gpio_table=None,
+        runner=CliRunner(),
+        tmp_path=tmp_path,
+    )
+    call = _capture(CASES_BY_ID[leaf].cli, ctx)
+    dropped = {
+        flag: f"{core}={call.get(core, MISSING)!r}, wanted {value!r}"
+        for flag, (_argv, core, value) in flags.items()
+        if call.get(core, MISSING) != value
+    }
+    assert not dropped, f"`gpio {leaf}` dropped write flags on the way to core: {dropped}"

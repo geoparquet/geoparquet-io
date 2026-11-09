@@ -18,7 +18,7 @@ from geoparquet_io.cli.decorators import (
     grid_aggregate_options,
     metric_nodata_option,
     overwrite_option,
-    parse_row_group_options,
+    pack_write_options,
     process_compression_options,
     refuse_together,
     repair_geometry_option,
@@ -138,6 +138,7 @@ def process(ctx):
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def process_overview(
     ctx,
     input_parquet,
@@ -148,15 +149,12 @@ def process_overview(
     scheme,
     output_dir,
     force,
-    compression,
-    compression_level,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
     overview_out,
     cell_detail,
     explicit_gsd,
-    write_memory,
 ):
     """Build coarser overview levels from an aggregate output.
 
@@ -189,9 +187,7 @@ def process_overview(
             "cell_column": cell_column,
             "scheme": scheme,
             "output_dir": output_dir,
-            "compression": compression,
-            "compression_level": compression_level,
-            "geoparquet_version": geoparquet_version,
+            **write.funnel_kwargs(),
             "force": force,
             "verbose": verbose,
             "show_sql": show_sql,
@@ -203,11 +199,10 @@ def process_overview(
                     overview_out,
                     cell_detail=cell_detail,
                     explicit_gsd=explicit_gsd,
-                    memory_limit=write_memory,
                     **kwargs,
                 )
             else:
-                create_overviews_impl(input_parquet, memory_limit=write_memory, **kwargs)
+                create_overviews_impl(input_parquet, **kwargs)
         except (ValueError, duckdb.Error) as exc:
             raise click_error_for(exc) from exc
 
@@ -239,6 +234,7 @@ def process_aggregate(ctx):
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def process_aggregate_a5(
     ctx,
     input_parquet,
@@ -248,10 +244,8 @@ def process_aggregate_a5(
     target_per_cell,
     max_cells,
     aggregate_options,
-    compression,
-    compression_level,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Aggregate features into A5 grid cells.
@@ -280,9 +274,7 @@ def process_aggregate_a5(
                 target_per_cell=target_per_cell,
                 max_cells=max_cells,
                 options=aggregate_options,
-                compression=compression,
-                compression_level=compression_level,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
                 verbose=verbose,
                 show_sql=show_sql,
             )
@@ -305,6 +297,7 @@ def process_aggregate_a5(
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def process_aggregate_h3(
     ctx,
     input_parquet,
@@ -314,10 +307,8 @@ def process_aggregate_h3(
     target_per_cell,
     max_cells,
     aggregate_options,
-    compression,
-    compression_level,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Aggregate features into H3 grid cells.
@@ -346,9 +337,7 @@ def process_aggregate_h3(
                 target_per_cell=target_per_cell,
                 max_cells=max_cells,
                 options=aggregate_options,
-                compression=compression,
-                compression_level=compression_level,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
                 verbose=verbose,
                 show_sql=show_sql,
             )
@@ -397,6 +386,7 @@ def process_aggregate_h3(
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def process_aggregate_admin(
     ctx,
     input_parquet,
@@ -411,11 +401,8 @@ def process_aggregate_admin(
     where,
     bucket_point,
     bbox_column,
-    write_memory,
-    compression,
-    compression_level,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Aggregate features into administrative regions.
@@ -443,16 +430,13 @@ def process_aggregate_admin(
                 breakdown_limit=breakdown_limit,
                 breakdown_metric=breakdown_metric,
                 out_geometry=out_geometry,
-                compression=compression,
-                compression_level=compression_level,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
                 verbose=verbose,
                 show_sql=show_sql,
                 where=where,
                 metric_nodata=metric_nodata,
                 bucket_point=bucket_point,
                 bbox_column=bbox_column,
-                memory_limit=write_memory,
             )
         except (ValueError, duckdb.Error) as exc:
             raise click_error_for(exc, hint=_where_hint(where)) from exc
@@ -525,6 +509,7 @@ def process_aggregate_admin(
 @geoparquet_version_option
 @verbose_option
 @click.pass_context
+@pack_write_options
 def process_simplify(
     ctx,
     input_parquet,
@@ -538,11 +523,7 @@ def process_simplify(
     drop_empty,
     simplify_crs,
     refresh_metrics,
-    row_group_size,
-    row_group_size_mb,
-    compression,
-    compression_level,
-    geoparquet_version,
+    write,
     verbose,
 ):
     """Simplify geometries with coarsen (GEOS-identical, multithreaded Rust).
@@ -564,7 +545,6 @@ def process_simplify(
             "--simplify-boundary/--no-simplify-boundary only applies with --coverage."
         )
     # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
-    row_group_size_mb = parse_row_group_options(row_group_size, row_group_size_mb)
     with _activate_s3(ctx):
         try:
             simplify_file_impl(
@@ -579,11 +559,7 @@ def process_simplify(
                 drop_empty=drop_empty,
                 simplify_crs=simplify_crs,
                 refresh_metrics=refresh_metrics,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_size,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
                 verbose=verbose,
             )
         except ValueError as exc:
@@ -634,6 +610,7 @@ def _parse_float_csv(value: str | None, option_name: str) -> list[float] | None:
 @geoparquet_version_option
 @verbose_option
 @click.pass_context
+@pack_write_options
 def process_polygonize(
     ctx,
     input_raster,
@@ -644,11 +621,7 @@ def process_polygonize(
     nodata,
     no_mask,
     repair_geometry,
-    row_group_size,
-    row_group_size_mb,
-    compression,
-    compression_level,
-    geoparquet_version,
+    write,
     verbose,
 ):
     """Polygonize a categorical raster into GeoParquet (contourrs).
@@ -666,7 +639,6 @@ def process_polygonize(
 
     value_list = _parse_float_csv(values, "--values")
     # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
-    row_group_size_mb = parse_row_group_options(row_group_size, row_group_size_mb)
     with _activate_s3(ctx):
         try:
             polygonize_file(
@@ -678,11 +650,7 @@ def process_polygonize(
                 nodata=nodata,
                 use_mask=not no_mask,
                 repair_geometry=repair_geometry,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_size,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
                 verbose=verbose,
             )
         except ValueError as exc:
@@ -739,6 +707,7 @@ def process_polygonize(
 @geoparquet_version_option
 @verbose_option
 @click.pass_context
+@pack_write_options
 def process_contour(
     ctx,
     input_raster,
@@ -751,11 +720,7 @@ def process_contour(
     no_mask,
     min_column,
     max_column,
-    row_group_size,
-    row_group_size_mb,
-    compression,
-    compression_level,
-    geoparquet_version,
+    write,
     verbose,
 ):
     """Extract filled contour bands from an elevation raster (contourrs).
@@ -773,7 +738,6 @@ def process_contour(
 
     level_list = _parse_float_csv(levels, "--levels")
     # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
-    row_group_size_mb = parse_row_group_options(row_group_size, row_group_size_mb)
     with _activate_s3(ctx):
         try:
             contour_file(
@@ -787,11 +751,7 @@ def process_contour(
                 use_mask=not no_mask,
                 min_column=min_column,
                 max_column=max_column,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_size,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
                 verbose=verbose,
             )
         except ValueError as exc:

@@ -458,6 +458,77 @@ def _matrix() -> list[Case]:
             "out.parquet",
         ),
     ]
+    # #761: every write flag at a non-default value, through each leaf's packed
+    # WriteOptions. GZIP so the level stays in GZIP's range (1-9).
+    flags = (
+        "--compression",
+        "GZIP",
+        "--compression-level",
+        "5",
+        "--row-group-size",
+        "1000",
+        "--geoparquet-version",
+        "1.0",
+    )
+    for name, argv, src in (
+        ("add_h3", ("add", "h3", "{in}", "{out}", "--resolution", "7"), places),
+        ("add_quadkey", ("add", "quadkey", "{in}", "{out}"), places),
+        ("add_s2", ("add", "s2", "{in}", "{out}", "--level", "10"), places),
+        ("add_a5", ("add", "a5", "{in}", "{out}"), places),
+        ("add_kdtree", ("add", "kdtree", "{in}", "{out}"), places),
+        ("add_bbox_force", ("add", "bbox", "{in}", "{out}", "--force"), places),
+        ("add_geometry_metrics", ("add", "geometry-metrics", "{in}", "{out}"), buildings),
+        ("sort_hilbert", ("sort", "hilbert", "{in}", "{out}"), places),
+        ("sort_str", ("sort", "str", "{in}", "{out}"), places),
+        ("sort_column", ("sort", "column", "{in}", "{out}", "name"), places),
+        ("sort_quadkey", ("sort", "quadkey", "{in}", "{out}"), places),
+        ("extract", ("extract", "{in}", "{out}"), places),
+        ("convert_geojson", ("convert", "geoparquet", "{in}", "{out}"), "buildings_test.geojson"),
+        (
+            "convert_reproject",
+            ("convert", "reproject", "{in}", "{out}", "--dst-crs", "EPSG:3857"),
+            places,
+        ),
+    ):
+        cases.append(
+            Case(
+                f"{name}_write_flags",
+                (*argv, *flags, "--write-memory", "1GB"),
+                (src,),
+                "out.parquet",
+            )
+        )
+    cases.append(
+        Case(
+            "process_simplify_write_flags",
+            ("process", "simplify", "{in}", "{out}", "--tolerance", "0.0001", *flags),
+            (buildings,),
+            "out.parquet",
+            takes_level=False,
+        )
+    )
+    cases.append(
+        Case(
+            "partition_string_write_flags",
+            (
+                "partition",
+                "string",
+                "{in}",
+                "{out}",
+                "--column",
+                "name",
+                "--chars",
+                "1",
+                "--force",
+                "--skip-analysis",
+                *flags,
+                "--write-memory",
+                "1GB",
+            ),
+            (places,),
+            "out_dir",
+        )
+    )
     return cases
 
 
