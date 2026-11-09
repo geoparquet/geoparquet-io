@@ -991,7 +991,10 @@ class Table:
 
         ``gpio.read(path)`` sets it (as an absolute path for a local file).
         A Table built in memory, read with ``columns=`` or ``filters=``, or
-        derived by any operation has none: it is no longer a view of a file.
+        derived by an operation that changes it has none: it is no longer a
+        view of a file. A no-op (``head(n)``/``tail(n)`` with
+        ``n >= num_rows``, or ``extract()`` with no filter and
+        ``repair_geometry=False``) returns the same Table, source included.
         ``check_*`` and ``validate()`` measure this file when it is still the
         one that was read; if it has been replaced or removed since, or it is
         a remote URL, they answer prospectively instead.
@@ -1819,13 +1822,18 @@ class Table:
 
         Returns:
             New filtered Table. Excluding every geometry column yields an
-            attribute table, which ``write()`` emits as plain Parquet.
+            attribute table, which ``write()`` emits as plain Parquet. With no
+            filter and ``repair_geometry=False`` nothing can change, so this
+            Table itself is returned.
 
         Raises:
             InvalidParameterError: If a requested column does not exist, if a
                 column is in both lists, or if ``bbox`` is used on a table with
                 no geometry column.
         """
+        unfiltered = all(arg is None for arg in (columns, exclude_columns, bbox, where, limit))
+        if unfiltered and not repair_geometry:
+            return self
         from geoparquet_io.core.extract import extract_table
 
         result = extract_table(
@@ -2665,7 +2673,8 @@ class Table:
             n: Number of rows to return (default: 10). Must be non-negative.
 
         Returns:
-            New Table with the first n rows
+            New Table with the first n rows, or this Table itself when
+            ``n >= num_rows`` (nothing to drop, so it stays a view of its file)
 
         Raises:
             ValueError: If n is negative
@@ -2677,7 +2686,8 @@ class Table:
         """
         if n < 0:
             raise ValueError(f"n must be non-negative, got {n}")
-        n = min(n, self.num_rows)
+        if n >= self.num_rows:
+            return self
         return self._wrap(self._table.slice(0, n), self._geometry_column)
 
     def tail(self, n: int = 10) -> Table:
@@ -2688,7 +2698,8 @@ class Table:
             n: Number of rows to return (default: 10). Must be non-negative.
 
         Returns:
-            New Table with the last n rows
+            New Table with the last n rows, or this Table itself when
+            ``n >= num_rows`` (nothing to drop, so it stays a view of its file)
 
         Raises:
             ValueError: If n is negative
@@ -2700,9 +2711,9 @@ class Table:
         """
         if n < 0:
             raise ValueError(f"n must be non-negative, got {n}")
-        n = min(n, self.num_rows)
-        offset = max(0, self.num_rows - n)
-        return self._wrap(self._table.slice(offset, n), self._geometry_column)
+        if n >= self.num_rows:
+            return self
+        return self._wrap(self._table.slice(self.num_rows - n, n), self._geometry_column)
 
     def stats(self) -> dict:
         """
