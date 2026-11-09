@@ -1055,9 +1055,11 @@ def _crs_sources_disagree(geo_block_crs, native_crs) -> bool:
     """True only when both sources name a CRS and the two are demonstrably different.
 
     When both sides resolve to an authority identifier, the identifiers decide.
-    When exactly one does, :func:`crs_equal` decides (pyproj, axis order
-    ignored), so a full PROJJSON of a different CRS with its ``id`` stripped is
-    not mistaken for another rendering of the same one (#1014).
+    When exactly one does, pyproj decides (axis order ignored), so a full
+    PROJJSON of a different CRS with its ``id`` stripped is not mistaken for
+    another rendering of the same one (#1014); it warns only when both sides
+    load and differ, because a warning fails open where :func:`crs_equal`
+    (built for consistency checks) fails closed.
 
     When neither has an identifier it stays silent: two PROJJSON objects with no
     ``id`` can be textually different renderings of the same CRS (different
@@ -1071,7 +1073,10 @@ def _crs_sources_disagree(geo_block_crs, native_crs) -> bool:
         return left != right
     if not (left or right) or not (geo_block_crs and native_crs):
         return False
-    return not crs_equal(geo_block_crs, native_crs)
+    left_crs, right_crs = load_crs(geo_block_crs), load_crs(native_crs)
+    if left_crs is None or right_crs is None:
+        return False
+    return not left_crs.equals(right_crs, ignore_axis_order=True)
 
 
 @lru_cache(maxsize=256)
