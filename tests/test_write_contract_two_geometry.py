@@ -45,8 +45,10 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.crs_utils import crs_equal, crs_from_column_meta
+from geoparquet_io.core.duckdb_metadata import get_kv_metadata
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
-from geoparquet_io.core.write_funnels import write_geoparquet_table
+from geoparquet_io.core.write_funnels import write_geoparquet_table, write_parquet_with_metadata
 from tests.test_write_contract import (
     KNOWN_STRATEGY_DIVERGENCES,
     POINTS,
@@ -300,3 +302,28 @@ def test_a4_two_geometry_contract(entry, shape, version, two_geometry_sources, t
         _xfail_if_expected(exc, divergence)
         raise  # unreachable; _xfail_if_expected always raises or xfails
     _adjudicate(failed, divergence)
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_rebuild_does_not_declare_a_projected_away_secondary(
+    version, two_geometry_sources, tmp_path
+):
+    """A rebuild restores a secondary's declared CRS only if the query emits it."""
+    source = two_geometry_sources["wkb_primary_first"]
+    out = str(tmp_path / "out.parquet")
+    con = get_duckdb_connection()
+    try:
+        write_parquet_with_metadata(
+            con,
+            f"SELECT id, {PRIMARY} FROM read_parquet({sql_path(source)})",
+            out,
+            original_metadata=get_kv_metadata(source),
+            geoparquet_version=version,
+            input_file=source,
+            rebuild_geo_metadata=True,
+        )
+    finally:
+        con.close()
+    assert set(_geo_metadata(out)["columns"]) == {PRIMARY}
+    result = validate_geoparquet(out, validate_data=True, sample_size=0)
+    assert [c.name for c in result.checks if c.status == CheckStatus.FAILED] == []
