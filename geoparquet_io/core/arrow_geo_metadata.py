@@ -18,13 +18,11 @@ like -- are not re-exported, and nothing outside this module reached them).
 from geoparquet_io.core.arrow_types import _rebuild_array_with_type
 from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
 from geoparquet_io.core.crs_utils import (
-    PARQUET_UNKNOWN_CRS,
+    _crs_from_geoarrow_field,
     _format_crs_display,
-    crs_of,
     field_type_crs_is_unknown,
     is_default_crs,
     is_empty_crs_value,
-    table_crs_is_unknown,
 )
 from geoparquet_io.core.duckdb_utils import geoarrow_extension, planar_view
 from geoparquet_io.core.edges import (
@@ -197,7 +195,11 @@ def _secondary_crs_from_field(field) -> dict:
     """
     if field_type_crs_is_unknown(field):
         return {"crs": None}
-    crs = _crs_as_projjson(getattr(field.type, "crs", None))
+    import pyarrow as pa
+
+    # crs_of's field reader: the type's crs, or on a plain binary field the raw
+    # ARROW:extension:metadata (#1400's probe was the only other reader of it).
+    crs = _crs_from_geoarrow_field(pa.schema([field]), field.name)
     if is_empty_crs_value(crs):
         return {"crs": None}
     if isinstance(crs, dict) and not is_default_crs(crs):
@@ -800,18 +802,6 @@ def _build_geo_block(
     """
     if verbose and input_crs and not is_default_crs(input_crs):
         debug(f"Added CRS to geo metadata: {_format_crs_display(input_crs)}")
-    # Resolve CRS data from the intact table before composing stripped declarations.
-    column_crs = {
-        name: (
-            PARQUET_UNKNOWN_CRS
-            if table_crs_is_unknown(table, name)
-            else crs_of(table, geometry_column=name, quiet=True)
-        )
-        for name in (
-            table_geometry_info(table, None, sanitized_carried_geo(table.schema.metadata)) or {}
-        ).get("metadata", {})
-        if name != geometry_column
-    }
     return compose_geo_block(
         SchemaSource(table.schema, original_metadata),
         GeoBlockOptions(
@@ -822,7 +812,6 @@ def _build_geo_block(
             custom_metadata=custom_metadata,
             edges=edges,
             crs=input_crs,
-            column_crs=column_crs,
             stats=stats,
             geometry_info=geometry_info,
             measure_missing=measure_missing,

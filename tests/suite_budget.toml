@@ -11,7 +11,7 @@
 # projected away x geo-only, ARROW:schema or decoded-dict footer x 1.1/2.0),
 # plus 1 for declared_write_metadata leaving a decoded geo dict unchanged.
 # +10: a secondary CRS held only in field metadata, per strategy x 1.1/2.0
-# (the cells #1400's _build_geo_block probe is load-bearing for, and the gap).
+# (#1400's probe kept two; the owner read keeps all ten).
 max_collected = 14439
 max_timeout_marks = 1
 slow_mark_sites = [

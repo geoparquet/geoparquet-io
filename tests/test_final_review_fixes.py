@@ -99,37 +99,12 @@ def _wkb_field(name: str, crs: dict | None = None) -> pa.Field:
     return pa.field(name, pa.binary(), metadata=metadata)
 
 
-#: Cells the ``_build_geo_block`` probe does not reach: the other strategies never
-#: call it, and at 1.1 the in-memory path re-composes over the retyped plain-WKB
-#: table, which has lost the field metadata.
-FIELD_METADATA_CRS_GAP = pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "ISSUE-TBD: write_geoparquet_table(t, out, geoparquet_version=V, write_strategy=S), "
-        "t's secondary a plain-binary geoarrow.wkb field whose EPSG:3857 is only in "
-        "ARROW:extension:metadata, writes geo.columns.other with no crs (CRS84)"
-    ),
-)
-FIELD_METADATA_CRS_KEPT = {("2.0", "in-memory"), ("2.0", None)}
-
-
-@pytest.mark.parametrize(
-    ("version", "strategy"),
-    [
-        pytest.param(
-            version,
-            strategy,
-            marks=() if (version, strategy) in FIELD_METADATA_CRS_KEPT else FIELD_METADATA_CRS_GAP,
-            id=f"{version}-{strategy}",
-        )
-        for version in ("1.1", "2.0")
-        for strategy in ("in-memory", "streaming", "duckdb-kv", "disk-rewrite", None)
-    ],
-)
+@pytest.mark.parametrize("strategy", ["in-memory", "streaming", "duckdb-kv", "disk-rewrite", None])
+@pytest.mark.parametrize("version", ["1.1", "2.0"])
 def test_table_write_keeps_a_field_metadata_only_secondary_crs(tmp_path, version, strategy):
-    """#1400's ``column_crs`` probe in ``_build_geo_block`` reads a secondary's CRS
-    from raw field metadata, which ``table_geometry_info`` (``field.type.crs``)
-    misses: deleting it wrote ``other`` with no crs, i.e. OGC:CRS84."""
+    """A secondary whose CRS is only in raw ``ARROW:extension:metadata``: reading
+    just ``field.type.crs`` wrote ``other`` with no crs, i.e. OGC:CRS84, on every
+    strategy (only #1400's in-memory probe caught it, and only at 2.0)."""
     epsg_3857 = CRS.from_epsg(3857).to_json_dict()
     schema = pa.schema([_wkb_field("geometry"), _wkb_field("other", epsg_3857)])
     table = pa.table(
