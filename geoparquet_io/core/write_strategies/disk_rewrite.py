@@ -30,6 +30,7 @@ from geoparquet_io.core.geo_metadata import (
     QuerySource,
     compose_geo_block,
     geometry_stats_of,
+    missing_geometry_types,
     sanitized_carried_geo,
     with_geo_key,
 )
@@ -218,6 +219,9 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                     crs=input_crs,
                     stats={geometry_column: measured},
                     geometry_info=geometry_info,
+                    measure_missing=lambda block: missing_geometry_types(
+                        QuerySource(con, query), block
+                    ),
                     verbose=verbose,
                 ),
             )

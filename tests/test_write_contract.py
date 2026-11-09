@@ -132,25 +132,13 @@ AUTO_2_0_CRS_STATE = Divergence(
 # "all four paths agree at every version".
 KNOWN_DIVERGENCES: dict[tuple[str, str], Divergence] = {}
 
-REBUILD_DROPS_SECONDARY_TYPES = Divergence(
-    reason=(
-        "#1433: write_parquet_with_metadata(rebuild_geo_metadata=True) on the "
-        "in-memory, streaming and disk-rewrite strategies writes a 1.1 secondary "
-        "geometry entry with no geometry_types: declared_write_metadata strips the "
-        "key and only duckdb-kv recomputes a secondary's types (#952)."
-    ),
-    assertion_contains="other: geometry_types None",
-)
-
 # (strategy, shape) -> Divergence for A2; (entry, "<shape>@<version>") for A4
 # (tests/test_write_contract_two_geometry.py).
 #
 # A2's entries are gone: #688 (fixed by #707) covered six streaming shapes and
-# #689 (fixed by #698) the disk-rewrite row-group cell.
-KNOWN_STRATEGY_DIVERGENCES: dict[tuple[str, str], Divergence] = {
-    (f"query_rebuild[{strategy}]", "wkb_primary_first@1.1"): REBUILD_DROPS_SECONDARY_TYPES
-    for strategy in ("in-memory", "streaming", "disk-rewrite")
-}
+# #689 (fixed by #698) the disk-rewrite row-group cell. A4's one entry, #1433
+# (a geo rebuild dropping a 1.1 secondary's geometry_types), is fixed too.
+KNOWN_STRATEGY_DIVERGENCES: dict[tuple[str, str], Divergence] = {}
 
 # ---------------------------------------------------------------------------
 # Fixture data: built in-test, no new files under tests/data.

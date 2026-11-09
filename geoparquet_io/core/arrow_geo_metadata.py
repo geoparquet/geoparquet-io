@@ -45,6 +45,7 @@ from geoparquet_io.core.geo_metadata import (
     geometry_stats_of,
     geometry_types_of,
     is_bbox_struct_field,
+    missing_geometry_types,
     sanitized_carried_geo,
     with_geo_key,
 )
@@ -762,7 +763,12 @@ def _apply_geoparquet_metadata(
             measured["bbox"] = stats.bbox
         if need_types:
             measured["geometry_types"] = stats.geometry_types
-    geo_meta = _build_geo_block(table, *block_args, stats={geometry_column: measured})
+    geo_meta = _build_geo_block(
+        table,
+        *block_args,
+        stats={geometry_column: measured},
+        measure_missing=lambda block: missing_geometry_types(table, block),
+    )
 
     return _assemble_and_apply_geo_metadata(table, geo_meta, metadata_version, verbose)
 
@@ -778,6 +784,7 @@ def _build_geo_block(
     geometry_info: dict | None,
     verbose: bool,
     stats: dict | None = None,
+    measure_missing=None,
 ) -> dict:
     """The output's ``geo`` block, composed over the table's schema.
 
@@ -818,6 +825,7 @@ def _build_geo_block(
             column_crs=column_crs,
             stats=stats,
             geometry_info=geometry_info,
+            measure_missing=measure_missing,
             verbose=verbose,
         ),
     )

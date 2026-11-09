@@ -2674,6 +2674,22 @@ def geometry_types_of(source, geometry_column: str | None, *, verbose: bool = Fa
     ).geometry_types
 
 
+def missing_geometry_types(source, block: dict) -> dict[str, dict]:
+    """``measure_missing`` for a writer: every entry with no ``geometry_types`` key, measured.
+
+    A geo rebuild strips the key from each column it re-derives, and a 1.x
+    entry without it is invalid (#1433). Only the absent key is a gap here: the
+    ``[]`` "not known" sentinel stays as the caller left it (#934); duckdb-kv,
+    which fills that too, has its own gap rule (#952). ``source`` is anything
+    :func:`geometry_types_of` measures.
+    """
+    return {
+        name: {"geometry_types": geometry_types_of(source, name)}
+        for name, meta in block["columns"].items()
+        if isinstance(meta, dict) and "geometry_types" not in meta
+    }
+
+
 # The struct fields GeoParquet's "Bounding Box Columns" requires. The *name*
 # rule that used to live beside it is gone: conventional-name matching over
 # `bbox`/`bounds`/`extent`/`*_bbox` is no longer anybody's answer, on either the

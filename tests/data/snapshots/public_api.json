@@ -515,6 +515,7 @@
     "may_hold_a_self_evident_bbox",
     "merged_geometry_stats",
     "missing_bbox_struct_fields",
+    "missing_geometry_types",
     "parse_column_meta",
     "prune_geo_metadata_to_columns",
     "raw_geo_of_file",
