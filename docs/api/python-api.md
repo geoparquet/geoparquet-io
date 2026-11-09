@@ -1578,6 +1578,40 @@ result.source_path  # None
 result.prospective  # True
 ```
 
+#### `fix()`
+
+Apply the repairs `gpio check <cmd> --fix` would, into a new Table. It never
+rewrites the file the Table was read from: `output=` writes the repaired file
+to another path and returns `gpio.read(output)`; without it the repair goes
+through a scratch file and the rows come back in memory (`source_path` is
+None). An `output` that names the source is refused. `checks=` picks which
+fixes run, from `"bbox"`, `"covering"`, `"compression"`, `"row_groups"` and
+`"spatial"` (default: all); an unknown name is refused. The compression and
+row-group fixes are one rewrite, so picking either applies both when needed.
+
+```python
+fixed = table.fix()                                    # every fix, in memory
+fixed = table.fix(output='fixed.parquet')              # a view of the new file
+sorted_only = table.fix(checks=["spatial"], output='sorted.parquet')
+```
+
+#### Path-level checks
+
+`gpio.check_all`, `check_compression`, `check_row_groups`, `check_bbox`,
+`check_spatial`, `check_spatial_pushdown`, `check_bloom_filters`,
+`check_optimization` and `validate` take a path and the same options as the
+matching `Table` method (and the CLI subcommand), and return a `CheckResult`
+with `source_path` set. They check one file: a directory or glob raises
+`InvalidParameterError`, and `gpio check <cmd>` handles a multi-file run. A
+remote URL is read in place. The `Table` methods call these on the file they
+were read from, so `gpio.check_x(path)` and `gpio.read(path).check_x()` agree.
+
+```python
+result = gpio.check_compression('data.parquet')
+result = gpio.check_row_groups('data.parquet', profile='web')
+result = gpio.validate('data.parquet', version='1.1', skip_data_validation=True)
+```
+
 #### `check_optimization()`
 
 Evaluate spatial query optimization across five factors (native geo types, geo bbox stats, spatial sorting, row group size, ZSTD compression). Returns a score from 0 to 5.
