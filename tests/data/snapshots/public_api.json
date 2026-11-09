@@ -408,7 +408,8 @@
     "get_parquet_row_count",
     "get_schema_columns",
     "looks_like_latlong_bbox",
-    "parse_geometry_input"
+    "parse_geometry_input",
+    "refuse_cli_only_geometry_forms"
   ],
   "geoparquet_io.core.file_utils": [
     "atomic_write",

@@ -1242,6 +1242,10 @@ class Table:
                 f"row filters are not supported for {detected_format} output; "
                 "they apply to geopackage, flatgeobuf and csv",
             )
+        if geometry is not None:
+            from geoparquet_io.core.extract import refuse_cli_only_geometry_forms
+
+            refuse_cli_only_geometry_forms(geometry)
 
         # Handle GeoParquet format
         if detected_format == "parquet":
