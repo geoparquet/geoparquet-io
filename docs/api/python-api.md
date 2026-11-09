@@ -593,7 +593,9 @@ table = gpio.read('input.parquet').add_bbox()
 table = gpio.read('input.parquet').add_bbox(column_name='bounds')
 ```
 
-#### `add_quadkey(column_name='quadkey', resolution=13, use_centroid=False)`
+<!-- &#100; stands for the d of id= so Zensical keeps the TOC entry whole (#1329). -->
+
+#### <code>add_quadkey(column_name='quadkey', resolution=13, use_centroi&#100;=False)</code>
 
 Add a quadkey column based on geometry location.
 
@@ -755,7 +757,9 @@ table = gpio.read('input.parquet').sort_column('name')
 table = gpio.read('input.parquet').sort_column('population', descending=True)
 ```
 
-#### `sort_quadkey(column_name='quadkey', resolution=13, use_centroid=False, remove_column=False)`
+<!-- &#100; stands for the d of id= so Zensical keeps the TOC entry whole (#1329). -->
+
+#### <code>sort_quadkey(column_name='quadkey', resolution=13, use_centroi&#100;=False, remove_column=False)</code>
 
 Sort rows by quadkey for spatial locality. If no quadkey column exists, one is added automatically.
 
@@ -1373,7 +1377,9 @@ for file_path in large_files:
 
 **Returns:** List of file paths sorted by size (largest first)
 
-#### `sub_partition_directory(directory, partition_type, min_size_bytes, resolution=None, level=None, partition_resolution=None, use_centroid=False, in_place=False, hive=False, overwrite=False, verbose=False, force=False, skip_analysis=True, compression='ZSTD', compression_level=None, auto=False, target_rows=100000, max_partitions=10000)`
+<!-- &#100; stands for the d of id= so Zensical keeps the TOC entry whole (#1329). -->
+
+#### <code>sub_partition_directory(directory, partition_type, min_size_bytes, resolution=None, level=None, partition_resolution=None, use_centroi&#100;=False, in_place=False, hive=False, overwrite=False, verbose=False, force=False, skip_analysis=True, compression='ZSTD', compression_level=None, auto=False, target_rows=100000, max_partitions=10000)</code>
 
 Sub-partition large files in a directory using spatial indexing.
 
