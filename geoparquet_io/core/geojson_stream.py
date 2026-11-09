@@ -25,7 +25,7 @@ import contextlib
 import hashlib
 import io
 import sys
-from typing import TYPE_CHECKING
+from typing import IO, TYPE_CHECKING
 
 from geoparquet_io.core.column_selection import same_column
 from geoparquet_io.core.geometry_detection import (
@@ -613,6 +613,8 @@ def _stream_feature_collection(
     result = con.execute(query)
     # Stage stdout too: a query or encoding failure must publish no partial JSON.
     with contextlib.ExitStack() as stack:
+        # Windows typeshed types TemporaryFile as a wrapper, not a TextIOWrapper.
+        output: IO[str]
         if output_path:
             staged = stack.enter_context(atomic_write(output_path, suffix=".geojson"))
             output = stack.enter_context(open(staged, "w", encoding="utf-8", newline="\n"))
