@@ -20,11 +20,11 @@ from geoparquet_io.core.carto import (
     _build_carto_query,
     _column_names_from_fields,
     _create_empty_geoparquet_table,
-    _detect_geometry_column,
     _detect_table_shape,
     _fatal_status_error,
     _fetch_with_retry,
     _geometry_column_from_fields,
+    _probe_table_schema,
     _validate_carto_url,
     _validate_table_name,
     carto_to_table,
@@ -397,10 +397,11 @@ class TestDetectTableShape:
                 ["id", "the_geom"],
             )
 
-    def test_detect_geometry_column_reads_the_same_probe(self):
+    def test_the_geometry_column_comes_from_one_schema_probe(self):
         fields = {"id": {"type": "number"}, "the_geom": {"type": "geometry"}}
         with self._patch(self._payloads({"fields": fields, "rows": []})) as probe:
-            assert _detect_geometry_column("https://x.carto.com/api/v2/sql", "tbl") == "the_geom"
+            schema = _probe_table_schema("https://x.carto.com/api/v2/sql", "tbl")
+            assert _geometry_column_from_fields(schema) == "the_geom"
         assert probe.call_count == 1
 
 
@@ -662,9 +663,8 @@ class TestCartoToTable:
 
     def test_detect_geometry_column_on_geo_table(self):
         """Detection probe finds the geometry column on a spatial table."""
-        geom_col = _detect_geometry_column(
-            "https://phl.carto.com/api/v2/sql",
-            "opa_properties_public",
+        geom_col = _geometry_column_from_fields(
+            _probe_table_schema("https://phl.carto.com/api/v2/sql", "opa_properties_public")
         )
         assert geom_col == "the_geom"
 

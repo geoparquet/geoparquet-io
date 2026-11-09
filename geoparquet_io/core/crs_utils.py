@@ -2045,6 +2045,23 @@ def source_crs_string(
     return transform_source_crs(crs_of(parquet_file, verbose, geometry_column=geometry_column))
 
 
+def source_crs_name(source, verbose: bool = False, geometry_column: str | None = None) -> str:
+    """``source``'s CRS as an ``ST_Transform`` source, naming lon/lat too.
+
+    ``source`` is anything :func:`crs_of` reads (a RAW path/URL or a table).
+    What :func:`source_crs_string` returns, except that lon/lat input is named
+    by :func:`lonlat_source_name` (``"EPSG:4326"`` when absent, per the
+    GeoParquet spec) instead of ``None``, for a caller that always transforms.
+    """
+    crs = crs_of(source, verbose, geometry_column=geometry_column)
+    resolved = transform_source_crs(crs)
+    if resolved:
+        return resolved
+    if verbose and not crs:
+        debug("No CRS found in metadata, assuming EPSG:4326 (WGS84)")
+    return lonlat_source_name(crs)
+
+
 def reproject_to_source_sql(geom_expr: str, source_crs, base_crs: str = DEFAULT_TARGET_CRS) -> str:
     """Wrap ``geom_expr`` to reproject FROM ``base_crs`` (default CRS84) TO ``source_crs``.
 

@@ -211,7 +211,6 @@ class WFSLayerInfo:
     crs_list: list[str]
     default_crs: str | None
     bbox: tuple[float, float, float, float] | None
-    geometry_column: str
     available_formats: list[str]
     sortable_attribute: str | None = None
 
@@ -719,37 +718,6 @@ def _describe_schema(wfs, typename: str) -> dict | None:
     return schema if isinstance(schema, dict) else None
 
 
-def _detect_geometry_column(wfs, typename: str) -> str:
-    """
-    Detect geometry column name from DescribeFeatureType.
-
-    Args:
-        wfs: OWSLib WebFeatureService object
-        typename: Layer typename
-
-    Returns:
-        Geometry column name; when the server describes none, the name gpio
-        gives the geometry it reads (``BUILT_GEOMETRY_COLUMN``, the column every
-        WFS read writes)
-    """
-    try:
-        schema = _describe_schema(wfs, typename)
-        if schema and "geometry" in schema:
-            return str(schema.get("geometry_column") or BUILT_GEOMETRY_COLUMN)
-        # Check for common geometry column names in properties
-        if schema and "properties" in schema:
-            for prop_name, prop_type in schema["properties"].items():
-                if any(
-                    geom in str(prop_type).lower()
-                    for geom in ["geometry", "point", "line", "polygon", "multi"]
-                ):
-                    return str(prop_name)
-    except Exception:
-        pass  # Nothing described: gpio's own name for it
-
-    return BUILT_GEOMETRY_COLUMN
-
-
 def _detect_sortable_attribute(wfs, typename: str) -> str | None:
     """
     Detect a sortable (non-geometry) attribute from DescribeFeatureType.
@@ -853,9 +821,6 @@ def get_layer_info(service_url: str, typename: str, version: str = "1.1.0") -> W
     if hasattr(layer, "boundingBoxWGS84") and layer.boundingBoxWGS84:
         bbox = tuple(layer.boundingBoxWGS84)
 
-    # Detect geometry column
-    geometry_column = _detect_geometry_column(wfs, matched_typename)
-
     # Get available output formats
     available_formats = []
 
@@ -896,7 +861,6 @@ def get_layer_info(service_url: str, typename: str, version: str = "1.1.0") -> W
         crs_list=crs_list,
         default_crs=default_crs,
         bbox=bbox,
-        geometry_column=geometry_column,
         available_formats=available_formats,
         sortable_attribute=sortable_attribute,
     )

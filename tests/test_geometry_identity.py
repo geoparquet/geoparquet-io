@@ -356,7 +356,10 @@ def test_extra_names_come_after_the_standard_names():
 
 
 def test_bigquery_detection_is_the_resolver_plus_its_extras():
-    from geoparquet_io.core.extract_bigquery import _detect_geometry_column
+    from geoparquet_io.core.geometry_detection import GEOGRAPHY_SOURCE_NAMES
+
+    def _detect_geometry_column(table):
+        return primary_geometry_column(table, extra_names=GEOGRAPHY_SOURCE_NAMES)
 
     def table(*names):
         return pa.table({n: [b""] for n in names})

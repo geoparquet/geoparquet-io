@@ -30,7 +30,6 @@ from geoparquet_io.core.wfs import (
     _build_wfs_url,
     _describe_schema,
     _detect_best_output_format,
-    _detect_geometry_column,
     _detect_sortable_attribute,
     _determine_bbox_strategy,
     _negotiate_crs,
@@ -723,7 +722,6 @@ class TestBboxStrategy:
             crs_list=["EPSG:4326", "EPSG:3857"],
             default_crs="EPSG:4326",
             bbox=(-180.0, -90.0, 180.0, 90.0),
-            geometry_column="geometry",
             available_formats=["application/json"],
         )
 
@@ -760,7 +758,6 @@ class TestBboxStrategy:
             crs_list=[],
             default_crs=None,
             bbox=None,
-            geometry_column="geometry",
             available_formats=[],
         )
         result = _determine_bbox_strategy("auto", layer_info)
@@ -1059,11 +1056,10 @@ class TestDescribeSchemaNamesTheLayerPerVersion:
         assert query["service"] == ["WFS"]
         assert query["typeNames"] == ["nora:v_al_flur"]
 
-    def test_sortable_attribute_and_geometry_column_come_from_the_layer(self, monkeypatch):
+    def test_sortable_attribute_comes_from_the_layer(self, monkeypatch):
         monkeypatch.setattr("owslib.feature.schema.get_schema", _lgl_like_get_schema)
         wfs = self._wfs("2.0.0")
         assert _detect_sortable_attribute(wfs, "nora:v_al_flur") == "gemarkung_id"
-        assert _detect_geometry_column(wfs, "nora:v_al_flur") == "the_geom"
 
     @pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
     def test_1_x_keeps_owslibs_own_request(self, version, monkeypatch):
@@ -1355,7 +1351,6 @@ class TestCRSNegotiation:
             crs_list=crs_list,
             default_crs=default_crs or (crs_list[0] if crs_list else None),
             bbox=None,
-            geometry_column="geometry",
             available_formats=["application/json"],
         )
 
@@ -3987,7 +3982,6 @@ class TestBboxCrsContract:
             crs_list=[],
             default_crs=None,
             bbox=bbox,
-            geometry_column="geom",
             available_formats=[],
         )
 
@@ -4144,7 +4138,6 @@ class TestBboxCrsContract:
             crs_list=["EPSG:4026"],
             default_crs="EPSG:4026",
             bbox=self.MOLDOVA_WGS84,
-            geometry_column="geom",
             available_formats=[],
         )
         monkeypatch.setattr(wfs, "get_layer_info", lambda *a, **k: layer)
@@ -4173,7 +4166,6 @@ class TestBboxCrsContract:
             crs_list=["EPSG:4026"],
             default_crs="EPSG:4026",
             bbox=self.MOLDOVA_WGS84,
-            geometry_column="geom",
             available_formats=[],
         )
         monkeypatch.setattr(wfs, "get_layer_info", lambda *a, **k: layer)
@@ -4417,7 +4409,6 @@ class TestBboxAxisRuleByCrs:
             crs_list=[],
             default_crs=None,
             bbox=(170.0, 50.0, -130.0, 72.0),
-            geometry_column="geom",
             available_formats=[],
         )
         with caplog.at_level(logging.WARNING):
@@ -4458,7 +4449,6 @@ class TestBboxAxisRuleByCrs:
             crs_list=[],
             default_crs=None,
             bbox=(lon - 0.1, lat - 0.1, lon + 0.1, lat + 0.1),
-            geometry_column="geom",
             available_formats=[],
         )
         tile = _get_tiling_bbox(None, True, layer, crs)

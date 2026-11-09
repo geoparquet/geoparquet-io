@@ -60,65 +60,6 @@ class TestBackwardsCompatibility:
         assert "Unknown command" not in result.output
 
 
-class TestDetectGeometryColumn:
-    """Test geometry column detection function."""
-
-    def test_detect_common_names(self):
-        """Test detection of common geometry column names."""
-        from geoparquet_io.core.extract_bigquery import _detect_geometry_column
-
-        # Create table with "geometry" column
-        table = pa.table(
-            {
-                "id": [1, 2],
-                "geometry": [b"test", b"test2"],
-            }
-        )
-        assert _detect_geometry_column(table) == "geometry"
-
-        # Create table with "geography" column
-        table = pa.table(
-            {
-                "id": [1, 2],
-                "geography": [b"test", b"test2"],
-            }
-        )
-        assert _detect_geometry_column(table) == "geography"
-
-        # Create table with "geom" column
-        table = pa.table(
-            {
-                "id": [1, 2],
-                "geom": [b"test", b"test2"],
-            }
-        )
-        assert _detect_geometry_column(table) == "geom"
-
-    def test_a_name_containing_geo_is_not_detected(self):
-        """The substring fallback is gone (#1367): name the column explicitly."""
-        from geoparquet_io.core.extract_bigquery import _detect_geometry_column
-
-        table = pa.table(
-            {
-                "id": [1, 2],
-                "building_geom_wkb": [b"test", b"test2"],
-            }
-        )
-        assert _detect_geometry_column(table) is None
-
-    def test_detect_returns_none_when_not_found(self):
-        """Test that None is returned when no geometry column found."""
-        from geoparquet_io.core.extract_bigquery import _detect_geometry_column
-
-        table = pa.table(
-            {
-                "id": [1, 2],
-                "name": ["a", "b"],
-            }
-        )
-        assert _detect_geometry_column(table) is None
-
-
 class TestBuildGeometrySelectExpr:
     """Test _build_geometry_select_expr handles different column types."""
 

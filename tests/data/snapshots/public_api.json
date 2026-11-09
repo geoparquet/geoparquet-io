@@ -232,6 +232,7 @@
     "reset_crs_disagreement_warnings",
     "reset_null_crs_warnings",
     "source_crs_is_unknown",
+    "source_crs_name",
     "source_crs_string",
     "table_crs_is_unknown",
     "transform_geom_sql",
