@@ -5,10 +5,7 @@ decorator attaches `--write-memory` to many commands, but several of them
 captured `write_memory` in their signature and never forwarded it to the core
 function / DuckDB write engine.
 
-Layers tested here:
-  * Introspection: EVERY command that exposes --write-memory forwards it. This
-    is the test that cannot go stale — a new command (or a new decorator use)
-    that declares the flag and drops it fails immediately.
+Layers tested here (the every-command guard is in tests/test_write_options.py):
   * CLI -> core function: the CLI passes ``write_memory`` through as the
     keyword argument ``memory_limit`` (not positionally, not dropped).
   * Core function (file-based path) -> DuckDB write engine: a full, unmocked
@@ -16,13 +13,11 @@ Layers tested here:
   * Core function (streaming path) -> execute_transform/write_output.
   * Validation: bad values are rejected as Click parameter errors, and a value
     crafted to break out of ``SET memory_limit = '…'`` is refused.
-  * 1.1-geoarrow: the auto-routed write strategy warns and ignores
-    --write-memory instead of aborting with a raw traceback.
+  * Every strategy, the 1.1-geoarrow reroute included, honours it (#761).
 """
 
 from __future__ import annotations
 
-import inspect
 import os
 from unittest import mock
 
@@ -62,63 +57,10 @@ def _find_non_geometry_column(parquet_file: str) -> str:
     raise AssertionError("No non-geometry columns found in test fixture")
 
 
-def _iter_commands(command, path=None):
-    """Yield ``(dotted name, Command)`` for every leaf command in the CLI tree."""
-    path = path or []
-    if isinstance(command, click.Group):
-        for name, sub in command.commands.items():
-            yield from _iter_commands(sub, [*path, name])
-    else:
-        yield " ".join(path), command
-
-
-def _commands_with_write_memory():
-    return [
-        (name, cmd)
-        for name, cmd in _iter_commands(cli)
-        if any(param.name == "write_memory" for param in cmd.params)
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Layer 0: no command may declare --write-memory without forwarding it
-# ---------------------------------------------------------------------------
-
-
-def _packs_memory_limit(source: str) -> bool:
-    """A grid-aggregate command gets ``--write-memory`` as ``aggregate_options.memory_limit``."""
-    from geoparquet_io.cli.decorators import _AGGREGATE_OPTION_PARAMS
-
-    return "aggregate_options" in source and _AGGREGATE_OPTION_PARAMS["memory_limit"] == (
-        "write_memory"
-    )
-
-
-class TestEveryCommandForwardsWriteMemory:
-    """The offender list must stay empty.
-
-    A hand-written per-command list goes stale the moment someone adds a new
-    command; walking the Click tree cannot.
-    """
-
-    def test_no_command_declares_write_memory_without_forwarding_it(self):
-        commands = _commands_with_write_memory()
-        assert commands, "Expected at least one command to expose --write-memory"
-
-        offenders = []
-        for name, cmd in commands:
-            source = inspect.getsource(inspect.unwrap(cmd.callback))
-            if "_partition_cell_index(" in source:
-                from geoparquet_io.cli.commands.partition import _partition_cell_index
-
-                source += inspect.getsource(_partition_cell_index)
-            if "memory_limit=write_memory" not in source and not _packs_memory_limit(source):
-                offenders.append(name)
-
-        assert not offenders, (
-            "These commands accept --write-memory but never forward it as "
-            f"memory_limit=write_memory: {offenders}"
-        )
+# Layer 0 -- no command may declare --write-memory without forwarding it -- is
+# the structural and behavioural guard in tests/test_write_options.py: every
+# write command's body takes one `write` (a WriteOptions built by
+# `pack_write_options`), and each write flag is shown to reach core (#761).
 
 
 # ---------------------------------------------------------------------------
@@ -521,61 +463,42 @@ class TestWriteMemoryValidation:
 
 
 # ---------------------------------------------------------------------------
-# Layer 4: --write-memory + --geoparquet-version 1.1-geoarrow must not crash
+# Layer 4: --write-memory reaches the strategy the write lands on (#761)
 # ---------------------------------------------------------------------------
 
 
-class TestGeoarrowVersionIgnoresWriteMemory:
-    """1.1-geoarrow auto-routes to the arrow-streaming strategy, which cannot
-    honour a memory limit. Warn and continue — never abort with a traceback."""
+class TestWriteMemoryOnEveryStrategy:
+    """1.1-geoarrow auto-routes to the streaming strategy, and a user may name
+    any strategy; the limit used to be warned away or refused on both."""
 
-    def test_add_h3_geoarrow_with_write_memory_succeeds(self, places_test_file, temp_output_file):
-        runner = CliRunner()
-        result = runner.invoke(
+    @pytest.mark.parametrize(
+        "args",
+        [
+            pytest.param(["add", "h3"], id="add-h3-geoarrow"),
+            pytest.param(["sort", "hilbert"], id="sort-hilbert-geoarrow"),
+        ],
+    )
+    def test_geoarrow_reroute_honours_write_memory(self, places_test_file, temp_output_file, args):
+        result = CliRunner().invoke(
             cli,
             [
-                "add",
-                "h3",
+                *args,
                 places_test_file,
                 temp_output_file,
                 "--geoparquet-version",
                 "1.1-geoarrow",
                 "--write-memory",
                 "512MB",
+                "--verbose",
             ],
         )
         assert result.exit_code == 0, result.output
-        assert os.path.exists(temp_output_file)
-        assert "--write-memory" in result.output
+        assert "DuckDB memory limit: 512MB" in result.output
 
-    def test_sort_hilbert_geoarrow_with_write_memory_succeeds(
+    def test_explicit_non_duckdb_kv_strategy_honours_write_memory(
         self, places_test_file, temp_output_file
     ):
-        runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "sort",
-                "hilbert",
-                places_test_file,
-                temp_output_file,
-                "--geoparquet-version",
-                "1.1-geoarrow",
-                "--write-memory",
-                "512MB",
-            ],
-        )
-        assert result.exit_code == 0, result.output
-        assert os.path.exists(temp_output_file)
-        assert "--write-memory" in result.output
-
-    def test_explicit_non_duckdb_kv_strategy_still_errors_cleanly(
-        self, places_test_file, temp_output_file
-    ):
-        """A user-chosen strategy that cannot honour the limit is a real error,
-        but it must surface as a clean message, not a bare ValueError."""
-        runner = CliRunner()
-        result = runner.invoke(
+        result = CliRunner().invoke(
             cli,
             [
                 "extract",
@@ -586,11 +509,11 @@ class TestGeoarrowVersionIgnoresWriteMemory:
                 "streaming",
                 "--write-memory",
                 "512MB",
+                "--verbose",
             ],
         )
-        assert result.exit_code != 0
-        assert "--write-memory" in result.output
-        assert not isinstance(result.exception, ValueError)
+        assert result.exit_code == 0, result.output
+        assert "DuckDB memory limit: 512MB" in result.output
 
 
 # ---------------------------------------------------------------------------

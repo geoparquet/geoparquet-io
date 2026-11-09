@@ -151,11 +151,24 @@ def _single_thread(*args, **kwargs):
 duckdb.connect = _single_thread
 """
 
+#: ``Table.write`` from argv: ``in out [strategy | key=value ...] [level]``. A bare
+#: word is the strategy, a bare number the test hook's level. ``options=1`` writes
+#: the rest as one ``WriteOptions`` where ``Table.write`` takes one (#761), and as
+#: keywords on a tree that predates it, so the two forms are compared byte for byte.
 TABLE_WRITE_CODE = (
-    "import sys, geoparquet_io as gpio\n"
-    "kwargs = {'write_strategy': sys.argv[3]}\n"
-    "if len(sys.argv) > 4: kwargs['compression_level'] = int(sys.argv[4])\n"
-    "gpio.read(sys.argv[1]).write(sys.argv[2], **kwargs)\n"
+    "import inspect, sys, geoparquet_io as gpio\n"
+    "kwargs = {}\n"
+    "for arg in sys.argv[3:]:\n"
+    "    key, eq, value = arg.partition('=')\n"
+    "    if not eq:\n"
+    "        key, value = 'compression_level' if arg.isdigit() else 'write_strategy', arg\n"
+    "    kwargs[key] = int(value) if value.isdigit() else value\n"
+    "table = gpio.read(sys.argv[1])\n"
+    "if kwargs.pop('options', None) and 'options' in inspect.signature(table.write).parameters:\n"
+    "    from geoparquet_io.core.parquet_writer import WriteOptions\n"
+    "    table.write(sys.argv[2], WriteOptions(**kwargs))\n"
+    "else:\n"
+    "    table.write(sys.argv[2], **kwargs)\n"
 )
 
 
@@ -401,6 +414,119 @@ def _matrix() -> list[Case]:
                     kind="api",
                 )
             )
+    # #761: Table.write's defaults, its options= form, and the copy-through and
+    # memory-limit paths WriteOptions must not disturb.
+    gzip_rg = ("compression=GZIP", "row_group_rows=2048", "geoparquet_version=1.0")
+    cases += [
+        Case("table_write_default", ("{in}", "{out}"), (places,), "out.parquet", kind="api"),
+        Case(
+            "table_write_options_form",
+            ("{in}", "{out}", "options=1", *gzip_rg),
+            (buildings,),
+            "out.parquet",
+            kind="api",
+            takes_level=False,
+        ),
+        Case(
+            "table_write_keywords_form",
+            ("{in}", "{out}", *gzip_rg),
+            (buildings,),
+            "out.parquet",
+            kind="api",
+            takes_level=False,
+        ),
+        Case("add_bbox_copy_through", ("add", "bbox", "{in}", "{out}"), (places,), "out.parquet"),
+        Case(
+            "extract_write_memory",
+            ("extract", "{in}", "{out}", "--write-memory", "2GB"),
+            (places,),
+            "out.parquet",
+        ),
+        Case(
+            "add_h3_geoarrow_write_memory",
+            (
+                "add",
+                "h3",
+                "{in}",
+                "{out}",
+                "--geoparquet-version",
+                "1.1-geoarrow",
+                "--write-memory",
+                "2GB",
+            ),
+            (places,),
+            "out.parquet",
+        ),
+    ]
+    # #761: every write flag at a non-default value, through each leaf's packed
+    # WriteOptions. GZIP so the level stays in GZIP's range (1-9).
+    flags = (
+        "--compression",
+        "GZIP",
+        "--compression-level",
+        "5",
+        "--row-group-size",
+        "1000",
+        "--geoparquet-version",
+        "1.0",
+    )
+    for name, argv, src in (
+        ("add_h3", ("add", "h3", "{in}", "{out}", "--resolution", "7"), places),
+        ("add_quadkey", ("add", "quadkey", "{in}", "{out}"), places),
+        ("add_s2", ("add", "s2", "{in}", "{out}", "--level", "10"), places),
+        ("add_a5", ("add", "a5", "{in}", "{out}"), places),
+        ("add_kdtree", ("add", "kdtree", "{in}", "{out}"), places),
+        ("add_bbox_force", ("add", "bbox", "{in}", "{out}", "--force"), places),
+        ("add_geometry_metrics", ("add", "geometry-metrics", "{in}", "{out}"), buildings),
+        ("sort_hilbert", ("sort", "hilbert", "{in}", "{out}"), places),
+        ("sort_str", ("sort", "str", "{in}", "{out}"), places),
+        ("sort_column", ("sort", "column", "{in}", "{out}", "name"), places),
+        ("sort_quadkey", ("sort", "quadkey", "{in}", "{out}"), places),
+        ("extract", ("extract", "{in}", "{out}"), places),
+        ("convert_geojson", ("convert", "geoparquet", "{in}", "{out}"), "buildings_test.geojson"),
+        (
+            "convert_reproject",
+            ("convert", "reproject", "{in}", "{out}", "--dst-crs", "EPSG:3857"),
+            places,
+        ),
+    ):
+        cases.append(
+            Case(
+                f"{name}_write_flags",
+                (*argv, *flags, "--write-memory", "1GB"),
+                (src,),
+                "out.parquet",
+            )
+        )
+    cases.append(
+        Case(
+            "process_simplify_write_flags",
+            ("process", "simplify", "{in}", "{out}", "--tolerance", "0.0001", *flags),
+            (buildings,),
+            "out.parquet",
+            takes_level=False,
+        )
+    )
+    cases.append(
+        Case(
+            "partition_h3_write_flags",
+            (
+                "partition",
+                "h3",
+                "{in}",
+                "{out}",
+                "--resolution",
+                "4",
+                "--force",
+                "--skip-analysis",
+                *flags,
+                "--write-memory",
+                "1GB",
+            ),
+            (places,),
+            "out_dir",
+        )
+    )
     return cases
 
 

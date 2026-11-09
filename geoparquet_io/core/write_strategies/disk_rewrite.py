@@ -134,8 +134,13 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         custom_metadata: dict | None = None,
         geometry_info: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        memory_limit: str | None = None,
     ) -> None:
-        """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite."""
+        """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite.
+
+        ``memory_limit`` bounds the DuckDB COPY (phase one); the row-group
+        rewrite after it is pyarrow's and runs no DuckDB.
+        """
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
@@ -157,6 +162,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 compression_level,
                 verbose,
                 resolved_row_group_rows,
+                memory_limit=memory_limit,
             )
             return
 
@@ -185,11 +191,9 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             if verbose:
                 debug(f"Writing via DuckDB COPY TO with {codec.name} compression...")
 
-            # This strategy takes no `--write-memory` (the CLI rejects the
-            # combination), so the scope applies the ceiling-based default:
-            # phase one is a COPY of the whole, possibly sorted query and used
+            # Phase one is a COPY of the whole, possibly sorted query; it used
             # to run at DuckDB's own 80%-of-host default (#1174).
-            with scoped_write_memory_limit(con, None, verbose):
+            with scoped_write_memory_limit(con, memory_limit, verbose):
                 con.execute(copy_query)
 
             if verbose:
@@ -271,6 +275,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
         original_metadata: dict | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using temporary file and rewrite."""
 
@@ -348,6 +353,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         compression_level: int | None,
         verbose: bool,
         row_group_rows: int | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """Write plain Parquet (no geo metadata) from a query.
 
@@ -370,7 +376,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
 
             if verbose:
                 debug(f"Writing plain Parquet with {codec.name} compression...")
-            with scoped_write_memory_limit(con, None, verbose):
+            with scoped_write_memory_limit(con, memory_limit, verbose):
                 con.execute(copy_query)
 
             if is_remote:

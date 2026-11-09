@@ -157,7 +157,7 @@ class TestExtractBigqueryCliLayer:
         # The CLI upper-cases the codec before handing it to core.
         assert kwargs["compression"] == "ZSTD"
         assert kwargs["row_group_size_mb"] == 128
-        assert kwargs["row_group_rows"] is None
+        assert kwargs.get("row_group_rows") is None  # unset flags are left out
         assert kwargs["geography_column"] == "geom"
         assert kwargs["geometry_format"] == "geojson"
 
@@ -172,7 +172,7 @@ class TestExtractBigqueryCliLayer:
         assert result.exit_code == 0, result.output
         kwargs = mock_extract.call_args.kwargs
         assert kwargs["row_group_rows"] == 50000
-        assert kwargs["row_group_size_mb"] is None
+        assert kwargs.get("row_group_size_mb") is None  # unset flags are left out
 
     def test_non_parquet_output_is_rejected(self, runner, tmp_path):
         output = tmp_path / "out.csv"

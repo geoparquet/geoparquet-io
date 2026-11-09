@@ -25,7 +25,7 @@ from geoparquet_io.cli.decorators import (
     limit_option,
     output_format_options,
     overwrite_option,
-    parse_row_group_options,
+    pack_write_options,
     partition_input_options,
     repair_geometry_option,
     row_group_options,
@@ -118,6 +118,7 @@ def extract(ctx):
 @aws_profile_option
 @any_extension_option
 @click.pass_context
+@pack_write_options
 def extract_geoparquet(
     ctx,
     input_file,
@@ -130,14 +131,8 @@ def extract_geoparquet(
     where,
     limit,
     skip_count,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    geoparquet_version,
+    write,
     overwrite,
-    write_strategy,
-    write_memory,
     allow_schema_diff,
     hive_input,
     repair_geometry,
@@ -223,7 +218,7 @@ def extract_geoparquet(
         # Extract first 1000 rows
         gpio extract data.parquet output.parquet --limit 1000
     """
-    row_group_mb = prepare_output(output_file, any_extension, row_group_size, row_group_size_mb)
+    prepare_output(output_file, any_extension)
 
     with _activate_s3(ctx, aws_profile=aws_profile):
         extract_impl(
@@ -240,15 +235,10 @@ def extract_geoparquet(
             dry_run=dry_run,
             show_sql=show_sql,
             verbose=verbose,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            geoparquet_version=geoparquet_version,
+            **write.funnel_kwargs(),
             allow_schema_diff=allow_schema_diff,
             hive_input=hive_input,
-            write_strategy=write_strategy,
-            memory_limit=write_memory,
+            write_strategy=write.write_strategy,
             overwrite=overwrite,
             repair_geometry=repair_geometry,
         )
@@ -346,6 +336,7 @@ def extract_geoparquet(
 @aws_profile_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def extract_arcgis(
     ctx,
     service_url,
@@ -367,14 +358,10 @@ def extract_arcgis(
     workers,
     batch_size,
     timeout,
-    geoparquet_version,
+    write,
     overwrite,
     repair_geometry,
     verbose,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
     any_extension,
     aws_profile,
     show_sql,
@@ -442,9 +429,6 @@ def extract_arcgis(
     if not any_extension:
         validate_parquet_extension(output_file)
 
-    # Validate mutual exclusivity of row group options and get MB value
-    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
     with _activate_s3(ctx, aws_profile=aws_profile):
         convert_arcgis_to_geoparquet(
             service_url=service_url,
@@ -466,13 +450,9 @@ def extract_arcgis(
             max_workers=workers,
             batch_size=batch_size,
             timeout=timeout,
-            compression=compression,
-            compression_level=compression_level,
+            **write.funnel_kwargs(),
             verbose=verbose,
-            geoparquet_version=geoparquet_version,
             profile=aws_profile,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
             overwrite=overwrite,
             repair_geometry=repair_geometry,
         )
@@ -647,6 +627,7 @@ def _reject_query_shaping_with_sql(ctx: click.Context, sql: str | None) -> None:
 @verbose_option
 @any_extension_option
 @click.pass_context
+@pack_write_options
 def extract_bigquery_cmd(
     ctx,
     table_id,
@@ -664,12 +645,7 @@ def extract_bigquery_cmd(
     geography_column,
     geometry_format,
     edges,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     repair_geometry,
     dry_run,
@@ -774,7 +750,7 @@ def extract_bigquery_cmd(
     _reject_query_shaping_with_sql(ctx, sql)
     _check_bigquery_source(table_id, sql, project)
 
-    row_group_mb = prepare_output(output_file, any_extension, row_group_size, row_group_size_mb)
+    prepare_output(output_file, any_extension)
 
     extract_bigquery(
         table_id=table_id,
@@ -795,14 +771,9 @@ def extract_bigquery_cmd(
         dry_run=dry_run,
         show_sql=show_sql,
         verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_mb,
-        row_group_rows=row_group_size,
-        geoparquet_version=geoparquet_version,
+        **write.funnel_kwargs(),
         overwrite=overwrite,
         repair_geometry=repair_geometry,
-        memory_limit=write_memory,
     )
 
 
@@ -924,6 +895,7 @@ def _deprecated_version_callback(ctx, param, value):
 @overwrite_option
 @verbose_option
 @any_extension_option
+@pack_write_options
 def extract_wfs_cmd(
     service_url,
     typename,
@@ -944,11 +916,7 @@ def extract_wfs_cmd(
     skip_hilbert,
     skip_bbox,
     repair_geometry,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    geoparquet_version,
+    write,
     overwrite,
     verbose,
     any_extension,
@@ -1064,9 +1032,6 @@ def extract_wfs_cmd(
         # Single layer mode: validate .parquet extension
         validate_parquet_extension(output_file, any_extension)
 
-    # Parse row group options
-    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
     if is_multi_layer:
         # Multi-layer parallel extraction
         convert_wfs_layers_to_directory(
@@ -1085,11 +1050,7 @@ def extract_wfs_cmd(
             strict_crs=strict_crs,
             skip_hilbert=skip_hilbert,
             skip_bbox=skip_bbox,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            geoparquet_version=geoparquet_version,
+            **write.funnel_kwargs(),
             overwrite=overwrite,
             verbose=verbose,
             auto_tile=auto_tile,
@@ -1113,11 +1074,7 @@ def extract_wfs_cmd(
             strict_crs=strict_crs,
             skip_hilbert=skip_hilbert,
             skip_bbox=skip_bbox,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            geoparquet_version=geoparquet_version,
+            **write.funnel_kwargs(),
             overwrite=overwrite,
             verbose=verbose,
             auto_tile=auto_tile,
@@ -1177,6 +1134,7 @@ def extract_wfs_cmd(
 @any_extension_option
 @aws_profile_option
 @click.pass_context
+@pack_write_options
 def extract_carto_cmd(
     ctx,
     url,
@@ -1191,11 +1149,7 @@ def extract_carto_cmd(
     skip_hilbert,
     skip_bbox,
     geometry,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    geoparquet_version,
+    write,
     overwrite,
     repair_geometry,
     verbose,
@@ -1255,9 +1209,6 @@ def extract_carto_cmd(
     # Validate .parquet extension
     validate_parquet_extension(output_file, any_extension)
 
-    # Parse row group options
-    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
     with _activate_s3(ctx, aws_profile=aws_profile):
         convert_carto_to_geoparquet(
             url=url,
@@ -1271,11 +1222,7 @@ def extract_carto_cmd(
             timeout=float(timeout),
             skip_hilbert=skip_hilbert,
             skip_bbox=skip_bbox,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            geoparquet_version=geoparquet_version,
+            **write.funnel_kwargs(),
             overwrite=overwrite,
             verbose=verbose,
             repair_geometry=repair_geometry,

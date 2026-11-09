@@ -846,9 +846,11 @@ table = gpio.read('input.parquet').extract(bbox=(-122.5, 37.5, -122.0, 38.0))
 table = gpio.read('input.parquet').extract(where="population > 10000")
 ```
 
-#### `write(path, format=None, compression='ZSTD', compression_level=None, row_group_size_mb=None, row_group_rows=None, geoparquet_version=None, write_strategy='duckdb-kv', profile=None, verbose=False, ...)`
+#### `write(path, options=None, *, format=None, compression=None, compression_level=None, row_group_size_mb=None, row_group_rows=None, geoparquet_version=None, write_strategy=None, memory_limit=None, profile=None, verbose=False, ...)`
 
 Write the table to a GeoParquet file. Returns the output `Path` for chaining or confirmation.
+Every argument after `options` is keyword-only, so `table.write('out.dat', 'csv')`
+is a `TypeError` naming `format=`.
 
 ```python
 # Basic write
@@ -861,6 +863,38 @@ table.write('output.parquet', compression='GZIP', compression_level=6)
 # With row group size
 table.write('output.parquet', row_group_size_mb=128)
 ```
+
+**`WriteOptions`**
+
+`gpio.WriteOptions` holds the GeoParquet write settings as one value, the same
+one every CLI write command builds from its flags. Pass it as `options`; a
+write keyword merges into it, and setting one field both ways is a `TypeError`.
+Unset fields mean "not asked": `compression` defaults to `'ZSTD'`,
+`write_strategy` to `'auto'` (`duckdb-kv` here), and the rest to `None`.
+`memory_limit` caps the write's DuckDB work on every strategy.
+
+=== "CLI"
+
+    ```bash
+    gpio sort hilbert input.parquet output.parquet \
+        --compression GZIP --row-group-size 10240 --write-memory 2GB
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    opts = gpio.WriteOptions(compression='GZIP', row_group_rows=10240, memory_limit='2GB')
+    gpio.read('input.parquet').sort_hilbert().write('output.parquet', opts)
+
+    # Keywords merge into the options
+    gpio.read('input.parquet').write('output.parquet', opts, geoparquet_version='2.0')
+    ```
+
+The write settings apply to GeoParquet only. Setting one for another format —
+`table.write('out.csv', compression='GZIP')` — raises `InvalidParameterError`
+instead of being ignored; `profile` still applies to any format's upload.
 
 A geometry column name the table does not carry — `Table(arrow_table,
 geometry_column='geom')` on a table whose column is `geometry` — raises
@@ -951,7 +985,8 @@ table.write('output.parquet', write_strategy='streaming')
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `write_strategy` | str | Write strategy: `duckdb-kv` (default), `streaming`, `disk-rewrite`, or `in-memory` |
+| `write_strategy` | str | Write strategy: `duckdb-kv` (the default, `'auto'`), `streaming`, `disk-rewrite`, or `in-memory` |
+| `memory_limit` | str | DuckDB memory cap for the write, e.g. `'2GB'`. Default: gpio's ceiling-based limit |
 
 Every strategy writes the same file-level keys. The `geo` block is built fresh
 for the output, and other keys such as fiboa, STAC or your own provenance key are

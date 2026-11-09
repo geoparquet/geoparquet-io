@@ -201,6 +201,7 @@ _TABLE_WRITE_FORWARDED = (
     "verbose",
     "custom_metadata",
     "extra_kv_metadata",
+    "memory_limit",
 )
 
 
@@ -235,6 +236,7 @@ class BaseWriteStrategy(ABC):
         custom_metadata: dict | None = None,
         geometry_info: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """
         Write query results to GeoParquet file.
@@ -255,6 +257,9 @@ class BaseWriteStrategy(ABC):
             custom_metadata: Optional dict with custom metadata (e.g., H3 covering info)
             geometry_info: Multi-geometry column info from input file
             extra_kv_metadata: Additional Parquet KV metadata (e.g., Vecorel collection info)
+            memory_limit: DuckDB memory cap for every statement this write runs
+                on ``con`` (``scoped_write_memory_limit``); None applies gpio's
+                default. Each strategy's docstring says which stage that is.
         """
         ...
 
@@ -274,6 +279,7 @@ class BaseWriteStrategy(ABC):
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
         original_metadata: dict | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """
         Write Arrow table to GeoParquet file.
@@ -294,6 +300,9 @@ class BaseWriteStrategy(ABC):
                 {key: json_string}, written alongside 'geo'. Callers pass the
                 input's preserved non-geo keys here so sidecar payloads
                 (fiboa, vecorel, STAC) survive on every strategy (#690).
+            memory_limit: DuckDB memory cap for a strategy that writes the
+                table through DuckDB; a pure-Arrow writer runs no DuckDB and
+                has nothing for it to bound.
         """
         ...
 

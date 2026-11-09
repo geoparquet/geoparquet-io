@@ -199,6 +199,43 @@ class TestFastPathMemoryLimit:
         assert (_setting(con, "memory_limit"), _setting(con, "threads")) == (before, 8)
 
 
+class TestEveryStrategyHonoursTheLimit:
+    """``memory_limit`` caps the DuckDB work of every strategy, not only duckdb-kv (#761).
+
+    It used to reach duckdb-kv alone: the funnel refused it for the other three
+    (exit 2) or warned and dropped it when it had routed the write itself.
+    """
+
+    @pytest.mark.parametrize("strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
+    def test_query_write_is_bounded(self, tmp_path, con, strategy):
+        query = _points_parquet(con, str(tmp_path / "src.parquet"), rows=200_000)
+        with pytest.raises(duckdb.OutOfMemoryException):
+            write_parquet_with_metadata(
+                con,
+                f"{query} ORDER BY id DESC",
+                str(tmp_path / "out.parquet"),
+                geoparquet_version="1.1",
+                write_strategy=strategy,
+                memory_limit="1MB",
+            )
+
+    @pytest.mark.parametrize("strategy", ["duckdb-kv", "disk-rewrite"])
+    def test_table_write_is_bounded(self, tmp_path, con, strategy, caplog):
+        """The table strategies that open a DuckDB connection bound it too."""
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        query = _points_parquet(con, str(tmp_path / "src.parquet"))
+        table = con.sql(query).arrow().read_all()
+        write_geoparquet_table(
+            table,
+            str(tmp_path / "out.parquet"),
+            write_strategy=strategy,
+            memory_limit="517MB",
+            verbose=True,
+        )
+        assert "DuckDB memory limit: 517MB" in caplog.text
+
+
 @pytest.mark.fresh_duckdb
 class TestResolveLimitReadsTheSessionThroughTheDisplay:
     """``current_setting`` truncates a size, so the session reads back smaller.
