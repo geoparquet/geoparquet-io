@@ -290,3 +290,17 @@ def test_a_table_read_from_a_directory_checks_a_prospective_copy(tmp_path, unsor
     result = gpio.read(str(tmp_path)).check_compression()
     assert result.prospective
     assert result.passed()
+
+
+def test_spec_warnings_reach_the_result(tmp_path, unsorted_test_file):
+    """An explicit null CRS is a spec warning; `gpio check spec` prints it, so warnings() lists it."""
+    table = pq.read_table(unsorted_test_file)
+    geo = json.loads(table.schema.metadata[b"geo"])
+    geo["columns"][geo["primary_column"]]["crs"] = None
+    path = tmp_path / "null_crs.parquet"
+    pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo)}), path)
+
+    spec = gpio.validate(path)
+    assert spec.verdict() == "warning"
+    assert any("crs" in w.lower() for w in spec.warnings())
+    assert set(spec.warnings()) <= {w.removeprefix("[spec] ") for w in gpio.check_all(path).warnings()}

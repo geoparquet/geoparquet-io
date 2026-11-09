@@ -429,5 +429,8 @@ def validate(
         "failed_count": outcome.failed_count,
         "warning_count": outcome.warning_count,
         "issues": [f"{c.name}: {c.message}" for c in outcome.checks if c.status.value == "failed"],
+        "warnings": [
+            f"{c.name}: {c.message}" for c in outcome.checks if c.status.value == "warning"
+        ],
     }
     return CheckResult(results, check_type="validate", source_path=path)
