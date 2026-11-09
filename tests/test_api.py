@@ -9,6 +9,7 @@ import functools
 import inspect
 import json
 import os
+import re
 import struct
 import tempfile
 import uuid
@@ -1529,53 +1530,53 @@ class TestTableUpload:
         mock_upload.assert_not_called()
 
     @pytest.mark.parametrize(
-        ("source", "name"),
+        "source",
         [
-            ("https://h.example/d/a%20b.parquet?X-Amz-Signature=x#f", "a b.parquet"),
-            ("s3://b/d/a%20b.parquet", "a b.parquet"),
-            ("s3://b/a?b.parquet", "a?b.parquet"),
-            ("data/a%20b.parquet", "a%20b.parquet"),
+            "s3://b/d/data.parquet",
+            "https://h.example/d/data.parquet",
+            "https://h.example/d/a%20b.parquet?X-Amz-Signature=x#f",
+            "s3://b/d/year=2024/data.parquet",
+            "http://[::1]/data.parquet",
+            "s3://test-bucket/data/*.parquet",
         ],
-        ids=["http", "s3_encoded", "s3_question_mark", "local"],
+        ids=["s3", "https", "signed", "hive_s3", "ipv6", "glob"],
     )
-    def test_object_name_of_a_source(self, source, name):
-        """A URL's key is percent-decoded; only an http(s) URL has a query to drop."""
-        from geoparquet_io.api.table import _object_name
-
-        assert _object_name(source) == name
-
-    def test_upload_to_a_prefix_from_a_glob_source_is_refused(self, sample_table):
+    def test_upload_to_a_prefix_from_a_non_local_source_is_refused(self, sample_table, source):
+        """Only a local single file names the object; anything else needs a full key."""
         from geoparquet_io.core.exceptions import InvalidParameterError
 
         with (
-            patch.object(sample_table, "_source_path", "s3://test-bucket/data/*.parquet"),
+            patch.object(sample_table, "_source_path", source),
+            patch("geoparquet_io.core.upload.upload") as mock_upload,
+        ):
+            with pytest.raises(
+                InvalidParameterError,
+                match=re.escape("full object key, e.g. 's3://test-bucket/prefix/data.parquet'"),
+            ):
+                sample_table.upload("s3://test-bucket/prefix/", dry_run=True)
+        mock_upload.assert_not_called()
+
+    def test_upload_to_a_prefix_from_a_directory_source_is_refused(self, sample_table, tmp_path):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with (
+            patch.object(sample_table, "_source_path", str(tmp_path)),
             patch("geoparquet_io.core.upload.upload") as mock_upload,
         ):
             with pytest.raises(InvalidParameterError, match="full object key"):
                 sample_table.upload("s3://test-bucket/prefix/", dry_run=True)
         mock_upload.assert_not_called()
 
-    @pytest.mark.parametrize(
-        ("source", "name"),
-        [
-            ("https://host/d/f.parquet?sig=a:b*c", "f.parquet"),
-            # ':' is unsafe on Windows; a '*' would make the source a glob, refused above.
-            ("s3://bucket/d/w:e:i.rd.parquet", "w:e:i.rd.parquet"),
-        ],
-        ids=["query_string", "unsafe_basename"],
-    )
-    def test_upload_scratch_name_is_generated_and_key_takes_the_url_basename(
-        self, sample_table, source, name
-    ):
-        """The scratch file never carries the source's name; the prefix key does, sans query."""
+    def test_upload_scratch_name_is_generated_and_key_takes_the_local_basename(self, sample_table):
+        """The scratch file never carries the source's name (':' is unsafe on Windows)."""
         with (
-            patch.object(sample_table, "_source_path", source),
+            patch.object(sample_table, "_source_path", "/data/d/w:e:i.rd.parquet"),
             patch("geoparquet_io.core.upload.upload") as mock_upload,
         ):
             sample_table.upload("s3://test-bucket/prefix/")
 
         kwargs = mock_upload.call_args.kwargs
-        assert kwargs["destination"] == f"s3://test-bucket/prefix/{name}"
+        assert kwargs["destination"] == "s3://test-bucket/prefix/w:e:i.rd.parquet"
         assert Path(kwargs["source"]).name == "upload.parquet"
 
 

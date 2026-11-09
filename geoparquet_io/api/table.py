@@ -46,23 +46,6 @@ if TYPE_CHECKING:
     from geoparquet_io.api.check import CheckResult
 
 
-def _object_name(source: str) -> str:
-    """The basename of *source* as an object key; a URL's is percent-decoded.
-
-    Only an http(s) URL has a query and fragment to drop; in any other scheme a
-    ``?`` is part of the name.
-    """
-    from pathlib import Path, PurePosixPath
-    from urllib.parse import unquote
-
-    from geoparquet_io.core.file_utils import without_http_query
-    from geoparquet_io.core.remote import is_remote_url
-
-    if is_remote_url(source):
-        return unquote(PurePosixPath(without_http_query(source)).name)
-    return Path(source).name
-
-
 def _run_partition_with_temp_file(
     table: pa.Table,
     geometry_column: str | None,
@@ -2680,8 +2663,8 @@ class Table:
         Args:
             destination: Object store URL (e.g., s3://bucket/path/data.parquet).
                 One ending in ``/`` is a prefix: the object is named after the
-                file this Table was read from, as ``gpio publish upload`` names
-                it after the file it uploads.
+                local file this Table was read from, as ``gpio publish upload``
+                names it after the file it uploads.
             compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
             compression_level: Compression level. None lets the codec pick its
                 own default, matching the CLI -- a fixed value is rejected by
@@ -2702,8 +2685,8 @@ class Table:
 
         Raises:
             InvalidParameterError: If ``destination`` ends in ``/`` and the
-                Table has no source file to name the object after (built in
-                memory or derived by an operation).
+                Table was not read from a single local file (built in memory,
+                derived by an operation, or read from a URL, directory or glob).
 
         Example:
             >>> gpio.read('data.parquet').sort_hilbert().upload(
@@ -2716,22 +2699,22 @@ class Table:
 
         from geoparquet_io.core.exceptions import InvalidParameterError
         from geoparquet_io.core.file_utils import is_partition_path, scratch_dir
+        from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload as do_upload
 
-        # A destination ending in '/' names the object after the source file.
-        if destination.endswith("/") and (
-            self._source_path is None or is_partition_path(self._source_path)
-        ):
-            raise InvalidParameterError(
-                "destination",
-                f"'{destination}' ends in '/', so the object would be named after "
-                "the file this Table was read from, and it has none (it was built "
-                "in memory or derived, or read from a directory or glob). Give a "
-                "full object key, e.g. "
-                f"'{destination}data.parquet'.",
-            )
+        # A destination ending in '/' names the object after a local source file only.
         if destination.endswith("/"):
-            destination += _object_name(self._source_path)
+            src = self._source_path
+            if src is None or is_remote_url(src) or is_partition_path(src):
+                raise InvalidParameterError(
+                    "destination",
+                    f"'{destination}' ends in '/', so the object would be named after "
+                    "the local file this Table was read from, and it has none (it was "
+                    "built in memory or derived, or read from a remote URL, a directory "
+                    "or a glob). Give a full object key, e.g. "
+                    f"'{destination}data.parquet'.",
+                )
+            destination += Path(src).name
 
         with scratch_dir(prefix="gpio_upload_") as scratch:
             # Never the source's name: it may hold ':' or '*' (Windows) or a query.

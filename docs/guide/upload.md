@@ -188,9 +188,10 @@ scratch file, so the size it reports is the size of the file you would get.
     ```
 
 A destination ending in `/` is a prefix, and the object is named after the
-file: `s3://bucket/dataset/data.parquet` above. A Table built in memory or
-derived by an operation has no file name to use, so `upload()` asks for a full
-object key instead (`s3://bucket/dataset/data.parquet`).
+local file: `s3://bucket/dataset/data.parquet` above. Only a Table read from a
+single local file has a name to use. For one built in memory, derived by an
+operation, or read from a remote URL, a directory or a glob, `upload()` asks
+for a full object key instead (`s3://bucket/dataset/data.parquet`).
 
 ## CLI Reference
 
