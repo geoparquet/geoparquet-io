@@ -159,9 +159,10 @@ def test_check_all_reports_a_stage_that_could_not_run(monkeypatch, unsorted_test
     [
         "https://b.s3.amazonaws.com/d/f.parquet?X-Amz-Signature=abc",
         "s3://bucket/year=2026/data.parquet",
+        "s3://bucket/year=2026/data",
         "http://[::1]/data.parquet",
     ],
-    ids=["presigned", "hive_prefix_object", "ipv6"],
+    ids=["presigned", "hive_prefix_object", "hive_prefix_extensionless_object", "ipv6"],
 )
 def test_a_single_remote_object_is_one_file(url):
     assert check_api._one_file(url, "compression") == url
@@ -171,11 +172,20 @@ def test_a_single_remote_object_is_one_file(url):
     "url",
     [
         "s3://bucket/year=2026/",
+        "s3://bucket/year=2026",
+        "s3://bucket/*.parquet",
         "s3://bucket/data/*.parquet",
         "s3://bucket/data.v?.parquet",
         "http://[::1]/d/*.parquet",
     ],
-    ids=["prefix", "glob", "object_store_question_mark", "ipv6_glob"],
+    ids=[
+        "prefix",
+        "hive_segment_last",
+        "bucket_glob",
+        "glob",
+        "object_store_question_mark",
+        "ipv6_glob",
+    ],
 )
 def test_a_remote_prefix_or_glob_is_still_refused(url):
     with pytest.raises(gpio.InvalidParameterError, match="directory or glob"):

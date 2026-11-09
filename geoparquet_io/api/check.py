@@ -217,21 +217,22 @@ class CheckResult:
 
 
 def _names_one_remote_object(path: str) -> bool:
-    """A remote URL whose path ends in a file name with an extension and no glob.
+    """A remote URL whose LAST path segment names one object.
 
-    Core reads ``s3://b/year=2026/f.parquet`` as a hive dataset, which its
-    multi-file callers rely on; a path-level check is handed that one object.
-    Only an http(s) URL's path is scanned: elsewhere ``?`` is a glob.
+    Only that segment decides: no glob character, no trailing ``/``, and not a
+    ``key=value`` hive segment. Core reads ``s3://b/year=2026/f`` as a hive
+    dataset, which its multi-file callers rely on; a path-level check is handed
+    that one object. Only an http(s) URL's path is scanned: elsewhere ``?`` is
+    a glob.
     """
-    from pathlib import PurePosixPath
-
     from geoparquet_io.core.file_utils import http_url_path
     from geoparquet_io.core.remote import is_remote_url
 
     url = http_url_path(path)
-    return (
-        is_remote_url(path) and bool(PurePosixPath(url).suffix) and not any(c in url for c in "*?[")
-    )
+    last = url.rpartition("/")[2]
+    # The hive test is is_partition_path's: a segment ending .parquet is a file name.
+    hive = "=" in last and not last.endswith(".parquet")
+    return is_remote_url(path) and bool(last) and not hive and not any(c in url for c in "*?[")
 
 
 def _one_file(path, command: str) -> str:
