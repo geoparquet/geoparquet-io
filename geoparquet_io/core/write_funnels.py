@@ -783,6 +783,30 @@ def _merge_derived_geometry_info(caller: dict | None, derived: dict | None) -> d
     return merged
 
 
+def _rebuilt_secondary_crs(
+    geometry_info: dict | None, metadata: dict | None, geometry_column: str | None, rebuild: bool
+) -> dict | None:
+    """``geometry_info`` keeping each secondary's declared ``crs`` through a rebuild.
+
+    ``declared_write_metadata`` strips every column's ``crs`` for the composer
+    to decide, but only the primary's has a decider (``input_crs``); a declared
+    secondary came out with no ``crs`` key, i.e. OGC:CRS84. ``convert`` hid it
+    by naming the CRS in its own ``geometry_info``, which still wins the merge.
+    """
+    if not rebuild:
+        return geometry_info
+    columns = (sanitized_carried_geo(metadata) or {}).get("columns") or {}
+    declared = {
+        name: {"crs": entry["crs"]}
+        for name, entry in columns.items()
+        if name != geometry_column and "crs" in entry
+    }
+    if not declared:
+        return geometry_info
+    derived = {"primary": geometry_column, "secondary": list(declared), "metadata": declared}
+    return _merge_derived_geometry_info(geometry_info, derived)
+
+
 def _resolve_geometry_info(
     con,
     query: str,
@@ -1498,6 +1522,7 @@ def write_parquet_with_metadata(
 
     # A conversion rebuilds the input's measured facts. Transforming an
     # existing dataset can still use its carried block as a schema witness.
+    input_metadata = original_metadata
     if rebuild_geo_metadata:
         original_metadata = declared_write_metadata(original_metadata)
 
@@ -1509,6 +1534,9 @@ def write_parquet_with_metadata(
         geometry_column = geometry_info["primary"]
     else:
         geometry_column = _detect_geometry_from_query(con, query, original_metadata, verbose)
+    geometry_info = _rebuilt_secondary_crs(
+        geometry_info, input_metadata, geometry_column, rebuild_geo_metadata
+    )
 
     # Callers that transform geometry, filter rows, or merge multiple inputs
     # invalidate the carried bbox/geometry_types; drop them so the write
