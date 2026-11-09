@@ -28,6 +28,8 @@ def _check_file_type_cache(parquet_file: str) -> dict | None:
         cached_mtime, result = _file_type_cache[cache_key]
         # For remote files (mtime=0), always use cache
         # For local files, invalidate if file changed
+        # shortcut: a remote file's positive answer is never revalidated, so a
+        # replaced object reads stale until restart; key on ETag if that bites.
         if mtime == 0 or cached_mtime == mtime:
             return result
     return None
@@ -126,8 +128,9 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
         result["bbox_recommended"] = False  # Native geo types provide row group stats
     # else: remains "unknown"
 
-    # Cache the result (only if no connection provided)
-    if con is None:
+    # Cache only a positive answer, and only without a connection: an "unknown"
+    # is a refusal (not GeoParquet), and a refusal must not outlive a fixed file.
+    if con is None and result["file_type"] != "unknown":
         _update_file_type_cache(parquet_file, result)
 
     if verbose:

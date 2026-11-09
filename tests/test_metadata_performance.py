@@ -244,6 +244,30 @@ class TestDetectGeoparquetFileTypeCache:
         # Now should detect geo metadata
         assert result2["has_geo_metadata"] is True
 
+    def test_an_unknown_answer_is_reprobed_and_a_positive_remote_one_is_cached(self, monkeypatch):
+        """A "not GeoParquet" answer never sticks; a remote GeoParquet answer is still cached."""
+        from types import SimpleNamespace
+
+        from geoparquet_io.core import file_type
+
+        url = "s3://bucket/swapped.parquet"  # remote: mtime 0, so a cached entry always hits
+        geo = {"value": None}
+        probes = []
+
+        def fake_raw_geo(path, con=None):
+            probes.append(path)
+            return SimpleNamespace(value=geo["value"])
+
+        monkeypatch.setattr(file_type, "raw_geo_of_file", fake_raw_geo)
+        monkeypatch.setattr(file_type, "detect_geometry_columns", lambda *a, **k: {})
+        file_type.detect_geoparquet_file_type.cache_clear()
+
+        assert file_type.detect_geoparquet_file_type(url)["file_type"] == "unknown"
+        geo["value"] = {"version": "1.1.0", "primary_column": "geometry", "columns": {}}
+        assert file_type.detect_geoparquet_file_type(url)["file_type"] == "geoparquet_v1"
+        assert file_type.detect_geoparquet_file_type(url)["file_type"] == "geoparquet_v1"
+        assert len(probes) == 2
+
 
 class TestGeoArrowPyArrowCRSExtraction:
     """Test CRS extraction works when geoarrow-pyarrow is imported.
