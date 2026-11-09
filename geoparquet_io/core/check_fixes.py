@@ -18,6 +18,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import (
     atomic_write,
+    copy_file,
     is_same_file_path,
     resolve_file_url,
     scratch_file,
@@ -41,6 +42,7 @@ from geoparquet_io.core.parquet_writer import (
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_rewrite,
 )
+from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.write_funnels import (
     rewrite_file_through_funnel,
     rewrite_footer_kv,
@@ -597,10 +599,14 @@ def _place_result(result_file: str, output_file: str) -> None:
     is copied, never moved: ``--fix-output`` names a path nobody backed up, so
     moving the input away left the user with neither file nor ``.bak`` (#1036),
     and a scratch copy is removed by its owner (``file_utils.scratch_file``).
-    It lands through ``atomic_write``, so an existing destination is replaced
-    atomically.
+    A local destination lands through ``atomic_write``, so an existing one is
+    replaced atomically; a remote one goes through the object store
+    (``copy_file``), whose single PUT replaces the object whole.
     """
     if is_same_file_path(result_file, output_file):
+        return
+    if is_remote_url(output_file):
+        copy_file(result_file, output_file)
         return
 
     with atomic_write(output_file) as destination:

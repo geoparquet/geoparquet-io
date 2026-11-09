@@ -2774,6 +2774,39 @@ class TestTableAddBboxMetadata:
         """No name means detect, as `gpio add bbox-metadata` does: the covering's column."""
         assert self._covering_column(call(read(austria_bbox_covering_file))) == "geometry_bbox"
 
+    @staticmethod
+    def _two_geometries(path, boundary_covering: bool):
+        """``geometry`` covered by ``geometry_bbox``; a secondary ``boundary`` with its own."""
+        arrow = read(path).to_arrow()
+        arrow = arrow.append_column("boundary", arrow.column("geometry"))
+        arrow = arrow.append_column("boundary_bbox", arrow.column("geometry_bbox"))
+        arrow = arrow.append_column("bbox", arrow.column("geometry_bbox"))
+        geo = json.loads(arrow.schema.metadata[b"geo"])
+        entry = {k: v for k, v in geo["columns"]["geometry"].items() if k != "covering"}
+        if boundary_covering:
+            entry["covering"] = {
+                "bbox": {axis: ["boundary_bbox", axis] for axis in ("xmin", "ymin", "xmax", "ymax")}
+            }
+        geo["columns"]["boundary"] = entry
+        return arrow.replace_schema_metadata({**arrow.schema.metadata, b"geo": json.dumps(geo)})
+
+    def test_secondary_geometry_keeps_its_own_covering(self, austria_bbox_covering_file):
+        """Detection resolves the SELECTED column's covering, not the primary's."""
+        arrow = self._two_geometries(austria_bbox_covering_file, boundary_covering=True)
+
+        out = ops.add_bbox_metadata(arrow, geometry_column="boundary")
+
+        columns = json.loads(out.schema.metadata[b"geo"])["columns"]
+        assert columns["boundary"]["covering"]["bbox"]["xmin"] == ["boundary_bbox", "xmin"]
+        assert columns["geometry"]["covering"]["bbox"]["xmin"] == ["geometry_bbox", "xmin"]
+
+    def test_secondary_geometry_without_a_covering_is_refused(self, austria_bbox_covering_file):
+        """Neither the primary's covering nor a ``bbox`` column bounds a secondary geometry."""
+        arrow = self._two_geometries(austria_bbox_covering_file, boundary_covering=False)
+
+        with pytest.raises(ValueError, match="No valid bbox column found"):
+            ops.add_bbox_metadata(arrow, geometry_column="boundary")
+
     def test_explicit_bbox_column_is_honoured(self, austria_bbox_covering_file):
         """A named column wins over the one detection would pick."""
         arrow = read(austria_bbox_covering_file).to_arrow()

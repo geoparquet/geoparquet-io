@@ -91,7 +91,8 @@ def add_bbox_metadata(
     Args:
         table: Input PyArrow Table, carrying GeoParquet `geo` metadata
         bbox_column: Name of the existing bbox column (None: detect it as
-            `gpio add bbox-metadata` does -- the covering's column, else 'bbox')
+            `gpio add bbox-metadata` does -- the covering's column, else 'bbox'.
+            A non-primary ``geometry_column`` takes only its own covering)
         geometry_column: Geometry column name (auto-detected if None)
 
     Returns:

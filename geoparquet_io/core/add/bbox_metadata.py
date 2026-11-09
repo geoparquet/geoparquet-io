@@ -19,7 +19,7 @@ import functools
 from typing import TYPE_CHECKING
 
 from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
-from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.bbox_structure import bbox_covering_column_for, check_bbox_structure
 from geoparquet_io.core.column_selection import find_column
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.exceptions import GeoParquetError
@@ -117,8 +117,9 @@ def add_bbox_metadata_table(
     Args:
         table: Arrow table carrying GeoParquet `geo` schema metadata
         bbox_column: Name of the existing bbox struct column. None detects it
-            the way the file path does: the primary's covering column, else
-            a struct called ``bbox``.
+            for the selected geometry: its own covering column, and for the
+            primary only, the way the file path does, else a struct called
+            ``bbox``.
         geometry_column: Geometry column name (auto-detected if None)
 
     Returns:
@@ -133,7 +134,16 @@ def add_bbox_metadata_table(
     geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
     if bbox_column is None:
-        bbox_column = _detect_bbox_column_from_table(table)
+        # Only the primary has a conventional ``bbox`` fallback; any other
+        # column is bounded by nothing but its own declared covering.
+        primary = resolve_geometry_column(table, None, where="the table")
+        bbox_column = (
+            _detect_bbox_column_from_table(table)
+            if geom_col == primary
+            else bbox_covering_column_for(
+                sanitized_carried_geo(table.schema.metadata), str(geom_col)
+            )
+        )
         if bbox_column is None:
             raise ValueError(
                 "No valid bbox column found. Use add_bbox() first, or name an existing "

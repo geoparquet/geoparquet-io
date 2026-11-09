@@ -203,3 +203,59 @@ def test_fix_honours_the_checks_subset(tmp_path, unsorted_copy):
     fixed = pq.read_table(out)
     assert pc.all(pc.equal(fixed.column("id"), source.column("id"))).as_py()  # not sorted
     assert gpio.check_compression(out).passed()
+
+
+def test_fix_refuses_an_existing_output_unless_overwrite(tmp_path, unsorted_copy):
+    """An existing output is the CLI's refusal (#1367); a derived Table cannot clobber its file."""
+    taken = tmp_path / "taken.parquet"
+    taken.write_bytes(b"keep me")
+    before = unsorted_copy.read_bytes()
+
+    with pytest.raises(gpio.GeoParquetError, match="overwrite=True"):
+        gpio.read(unsorted_copy).fix(checks=[], output=taken)
+    with pytest.raises(gpio.GeoParquetError, match="overwrite=True"):
+        gpio.read(unsorted_copy).head(5).fix(checks=[], output=unsorted_copy)
+
+    assert taken.read_bytes() == b"keep me"
+    assert unsorted_copy.read_bytes() == before
+    assert gpio.read(unsorted_copy).fix(checks=[], output=taken, overwrite=True).num_rows == 1445
+
+
+def test_fix_to_a_remote_output_copies_through_the_object_store(monkeypatch, unsorted_copy):
+    """A remote output is copied with the cloud-aware ``copy_file``, not ``shutil``."""
+    from geoparquet_io.api import table as table_module
+    from geoparquet_io.core import check_fixes
+
+    landed = {}
+
+    def fake_copy(source, dest, verbose=False):
+        landed[dest] = pq.read_table(source).num_rows
+
+    monkeypatch.setattr(check_fixes, "copy_file", fake_copy, raising=False)
+    monkeypatch.setattr(table_module, "read", lambda path: path)
+
+    gpio.read(unsorted_copy).fix(checks=["spatial"], output="s3://bucket/out.parquet")
+
+    assert landed == {"s3://bucket/out.parquet": 1445}
+
+
+def test_fix_row_groups_fuses_the_compression_rewrite(tmp_path, unsorted_copy):
+    """Selecting ``row_groups`` is the one rewrite, so the output is ZSTD too."""
+    out = tmp_path / "fixed.parquet"
+
+    gpio.read(unsorted_copy).fix(checks=["row_groups"], output=out)
+
+    meta = pq.ParquetFile(out).metadata
+    assert meta.num_row_groups == 1
+    assert meta.row_group(0).column(0).compression == "ZSTD"
+
+
+def test_fix_covering_on_a_good_file_leaves_codec_and_row_groups(tmp_path, unsorted_copy):
+    """No covering fix to apply: the SNAPPY, 15-row-group input is placed as it is."""
+    out = tmp_path / "fixed.parquet"
+
+    gpio.read(unsorted_copy).fix(checks=["covering"], output=out)
+
+    meta = pq.ParquetFile(out).metadata
+    assert meta.num_row_groups == 15
+    assert meta.row_group(0).column(0).compression == "SNAPPY"

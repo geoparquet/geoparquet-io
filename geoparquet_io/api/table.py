@@ -3342,6 +3342,7 @@ class Table:
         checks: list[str] | None = None,
         output: str | Path | None = None,
         *,
+        overwrite: bool = False,
         verbose: bool = False,
     ) -> Table:
         """
@@ -3364,6 +3365,9 @@ class Table:
             output: Write the repaired file here and return a Table read from
                 it. None (default) repairs into a scratch file and returns the
                 rows in memory. Refused when it is this Table's source.
+            overwrite: Replace an existing ``output``. Without it an existing
+                file is refused, as ``--fix-output`` refuses one without
+                ``--overwrite``.
             verbose: Log each fix as it runs
 
         Returns:
@@ -3372,6 +3376,7 @@ class Table:
         Raises:
             InvalidParameterError: An unknown check name, or ``output`` naming
                 the source file
+            GeoParquetError: ``output`` exists and ``overwrite`` is not set
 
         Example:
             >>> fixed = gpio.read('data.parquet').fix()
@@ -3382,7 +3387,7 @@ class Table:
         from geoparquet_io.api import check
         from geoparquet_io.core.check_fixes import apply_all_fixes
         from geoparquet_io.core.exceptions import InvalidParameterError
-        from geoparquet_io.core.file_utils import is_same_file_path
+        from geoparquet_io.core.file_utils import handle_output_overwrite, is_same_file_path
 
         fixable = ("bbox", "covering", "compression", "row_groups", "spatial")
         wanted = set(fixable if checks is None else [checks] if isinstance(checks, str) else checks)
@@ -3394,6 +3399,12 @@ class Table:
                 "output",
                 "is this Table's source file, and fix() never rewrites its input. Name "
                 "another path, or leave output unset for the result in memory.",
+            )
+        if output is not None:
+            # The CLI repair path's policy (_copy_to_fix_output): the old file
+            # survives until the repaired one replaces it.
+            handle_output_overwrite(
+                os.fspath(output), overwrite, self._source_path, flag="overwrite=True", remove=False
             )
 
         def repair(path: str, target: str) -> None:
