@@ -266,7 +266,9 @@ def _assert_column(name: str, got: dict, want: dict) -> None:
 
 def assert_matches_declaration(path: str, declared: dict, version: str) -> list[str]:
     """Assert the written block keeps what the input declared; return oracle failures."""
-    assert pq.read_metadata(path).num_rows == len(POINTS), "rows lost"
+    # Every source carries ``id`` = 0..n-1 (``_build_source``): rows kept, in order.
+    written_ids = pq.read_table(path, columns=["id"])["id"].to_pylist()
+    assert written_ids == list(range(len(POINTS))), f"id sequence {written_ids}"
     geo = _geo_metadata(path)
     assert geo is not None, "write produced no 'geo' metadata key"
     assert geo.get("version") == VERSIONS[version], f"geo version {geo.get('version')!r}"
