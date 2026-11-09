@@ -1,11 +1,12 @@
-"""The write-options object (#1367, T5c): one value carries the write facts.
+"""The write-options object (#1367, T5c; reshaped by #761): one value carries the write facts.
 
 Every write path used to forward the same seven keywords (``compression``,
 ``compression_level``, ``row_group_size_mb``, ``row_group_rows``, ``profile``,
 ``geoparquet_version``, ``memory_limit``) from its public entry point through
 each private driver to the funnel; pylint's duplicate-code check reported those
 lists as 18 copies. ``parquet_writer.WriteOptions`` is the one value they travel
-in now: built once at the entry point, expanded once at the funnel.
+in now: built once at the entry point, expanded once at the funnel. #761 made it
+public (``gpio.WriteOptions``) and added ``write_strategy``.
 """
 
 from __future__ import annotations
@@ -17,9 +18,10 @@ import pytest
 
 from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.stream_io import execute_transform, write_output
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+from geoparquet_io.core.write_funnels import write_geoparquet_table, write_parquet_with_metadata
 
-FIELDS = (
+#: The keywords every funnel takes; ``funnel_kwargs`` emits these and no others.
+FUNNEL_FIELDS = (
     "compression",
     "compression_level",
     "row_group_size_mb",
@@ -28,27 +30,62 @@ FIELDS = (
     "geoparquet_version",
     "memory_limit",
 )
+FIELDS = (*FUNNEL_FIELDS, "write_strategy")
 
 
-def test_the_fields_are_the_forwarded_write_keywords():
+def test_the_fields_are_the_funnel_keywords_and_the_strategy():
     assert tuple(f.name for f in dataclasses.fields(WriteOptions)) == FIELDS
 
 
-def test_it_is_frozen():
+def test_the_ruled_defaults():
+    """#761's ruling: ZSTD and an "auto" strategy; every other fact unset."""
+    options = WriteOptions()
+    assert (options.compression, options.write_strategy) == ("ZSTD", "auto")
+    assert all(getattr(options, name) is None for name in FIELDS[1:-1])
+
+
+def test_it_is_frozen_and_keyword_only():
     with pytest.raises(dataclasses.FrozenInstanceError):
         WriteOptions().compression = "GZIP"  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        WriteOptions("GZIP")  # type: ignore[misc]
 
 
-def test_every_default_is_the_funnels_own_default():
-    """An unset field means what leaving the keyword out of the funnel means."""
-    signature = inspect.signature(write_parquet_with_metadata)
-    for name, value in WriteOptions().funnel_kwargs().items():
-        assert value == signature.parameters[name].default, name
+def test_every_default_means_what_the_funnel_default_means():
+    """An unset field is left out; ZSTD is what the funnel's own None resolves to."""
+    from geoparquet_io.core.compression import resolve_codec
+
+    assert WriteOptions().funnel_kwargs() == {"compression": "ZSTD"}
+    assert resolve_codec("ZSTD", None, context="write") == resolve_codec(
+        None, None, context="write"
+    )
 
 
-@pytest.mark.parametrize("funnel", [write_parquet_with_metadata, write_output, execute_transform])
-def test_every_funnel_takes_every_field(funnel):
-    assert set(FIELDS) <= set(inspect.signature(funnel).parameters)
+@pytest.mark.parametrize(
+    "funnel", [write_parquet_with_metadata, write_geoparquet_table, write_output, execute_transform]
+)
+def test_every_funnel_takes_every_funnel_field(funnel):
+    assert set(FUNNEL_FIELDS) <= set(inspect.signature(funnel).parameters)
+
+
+def test_funnel_kwargs_emits_only_the_funnel_keywords_and_never_none():
+    full = WriteOptions(
+        compression=None,
+        compression_level=6,
+        row_group_size_mb=None,
+        row_group_rows=4096,
+        profile="p",
+        geoparquet_version=None,
+        memory_limit="2GB",
+        write_strategy="streaming",
+    )
+    assert full.funnel_kwargs() == {
+        "compression_level": 6,
+        "row_group_rows": 4096,
+        "profile": "p",
+        "memory_limit": "2GB",
+    }
+    assert set(WriteOptions(write_strategy="disk-rewrite").funnel_kwargs()) <= set(FUNNEL_FIELDS)
 
 
 def test_pick_reads_the_fields_by_name_and_ignores_the_rest():
@@ -60,16 +97,49 @@ def test_pick_reads_the_fields_by_name_and_ignores_the_rest():
         "profile": "p",
         "geoparquet_version": "2.0",
         "memory_limit": "2GB",
+        "write_strategy": "streaming",
         "verbose": True,
         "input_parquet": "in.parquet",
     }
     options = WriteOptions.pick(values)
-    assert options == WriteOptions("GZIP", 6, 64.0, None, "p", "2.0", "2GB")
-    assert options.funnel_kwargs() == {k: values[k] for k in FIELDS}
+    assert options == WriteOptions(**{k: values[k] for k in FIELDS})
+    assert options.funnel_kwargs() == {k: values[k] for k in FUNNEL_FIELDS if values[k] is not None}
 
 
 def test_pick_leaves_an_absent_field_at_its_default():
     assert WriteOptions.pick({"compression": "LZ4"}) == WriteOptions(compression="LZ4")
+
+
+def _points_table(rows=3000):
+    import pyarrow as pa
+
+    shapely = pytest.importorskip("shapely")
+    geoms = shapely.to_wkb(shapely.points([[i * 0.01, i * 0.02] for i in range(rows)])).tolist()
+    return pa.table({"id": list(range(rows)), "geometry": geoms})
+
+
+def test_auto_is_the_query_funnels_duckdb_kv(tmp_path):
+    """Each entry point resolves "auto" to the strategy it used to default to."""
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+    con = get_duckdb_connection()
+    try:
+        con.register("t", _points_table())
+        query = "SELECT id, ST_GeomFromWKB(geometry) AS geometry FROM t"
+        for name in ("auto", "duckdb-kv"):
+            write_parquet_with_metadata(
+                con, query, str(tmp_path / f"{name}.parquet"), write_strategy=name
+            )
+    finally:
+        con.close()
+    assert (tmp_path / "auto.parquet").read_bytes() == (tmp_path / "duckdb-kv.parquet").read_bytes()
+
+
+def test_auto_is_the_table_funnels_arrow_writer(tmp_path):
+    table = _points_table()
+    write_geoparquet_table(table, str(tmp_path / "auto.parquet"), write_strategy="auto")
+    write_geoparquet_table(table, str(tmp_path / "none.parquet"))
+    assert (tmp_path / "auto.parquet").read_bytes() == (tmp_path / "none.parquet").read_bytes()
 
 
 # ---------------------------------------------------------------------------
@@ -184,8 +254,15 @@ def test_piped_reproject_honours_the_write_flags(points_file, tmp_path):
 @pytest.mark.parametrize(
     ("options", "expected"),
     [
-        (WriteOptions(), False),
-        (WriteOptions(profile="p", memory_limit="1GB"), False),
+        (WriteOptions(compression=None), False),
+        (
+            WriteOptions(
+                compression=None, profile="p", memory_limit="1GB", write_strategy="streaming"
+            ),
+            False,
+        ),
+        # The ruled default is a codec asked for; only None means "not asked".
+        (WriteOptions(), True),
         (WriteOptions(compression="zstd"), True),
         (WriteOptions(compression_level=3), True),
         (WriteOptions(row_group_size_mb=64), True),

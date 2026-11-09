@@ -1391,7 +1391,7 @@ def write_parquet_with_metadata(
     profile=None,
     geoparquet_version=None,
     input_crs=None,
-    write_strategy: str = "duckdb-kv",
+    write_strategy: str | None = "duckdb-kv",
     memory_limit: str | None = None,
     geometry_info: dict | None = None,
     extra_kv_metadata: dict[str, str] | None = None,
@@ -1779,7 +1779,10 @@ def write_parquet_with_metadata(
                         debug("Routing 1.1-geoarrow WKB input through arrow-streaming")
                     write_strategy = "streaming"
 
-            strategy_enum = WriteStrategy(write_strategy)
+            # "auto" (WriteOptions' default) is this funnel's duckdb-kv (#761).
+            strategy_enum = WriteStrategy(
+                "duckdb-kv" if write_strategy in (None, "auto") else write_strategy
+            )
             strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
             if verbose:
@@ -2104,7 +2107,8 @@ def write_geoparquet_table(
         # a 2.0 write would otherwise keep as spherical.
         table = with_planar_edge_types(table, [geometry_column])
 
-    if write_strategy is not None:
+    # "auto" (WriteOptions' default) is this funnel's Arrow writer (#761).
+    if write_strategy not in (None, "auto"):
         strategy = WriteStrategyFactory.get_strategy(WriteStrategy(write_strategy))
         _write_table_with_strategy(
             strategy,
