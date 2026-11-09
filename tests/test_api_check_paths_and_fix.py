@@ -84,10 +84,16 @@ def test_a_directory_or_glob_is_refused(tmp_path, unsorted_test_file, function, 
 
 
 def test_a_remote_url_goes_straight_to_core(monkeypatch):
-    from geoparquet_io.core import check_parquet_structure
+    from geoparquet_io.core import check_parquet_structure, file_type
 
     url = "s3://bucket/data.parquet"
     seen = []
+    # The not-GeoParquet gate probes the footer first; keep this test off the network.
+    monkeypatch.setattr(
+        file_type,
+        "detect_geoparquet_file_type",
+        lambda path, *_, **__: seen.append(path) or {"file_type": "geoparquet_v1"},
+    )
     monkeypatch.setattr(
         check_parquet_structure,
         "check_compression",
@@ -96,7 +102,7 @@ def test_a_remote_url_goes_straight_to_core(monkeypatch):
 
     result = gpio.check_compression(url)
 
-    assert seen == [url]
+    assert seen == [url, url]  # the gate's probe, then the check itself, both on the URL
     assert result.source_path == url
 
 
