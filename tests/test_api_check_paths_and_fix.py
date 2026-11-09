@@ -35,6 +35,13 @@ PAIRS = [
 ]
 
 
+def test_every_public_check_wraps_the_check_table_methods_call():
+    """``Table._run_check`` calls ``__wrapped__`` to skip the one-file refusal."""
+    names = [n for n in gpio.__all__ if n.startswith("check_") or n == "validate"]
+    assert len(names) == 9
+    assert [n for n in names if not hasattr(getattr(gpio, n), "__wrapped__")] == []
+
+
 @pytest.mark.parametrize(("function", "method"), PAIRS)
 def test_path_function_answers_as_the_table_method(unsorted_test_file, function, method):
     path = os.path.abspath(unsorted_test_file)

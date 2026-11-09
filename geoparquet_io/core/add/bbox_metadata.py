@@ -161,11 +161,10 @@ def add_bbox_metadata_table(
 
     # Another column's covering bounds that column's geometry, not this one (#953).
     carried = sanitized_carried_geo(table.schema.metadata)
-    columns = carried.get("columns") if isinstance(carried, dict) else None
     owner = next(
         (
             name
-            for name in (columns if isinstance(columns, dict) else {})
+            for name in carried.get("columns", {})
             if name != geom_col and bbox_covering_column_for(carried, name) == bbox_column
         ),
         None,
