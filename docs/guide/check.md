@@ -143,13 +143,16 @@ read in place.
     `gpio.check_all`, `check_bbox`, `check_row_groups`, `check_spatial`,
     `check_spatial_pushdown`, `check_bloom_filters` and `check_optimization`
     work the same way. `gpio.read(path).check_*()` calls them on the file it
-    read, so both give the same answer.
+    read, so for a local file that has not changed both give the same answer.
+    A Table read from a remote URL is checked on a temporary local rewrite of
+    its rows instead, so its answer describes that rewrite.
 
 ### Fix from Python
 
 `Table.fix()` applies the repairs `--fix` would, but into a new Table: the file
 it was read from is never rewritten. Pass `output=` to write the repaired file
-there (it must not be the source), or leave it unset to get the rows in memory.
+there (it must not be the source, and an existing file needs `overwrite=True`),
+or leave it unset to get the rows in memory.
 `checks=` picks which checks' fixes run, from `"bbox"`, `"covering"`,
 `"compression"`, `"row_groups"` and `"spatial"`. The compression and row-group
 fixes are one rewrite, so picking either applies both when it is needed.

@@ -1590,7 +1590,8 @@ Apply the repairs `gpio check <cmd> --fix` would, into a new Table. It never
 rewrites the file the Table was read from: `output=` writes the repaired file
 to another path and returns `gpio.read(output)`; without it the repair goes
 through a scratch file and the rows come back in memory (`source_path` is
-None). An `output` that names the source is refused. `checks=` picks which
+None). An `output` that names the source is refused, and an existing `output`
+is refused unless `overwrite=True`. `checks=` picks which
 fixes run, from `"bbox"`, `"covering"`, `"compression"`, `"row_groups"` and
 `"spatial"` (default: all); an unknown name is refused. The compression and
 row-group fixes are one rewrite, so picking either applies both when needed.
@@ -1610,7 +1611,11 @@ matching CLI subcommand (and `Table` method), and return a `CheckResult`
 with `source_path` set. They check one file: a directory or glob raises
 `InvalidParameterError`, and `gpio check <cmd>` handles a multi-file run. A
 remote URL is read in place. The `Table` methods call these on the file they
-were read from, so `gpio.check_x(path)` and `gpio.read(path).check_x()` agree.
+were read from, so for a local file that has not changed since it was read,
+`gpio.check_x(path)` and `gpio.read(path).check_x()` agree. A `Table` read from
+a remote URL (or derived, or whose file changed) is checked on a temporary
+local rewrite of its rows, so its verdict describes that rewrite, not the
+remote file.
 `gpio.check_all` is the exception: it runs what `gpio check all` runs (structure,
 spatial order, spec), while `Table.check()` runs the structure checks only.
 
