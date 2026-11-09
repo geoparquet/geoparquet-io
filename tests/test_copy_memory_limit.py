@@ -236,7 +236,7 @@ class TestEveryStrategyHonoursTheLimit:
         assert "DuckDB memory limit: 517MB" in caplog.text
 
     def test_disk_rewrite_bounds_every_scan_of_the_write(self, tmp_path, con, monkeypatch):
-        """The stats scan before the COPY and the geometry-type scan after it ran unbounded."""
+        """The row-group sample and stats scan before the COPY, and the type scan after it, ran unbounded."""
         from geoparquet_io.core.write_strategies import disk_rewrite
 
         seen: dict[str, list[str]] = {}
@@ -250,6 +250,7 @@ class TestEveryStrategyHonoursTheLimit:
 
             monkeypatch.setattr(disk_rewrite, name, recording)
 
+        spy("resolve_row_group_rows_for_query")
         spy("geometry_stats_of")
         spy("missing_geometry_types")
         query = _points_parquet(con, str(tmp_path / "src.parquet"))
@@ -259,13 +260,18 @@ class TestEveryStrategyHonoursTheLimit:
             str(tmp_path / "out.parquet"),
             geoparquet_version="1.1",
             write_strategy="disk-rewrite",
+            row_group_size_mb=1,
             memory_limit="517MB",
         )
         bounded = duckdb.connect()
         bounded.execute("SET memory_limit='517MB'")
         expected = _setting(bounded, "memory_limit")
         bounded.close()
-        assert seen.keys() == {"geometry_stats_of", "missing_geometry_types"}
+        assert seen.keys() == {
+            "resolve_row_group_rows_for_query",
+            "geometry_stats_of",
+            "missing_geometry_types",
+        }
         assert {v for values in seen.values() for v in values} == {expected}
 
     def test_streaming_closes_its_reader_before_restoring_settings(

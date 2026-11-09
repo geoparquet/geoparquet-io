@@ -138,9 +138,9 @@ class DiskRewriteStrategy(BaseWriteStrategy):
     ) -> None:
         """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite.
 
-        ``memory_limit`` bounds every DuckDB statement of phase one (the stats
-        scan, the COPY, the geometry-type scans); the row-group rewrite after it
-        is pyarrow's and runs no DuckDB.
+        ``memory_limit`` bounds every DuckDB statement of phase one (the
+        row-group sample, the stats scan, the COPY, the geometry-type scans); the
+        row-group rewrite after it is pyarrow's and runs no DuckDB.
         """
 
         configure_verbose(verbose)
@@ -149,9 +149,12 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # DuckDB COPY TO sizes row groups by row count, so translate any MB target
         # into rows before it can take effect on this strategy (fixes #689 — both
         # sizing options were accepted and then ignored entirely).
-        resolved_row_group_rows = resolve_row_group_rows_for_query(
-            con, query, row_group_rows, row_group_size_mb, verbose
-        )
+        # Its own scope: an MB target samples the query, which the plain path
+        # below and the geo path's scope would otherwise leave unbounded.
+        with scoped_write_memory_limit(con, memory_limit, verbose):
+            resolved_row_group_rows = resolve_row_group_rows_for_query(
+                con, query, row_group_rows, row_group_size_mb, verbose
+            )
 
         # Handle non-geo queries: write plain Parquet without geo metadata
         if geometry_column is None:
