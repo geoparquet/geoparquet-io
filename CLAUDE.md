@@ -140,7 +140,8 @@ geoparquet_io/
 ### Critical Rules
 
 - **Never use `click.echo()` in `core/` modules** - Use logging helpers instead
-- **Every CLI command needs a Python API** - Add to `api/table.py` (methods) and `api/ops.py` (functions)
+- **Every CLI command needs a Python API** - Add to `api/table.py` (methods) and `api/ops.py` (functions),
+  and register it in `tests/parity_registry.py`; `tests/test_parity_registry.py` enforces it
 - **All documentation needs CLI + Python examples** - Use tabbed format
 
 ---
@@ -413,7 +414,7 @@ bumped or tagged.
    `cli.add_command()`. Where a helper goes: shared by many groups → `cli/_shared.py`;
    a reusable option or `cls=` command class → `cli/decorators.py`; used by one group
    only → it travels with that group's module.
-3. [ ] Python API in `api/table.py` and `api/ops.py`
+3. [ ] Python API in `api/table.py` and `api/ops.py`; register it in `tests/parity_registry.py`
 4. [ ] Tests in `tests/`
 5. [ ] Docs in `docs/guide/`
 

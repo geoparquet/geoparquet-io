@@ -36,10 +36,9 @@ that those two names must always carry the same value. A key absent from the
 map is a knob one side does not have (the table-centric `add_*_table` functions
 take no compression or row-group options at all -- they do not write).
 
-Known gaps live in `KNOWN_PARITY_GAPS`, keyed by ``(case id, front end,
+Known gaps live in `KNOWN_PARITY_GAPS` (in `tests/parity_registry.py`), keyed by ``(case id, front end,
 canonical name, repr(CLI value), repr(API value))`` with a written
-justification, following `collect_divergences()` in
-`tests/test_cli_api_default_parity.py`. The two reprs are part of the key on
+justification, following `KNOWN_DIVERGENCES` beside it. The two reprs are part of the key on
 purpose: an allowlist recording only "these differ" would stay green if
 `ops.sort_str` changed `tile_size` from 50000 to 40000 -- still a divergence, but a
 different one nobody reviewed.
@@ -59,9 +58,9 @@ introspection cannot see, such as the CLI deriving `iterations` from
 
 The census
 ----------
-Every CLI leaf is either a `ParityCase` or an entry in `NO_CALL_PARITY_CASE`
-with a written reason; `test_every_cli_leaf_has_a_parity_case_or_a_recorded_reason`
-fails on a new command that is neither.
+Every CLI leaf is either a `ParityCase` or carries an `EXEMPT[leaf]["call_case"]`
+reason in `tests/parity_registry.py`; `tests/test_parity_registry.py` fails on a
+new command that is neither.
 
 Patching note (project memory): dotted-string `mock.patch("...cli.main.X")`
 targets fail on Python 3.10. Every patch here is `patch.object(module, name)`,
@@ -124,7 +123,6 @@ from geoparquet_io.core.add import quadkey as core_quadkey
 from geoparquet_io.core.add import s2 as core_s2
 from geoparquet_io.core.add import stac_metadata as core_stac_metadata
 from geoparquet_io.core.convert import convert_to_geoparquet
-from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
 from geoparquet_io.core.partition import by_h3 as core_part_h3
 from geoparquet_io.core.partition import by_quadkey as core_part_quadkey
 from geoparquet_io.core.process import overview as core_overview
@@ -132,6 +130,7 @@ from geoparquet_io.core.process.aggregate import by_a5 as core_agg_a5
 from geoparquet_io.core.process.aggregate import by_admin as core_agg_admin
 from geoparquet_io.core.process.aggregate import by_h3 as core_agg_h3
 from geoparquet_io.core.process.aggregate.options import AggregateOptions
+from tests.parity_registry import KNOWN_PARITY_GAPS
 
 # Sentinel: the recorder returns its first positional argument. The table-centric
 # core functions return a table that the API front ends immediately re-wrap, so a
@@ -824,7 +823,7 @@ CASES: list[ParityCase] = [
     # WP-7 (#1018): the seven command groups that had no call-parity case.
     #
     # `check`, `benchmark`, `process`, `pmtiles` and `publish` are added here.
-    # `inspect` and `skills` cannot be: see `NO_CALL_PARITY_CASE` below.
+    # `inspect` and `skills` cannot be: see `EXEMPT` in tests/parity_registry.py.
     #
     # A recurring shape in this batch: `verbose` and `quiet` are deliberately
     # absent from every `normalize` map. They are rendering knobs, and the API
@@ -1289,80 +1288,6 @@ CASES_BY_ID = {case.id: case for case in CASES}
 
 
 # --------------------------------------------------------------------------
-# Known gaps -- findings, not pinned behaviour. Every entry needs a reason.
-# --------------------------------------------------------------------------
-
-# Keys are (case id, front end, canonical name, repr(CLI value), repr(API value)),
-# following `collect_divergences()` in tests/test_cli_api_default_parity.py. The two
-# reprs are load-bearing: an allowlist that recorded only "these differ" would stay
-# green if `ops.sort_str` changed `tile_size` from 50000 to 40000 -- still a divergence,
-# but a *different* one that nobody reviewed. Pinning the pair means any change to
-# either side has to come back through this table.
-KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
-    (
-        "sort hilbert",
-        "table",
-        "geometry_column",
-        "None",
-        "'geometry'",
-    ): (
-        "CLI --geometry-column defaults to None, the file's primary geometry column "
-        "(geometry_detection.primary_geometry_column, #1367 T3c); Table.sort_hilbert passes the "
-        "column the Table already tracks. Same column, resolved where each front end knows it."
-    ),
-    (
-        "sort str",
-        "table",
-        "geometry_column",
-        "None",
-        "'geometry'",
-    ): (
-        "CLI --geometry-column defaults to None, the file's primary geometry column "
-        "(geometry_detection.primary_geometry_column, #1367 T3c); Table.sort_str passes the "
-        "column the Table already tracks. Same column, resolved where each front end knows it."
-    ),
-    (
-        "sort str",
-        "ops",
-        "tile_size",
-        "None",
-        str(DEFAULT_ROW_GROUP_ROWS),
-    ): (
-        f"The file core resolves row_group_rows=None to the sort default of "
-        f"{DEFAULT_ROW_GROUP_ROWS:,} rows (DEFAULT_ROW_GROUP_ROWS); the in-memory API "
-        f"spells that same effective default explicitly as tile_size={DEFAULT_ROW_GROUP_ROWS}."
-    ),
-    (
-        "sort str",
-        "table",
-        "tile_size",
-        "None",
-        str(DEFAULT_ROW_GROUP_ROWS),
-    ): (
-        f"The file core resolves row_group_rows=None to the sort default of "
-        f"{DEFAULT_ROW_GROUP_ROWS:,} rows (DEFAULT_ROW_GROUP_ROWS); the fluent API "
-        f"spells that same effective default explicitly as tile_size={DEFAULT_ROW_GROUP_ROWS}."
-    ),
-    (
-        "convert geoparquet",
-        "table",
-        "row_group_rows",
-        "None",
-        str(DEFAULT_ROW_GROUP_ROWS),
-    ): (
-        f"Measurement depth, not behaviour -- the same gap this case's notes already "
-        f"concede for geoparquet_version. Both front ends resolve row_group_rows through "
-        f"parquet_writer.resolve_row_group_rows and both land on {DEFAULT_ROW_GROUP_ROWS:,}, "
-        f"but the two boundaries this case patches sit on opposite sides of that call: the "
-        f"CLI's is convert_to_geoparquet, which runs *before* write_parquet_with_metadata "
-        f"resolves, and the table's is WriteStrategyFactory.get_strategy, which runs *after* "
-        f"Table.write resolves. tests/test_write_facade_row_groups.py asserts the thing this "
-        f"case cannot see: that the two front ends write the same row-group layout."
-    ),
-}
-
-
-# --------------------------------------------------------------------------
 # Fixtures
 # --------------------------------------------------------------------------
 
@@ -1550,11 +1475,6 @@ def test_known_parity_gap_still_diverges_the_same_way(gap, parity_ctx):
     )
 
 
-def test_every_known_gap_has_a_justification():
-    for gap, reason in KNOWN_PARITY_GAPS.items():
-        assert reason and reason.strip(), f"No justification recorded for {gap}"
-
-
 def test_every_known_gap_names_a_real_case_and_parameter():
     """A typo in the allowlist would silently disable a comparison."""
     for case_id, side, canonical, _cli_repr, _api_repr in KNOWN_PARITY_GAPS:
@@ -1565,86 +1485,6 @@ def test_every_known_gap_names_a_real_case_and_parameter():
         assert canonical in case.normalize, (
             f"{canonical!r} is not a canonical parameter of {case_id!r}"
         )
-
-
-# --------------------------------------------------------------------------
-# Census -- a new CLI leaf must arrive with a parity case or an excuse
-# --------------------------------------------------------------------------
-
-_NO_SEAM_INSPECT = (
-    "No shared seam: the CLI goes through `core.inspect`, the Table method is inline "
-    "pyarrow/DuckDB and calls no core function. Compared behaviourally in "
-    "tests/test_api_cli_behaviour_parity.py::TestInspectGroupAgreesWithTable."
-)
-_ONE_DOOR = (
-    "The CLI and the API call the same core function with just the path (#1065): one "
-    "door, nothing to diff."
-)
-_NETWORK = "Reaches a live service; the network lane covers it."
-_DEFERRED = "Worth a case; not written yet (#1085)."
-
-NO_CALL_PARITY_CASE: dict[str, str] = {
-    # --- no API twin at all (`NO_API_TWIN` minus the three #1065 mislabels) --
-    "benchmark compare": "No API twin: diffs two benchmark JSON runs for a human.",
-    "benchmark report": "No API twin: renders collected benchmark results for a human.",
-    "benchmark suite": "No API twin: orchestrates a multi-command benchmark run.",
-    "skills": "No API twin: prints the bundled LLM skill documents.",
-    # --- a twin exists, but the two front ends share no call seam ----------
-    **dict.fromkeys(
-        ["inspect summary", "inspect head", "inspect tail", "inspect stats", "inspect meta"],
-        _NO_SEAM_INSPECT,
-    ),
-    "inspect layers": _ONE_DOOR,
-    "check stac": _ONE_DOOR,
-    "add geometry-metrics": (
-        "Compared behaviourally in tests/test_api_cli_behaviour_parity.py::"
-        "TestAddGeometryMetricsParity, on the computed values rather than the call."
-    ),
-    # --- a twin and a seam, but not reachable offline --------------------
-    **dict.fromkeys(["extract arcgis", "extract wfs"], _NETWORK),
-    # --- deferred ---------------------------------------------------------
-    **dict.fromkeys(
-        [
-            "extract carto",
-            "extract bigquery",
-            "add admin-divisions",
-            "partition admin",
-            "convert reproject",
-            "convert geojson",
-            "convert shapefile",
-            "partition string",
-            "partition kdtree",
-            "partition s2",
-            "partition a5",
-            "add bbox-metadata",
-            "process simplify",
-            "process polygonize",
-            "process contour",
-        ],
-        _DEFERRED,
-    ),
-}
-
-
-def _cli_leaves() -> set[str]:
-    from tests.conftest import walk_cli_commands
-
-    return {" ".join(path) for path, _cmd in walk_cli_commands(cli_main.cli)}
-
-
-def test_every_cli_leaf_has_a_parity_case_or_a_recorded_reason():
-    """Left: leaves with neither a case nor an excuse. Right: excuses that are stale
-    (no such command) or dead (the command has a case)."""
-    assert _cli_leaves() - set(CASES_BY_ID) == set(NO_CALL_PARITY_CASE)
-
-
-def test_every_command_group_is_represented():
-    """A group with no case at all is the state WP-7 set out to fix."""
-    groups_without_a_case = {"inspect", "skills"}  # no shared seam / no twin
-
-    covered = {case_id.split()[0] for case_id in CASES_BY_ID}
-    all_groups = {name.split()[0] for name in _cli_leaves()}
-    assert all_groups - covered - groups_without_a_case == set()
 
 
 @pytest.mark.xfail(strict=True, reason="gpio #1063: Table.upload has no dry_run")

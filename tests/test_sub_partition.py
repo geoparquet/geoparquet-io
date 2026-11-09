@@ -1332,6 +1332,29 @@ class TestApiDirectorySubPartition:
         assert os.path.exists(large)
 
 
+def _front_door_invocations(index_args, index_kwargs):
+    """The (CLI args, API kwargs) pairs one index's front-door case runs.
+
+    Every knob `partition <idx>` shares with `ops.sub_partition_by_<idx>` travels
+    to core through `**run`, which no signature shows, so each one is set by some
+    invocation; tests/test_parity_registry.py fails when a shared knob is left out.
+    A resolution (or --auto) is required on every run.
+    """
+    run_args = ["--in-place", "--hive", "--overwrite", "--force", "--skip-analysis"]
+    run_kwargs = {"in_place": True, "hive": True, "overwrite": True, "force": True}
+    # The CLI upper-cases the codec; core accepts either case.
+    run_args += ["--compression", "gzip", "--compression-level", "6"]
+    run_kwargs |= {"skip_analysis": True, "compression": "GZIP", "compression_level": 6}
+    return [
+        (index_args, index_kwargs),
+        ([*index_args, *run_args], {**index_kwargs, **run_kwargs}),
+        (
+            ["--auto", "--target-rows", "5000", "--max-partitions", "50"],
+            {"auto": True, "target_rows": 5000, "max_partitions": 50},
+        ),
+    ]
+
+
 class TestSubPartitionFrontDoorParity:
     """`gpio partition <index> <dir> --min-size` and its `ops` twin are one operation.
 
@@ -1341,25 +1364,23 @@ class TestSubPartitionFrontDoorParity:
     """
 
     CASES = [
-        ("a5", "sub_partition_by_a5", ["--resolution", "12"], {"resolution": 12}),
-        ("h3", "sub_partition_by_h3", ["--resolution", "4"], {"resolution": 4}),
-        ("s2", "sub_partition_by_s2", ["--level", "10"], {"level": 10}),
+        ("a5", _front_door_invocations(["--resolution", "12"], {"resolution": 12})),
+        ("h3", _front_door_invocations(["--resolution", "4"], {"resolution": 4})),
+        ("s2", _front_door_invocations(["--level", "10"], {"level": 10})),
         (
             "quadkey",
-            "sub_partition_by_quadkey",
-            ["--resolution", "6", "--partition-resolution", "3", "--use-centroid"],
-            {"resolution": 6, "partition_resolution": 3, "use_centroid": True},
+            _front_door_invocations(
+                ["--resolution", "6", "--partition-resolution", "3", "--use-centroid"],
+                {"resolution": 6, "partition_resolution": 3, "use_centroid": True},
+            ),
         ),
     ]
 
-    @pytest.mark.parametrize(
-        ("index", "function", "cli_args", "api_kwargs"),
-        CASES,
-        ids=[case[0] for case in CASES],
-    )
+    @pytest.mark.parametrize(("index", "invocations"), CASES, ids=[case[0] for case in CASES])
     def test_both_front_doors_hand_core_the_same_call(
-        self, cli_runner, temp_partition_dir, index, function, cli_args, api_kwargs
+        self, cli_runner, temp_partition_dir, index, invocations
     ):
+        import inspect
         from pathlib import Path
         from unittest.mock import patch
 
@@ -1370,29 +1391,9 @@ class TestSubPartitionFrontDoorParity:
         test_file = os.path.join(temp_partition_dir, "test.parquet")
         shutil.copy(buildings, test_file)
         threshold = f"{os.path.getsize(test_file) - 100}B"
-
         clean = {"processed": 1, "skipped": 0, "errors": []}
-
-        with patch.object(
-            core_sub_partition, "sub_partition_directory", return_value=clean
-        ) as fake:
-            result = cli_runner.invoke(
-                partition,
-                [index, temp_partition_dir, "--min-size", threshold, *cli_args],
-            )
-            assert result.exit_code == 0, f"CLI failed: {result.output}"
-            cli_call = fake.call_args.kwargs
-
-        with patch.object(
-            core_sub_partition, "sub_partition_directory", return_value=clean
-        ) as fake:
-            getattr(ops, function)(temp_partition_dir, min_size=threshold, **api_kwargs)
-            api_call = fake.call_args.kwargs
-
         # The two doors may spell a defaulted argument or leave it out; compare
         # what core receives once its defaults are applied.
-        import inspect
-
         signature = inspect.signature(core_sub_partition.sub_partition_directory)
 
         def received(call):
@@ -1400,7 +1401,26 @@ class TestSubPartitionFrontDoorParity:
             bound.apply_defaults()
             return bound.arguments
 
-        assert received(api_call) == received(cli_call)
+        for cli_args, api_kwargs in invocations:
+            with patch.object(
+                core_sub_partition, "sub_partition_directory", return_value=clean
+            ) as fake:
+                result = cli_runner.invoke(
+                    partition,
+                    [index, temp_partition_dir, "--min-size", threshold, *cli_args],
+                )
+                assert result.exit_code == 0, f"CLI failed: {result.output}"
+                cli_call = fake.call_args.kwargs
+
+            with patch.object(
+                core_sub_partition, "sub_partition_directory", return_value=clean
+            ) as fake:
+                getattr(ops, f"sub_partition_by_{index}")(
+                    temp_partition_dir, min_size=threshold, **api_kwargs
+                )
+                api_call = fake.call_args.kwargs
+
+            assert received(api_call) == received(cli_call), cli_args
 
 
 @pytest.mark.parametrize("option", ["resolution", "partition_resolution"])
