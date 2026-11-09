@@ -2220,6 +2220,9 @@ def _table_to_temp_parquet_and_convert(
 
     if not isinstance(table, pa.Table):
         raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
+    from geoparquet_io.core.extract import refuse_cli_only_geometry_forms
+
+    refuse_cli_only_geometry_forms(writer_kwargs.get("geometry"))
 
     # Write table to temp parquet file for processing
     temp_input = Path(_scratch_path(prefix=f"gpio_{prefix}_"))

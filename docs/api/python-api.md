@@ -502,7 +502,9 @@ print(info_dict['crs'])   # None or CRS dict
 
 #### `head(n=10)` / `tail(n=10)`
 
-Get the first or last N rows.
+Get the first or last N rows. When `n` is at least `num_rows` there is nothing
+to drop, so the same Table is returned (`table.head(table.num_rows) is table`):
+it keeps its `source_path`, and its checks still measure the file.
 
 ```python
 # First 10 rows (default)
@@ -822,6 +824,10 @@ Names in `columns` and `exclude_columns` are checked against the schema:
 an unknown name raises `InvalidParameterError` naming it, rather than being
 silently ignored. A column may not appear in both lists, except for the
 geometry and bbox columns.
+
+With no filter and `repair_geometry=False`, nothing can change, so `extract()`
+returns the same Table. The default `repair_geometry=True` may rewrite invalid
+geometry, so it always returns a new one.
 
 ```python
 # Select specific columns
@@ -1565,7 +1571,8 @@ print(report['undersized_rows'], report['undersized_examples'])
 against that file, so `table.check_compression()` and `gpio check compression
 <path>` give the same verdict. A table built in memory, read with `columns=` or
 `filters=`, or derived by an operation such as `sort_hilbert()` has no file
-behind it; its checks measure the bytes `write()` would produce with its
+behind it (a no-op such as `head(n)` with `n >= num_rows` returns the table
+itself, file included); its checks measure the bytes `write()` would produce with its
 defaults and say so with `prospective`. A source file that was replaced or
 removed after `read()`, or a remote URL, is treated the same way.
 

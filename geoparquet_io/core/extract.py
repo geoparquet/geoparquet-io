@@ -202,6 +202,25 @@ def _resolve_geometry_file(geometry_input: str) -> str | None:
     return None
 
 
+def refuse_cli_only_geometry_forms(geometry_input: str | None) -> None:
+    """Refuse the geometry forms only the CLI takes: ``"-"`` and a bare file path (#1321).
+
+    :func:`parse_geometry_input` reads stdin for ``"-"`` and reads a bare string
+    naming an existing ``.geojson``/``.json``/``.wkt`` file. Those are shell
+    conveniences; a library caller passing an untrusted string must not be made
+    to read stdin or a local file, so the Python API calls this first and
+    accepts only GeoJSON/WKT text or the explicit ``@path`` form.
+    """
+    if geometry_input is None or geometry_input.startswith("@"):
+        return
+    if geometry_input == "-" or _resolve_geometry_file(geometry_input):
+        raise InvalidParameterError(
+            "geometry",
+            f"{geometry_input[:100]!r} is a CLI-only form (stdin or a bare file path); "
+            "pass GeoJSON or WKT text, or '@path' to read a geometry file",
+        )
+
+
 def _extract_geometry_from_geojson(geojson: dict, use_first: bool) -> dict:
     """
     Extract geometry from GeoJSON, handling Feature and FeatureCollection.

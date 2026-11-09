@@ -819,6 +819,62 @@ def _source_column_types(con, source: str) -> dict[str, str]:
     return dict(rows)
 
 
+def _batched_stats_row(con, source: str, names: list[str], types: dict[str, str]) -> tuple | None:
+    """Every non-geometry column's four figures in one query, or None if it fails."""
+    select_parts = []
+    for name in names:
+        quoted = quote_identifier(name)
+        select_parts += [
+            f"COUNT(*) FILTER (WHERE {quoted} IS NULL)",
+            f"MIN({quoted})",
+            f"MAX({quoted})",
+            f"APPROX_COUNT_DISTINCT({quoted})",
+        ]
+    column_types = None
+    if all(name in types for name in names):
+        column_types = [t for name in names for t in _stats_query_types(False, types[name]) or []]
+    try:
+        return fetch_row(
+            con, f"SELECT {', '.join(select_parts)} FROM {source}", column_types=column_types
+        )
+    except duckdb.Error as e:
+        if is_interrupt(e):
+            raise
+        debug(f"Batched stats query failed, falling back to per-column queries: {e}")
+        return None
+
+
+def compute_column_statistics(
+    con, source: str, columns_info: list[dict[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Stats per column of ``source`` (a SQL-ready relation or path literal), in ``columns_info`` order.
+
+    One batched query covers every non-geometry column (``is_geometry`` false);
+    if it fails, each column is queried on its own, so one bad column reports
+    unknown figures (None) without taking the rest with it. Geometry columns
+    only count nulls. ``source`` is described once for every column's type.
+    An interrupt propagates.
+    """
+    types = _source_column_types(con, source)
+    names = [col["name"] for col in columns_info if not col["is_geometry"]]
+    row = _batched_stats_row(con, source, names, types) if names else None
+    batched = (
+        {
+            name: dict(zip(("nulls", "min", "max", "unique"), row[i * 4 : i * 4 + 4], strict=True))
+            for i, name in enumerate(names)
+        }
+        if row is not None
+        else {}
+    )
+    return {
+        col["name"]: batched.get(col["name"])
+        or compute_column_stats(
+            con, col["name"], col["is_geometry"], source, types.get(col["name"])
+        )
+        for col in columns_info
+    }
+
+
 def get_column_statistics(
     parquet_file: str, columns_info: list[dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
@@ -827,9 +883,9 @@ def get_column_statistics(
 
     Rows come through :func:`fetch_row`, so TIMESTAMP WITH TIME ZONE min and
     max are fetched as UTC and come back as datetimes aware of the session time
-    zone (``zoneinfo``), without DuckDB needing ``pytz``. The file is described
-    once for every column's type, so no per-column DESCRIBE is needed. A figure
-    that could not be computed is None, never a made-up zero.
+    zone (``zoneinfo``), without DuckDB needing ``pytz``. The work is
+    :func:`compute_column_statistics`: one batched query with a per-column
+    fallback. A figure that could not be computed is None, never a made-up zero.
 
     Args:
         parquet_file: Path to the parquet file
@@ -842,13 +898,7 @@ def get_column_statistics(
     source = sql_path(raw_url)
     con = get_duckdb_connection(load_httpfs=needs_httpfs(parquet_file))
     try:
-        types = _source_column_types(con, source)
-        return {
-            col["name"]: compute_column_stats(
-                con, col["name"], col["is_geometry"], source, types.get(col["name"])
-            )
-            for col in columns_info
-        }
+        return compute_column_statistics(con, source, columns_info)
     finally:
         con.close()
 

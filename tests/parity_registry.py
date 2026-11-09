@@ -170,7 +170,14 @@ EXEMPT: dict[str, dict[str, str]] = {
     "skills": {"api_twin": "Prints the bundled LLM skill documents; no data operation."},
     **{
         f"inspect {c}": {"ops_twin": _INSPECTION_NOT_A_TABLE, "call_case": _NO_SEAM_INSPECT}
-        for c in ("head", "meta", "stats", "summary", "tail")
+        for c in ("head", "meta", "summary", "tail")
+    },
+    "inspect stats": {
+        "ops_twin": _INSPECTION_NOT_A_TABLE,
+        "call_case": "Both doors call `core.inspect_utils.compute_column_statistics` (#1087), "
+        "but on different sources (the CLI's file, the Table's registered Arrow table), so "
+        "there is no one call to compare. Both outputs are pinned in "
+        "tests/test_column_statistics_snapshot.py.",
     },
     "publish upload": {
         "ops_twin": "Uploads a file already on disk; the unit of work is a path, not the "
