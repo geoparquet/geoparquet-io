@@ -255,6 +255,36 @@ def test_a_one_sided_id_rendering_of_the_same_crs_does_not_warn(tmp_path, _nativ
     assert caplog.records == []
 
 
+def _id_less(epsg: int) -> dict:
+    body = json.loads(projjson(epsg))
+    body.pop("id")
+    return body
+
+
+@pytest.mark.parametrize(
+    ("block", "native", "disagree"),
+    [
+        # A bare code against the same CRS spelled out without one: the same CRS.
+        pytest.param("EPSG:3857", _id_less(3857), False, id="string-block-same-crs"),
+        pytest.param(_id_less(3857), "EPSG:3857", False, id="string-native-same-crs"),
+        pytest.param("EPSG:3857", _id_less(32633), True, id="string-block-different-crs"),
+        # A side pyproj cannot read proves nothing, so it never warns.
+        pytest.param("not a crs", _id_less(3857), False, id="unreadable-string"),
+        pytest.param(
+            {"id": {"authority": "EPSG", "code": 999999}},
+            _id_less(3857),
+            False,
+            id="unreadable-id-stub",
+        ),
+    ],
+)
+def test_a_one_sided_id_warns_only_when_pyproj_proves_a_difference(block, native, disagree):
+    """A warning fails open where ``crs_equal`` fails closed (#1014)."""
+    from geoparquet_io.core.crs_utils import _crs_sources_disagree
+
+    assert _crs_sources_disagree(block, native) is disagree
+
+
 # ---------------------------------------------------------------------------
 # Two geometry columns: the comparison is about the primary one
 # ---------------------------------------------------------------------------
