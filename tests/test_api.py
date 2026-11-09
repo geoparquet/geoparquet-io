@@ -1547,8 +1547,10 @@ class TestTableUpload:
     def test_upload_to_a_prefix_from_a_glob_source_is_refused(self, sample_table):
         from geoparquet_io.core.exceptions import InvalidParameterError
 
-        sample_table._source_path = "s3://test-bucket/data/*.parquet"
-        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+        with (
+            patch.object(sample_table, "_source_path", "s3://test-bucket/data/*.parquet"),
+            patch("geoparquet_io.core.upload.upload") as mock_upload,
+        ):
             with pytest.raises(InvalidParameterError, match="full object key"):
                 sample_table.upload("s3://test-bucket/prefix/", dry_run=True)
         mock_upload.assert_not_called()

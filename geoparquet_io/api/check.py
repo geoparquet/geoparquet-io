@@ -229,9 +229,7 @@ def _names_one_remote_object(path: str) -> bool:
 
     url = without_http_query(path)
     return (
-        is_remote_url(path)
-        and bool(PurePosixPath(url).suffix)
-        and not any(c in url for c in "*?[")
+        is_remote_url(path) and bool(PurePosixPath(url).suffix) and not any(c in url for c in "*?[")
     )
 
 

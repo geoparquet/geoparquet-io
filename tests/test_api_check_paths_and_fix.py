@@ -303,4 +303,6 @@ def test_spec_warnings_reach_the_result(tmp_path, unsorted_test_file):
     spec = gpio.validate(path)
     assert spec.verdict() == "warning"
     assert any("crs" in w.lower() for w in spec.warnings())
-    assert set(spec.warnings()) <= {w.removeprefix("[spec] ") for w in gpio.check_all(path).warnings()}
+    assert set(spec.warnings()) <= {
+        w.removeprefix("[spec] ") for w in gpio.check_all(path).warnings()
+    }
