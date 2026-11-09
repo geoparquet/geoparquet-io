@@ -36,6 +36,13 @@ WRONG_TYPED = [
     ("bbox_string", {"bbox": "1234"}, "bbox_valid", "bbox must be an array"),
     ("epoch_boolean", {"epoch": True}, "epoch_valid", "epoch must be a number"),
     ("covering_string", {"covering": "bbox"}, "covering_is_object", "must be an object"),
+    ("covering_bbox_string", {"covering": {"bbox": "b"}}, "covering_bbox_paths", "an object"),
+    (
+        "covering_bbox_xmin_string",
+        {"covering": {"bbox": {k: ["bbox", k] for k in ("ymin", "xmax", "ymax")} | {"xmin": "b"}}},
+        "covering_bbox_paths",
+        "must be a path array",
+    ),
 ]
 
 

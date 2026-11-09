@@ -1800,13 +1800,18 @@ def _cover_bbox_column(
     """``(column, root schema index)`` the covering points at, or the verdict that stops the check.
 
     The three column-resolving checks share this prologue so a shape guard
-    cannot be dropped from one of them.
+    cannot be dropped from one of them. A malformed ``covering.bbox`` is
+    ``covering_bbox_paths``' one FAILED; these skip it (#1089).
     """
     ref = meta.covering_bbox
     if ref is None:
         return _cover_verdict(check_name, CheckStatus.SKIPPED, "no bbox covering defined")
     if ref.problem is not None or ref.column is None:
-        return _cover_verdict(check_name, CheckStatus.FAILED, ref.problem or "")
+        return _cover_verdict(
+            check_name,
+            CheckStatus.SKIPPED,
+            f"covering bbox is malformed; see covering_bbox_paths_{meta.name}",
+        )
     index = _schema_index(schema_info, ref.column)
     if index is None:
         return _bbox_column_missing(check_name, ref.column, schema_info)
