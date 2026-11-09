@@ -933,3 +933,33 @@ class TestTablePMTilesFrontDoor:
             assert Path(source).resolve() != Path(places_test_file).resolve()
             assert existed, "core was handed a scratch file that was not written"
             assert not Path(source).exists(), "scratch file outlived the call"
+
+    @pytest.mark.parametrize("door", DOORS, ids=[d[0] for d in DOORS])
+    def test_a_directory_backed_table_tiles_its_rows(self, door, places_test_file, tmp_path):
+        """A member rewritten in place leaves the directory's size and mtime as they were."""
+        import shutil
+        from unittest.mock import patch
+
+        import pyarrow.parquet as pq
+
+        import geoparquet_io as gpio
+
+        method, module, core_fn, _option, _value = door
+        dataset = tmp_path / "dataset"
+        dataset.mkdir()
+        for name in ("a.parquet", "b.parquet"):
+            shutil.copy(places_test_file, dataset / name)
+        table = gpio.read(str(dataset))
+        pq.write_table(pq.read_table(dataset / "a.parquet").slice(0, 1), dataset / "a.parquet")
+
+        tiled = []
+
+        def record(*args, **kwargs):
+            source = kwargs.get("input_path", args[0] if args else None)
+            tiled.append((source, pq.read_table(source).num_rows))
+
+        with patch(f"geoparquet_io.core.{module}.{core_fn}", record):
+            getattr(table, method)(str(tmp_path / "out.pmtiles"))
+
+        assert tiled[0][1] == table.num_rows  # not the rewritten member's stale view
+        assert tiled[0][0] != str(dataset)

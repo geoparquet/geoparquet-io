@@ -2768,7 +2768,7 @@ class Table:
         """
         Create PMTiles from the table using tippecanoe.
 
-        Tiles the file this Table was read from when it is still a view of it;
+        Tiles the file this Table was read from when it is one file and still a view of it;
         otherwise writes the rows to a scratch file first and removes it after.
         Takes the options of ``ops.create_pmtiles`` (see it for each one),
         less ``profile``, which ``gpio.read()`` already took. Mirrors
@@ -2787,7 +2787,7 @@ class Table:
         options = {k: v for k, v in locals().items() if k not in ("self", "output")}
         from geoparquet_io.api.ops import create_pmtiles
 
-        self._check_file(create_pmtiles, output, **options)
+        self._run_on_one_file(create_pmtiles, output, **options)
 
     def create_pmtiles_pyramid(
         self,
@@ -2811,7 +2811,7 @@ class Table:
         """
         Create a banded multi-level PMTiles pyramid from an aggregate table.
 
-        Tiles the file this Table was read from when it is still a view of it,
+        Tiles the file this Table was read from when it is one file and still a view of it,
         which also reuses that file's overview siblings; otherwise writes the
         rows to a scratch file first and removes it after (missing levels are
         built in the run's own scratch either way). Takes the options of
@@ -2830,7 +2830,7 @@ class Table:
         options = {k: v for k, v in locals().items() if k not in ("self", "output")}
         from geoparquet_io.api.ops import create_pmtiles_pyramid
 
-        self._check_file(create_pmtiles_pyramid, output, **options)
+        self._run_on_one_file(create_pmtiles_pyramid, output, **options)
 
     def head(self, n: int = 10) -> Table:
         """
@@ -3097,6 +3097,19 @@ class Table:
         if source is not None:
             return func(source, *args, **kwargs), source
         return self._with_temp_file(func, *args, **kwargs), None
+
+    def _run_on_one_file(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """:meth:`_check_file` for work that reads one file (tiling, ``fix``).
+
+        A directory or glob source always goes through a scratch write of the
+        rows: a member rewritten in place leaves the directory's size and mtime
+        as they were, so :meth:`_measurable_source` cannot see it change.
+        """
+        from geoparquet_io.core.file_utils import is_partition_path
+
+        if self._source_path is not None and is_partition_path(self._source_path):
+            return self._with_temp_file(func, *args, **kwargs)
+        return self._check_file(func, *args, **kwargs)[0]
 
     def _run_check(self, check: Callable[..., CheckResult], **kwargs: Any) -> CheckResult:
         """Run a path-level check from ``api/check.py`` through :meth:`_check_file`.
@@ -3441,11 +3454,7 @@ class Table:
         from geoparquet_io.api import check
         from geoparquet_io.core.check_fixes import apply_all_fixes
         from geoparquet_io.core.exceptions import InvalidParameterError
-        from geoparquet_io.core.file_utils import (
-            handle_output_overwrite,
-            is_partition_path,
-            is_same_file_path,
-        )
+        from geoparquet_io.core.file_utils import handle_output_overwrite, is_same_file_path
 
         fixable = ("bbox", "covering", "compression", "row_groups", "spatial")
         wanted = set(fixable if checks is None else [checks] if isinstance(checks, str) else checks)
@@ -3476,15 +3485,12 @@ class Table:
             }
             apply_all_fixes(path, target, plan, verbose=verbose)
 
-        # The repair reads one file: a Table read from a directory or glob is fixed as its rows.
-        dataset = self._source_path is not None and is_partition_path(self._source_path)
-        run = self._with_temp_file if dataset else self._check_file
         if output is not None:
-            run(repair, os.fspath(output))
+            self._run_on_one_file(repair, os.fspath(output))
             return read(output)
         target = scratch_path(prefix="gpio_fix_")
         try:
-            run(repair, target)
+            self._run_on_one_file(repair, target)
             # Read with pyarrow, not read(): the Table must not be a view of a scratch file.
             return Table(pq.read_table(target), geometry_column=self._geometry_column)
         finally:
