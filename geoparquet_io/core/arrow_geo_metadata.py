@@ -18,11 +18,13 @@ like -- are not re-exported, and nothing outside this module reached them).
 from geoparquet_io.core.arrow_types import _rebuild_array_with_type
 from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
 from geoparquet_io.core.crs_utils import (
+    UnresolvableCRSError,
     _crs_from_geoarrow_field,
     _format_crs_display,
     field_type_crs_is_unknown,
     is_default_crs,
     is_empty_crs_value,
+    projjson_for_label,
 )
 from geoparquet_io.core.duckdb_utils import geoarrow_extension, planar_view
 from geoparquet_io.core.edges import (
@@ -202,6 +204,13 @@ def _secondary_crs_from_field(field) -> dict:
     crs = _crs_from_geoarrow_field(pa.schema([field]), field.name)
     if is_empty_crs_value(crs):
         return {"crs": None}
+    if isinstance(crs, str):
+        # Text (AUTH:CODE, PROJJSON, WKT) goes through the label owner, which
+        # never reads an init= file; text nothing defines is unknown, not CRS84.
+        try:
+            crs = projjson_for_label(crs)
+        except UnresolvableCRSError:
+            return {"crs": None}
     if isinstance(crs, dict) and not is_default_crs(crs):
         return {"crs": crs}
     return {}
