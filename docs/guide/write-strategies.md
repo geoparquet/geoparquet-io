@@ -286,16 +286,14 @@ Override auto-detection when needed:
     gpio extract input.parquet output.parquet --write-memory 512MB
     ```
 
-    !!! warning "On file-writing commands, `--write-memory` requires `duckdb-kv`"
-        On commands that write through a DuckDB write engine, only `duckdb-kv`
-        (the default) has one to configure.
-        Combining `--write-memory` with an explicitly chosen `--write-strategy`
-        of `streaming`, `in-memory`, or `disk-rewrite` is rejected as a
-        parameter error. `--geoparquet-version 1.1-geoarrow` internally reroutes
-        WKB input to the arrow-streaming strategy; there gpio warns and ignores
-        `--write-memory` rather than failing. Streaming Arrow IPC to stdout
-        (`-`) also has no write engine to configure, so the limit is ignored
-        with a warning — `--write-memory` only applies to file outputs.
+    !!! note "`--write-memory` applies to every write strategy"
+        Each strategy bounds its own DuckDB work by the limit: the COPY of
+        `duckdb-kv` and of `disk-rewrite`'s first phase, the query `streaming`
+        reads in batches, and the query `in-memory` materializes. What a
+        strategy then does in pyarrow is outside DuckDB's accounting. Streaming
+        Arrow IPC to stdout (`-`) has no write engine to configure, so the limit
+        is ignored there with a warning — `--write-memory` only applies to file
+        outputs.
 
     !!! note "On `gpio extract bigquery`, `--write-memory` governs the scan"
         That command writes through PyArrow and has no `--write-strategy` flag,

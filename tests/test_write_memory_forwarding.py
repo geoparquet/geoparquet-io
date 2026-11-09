@@ -16,8 +16,7 @@ Layers tested here:
   * Core function (streaming path) -> execute_transform/write_output.
   * Validation: bad values are rejected as Click parameter errors, and a value
     crafted to break out of ``SET memory_limit = '…'`` is refused.
-  * 1.1-geoarrow: the auto-routed write strategy warns and ignores
-    --write-memory instead of aborting with a raw traceback.
+  * Every strategy, the 1.1-geoarrow reroute included, honours it (#761).
 """
 
 from __future__ import annotations
@@ -521,61 +520,42 @@ class TestWriteMemoryValidation:
 
 
 # ---------------------------------------------------------------------------
-# Layer 4: --write-memory + --geoparquet-version 1.1-geoarrow must not crash
+# Layer 4: --write-memory reaches the strategy the write lands on (#761)
 # ---------------------------------------------------------------------------
 
 
-class TestGeoarrowVersionIgnoresWriteMemory:
-    """1.1-geoarrow auto-routes to the arrow-streaming strategy, which cannot
-    honour a memory limit. Warn and continue — never abort with a traceback."""
+class TestWriteMemoryOnEveryStrategy:
+    """1.1-geoarrow auto-routes to the streaming strategy, and a user may name
+    any strategy; the limit used to be warned away or refused on both."""
 
-    def test_add_h3_geoarrow_with_write_memory_succeeds(self, places_test_file, temp_output_file):
-        runner = CliRunner()
-        result = runner.invoke(
+    @pytest.mark.parametrize(
+        "args",
+        [
+            pytest.param(["add", "h3"], id="add-h3-geoarrow"),
+            pytest.param(["sort", "hilbert"], id="sort-hilbert-geoarrow"),
+        ],
+    )
+    def test_geoarrow_reroute_honours_write_memory(self, places_test_file, temp_output_file, args):
+        result = CliRunner().invoke(
             cli,
             [
-                "add",
-                "h3",
+                *args,
                 places_test_file,
                 temp_output_file,
                 "--geoparquet-version",
                 "1.1-geoarrow",
                 "--write-memory",
                 "512MB",
+                "--verbose",
             ],
         )
         assert result.exit_code == 0, result.output
-        assert os.path.exists(temp_output_file)
-        assert "--write-memory" in result.output
+        assert "DuckDB memory limit: 512MB" in result.output
 
-    def test_sort_hilbert_geoarrow_with_write_memory_succeeds(
+    def test_explicit_non_duckdb_kv_strategy_honours_write_memory(
         self, places_test_file, temp_output_file
     ):
-        runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "sort",
-                "hilbert",
-                places_test_file,
-                temp_output_file,
-                "--geoparquet-version",
-                "1.1-geoarrow",
-                "--write-memory",
-                "512MB",
-            ],
-        )
-        assert result.exit_code == 0, result.output
-        assert os.path.exists(temp_output_file)
-        assert "--write-memory" in result.output
-
-    def test_explicit_non_duckdb_kv_strategy_still_errors_cleanly(
-        self, places_test_file, temp_output_file
-    ):
-        """A user-chosen strategy that cannot honour the limit is a real error,
-        but it must surface as a clean message, not a bare ValueError."""
-        runner = CliRunner()
-        result = runner.invoke(
+        result = CliRunner().invoke(
             cli,
             [
                 "extract",
@@ -586,11 +566,11 @@ class TestGeoarrowVersionIgnoresWriteMemory:
                 "streaming",
                 "--write-memory",
                 "512MB",
+                "--verbose",
             ],
         )
-        assert result.exit_code != 0
-        assert "--write-memory" in result.output
-        assert not isinstance(result.exception, ValueError)
+        assert result.exit_code == 0, result.output
+        assert "DuckDB memory limit: 512MB" in result.output
 
 
 # ---------------------------------------------------------------------------

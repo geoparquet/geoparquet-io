@@ -542,6 +542,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
         original_metadata: dict | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using DuckDB COPY TO with KV_METADATA."""
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection
@@ -558,6 +559,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 row_group_rows,
                 verbose,
                 extra_kv_metadata,
+                memory_limit=memory_limit,
             )
             return
 
@@ -612,6 +614,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         row_group_rows: int | None,
         verbose: bool,
         extra_kv_metadata: dict[str, str] | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """Write plain Parquet (no geo metadata) from an Arrow table.
 
@@ -640,7 +643,8 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
             if verbose:
                 debug(f"Writing plain Parquet with {codec.name} compression...")
-            con.execute(copy_query)
+            with scoped_write_memory_limit(con, memory_limit, verbose):
+                con.execute(copy_query)
 
             if is_remote:
                 upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)

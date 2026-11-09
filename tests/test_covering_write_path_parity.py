@@ -242,21 +242,14 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
 
         assert bbox_covering_column(out) == "bbox"
 
-    # The reroute and its warning are the funnel's, whichever strategy was named.
-    @pytest.mark.parametrize("strategy", ["streaming"])
-    def test_write_memory_is_warned_not_refused(
-        self, v2_with_declared_covering, strategy, tmp_path
-    ):
-        """Keeping the covering routes the write; the user's flags did not change.
+    def test_write_memory_is_honoured_on_the_rewrite(self, v2_with_declared_covering, tmp_path):
+        """Keeping the covering routes the write; the user's flags still apply.
 
-        Taking the rewrite to keep the input's covering is a decision the funnel
-        makes, so the memory-limit guard it lands in must behave as it does for
-        the other funnel-made reroute (1.1-geoarrow): warn and drop the limit.
-        Raising instead turned `extract --limit N --write-strategy streaming
-        --write-memory 2GB` of a 2.0 input -- exit 0 before the carry existed --
-        into exit 2.
+        `extract --limit N --write-strategy streaming --write-memory 2GB` of a
+        2.0 input was exit 2, then a warning that dropped the limit (#1172).
+        Every strategy now bounds its DuckDB work by it (#761).
         """
-        out = tmp_path / f"wm_{strategy}.parquet"
+        out = tmp_path / "wm_streaming.parquet"
 
         output = run_cli(
             "extract",
@@ -266,63 +259,15 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
             "--limit",
             "10",
             "--write-strategy",
-            strategy,
+            "streaming",
             "--write-memory",
             "2GB",
+            "--verbose",
         )
 
-        assert "--write-memory is ignored" in output, output
+        assert "DuckDB memory limit: 2GB" in output, output
         assert bbox_covering_column(out) == "bbox"
         assert spec_failures(out) == {}
-
-    def test_enum_strategy_keeps_its_name_in_memory_limit_error(self):
-        from geoparquet_io.core.exceptions import InvalidParameterError
-        from geoparquet_io.core.write_funnels import _memory_limit_for_strategy
-        from geoparquet_io.core.write_strategies import WriteStrategy
-
-        assert str(WriteStrategy.ARROW_MEMORY) == "WriteStrategy.ARROW_MEMORY"
-        with pytest.raises(InvalidParameterError, match="not 'WriteStrategy.ARROW_MEMORY'"):
-            _memory_limit_for_strategy(
-                "2GB",
-                WriteStrategy.ARROW_MEMORY,
-                WriteStrategy.ARROW_MEMORY,
-                auto_routed_strategy=False,
-                funnel_forced_rewrite=False,
-            )
-
-    def test_a_rewrite_the_user_asked_for_still_refuses_it(
-        self, v2_with_declared_covering, tmp_path
-    ):
-        """The control: `--geoparquet-version 1.1` is the user's own rewrite.
-
-        Nothing the funnel decided put this write on the streaming strategy, so
-        the flag combination is a real error and stays one.
-        """
-        from click.testing import CliRunner
-
-        from geoparquet_io.cli.main import cli
-
-        out = tmp_path / "asked.parquet"
-        result = CliRunner().invoke(
-            cli,
-            [
-                "extract",
-                "geoparquet",
-                str(v2_with_declared_covering),
-                str(out),
-                "--limit",
-                "10",
-                "--geoparquet-version",
-                "1.1",
-                "--write-strategy",
-                "streaming",
-                "--write-memory",
-                "2GB",
-            ],
-        )
-
-        assert result.exit_code == 2, result.output
-        assert "only supported with the 'duckdb-kv' write strategy" in result.output
 
 
 # ---------------------------------------------------------------------------
