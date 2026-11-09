@@ -432,6 +432,12 @@ class TestIsSameFilePath:
         assert is_same_file_path("s3://bucket/a.parquet", "s3://bucket/b.parquet") is False
         assert is_same_file_path("s3://bucket/a.parquet", "/tmp/a.parquet") is False
 
+    def test_a_scheme_alias_names_the_same_object(self):
+        """``s3a://`` is ``s3://`` and ``gcs://`` is ``gs://``, as ``copy_file`` addresses them."""
+        assert is_same_file_path("s3://bucket/a.parquet", "s3a://bucket/a.parquet") is True
+        assert is_same_file_path("gcs://bucket/a.parquet", "gs://bucket/a.parquet") is True
+        assert is_same_file_path("s3a://bucket/a.parquet", "gs://bucket/a.parquet") is False
+
     def test_an_unresolvable_path_is_not_a_match(self, tmp_path, monkeypatch):
         """A resolve() that raises means "cannot tell", which must not read as "same"."""
 

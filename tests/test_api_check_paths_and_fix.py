@@ -224,6 +224,15 @@ def test_fix_refuses_to_write_over_its_source(unsorted_copy):
         gpio.read(unsorted_copy).fix(output=alias)
 
 
+def test_fix_refuses_its_remote_source_under_a_scheme_alias(monkeypatch, unsorted_copy):
+    """``s3a://`` names the ``s3://`` object ``copy_file`` would overwrite."""
+    table = gpio.read(unsorted_copy)
+    monkeypatch.setattr(table, "_source_path", "s3://bucket/data.parquet")
+
+    with pytest.raises(gpio.InvalidParameterError, match="source"):
+        table.fix(output="s3a://bucket/data.parquet", overwrite=True)
+
+
 def test_fix_refuses_an_unknown_check(unsorted_copy):
     with pytest.raises(gpio.InvalidParameterError, match="bloom_filters"):
         gpio.read(unsorted_copy).fix(checks=["compression", "bloom_filters"])

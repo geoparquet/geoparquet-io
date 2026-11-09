@@ -453,6 +453,8 @@ def test_the_owner_refuses_a_remote_in_place_rewrite_without_the_switch():
         handle_output_overwrite(url, False, url, flag="--force")
     handle_output_overwrite(url, True, url)  # the switch allows it
     handle_output_overwrite("s3://b/y.parquet", False, url)  # another output passes
+    with pytest.raises(GeoParquetError, match="Cannot modify remote file"):
+        handle_output_overwrite("s3a://b/x.parquet", False, url)  # the same object, aliased
 
 
 def test_a_remote_fix_reads_the_owner_refusal(monkeypatch):

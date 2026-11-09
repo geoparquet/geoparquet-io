@@ -3418,7 +3418,10 @@ class Table:
                 rows in memory. Refused when it is this Table's source.
             overwrite: Replace an existing ``output``. Without it an existing
                 file is refused, as ``--fix-output`` refuses one without
-                ``--overwrite``.
+                ``--overwrite``. A remote ``output`` is not looked up (gpio
+                does not stat an object store), so an existing remote object
+                is replaced whatever this is set to; only the source itself,
+                under any scheme alias (``s3a://`` for ``s3://``), is refused.
             verbose: Log each fix as it runs
 
         Returns:

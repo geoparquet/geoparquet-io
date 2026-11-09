@@ -327,8 +327,9 @@ def is_same_file_path(first: str | None, second: str | None) -> bool:
     guard -- reproducing the very failure the in-place path exists to avoid
     (#941, #959).
 
-    Remote URLs are compared verbatim: there is no local filesystem to resolve
-    them against.
+    Remote URLs are compared under their store spelling (``canonical_store_url``,
+    the one ``copy_file`` writes through), so ``s3a://b/k`` is ``s3://b/k``;
+    there is no local filesystem to resolve them against.
     """
     if not first or not second:
         return False
@@ -336,7 +337,7 @@ def is_same_file_path(first: str | None, second: str | None) -> bool:
         return True
 
     if is_remote_url(first) or is_remote_url(second):
-        return False
+        return canonical_store_url(first) == canonical_store_url(second)
     try:
         if os.path.exists(first) and os.path.exists(second):
             # The inode is the truth once both exist: it also catches a
@@ -417,7 +418,7 @@ def handle_output_overwrite(
     guard_output_not_read_as_input(input_path, output_path)
 
     if is_remote_url(output_path):
-        if output_path == input_path and not overwrite:
+        if is_same_file_path(output_path, input_path) and not overwrite:
             raise remote_in_place_error(flag)
         return
     output_file = Path(output_path)
