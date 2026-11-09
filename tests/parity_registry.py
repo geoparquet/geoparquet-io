@@ -135,11 +135,6 @@ def is_functional(label: str) -> bool:
 
 AXES = ("api_twin", "ops_twin", "call_case")
 
-_REPORT_NOT_A_TABLE = (
-    "Returns a report -- findings about a file -- not GeoParquet, so there is no "
-    "`table in -> table out` shape for an `ops` function. `Table` is its home until a "
-    "path-level function lands (#1090)."
-)
 _INSPECTION_NOT_A_TABLE = (
     "Inspection: renders or returns a description of a table (metadata, a preview, "
     "column statistics) rather than transforming one, so an `ops.<fn>(table) -> table` "
@@ -170,10 +165,6 @@ EXEMPT: dict[str, dict[str, str]] = {
         "the operations directly."
     },
     "skills": {"api_twin": "Prints the bundled LLM skill documents; no data operation."},
-    **{
-        f"check {c}": {"ops_twin": _REPORT_NOT_A_TABLE}
-        for c in ("all", "bbox", "compression", "optimization", "row-group", "spatial", "spec")
-    },
     **{
         f"inspect {c}": {"ops_twin": _INSPECTION_NOT_A_TABLE, "call_case": _NO_SEAM_INSPECT}
         for c in ("head", "meta", "stats", "summary", "tail")
@@ -662,8 +653,8 @@ _CHECK_FIX = (
     "new Table instead, so the backup, overwrite and PMTiles knobs have nothing to act on."
 )
 _CHECK_KNOB = (
-    "#1090: the `Table.check*` methods measure with the defaults; the path-level `check_*` "
-    "functions are where this knob lands."
+    "`check all` also runs the spatial-order check; the API runs `check_spatial`, which "
+    "takes this knob, alongside `check_all` (#1090)."
 )
 _RENDERING = (
     "Presentation: how the CLI prints the answer (markdown, truncation, which metadata "
@@ -729,8 +720,7 @@ ONE_SIDED: dict[tuple[str, str, str], str] = {
     **_each("cli", _GAP, _PARTITIONS, "prefix"),
     **_each("cli", _CHECK_FIX, _CHECKS_WITH_FIX, ("fix", "fix_output", "no_backup", "overwrite")),
     **_each("cli", _CHECK_FIX, "check all", "pmtiles"),
-    **_each("cli", _CHECK_KNOB, "check all", ("limit_rows", "profile", "random_sample_size")),
-    **_each("cli", _CHECK_KNOB, "check spec", ("sample_size", "skip_data_validation")),
+    **_each("cli", _CHECK_KNOB, "check all", ("limit_rows", "random_sample_size")),
     **_each("cli", _RENDERING, ("inspect head", "inspect tail"), ("max_columns", "no_truncate")),
     **_each(
         "cli",

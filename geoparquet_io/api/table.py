@@ -2964,13 +2964,12 @@ class Table:
             return func(source, *args, **kwargs), source
         return self._with_temp_file(func, *args, **kwargs), None
 
-    def _run_check(
-        self, check_type: str, func: Callable[..., Any], *args: Any, **kwargs: Any
-    ) -> CheckResult:
+    def _run_check(self, check: Callable[..., CheckResult], **kwargs: Any) -> CheckResult:
+        """Run a path-level check from ``api/check.py`` through :meth:`_check_file`."""
         from geoparquet_io.api.check import CheckResult
 
-        results, source = self._check_file(func, *args, **kwargs)
-        return CheckResult(results, check_type=check_type, source_path=source)
+        result, source = self._check_file(check, **kwargs)
+        return CheckResult(result.to_dict(), check_type=result.check_type, source_path=source)
 
     def _with_temp_io_files(self, func, **kwargs) -> pa.Table:
         """
@@ -3040,9 +3039,9 @@ class Table:
             ...     for r in results:
             ...         print(*r.failures(), sep="\n")
         """
-        from geoparquet_io.core.check_parquet_structure import check_all
+        from geoparquet_io.api import check
 
-        return self._run_check("all", check_all, verbose=False, return_results=True, quiet=True)
+        return self._run_check(check.check_all)
 
     def check_spatial(self, sample_size: int = 100, limit_rows: int = 500000) -> CheckResult:
         """
@@ -3067,17 +3066,9 @@ class Table:
             >>> else:
             ...     print("Consider using sort_hilbert()")
         """
-        from geoparquet_io.core.check_spatial_order import check_spatial_order
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "spatial",
-            check_spatial_order,
-            random_sample_size=sample_size,
-            limit_rows=limit_rows,
-            verbose=False,
-            return_results=True,
-            quiet=True,
-        )
+        return self._run_check(check.check_spatial, sample_size=sample_size, limit_rows=limit_rows)
 
     def check_spatial_pushdown(self) -> CheckResult:
         """
@@ -3101,13 +3092,9 @@ class Table:
             ...     print("Good pushdown readiness")
             >>> print(result.details())
         """
-        from geoparquet_io.core.check_spatial_order import check_spatial_pushdown_readiness
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "spatial_pushdown",
-            check_spatial_pushdown_readiness,
-            verbose=False,
-        )
+        return self._run_check(check.check_spatial_pushdown)
 
     def check_compression(self) -> CheckResult:
         """
@@ -3126,11 +3113,9 @@ class Table:
             >>> result = table.check_compression()
             >>> print(result.to_dict())
         """
-        from geoparquet_io.core.check_parquet_structure import check_compression
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "compression", check_compression, verbose=False, return_results=True, quiet=True
-        )
+        return self._run_check(check.check_compression)
 
     def check_bbox(
         self,
@@ -3170,17 +3155,9 @@ class Table:
             >>> if not result.passed():
             ...     table = table.add_bbox()
         """
-        from geoparquet_io.core.check_parquet_structure import check_bbox
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "bbox",
-            check_bbox,
-            verbose=False,
-            return_results=True,
-            quiet=True,
-            verify_rows=sample_rows,
-            all_rows=all_rows,
-        )
+        return self._run_check(check.check_bbox, sample_rows=sample_rows, all_rows=all_rows)
 
     def check_row_groups(self, profile: CheckProfile | None = None) -> CheckResult:
         """
@@ -3200,16 +3177,9 @@ class Table:
             >>> result = table.check_row_groups()
             >>> print(result.recommendations())
         """
-        from geoparquet_io.core.check_parquet_structure import check_row_groups
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "row_groups",
-            check_row_groups,
-            verbose=False,
-            return_results=True,
-            quiet=True,
-            profile=profile,
-        )
+        return self._run_check(check.check_row_groups, profile=profile)
 
     def check_bloom_filters(self) -> CheckResult:
         """
@@ -3229,11 +3199,9 @@ class Table:
             >>> result = table.check_bloom_filters()
             >>> print(result.to_dict())
         """
-        from geoparquet_io.core.check_parquet_structure import check_bloom_filters
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "bloom_filters", check_bloom_filters, verbose=False, return_results=True, quiet=True
-        )
+        return self._run_check(check.check_bloom_filters)
 
     def check_optimization(self) -> CheckResult:
         """
@@ -3254,11 +3222,9 @@ class Table:
             >>> result = table.check_optimization()
             >>> print(result.to_dict()['score'], '/', result.to_dict()['total_checks'])
         """
-        from geoparquet_io.core.check_optimization import check_optimization
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "optimization", check_optimization, verbose=False, return_results=True, quiet=True
-        )
+        return self._run_check(check.check_optimization)
 
     def validate(self, version: str | None = None) -> CheckResult:
         """
@@ -3282,39 +3248,9 @@ class Table:
             >>> if result.passed():
             ...     print(f"Valid GeoParquet {table.geoparquet_version}")
         """
-        from geoparquet_io.core.validate import validate_geoparquet
+        from geoparquet_io.api import check
 
-        validation_result, source = self._check_file(
-            validate_geoparquet,
-            target_version=version,
-            validate_data=True,
-            sample_size=1000,
-            verbose=False,
-        )
-
-        # Convert ValidationResult to dict for CheckResult
-        from geoparquet_io.core.check_verdict import SEVERITY_KEY, validation_verdict
-
-        results = {
-            "passed": validation_result.is_valid,
-            SEVERITY_KEY: validation_verdict(
-                failed=validation_result.failed_count, warnings=validation_result.warning_count
-            ).label,
-            "file_path": validation_result.file_path,
-            "detected_version": validation_result.detected_version,
-            "target_version": validation_result.target_version,
-            "passed_count": validation_result.passed_count,
-            "failed_count": validation_result.failed_count,
-            "warning_count": validation_result.warning_count,
-            "issues": [
-                f"{c.name}: {c.message}"
-                for c in validation_result.checks
-                if c.status.value == "failed"
-            ],
-        }
-        from geoparquet_io.api.check import CheckResult
-
-        return CheckResult(results, check_type="validate", source_path=source)
+        return self._run_check(check.validate, version=version)
 
     def add_admin_divisions(
         self,
