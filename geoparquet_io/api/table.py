@@ -27,7 +27,6 @@ from geoparquet_io.core.add.kdtree import (
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
-from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.edges import edges_of, state_edges
 from geoparquet_io.core.file_utils import get_all_parquet_files, scratch_path, unlink_released_file
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
@@ -2736,66 +2735,23 @@ class Table:
             >>> print(stats['population']['max'])
             10000000
         """
-        import duckdb
-
-        from geoparquet_io.core.duckdb_utils import (
-            fetch_row,
-            get_duckdb_connection,
-            is_interrupt,
-            register_arrow,
-        )
-        from geoparquet_io.core.inspect_utils import compute_column_stats
-        from geoparquet_io.core.logging_config import debug
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, register_arrow
+        from geoparquet_io.core.inspect_utils import compute_column_statistics
 
         con = None
         try:
             con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
             register_arrow(con, "input_table", self._table)
-
-            regular_cols = [f.name for f in self._table.schema if f.name != self._geometry_column]
-            stats = {}
-
-            # One batched query for all non-geometry columns, so one DESCRIBE.
-            # fetch_row reads TIMESTAMPTZ min and max as UTC and makes them aware
-            # with zoneinfo, so they need no pytz.
-            if regular_cols:
-                select_parts = []
-                for col_name in regular_cols:
-                    quoted_col = quote_identifier(col_name)
-                    select_parts.extend(
-                        [
-                            f"COUNT(*) FILTER (WHERE {quoted_col} IS NULL)",
-                            f"MIN({quoted_col})",
-                            f"MAX({quoted_col})",
-                            f"APPROX_COUNT_DISTINCT({quoted_col})",
-                        ]
-                    )
-                query = f"SELECT {', '.join(select_parts)} FROM input_table"
-                try:
-                    row = fetch_row(con, query)
-                except duckdb.Error as e:
-                    if is_interrupt(e):
-                        raise
-                    debug(f"Batched stats query failed, falling back to per-column queries: {e}")
-                    row = None
-                for i, col_name in enumerate(regular_cols):
-                    if row is None:
-                        stats[col_name] = compute_column_stats(con, col_name, False, "input_table")
-                    else:
-                        nulls, min_val, max_val, unique = row[i * 4 : i * 4 + 4]
-                        stats[col_name] = {
-                            "nulls": nulls,
-                            "min": min_val,
-                            "max": max_val,
-                            "unique": unique,
-                        }
-
+            # The primary geometry column goes last; every other column,
+            # secondary geometry included, gets the full four figures.
+            columns_info = [
+                {"name": f.name, "is_geometry": False}
+                for f in self._table.schema
+                if f.name != self._geometry_column
+            ]
             if self._geometry_column in self._table.schema.names:
-                stats[self._geometry_column] = compute_column_stats(
-                    con, self._geometry_column, True, "input_table"
-                )
-
-            return stats
+                columns_info.append({"name": self._geometry_column, "is_geometry": True})
+            return compute_column_statistics(con, "input_table", columns_info)
 
         finally:
             if con is not None:
