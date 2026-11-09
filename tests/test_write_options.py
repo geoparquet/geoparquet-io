@@ -37,11 +37,14 @@ def test_the_fields_are_the_funnel_keywords_and_the_strategy():
     assert tuple(f.name for f in dataclasses.fields(WriteOptions)) == FIELDS
 
 
-def test_the_ruled_defaults():
-    """#761's ruling: ZSTD and an "auto" strategy; every other fact unset."""
-    options = WriteOptions()
-    assert (options.compression, options.write_strategy) == ("ZSTD", "auto")
-    assert all(getattr(options, name) is None for name in FIELDS[1:-1])
+def test_every_field_defaults_to_not_asked():
+    """None is "not asked" -- ZSTD and auto at the write step -- so asking is visible.
+
+    A ZSTD default made ``WriteOptions()`` indistinguishable from an explicit
+    ``compression="ZSTD"``: a `.csv` "written with ZSTD" was not refused, and the
+    same codec set in the options and as a keyword raised no conflict.
+    """
+    assert all(getattr(WriteOptions(), name) is None for name in FIELDS)
 
 
 def test_it_is_frozen_and_keyword_only():
@@ -52,13 +55,11 @@ def test_it_is_frozen_and_keyword_only():
 
 
 def test_every_default_means_what_the_funnel_default_means():
-    """An unset field is left out; ZSTD is what the funnel's own None resolves to."""
+    """An unset field is left out, so the funnel's own default (ZSTD for the codec) applies."""
     from geoparquet_io.core.compression import resolve_codec
 
-    assert WriteOptions().funnel_kwargs() == {"compression": "ZSTD"}
-    assert resolve_codec("ZSTD", None, context="write") == resolve_codec(
-        None, None, context="write"
-    )
+    assert WriteOptions().funnel_kwargs() == {}
+    assert resolve_codec(None, None, context="write").name == "ZSTD"
 
 
 @pytest.mark.parametrize(
@@ -261,8 +262,8 @@ def test_piped_reproject_honours_the_write_flags(points_file, tmp_path):
             ),
             False,
         ),
-        # The ruled default is a codec asked for; only None means "not asked".
-        (WriteOptions(), True),
+        # Only None means "not asked", and every default is None.
+        (WriteOptions(), False),
         (WriteOptions(compression="zstd"), True),
         (WriteOptions(compression_level=3), True),
         (WriteOptions(row_group_size_mb=64), True),
@@ -373,15 +374,18 @@ def test_keywords_merge_into_the_options(places, tmp_path):
     assert _footer(tmp_path / "out.parquet") == ("GZIP", 100)
 
 
-def test_one_field_set_both_ways_is_an_error(places, tmp_path):
+@pytest.mark.parametrize("asked", ["GZIP", "ZSTD"])
+def test_one_field_set_both_ways_is_an_error(places, tmp_path, asked):
+    """ZSTD too: the codec an unset field resolves to is still a codec asked for."""
     with pytest.raises(TypeError, match="compression"):
-        places.write(tmp_path / "out.parquet", WriteOptions(compression="GZIP"), compression="LZ4")
+        places.write(tmp_path / "out.parquet", WriteOptions(compression=asked), compression="LZ4")
 
 
 @pytest.mark.parametrize(
     ("name", "kwargs"),
     [
         ("out.csv", {"compression": "GZIP"}),
+        ("out.csv", {"compression": "ZSTD"}),
         ("out.geojson", {"options": WriteOptions(memory_limit="1GB")}),
         ("out.gpkg", {"write_strategy": "streaming"}),
     ],

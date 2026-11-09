@@ -65,7 +65,7 @@ from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any, cast, overload
 
-from geoparquet_io.core.compression import DEFAULT_CODEC, resolve_codec
+from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
     PARQUET_UNKNOWN_CRS,
     crs_of,
@@ -1319,13 +1319,16 @@ class WriteOptions:
     parameters; the drivers pass it along, and the funnel call expands it once
     (:meth:`funnel_kwargs`).
 
-    ``None`` is legal in every field and means "not asked": the facade resolves
-    it (codec ZSTD, the default row-group count, the auto output version,
-    gpio's memory default). ``compression`` defaults to ``"ZSTD"``, which is
-    what an unset codec resolves to anyway.
+    Every field defaults to ``None``, which means "not asked": the write step
+    resolves it (codec ZSTD, strategy auto, the default row-group count, the
+    auto output version, gpio's memory default). A field is asked for exactly
+    when it is not None, so an explicit ``compression="ZSTD"`` stays visible:
+    a non-Parquet ``Table.write`` refuses it, and ``Table.write`` refuses it
+    set both here and as a keyword.
 
     Attributes:
-        compression: Parquet codec (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED).
+        compression: Parquet codec (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED);
+            None writes ZSTD.
         compression_level: Codec level; None takes the codec's default.
         row_group_size_mb: Target row-group size in MB (exclusive with
             ``row_group_rows``).
@@ -1339,14 +1342,14 @@ class WriteOptions:
             own default.
     """
 
-    compression: str | None = DEFAULT_CODEC
+    compression: str | None = None
     compression_level: int | None = None
     row_group_size_mb: float | None = None
     row_group_rows: int | None = None
     profile: str | None = None
     geoparquet_version: str | None = None
     memory_limit: str | None = None
-    write_strategy: str | None = "auto"
+    write_strategy: str | None = None
 
     @classmethod
     def pick(cls, values: Mapping[str, Any]) -> WriteOptions:

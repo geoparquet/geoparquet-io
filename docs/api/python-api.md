@@ -869,8 +869,10 @@ table.write('output.parquet', row_group_size_mb=128)
 `gpio.WriteOptions` holds the GeoParquet write settings as one value, the same
 one every CLI write command builds from its flags. Pass it as `options`; a
 write keyword merges into it, and setting one field both ways is a `TypeError`.
-Unset fields mean "not asked": `compression` defaults to `'ZSTD'`,
-`write_strategy` to `'auto'` (`duckdb-kv` here), and the rest to `None`.
+Every field defaults to `None`, "not asked": the write resolves an unset
+`compression` to ZSTD and an unset `write_strategy` to auto (`duckdb-kv` here).
+A field set to anything else, ZSTD included, counts as asked: a non-Parquet
+format refuses it.
 `memory_limit` caps the write's DuckDB work on every strategy.
 
 === "CLI"
