@@ -281,3 +281,12 @@ def test_fix_covering_on_a_good_file_leaves_codec_and_row_groups(tmp_path, unsor
     meta = pq.ParquetFile(out).metadata
     assert meta.num_row_groups == 15
     assert meta.row_group(0).column(0).compression == "SNAPPY"
+
+
+def test_a_table_read_from_a_directory_checks_a_prospective_copy(tmp_path, unsorted_test_file):
+    """The path-level door refuses a directory, so the Table checks its rows as on main."""
+    for name in ("a.parquet", "b.parquet"):
+        shutil.copy(unsorted_test_file, tmp_path / name)
+    result = gpio.read(str(tmp_path)).check_compression()
+    assert result.prospective
+    assert result.passed()

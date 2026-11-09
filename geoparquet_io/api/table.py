@@ -1065,10 +1065,19 @@ class Table:
         self._source_stat = (stat.st_size, stat.st_mtime_ns)
 
     def _measurable_source(self) -> str | None:
-        """The source file, if it is local and still the bytes this Table was read from."""
+        """The source file, if it is one local file and still the bytes this Table was read from.
+
+        A directory or glob is several files, which the path-level checks refuse,
+        so its rows are checked as the prospective copy instead.
+        """
+        from geoparquet_io.core.file_utils import is_partition_path
         from geoparquet_io.core.remote import is_remote_url
 
-        if self._source_path is None or is_remote_url(self._source_path):
+        if (
+            self._source_path is None
+            or is_remote_url(self._source_path)
+            or is_partition_path(self._source_path)
+        ):
             return None
         try:
             stat = os.stat(self._source_path)
