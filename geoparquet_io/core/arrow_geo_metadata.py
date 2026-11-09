@@ -204,6 +204,14 @@ def _secondary_crs_from_field(field) -> dict:
     crs = _crs_from_geoarrow_field(pa.schema([field]), field.name)
     if is_empty_crs_value(crs):
         return {"crs": None}
+    if isinstance(crs, str) and crs.strip().lower().startswith("srid:"):
+        from geoparquet_io.core.duckdb_metadata import resolve_crs_reference
+
+        # srid:<N> is the Parquet type's EPSG:<N> (geoarrow_compat keeps it as
+        # this text); the reference owner maps it. No file is read for it.
+        crs = resolve_crs_reference("", crs)
+        if crs is None:  # srid:0, unknown
+            return {"crs": None}
     if isinstance(crs, str):
         # Text (AUTH:CODE, PROJJSON, WKT) goes through the label owner, which
         # never reads an init= file; text nothing defines is unknown, not CRS84.

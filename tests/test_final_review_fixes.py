@@ -104,7 +104,8 @@ EPSG_3857 = CRS.from_epsg(3857).to_json_dict()
 #: 3857 and default rows are what main's ``_build_geo_block`` probe wrote in its
 #: two cells (2.0 in-memory and the default strategy); every cell now agrees.
 #: Deliberately not main: ``srid:3857`` crashed it (pyproj cannot read the
-#: text) and ``""`` came out as the default; both are unknown, so null (#1267).
+#: text) and is the Parquet spelling of EPSG:3857; ``""`` came out as the
+#: default, and is unknown, so null (#1267).
 #: An ``init=`` text is never read (main wrote it through verbatim): unknown.
 #: ``srid:0`` was null on main too.
 _ABSENT = object()
@@ -115,7 +116,7 @@ FIELD_CRS_FORMS = {
     "wkt2": (CRS.from_epsg(3857).to_wkt(), EPSG_3857),
     "ogc_crs84": ("OGC:CRS84", _ABSENT),
     "epsg_4326": ("EPSG:4326", _ABSENT),
-    "srid_3857": ("srid:3857", None),
+    "srid_3857": ("srid:3857", EPSG_3857),
     "empty": ("", None),
     "srid_0": ("srid:0", None),
     "init_file": ("+init={init}:x", None),
@@ -167,4 +168,44 @@ def test_table_write_keeps_a_field_metadata_only_secondary_crs(tmp_path, version
         ]
         if not ok or failed:
             wrong[form] = {"crs": "absent" if got is _ABSENT else got, "failed": failed}
+    assert not wrong, wrong
+
+
+def test_a_native_srid_secondary_keeps_its_epsg_crs(tmp_path):
+    """A native Parquet GEOMETRY secondary typed ``srid:3857`` reaches the writer
+    as the text ``srid:3857`` once geoarrow.pyarrow is loaded (geoarrow_compat).
+    The label owner refuses SRID references, so it was written as unknown; main
+    raised CRSError on every strategy. The strategies x versions loop inside
+    keeps the fast suite's collected count down."""
+    import duckdb
+    import geoarrow.pyarrow  # noqa: F401 - registers the type the readers see
+
+    from geoparquet_io.core.duckdb_utils import sql_path
+
+    src = tmp_path / "native.parquet"
+    con = duckdb.connect()
+    try:
+        con.execute("LOAD spatial")
+        con.execute(
+            "COPY (SELECT ST_Point(1, 2) AS geometry, ST_SetCRS(ST_Point(1, 2), 'srid:3857') "
+            f"AS other) TO {sql_path(src)} (FORMAT PARQUET, GEOPARQUET_VERSION 'NONE')"
+        )
+    finally:
+        con.close()
+    table = pq.read_table(src)
+
+    wrong = {}
+    for version in ("1.1", "2.0"):
+        for strategy in ("in-memory", "streaming", "duckdb-kv", "disk-rewrite", None):
+            out = tmp_path / f"{version}-{strategy}.parquet"
+            try:
+                write_geoparquet_table(
+                    table, str(out), geoparquet_version=version, write_strategy=strategy
+                )
+            except Exception as exc:  # the crash is the finding, reported with the rest
+                wrong[f"{version}-{strategy}"] = f"raised {type(exc).__name__}: {exc}"[:200]
+                continue
+            got = _written_secondary_crs(out)
+            if not (isinstance(got, dict) and crs_equal(got, EPSG_3857)):
+                wrong[f"{version}-{strategy}"] = "absent" if got is _ABSENT else got
     assert not wrong, wrong

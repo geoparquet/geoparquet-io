@@ -16,7 +16,8 @@
 # a PROJ init= file a CRS string names.
 # +4: a {"init": ...} dict, or JSON text decoding to one, is never read
 # (owner reads and a write).
-max_collected = 14446
+# +1: a native srid:3857 secondary keeps EPSG:3857 on every strategy x version.
+max_collected = 14447
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
