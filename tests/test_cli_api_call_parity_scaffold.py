@@ -1239,6 +1239,11 @@ CASES: list[ParityCase] = [
             reference=core_pmtiles.create_pmtiles_from_geoparquet,
             invoke=lambda c: ops.create_pmtiles(c.input_file, c.scratch("api.pmtiles")),
         ),
+        table=Frontend(
+            patch_site=(core_pmtiles, "create_pmtiles_from_geoparquet"),
+            reference=core_pmtiles.create_pmtiles_from_geoparquet,
+            invoke=lambda c: c.gpio_table.create_pmtiles(c.scratch("table.pmtiles")),
+        ),
         normalize={
             "layer": ("layer", "layer"),
             "min_zoom": ("min_zoom", "min_zoom"),
@@ -1261,7 +1266,6 @@ CASES: list[ParityCase] = [
             "drop_densest_as_needed": ("drop_densest_as_needed", "drop_densest_as_needed"),
             "force": ("force", "force"),
         },
-        notes=("A PMTiles archive is not a table, so there is no `Table` door.",),
     ),
     ParityCase(
         id="pmtiles pyramid",
@@ -1275,6 +1279,11 @@ CASES: list[ParityCase] = [
             patch_site=(core_pmtiles_pyramid, "create_pmtiles_pyramid"),
             reference=core_pmtiles_pyramid.create_pmtiles_pyramid,
             invoke=lambda c: ops.create_pmtiles_pyramid(c.input_file, c.scratch("api_pyr.pmtiles")),
+        ),
+        table=Frontend(
+            patch_site=(core_pmtiles_pyramid, "create_pmtiles_pyramid"),
+            reference=core_pmtiles_pyramid.create_pmtiles_pyramid,
+            invoke=lambda c: c.gpio_table.create_pmtiles_pyramid(c.scratch("table_pyr.pmtiles")),
         ),
         normalize={
             "levels": ("levels", "levels"),
@@ -1312,12 +1321,11 @@ CASES: list[ParityCase] = [
             "s3_endpoint": ("s3_endpoint", "s3_endpoint"),
             "s3_region": ("s3_region", "s3_region"),
             "s3_use_ssl": ("s3_use_ssl", "s3_use_ssl"),
+            "dry_run": ("dry_run", "dry_run"),
         },
         notes=(
-            "`dry_run` is not pinned: `Table.upload` has no such keyword (#1063, "
-            "`test_table_upload_cannot_be_rehearsed`). `pattern`, `max_files`, "
-            "`chunk_size` and `fail_fast` describe walking a directory and have no "
-            "analogue on a Table.",
+            "`pattern`, `max_files`, `chunk_size` and `fail_fast` describe walking a "
+            "directory and have no analogue on a Table.",
         ),
     ),
     ParityCase(
@@ -1981,8 +1989,3 @@ def test_every_known_gap_names_a_real_case_and_parameter():
         assert canonical in case.normalize, (
             f"{canonical!r} is not a canonical parameter of {case_id!r}"
         )
-
-
-@pytest.mark.xfail(strict=True, reason="gpio #1063: Table.upload has no dry_run")
-def test_table_upload_cannot_be_rehearsed():
-    assert "dry_run" in inspect.signature(table_module.Table.upload).parameters

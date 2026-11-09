@@ -752,6 +752,11 @@ NOT_TABLE_IN_TABLE_OUT: dict[str, str] = {
     "partition_by_quadkey": "writes a partition tree; covered by TestOpsPartition",
     "partition_by_s2": "writes a partition tree; covered by TestOpsPartition",
     "partition_by_string": "writes a partition tree; covered by TestOpsPartition",
+    # Table/file in, PMTiles out: no table comes back to compare. The Table door
+    # hands ops the source file or a scratch copy; both doors are pinned against
+    # the CLI by the call-parity scaffold's `pmtiles create`/`pmtiles pyramid`.
+    "create_pmtiles": "PMTiles out through tippecanoe; call parity in the scaffold",
+    "create_pmtiles_pyramid": "banded PMTiles out; call parity in the scaffold",
 }
 
 
@@ -835,8 +840,6 @@ OPS_ONLY_SURFACE: dict[str, str] = {
     "handed back in memory cannot carry",
     "create_overviews": "`Table.overview` <-> `ops.create_overviews`, differently spelled "
     "twin: the method rolls one level in memory, the function writes a whole pyramid",
-    "create_pmtiles": "file in, PMTiles out through tippecanoe: no table on either end",
-    "create_pmtiles_pyramid": "file in, banded PMTiles out: no table on either end",
     "from_arcgis": "reader: fetches a service over the network, no input table",
     "from_carto": "reader: fetches a service over the network, no input table",
     "from_wfs_layers": "reader: writes many layers to a directory, so there is no single "
@@ -1489,6 +1492,39 @@ class TestTableUpload:
             assert len(captured_paths) == 1
             temp_path = captured_paths[0]
             assert not Path(temp_path).exists(), "Temp file should be deleted after error"
+
+    def test_upload_forwards_dry_run(self, sample_table):
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            sample_table.upload("s3://test-bucket/test.parquet", dry_run=True)
+        assert mock_upload.call_args.kwargs["dry_run"] is True
+
+    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry_run", "real"])
+    def test_upload_to_a_prefix_names_the_object_after_the_source(
+        self, sample_table, dry_run, capsys
+    ):
+        from geoparquet_io.core import upload as core_upload
+
+        with (
+            patch.object(core_upload, "_setup_store_and_kwargs", return_value=(None, {})),
+            patch.object(core_upload, "_upload_file_sync") as put,
+        ):
+            sample_table.upload("s3://test-bucket/prefix/", dry_run=dry_run)
+
+        key = f"prefix/{PLACES_PARQUET.name}"
+        if dry_run:
+            assert f"Target key:  {key}" in capsys.readouterr().out
+            put.assert_not_called()
+        else:
+            assert put.call_args.args[2] == key
+
+    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry_run", "real"])
+    def test_upload_to_a_prefix_without_a_source_name_is_refused(self, sample_table, dry_run):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            with pytest.raises(InvalidParameterError, match="full object key"):
+                sample_table.head(5).upload("s3://test-bucket/prefix/", dry_run=dry_run)
+        mock_upload.assert_not_called()
 
 
 class TestTableMetadataProperties:
