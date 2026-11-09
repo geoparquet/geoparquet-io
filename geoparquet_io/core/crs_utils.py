@@ -1434,6 +1434,10 @@ def _load_crs_cached(kind: str, key: str):
             return CRS.from_json(key)
         if kind == "authority":
             return CRS.from_authority(*key.split(":", 1))
+        # PROJ opens (or fetches) whatever an init= parameter names, and this
+        # text comes from files and servers: refused before pyproj sees it.
+        if names_proj_init_file(key):
+            return None
         return CRS.from_user_input(key)
     except Exception:  # pyproj raises CRSError, ValueError, TypeError
         return None

@@ -423,6 +423,48 @@ class TestProjInitFilesAreNeverRead:
         with pytest.raises(UnresolvableCRSError, match="init"):
             transform_source_crs(template.format(path=init_file))
 
+    @pytest.fixture
+    def parsed(self, monkeypatch):
+        """Every text pyproj parses, recorded: ``load_crs`` swallows any exception
+        its parse raises, so a raising stub could not tell a refusal from a read."""
+        import pyproj
+
+        seen: list[str] = []
+        original = pyproj.CRS.from_user_input
+
+        def _record(value, *args, **kwargs):
+            seen.append(str(value))
+            return original(value, *args, **kwargs)
+
+        monkeypatch.setattr(pyproj.CRS, "from_user_input", staticmethod(_record))
+        return seen
+
+    def test_load_crs_refuses_an_init_string_before_pyproj(self, init_file, parsed):
+        """``load_crs`` is the one constructor; every caller inherits its guard.
+        Read, the sentinel is a projected CRS rather than None."""
+        from geoparquet_io.core.crs_utils import load_crs
+
+        assert load_crs(f"+init={init_file}:x") is None
+        assert not [text for text in parsed if "init" in text]
+
+    def test_a_label_naming_an_init_file_is_refused_unread(self, init_file, parsed):
+        """``projjson_for_label`` reads labels from GDAL types and WFS servers too."""
+        from geoparquet_io.core.crs_utils import projjson_for_label
+
+        with pytest.raises(UnresolvableCRSError):
+            projjson_for_label(f"+init={init_file}:x")
+        assert not [text for text in parsed if "init" in text]
+
+    def test_a_disagreement_probe_does_not_read_an_init_file(self, init_file, parsed):
+        """The #1014 one-sided branch loads both values from the file's own
+        metadata; an unreadable side stays silent (a warning fails open). Read,
+        the sentinel's UTM 31N disagrees with EPSG:3857."""
+        from geoparquet_io.core.crs_utils import _crs_sources_disagree
+
+        epsg_3857 = CRS.from_epsg(3857).to_json_dict()
+        assert _crs_sources_disagree(epsg_3857, f"+init={init_file}:x") is False
+        assert not [text for text in parsed if "init" in text]
+
     def test_a_remote_init_is_refused(self):
         with pytest.raises(UnresolvableCRSError, match="init"):
             transform_source_crs("+init=https://example.invalid/proj:x")

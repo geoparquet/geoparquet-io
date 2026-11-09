@@ -12,7 +12,9 @@
 # plus 1 for declared_write_metadata leaving a decoded geo dict unchanged.
 # +10: a secondary CRS held only in field metadata, per strategy x 1.1/2.0
 # (#1400's probe kept two; the owner read keeps all ten).
-max_collected = 14439
+# +3: load_crs, projjson_for_label and the #1014 disagreement probe never read
+# a PROJ init= file a CRS string names.
+max_collected = 14442
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
