@@ -510,16 +510,14 @@ def _detect_geometry_column(
     con,
     input_file,
     verbose,
-    is_parquet=False,
     layer=None,
     open_options=None,
     column_aliases=None,
     columns_out=None,
 ):
-    """Detect geometry column name from input file.
+    """Detect the geometry column of a GDAL (non-parquet) source.
 
-    ``input_file`` is RAW: ``primary_geometry_column`` escapes its own
-    argument, and ``_build_st_read_expr`` escapes at the SQL boundary.
+    ``input_file`` is RAW: ``_build_st_read_expr`` escapes at the SQL boundary.
 
     ``columns_out``, when a list, receives every ``(name, type)`` a non-parquet
     source binds to: the same ``LIMIT 0`` bind answers the free bbox name
@@ -530,12 +528,6 @@ def _detect_geometry_column(
     if verbose:
         debug("Detecting geometry column from input...")
 
-    # For parquet files, check GeoParquet metadata first, then fall back to names
-    if is_parquet:
-        result = primary_geometry_column(input_file, verbose=verbose)
-        return result
-
-    # For other formats, use schema-based detection with standard names
     table_expr = _build_st_read_expr(
         input_file, layer, open_options=open_options, column_aliases=column_aliases
     )
@@ -564,7 +556,6 @@ def _detect_spatial_geometry(con, input_file, verbose, layer, open_options, colu
                 con,
                 input_file,
                 verbose,
-                is_parquet=False,
                 layer=layer,
                 open_options=open_options,
                 columns_out=columns_out,
@@ -582,7 +573,6 @@ def _detect_spatial_geometry(con, input_file, verbose, layer, open_options, colu
                 con,
                 input_file,
                 verbose,
-                is_parquet=False,
                 layer=layer,
                 open_options=open_options,
                 column_aliases=aliases,

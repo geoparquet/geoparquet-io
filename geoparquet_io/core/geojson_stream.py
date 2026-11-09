@@ -191,25 +191,6 @@ def _utf8_stdout() -> Iterator[TextIO]:
             wrapper.detach()
 
 
-def _get_source_crs(input_path: str) -> str | None:
-    """The primary geometry's ``ST_Transform`` source, or ``None`` for lon/lat.
-
-    Read through :func:`crs_utils.source_crs_string`, the resolver every other
-    command uses, so a native-geo-only input (CRS only in the Parquet logical
-    type, no ``geo`` block) is reprojected too (#1248), and so is a CRS with no
-    authority code (#1258). A CRS that cannot be resolved raises
-    :class:`crs_utils.UnresolvableCRSError` rather than being written as
-    RFC 7946 lon/lat.
-
-    Args:
-        input_path: RAW path to input GeoParquet file
-
-    Returns:
-        ``"AUTH:CODE"``, canonical PROJJSON, or ``None`` for lon/lat input
-    """
-    return source_crs_string(input_path)
-
-
 def _needs_reprojection(source_crs: str | None) -> bool:
     """
     Check if reprojection to WGS84 is needed for RFC 7946 compliance.
@@ -806,7 +787,10 @@ def convert_to_geojson_stream(
 
     # Check if reprojection is needed
     # --keep-crs writes the input coordinates, so the CRS is never resolved.
-    source_crs = None if keep_crs else _get_source_crs(input_path)
+    # source_crs_string, like every other command, so a native-geo-only input
+    # (#1248) and a CRS with no authority code (#1258) are reprojected too, and
+    # one that cannot be resolved raises rather than being written as lon/lat.
+    source_crs = None if keep_crs else source_crs_string(input_path)
     needs_reproject = _needs_reprojection(source_crs)
     if needs_reproject:
         info(f"Reprojecting from {transform_source_label(source_crs)} to WGS84 (RFC 7946)")

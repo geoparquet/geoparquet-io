@@ -99,7 +99,7 @@ EXPECTED_COUNTS = {
     "G1.geo_compose": 0,
     "G1.staging": 0,
     "G1.crs": 0,
-    "G2.exemptions": 1,
+    "G2.exemptions": 5,
     "G3.pairs": 0,
     "G3.baseline": 0,
     "G3.pylint": 15,

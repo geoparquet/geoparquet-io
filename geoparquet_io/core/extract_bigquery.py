@@ -361,23 +361,6 @@ def _get_table_row_count(
         return None
 
 
-def _detect_geometry_column(table: pa.Table) -> str | None:
-    """
-    Detect geometry column from table schema.
-
-    Args:
-        table: PyArrow Table to check
-
-    Returns:
-        Name of detected geometry column, or None
-    """
-    # The one resolver over the table's typed columns: its names, then
-    # BigQuery's own (its geometry type is called GEOGRAPHY, so a column named
-    # for it, or ``geo``, is a candidate), then a GeoArrow-typed column. A name
-    # that merely contains "geo" is not an answer (#1367).
-    return primary_geometry_column(table, extra_names=GEOGRAPHY_SOURCE_NAMES)
-
-
 # The Storage Read API backs bigquery_scan, and it serves physical tables
 # only. BigQuery refuses a view, a materialized view or an external table in
 # these words. Matched lowercased, against the message of the raised error.

@@ -1054,19 +1054,24 @@ def _block_names_the_default(raw) -> bool:
 def _crs_sources_disagree(geo_block_crs, native_crs) -> bool:
     """True only when both sources name a CRS and the two are demonstrably different.
 
-    Deliberately conservative: it reports a disagreement only when *both* sides
-    resolve to an authority identifier and those identifiers differ. A warning on
-    the write path that cries wolf is worse than one that is occasionally quiet,
-    and two PROJJSON objects with no ``id`` can be textually different renderings
-    of the same CRS (different pyproj versions spell the same datum out
-    differently), which is not something to tell a user their file is broken over.
+    When both sides resolve to an authority identifier, the identifiers decide.
+    When exactly one does, :func:`crs_equal` decides (pyproj, axis order
+    ignored), so a full PROJJSON of a different CRS with its ``id`` stripped is
+    not mistaken for another rendering of the same one (#1014).
 
-    ``crs_equal`` also resolves absent and explicit-null cases; this warning
-    compares only the two stated authority identifiers.
+    When neither has an identifier it stays silent: two PROJJSON objects with no
+    ``id`` can be textually different renderings of the same CRS (different
+    pyproj versions spell the same datum out differently), which is not
+    something to tell a user their file is broken over. A warning on the write
+    path that cries wolf is worse than one that is occasionally quiet.
     """
     left = crs_authority_code(geo_block_crs)
     right = crs_authority_code(native_crs)
-    return bool(left and right and left != right)
+    if left and right:
+        return left != right
+    if not (left or right) or not (geo_block_crs and native_crs):
+        return False
+    return not crs_equal(geo_block_crs, native_crs)
 
 
 @lru_cache(maxsize=256)
@@ -2043,6 +2048,23 @@ def source_crs_string(
     :func:`transform_source_crs` returns, ``None`` for lon/lat input.
     """
     return transform_source_crs(crs_of(parquet_file, verbose, geometry_column=geometry_column))
+
+
+def source_crs_name(source, verbose: bool = False, geometry_column: str | None = None) -> str:
+    """``source``'s CRS as an ``ST_Transform`` source, naming lon/lat too.
+
+    ``source`` is anything :func:`crs_of` reads (a RAW path/URL or a table).
+    What :func:`source_crs_string` returns, except that lon/lat input is named
+    by :func:`lonlat_source_name` (``"EPSG:4326"`` when absent, per the
+    GeoParquet spec) instead of ``None``, for a caller that always transforms.
+    """
+    crs = crs_of(source, verbose, geometry_column=geometry_column)
+    resolved = transform_source_crs(crs)
+    if resolved:
+        return resolved
+    if verbose and not crs:
+        debug("No CRS found in metadata, assuming EPSG:4326 (WGS84)")
+    return lonlat_source_name(crs)
 
 
 def reproject_to_source_sql(geom_expr: str, source_crs, base_crs: str = DEFAULT_TARGET_CRS) -> str:

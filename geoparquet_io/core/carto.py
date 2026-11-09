@@ -429,30 +429,6 @@ def _probe_table_schema(
     return payload.get("fields")
 
 
-def _detect_geometry_column(
-    url: str,
-    table_name: str,
-    api_key: str | None = None,
-    timeout: float = CARTO_REQUEST_TIMEOUT,
-) -> str | None:
-    """Probe the Carto SQL API for a geometry-typed column.
-
-    Note:
-        Carto attaches ``the_geom``/``the_geom_webmercator`` (type ``geometry``)
-        to nearly every managed table, even purely tabular ones where those
-        columns are entirely NULL. A column reported here therefore does *not*
-        guarantee the table actually holds geometry — confirm with
-        :func:`_geometry_column_has_values`.
-
-    Returns:
-        Name of the first geometry-typed column, or None if the schema has none.
-
-    Raises:
-        CartoError: If the probe request fails.
-    """
-    return _geometry_column_from_fields(_probe_table_schema(url, table_name, api_key, timeout))
-
-
 def _geometry_column_has_values(
     url: str,
     table_name: str,

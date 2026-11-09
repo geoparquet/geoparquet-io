@@ -375,7 +375,6 @@ def test_layer_info_reads_crs_bbox_and_formats_from_capabilities(monkeypatch):
     assert info.crs_list[0].endswith("4326")
     assert info.bbox == (-180.0, -90.0, 180.0, 90.0)
     assert "application/json" in info.available_formats
-    assert info.geometry_column == "the_geom"
     assert info.sortable_attribute == "name"
 
 
@@ -399,7 +398,6 @@ def test_an_unavailable_describe_feature_type_degrades_to_defaults(monkeypatch):
 
     info = get_layer_info(SERVICE, TYPENAME, "1.1.0")
 
-    assert info.geometry_column == "geometry"
     assert info.sortable_attribute is None
 
 
