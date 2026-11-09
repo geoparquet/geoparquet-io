@@ -1,11 +1,20 @@
 """
-CheckResult class for representing validation and check results.
+Checks on one GeoParquet file, and the CheckResult they return.
 
-Provides a structured way to inspect check results with helper methods
-for determining pass/fail status and extracting warnings and failures.
+``check_*`` and ``validate`` take a path (#1090); ``Table.check*`` hand them
+the file a Table was read from. CheckResult has helper methods for
+pass/fail status and for the warnings and failures.
 """
 
 from __future__ import annotations
+
+import os
+from typing import TYPE_CHECKING
+
+from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
+
+if TYPE_CHECKING:
+    from geoparquet_io.core.check_parquet_structure import CheckProfile
 
 
 class CheckResult:
@@ -198,3 +207,168 @@ class CheckResult:
     def __bool__(self) -> bool:
         """Boolean representation - True if passed."""
         return self.passed()
+
+
+# --------------------------------------------------------------------------
+# Path-level checks (#1090): one file in, a CheckResult out. ``Table.check*``
+# hands these its source file, so both doors share one call path.
+# --------------------------------------------------------------------------
+
+
+def _one_file(path, command: str) -> str:
+    """*path* as a string, refused when it names a directory or glob of files."""
+    from geoparquet_io.core.exceptions import InvalidParameterError
+    from geoparquet_io.core.file_utils import is_partition_path
+
+    path = os.fspath(path)
+    if is_partition_path(path):
+        raise InvalidParameterError(
+            "path",
+            f"{path} is a directory or glob; a path-level check reads one file. "
+            f"Check each file, or run `gpio check {command}` for a multi-file run.",
+        )
+    return path
+
+
+def _structure_check(path, command: str, check_type: str, func, **kwargs) -> CheckResult:
+    path = _one_file(path, command)
+    results = func(path, verbose=False, return_results=True, quiet=True, **kwargs)
+    return CheckResult(results, check_type=check_type, source_path=path)
+
+
+def check_all(path: str | os.PathLike, profile: CheckProfile | None = None) -> CheckResult:
+    """Run the structure checks on a file: row groups, bbox, covering, compression, bloom filters.
+
+    The checks :meth:`Table.check` runs -- not spatial order or spec
+    validation, which ``gpio check all`` adds; take the worst of this,
+    :func:`check_spatial` and :func:`validate` for its answer.
+
+    Args:
+        path: A local file or remote URL (not a directory or glob)
+        profile: Row-group size band to judge against, as ``--profile``
+
+    Example:
+        >>> result = gpio.check_all("data.parquet")
+        >>> print(result.verdict(), result.failures())
+    """
+    from geoparquet_io.core import check_parquet_structure as core
+
+    return _structure_check(path, "all", "all", core.check_all, profile=profile)
+
+
+def check_compression(path: str | os.PathLike) -> CheckResult:
+    """Check the geometry column's compression; ZSTD is recommended. See :func:`check_all`."""
+    from geoparquet_io.core import check_parquet_structure as core
+
+    return _structure_check(path, "compression", "compression", core.check_compression)
+
+
+def check_row_groups(path: str | os.PathLike, profile: CheckProfile | None = None) -> CheckResult:
+    """Check row-group sizes for cloud-native access. See :func:`check_all`."""
+    from geoparquet_io.core import check_parquet_structure as core
+
+    return _structure_check(path, "row-group", "row_groups", core.check_row_groups, profile=profile)
+
+
+def check_bbox(
+    path: str | os.PathLike, sample_rows: int = DEFAULT_BBOX_SAMPLE_ROWS, all_rows: bool = False
+) -> CheckResult:
+    """Check bbox structure, covering metadata, and that each bbox covers its geometry.
+
+    Args:
+        path: A local file or remote URL (not a directory or glob)
+        sample_rows: Rows compared against their geometry, as
+            ``--sample-rows``; 0 skips it
+        all_rows: Compare every row, as ``--all-rows``
+    """
+    from geoparquet_io.core import check_parquet_structure as core
+
+    return _structure_check(
+        path, "bbox", "bbox", core.check_bbox, verify_rows=sample_rows, all_rows=all_rows
+    )
+
+
+def check_bloom_filters(path: str | os.PathLike) -> CheckResult:
+    """Check which columns carry bloom filters for point lookups. See :func:`check_all`."""
+    from geoparquet_io.core import check_parquet_structure as core
+
+    return _structure_check(path, "all", "bloom_filters", core.check_bloom_filters)
+
+
+def check_optimization(path: str | os.PathLike) -> CheckResult:
+    """Score a file's spatial-query optimization (geo types, stats, order, row groups, codec)."""
+    from geoparquet_io.core import check_optimization as core
+
+    return _structure_check(path, "optimization", "optimization", core.check_optimization)
+
+
+def check_spatial(
+    path: str | os.PathLike, sample_size: int = 100, limit_rows: int = 500000
+) -> CheckResult:
+    """Check spatial order: consecutive-feature distance against random pairs (< 0.5 passes).
+
+    Args:
+        path: A local file or remote URL (not a directory or glob)
+        sample_size: Random pairs to sample, as ``--random-sample-size``
+        limit_rows: Maximum rows to analyze, as ``--limit-rows``
+    """
+    from geoparquet_io.core import check_spatial_order as core
+
+    return _structure_check(
+        path,
+        "spatial",
+        "spatial",
+        core.check_spatial_order,
+        random_sample_size=sample_size,
+        limit_rows=limit_rows,
+    )
+
+
+def check_spatial_pushdown(path: str | os.PathLike) -> CheckResult:
+    """Estimate how many row groups a regional query can skip, from per-row-group bbox stats."""
+    from geoparquet_io.core import check_spatial_order as core
+
+    path = _one_file(path, "spatial")
+    results = core.check_spatial_pushdown_readiness(path, verbose=False)
+    return CheckResult(results, check_type="spatial_pushdown", source_path=path)
+
+
+def validate(
+    path: str | os.PathLike,
+    version: str | None = None,
+    sample_size: int = 1000,
+    skip_data_validation: bool = False,
+) -> CheckResult:
+    """Validate a file against the GeoParquet specification, as ``gpio check spec``.
+
+    Args:
+        path: A local file or remote URL (not a directory or glob)
+        version: Target version ("1.0", "1.1", "2.0"), or None to use the declared one
+        sample_size: Rows sampled for data validation, as ``--sample-size``
+        skip_data_validation: Check metadata only, as ``--skip-data-validation``
+    """
+    from geoparquet_io.core.check_verdict import SEVERITY_KEY, validation_verdict
+    from geoparquet_io.core.validate import validate_geoparquet
+
+    path = _one_file(path, "spec")
+    outcome = validate_geoparquet(
+        path,
+        target_version=version,
+        validate_data=not skip_data_validation,
+        sample_size=sample_size,
+        verbose=False,
+    )
+    results = {
+        "passed": outcome.is_valid,
+        SEVERITY_KEY: validation_verdict(
+            failed=outcome.failed_count, warnings=outcome.warning_count
+        ).label,
+        "file_path": outcome.file_path,
+        "detected_version": outcome.detected_version,
+        "target_version": outcome.target_version,
+        "passed_count": outcome.passed_count,
+        "failed_count": outcome.failed_count,
+        "warning_count": outcome.warning_count,
+        "issues": [f"{c.name}: {c.message}" for c in outcome.checks if c.status.value == "failed"],
+    }
+    return CheckResult(results, check_type="validate", source_path=path)

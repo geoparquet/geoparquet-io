@@ -869,6 +869,8 @@ TABLE_ONLY_SURFACE: dict[str, str] = {
     "check_row_groups": "returns a CheckResult, not a table",
     "check_spatial": "returns a CheckResult, not a table",
     "check_spatial_pushdown": "returns a CheckResult, not a table",
+    "fix": "repairs the file the Table measures: the checks it acts on are file facts, "
+    "and the file-level repair is `gpio check <cmd> --fix`",
     "from_bigquery": "`Table.from_bigquery` <-> `ops.read_bigquery`, differently spelled twin",
     "head": "row preview off the wrapped table; `ops` callers can slice the pa.Table",
     "info": "prints a summary of the wrapped table",
