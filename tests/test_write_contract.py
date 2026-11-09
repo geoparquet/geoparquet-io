@@ -134,7 +134,7 @@ KNOWN_DIVERGENCES: dict[tuple[str, str], Divergence] = {}
 
 REBUILD_DROPS_SECONDARY_TYPES = Divergence(
     reason=(
-        "ISSUE-TBD: write_parquet_with_metadata(rebuild_geo_metadata=True) on the "
+        "#1433: write_parquet_with_metadata(rebuild_geo_metadata=True) on the "
         "in-memory, streaming and disk-rewrite strategies writes a 1.1 secondary "
         "geometry entry with no geometry_types: declared_write_metadata strips the "
         "key and only duckdb-kv recomputes a secondary's types (#952)."
