@@ -138,8 +138,9 @@ class DiskRewriteStrategy(BaseWriteStrategy):
     ) -> None:
         """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite.
 
-        ``memory_limit`` bounds the DuckDB COPY (phase one); the row-group
-        rewrite after it is pyarrow's and runs no DuckDB.
+        ``memory_limit`` bounds every DuckDB statement of phase one (the stats
+        scan, the COPY, the geometry-type scans); the row-group rewrite after it
+        is pyarrow's and runs no DuckDB.
         """
 
         configure_verbose(verbose)
@@ -172,63 +173,65 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             scratch_file(prefix="gpio_disk_rewrite_") as temp_path,
             remote_write_context(output_path, verbose=verbose) as (final_path, is_remote),
         ):
-            if verbose:
-                debug("Computing bbox and geometry types via SQL...")
-            stats = geometry_stats_of(QuerySource(con, query), geometry_column)
-            bbox, geometry_types = stats.bbox, stats.geometry_types
-
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
-
-            copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
-            if resolved_row_group_rows:
-                copy_options.append(f"ROW_GROUP_SIZE {resolved_row_group_rows}")
-            copy_query = f"""
-                COPY ({final_query})
-                TO {sql_path(temp_path)}
-                ({", ".join(copy_options)})
-            """
-
-            if verbose:
-                debug(f"Writing via DuckDB COPY TO with {codec.name} compression...")
-
-            # Phase one is a COPY of the whole, possibly sorted query; it used
-            # to run at DuckDB's own 80%-of-host default (#1174).
+            # Every DuckDB statement of the write runs under its cap: the stats
+            # scan, the COPY, and the geometry-type scans the composer runs.
             with scoped_write_memory_limit(con, memory_limit, verbose):
+                if verbose:
+                    debug("Computing bbox and geometry types via SQL...")
+                stats = geometry_stats_of(QuerySource(con, query), geometry_column)
+                bbox, geometry_types = stats.bbox, stats.geometry_types
+
+                final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
+
+                copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
+                if resolved_row_group_rows:
+                    copy_options.append(f"ROW_GROUP_SIZE {resolved_row_group_rows}")
+                copy_query = f"""
+                    COPY ({final_query})
+                    TO {sql_path(temp_path)}
+                    ({", ".join(copy_options)})
+                """
+
+                if verbose:
+                    debug(f"Writing via DuckDB COPY TO with {codec.name} compression...")
+
+                # Phase one is a COPY of the whole, possibly sorted query; it used
+                # to run at DuckDB's own 80%-of-host default (#1174).
                 con.execute(copy_query)
 
-            if verbose:
-                # Closed before leaving the block: this file is `os.unlink`ed a
-                # few lines below, and Windows refuses to delete a file with an
-                # open handle -- `--verbose` disk-rewrite writes died there with
-                # `PermissionError: [WinError 32]` while POSIX cleaned up fine.
-                with pq.ParquetFile(temp_path) as pf:
-                    debug(
-                        f"DuckDB wrote {pf.metadata.num_rows:,} rows, "
-                        f"{pf.metadata.num_row_groups} row groups"
-                    )
+                if verbose:
+                    # Closed before leaving the block: this file is `os.unlink`ed a
+                    # few lines below, and Windows refuses to delete a file with an
+                    # open handle -- `--verbose` disk-rewrite writes died there with
+                    # `PermissionError: [WinError 32]` while POSIX cleaned up fine.
+                    with pq.ParquetFile(temp_path) as pf:
+                        debug(
+                            f"DuckDB wrote {pf.metadata.num_rows:,} rows, "
+                            f"{pf.metadata.num_row_groups} row groups"
+                        )
 
-            # The composer declares a conventional bbox column the output
-            # carries (and drops a carried covering over an illegal struct)
-            # before the #954 gate, for every column, as every write path does.
-            measured = {"geometry_types": geometry_types}
-            if bbox is not None:
-                measured["bbox"] = bbox
-            geo_meta = compose_geo_block(
-                QuerySource(con, query, original_metadata),
-                GeoBlockOptions(
-                    geometry_column=geometry_column,
-                    version=geoparquet_version,
-                    custom_metadata=custom_metadata,
-                    encoding=written_block_encoding(geoparquet_version),
-                    crs=input_crs,
-                    stats={geometry_column: measured},
-                    geometry_info=geometry_info,
-                    measure_missing=lambda block: missing_geometry_types(
-                        QuerySource(con, query), block
+                # The composer declares a conventional bbox column the output
+                # carries (and drops a carried covering over an illegal struct)
+                # before the #954 gate, for every column, as every write path does.
+                measured = {"geometry_types": geometry_types}
+                if bbox is not None:
+                    measured["bbox"] = bbox
+                geo_meta = compose_geo_block(
+                    QuerySource(con, query, original_metadata),
+                    GeoBlockOptions(
+                        geometry_column=geometry_column,
+                        version=geoparquet_version,
+                        custom_metadata=custom_metadata,
+                        encoding=written_block_encoding(geoparquet_version),
+                        crs=input_crs,
+                        stats={geometry_column: measured},
+                        geometry_info=geometry_info,
+                        measure_missing=lambda block: missing_geometry_types(
+                            QuerySource(con, query), block
+                        ),
+                        verbose=verbose,
                     ),
-                    verbose=verbose,
-                ),
-            )
+                )
 
             # 2.0 and parquet-geo-only require a native Parquet GEOMETRY logical
             # type; 1.0/1.1 require plain BYTE_ARRAY WKB and forbid it. Every

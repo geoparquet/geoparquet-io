@@ -12,6 +12,8 @@ Speed: Slightly slower due to batch overhead
 from __future__ import annotations
 
 import itertools
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
@@ -174,13 +176,19 @@ def _narrows_to_32_bit_binary(field_type: pa.DataType) -> bool:
     return storage == pa.binary()
 
 
-def _sized_reader(con, query: str, batch_size: int) -> pa.RecordBatchReader:
+@contextmanager
+def _sized_reader(con, query: str, batch_size: int) -> Iterator[pa.RecordBatchReader]:
     """Stream ``query`` in ``batch_size``-row batches (see :func:`~geoparquet_io.core.parquet_writer.regroup`).
 
-    On DuckDB 2.0 nothing else may run on ``con`` until the reader is drained.
+    On DuckDB 2.0 nothing else may run on ``con`` until the reader is drained or
+    closed, so it is closed on the way out, failure included: the memory scope
+    around it restores its settings on ``con`` next.
     """
     reader = con.sql(query).to_arrow_reader(batch_size=batch_size)
-    return pa.RecordBatchReader.from_batches(reader.schema, regroup(reader, batch_size))
+    try:
+        yield pa.RecordBatchReader.from_batches(reader.schema, regroup(reader, batch_size))
+    finally:
+        reader.close()
 
 
 def _binary_cast_spans(batch: pa.RecordBatch, schema: pa.Schema) -> list[tuple[int, int]]:
@@ -393,34 +401,34 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 debug(f"Executing query with batch size {batch_size:,}...")
 
             # Nothing below queries `con` while the reader is open.
-            reader = _sized_reader(con, final_sql, batch_size)
-            schema = reader.schema
+            with _sized_reader(con, final_sql, batch_size) as reader:
+                schema = reader.schema
 
-            if verbose:
-                progress(f"Streaming to {output_path}...")
+                if verbose:
+                    progress(f"Streaming to {output_path}...")
 
-            # Secondary geometry columns must reach the schema builder explicitly:
-            # parquet-geo-only writes no geo metadata, so there is nothing else left
-            # to name them by the time the schema is built.
-            geometry_columns = {geometry_column}
-            if geometry_info:
-                geometry_columns.update(geometry_info.get("secondary") or [])
+                # Secondary geometry columns must reach the schema builder explicitly:
+                # parquet-geo-only writes no geo metadata, so there is nothing else left
+                # to name them by the time the schema is built.
+                geometry_columns = {geometry_column}
+                if geometry_info:
+                    geometry_columns.update(geometry_info.get("secondary") or [])
 
-            # Stream batches to file
-            self._stream_batches_to_file(
-                reader,
-                output_path,
-                schema,
-                geometry_column,
-                geo_meta,
-                use_native_geometry,
-                native_crs,
-                writer_kwargs,
-                verbose,
-                extra_kv_metadata=extra_kv_metadata,
-                geoarrow_target_type=geoarrow_target_type,
-                geometry_columns=geometry_columns,
-            )
+                # Stream batches to file
+                self._stream_batches_to_file(
+                    reader,
+                    output_path,
+                    schema,
+                    geometry_column,
+                    geo_meta,
+                    use_native_geometry,
+                    native_crs,
+                    writer_kwargs,
+                    verbose,
+                    extra_kv_metadata=extra_kv_metadata,
+                    geoarrow_target_type=geoarrow_target_type,
+                    geometry_columns=geometry_columns,
+                )
 
     def _precompute_metadata(
         self,
@@ -1042,38 +1050,38 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             debug(f"Executing query with batch size {batch_size:,}...")
 
         # Nothing below queries `con` while the reader is open.
-        reader = _sized_reader(con, query, batch_size)
-        schema = reader.schema
+        with _sized_reader(con, query, batch_size) as reader:
+            schema = reader.schema
 
-        writer_kwargs = codec.pyarrow_kwargs()
+            writer_kwargs = codec.pyarrow_kwargs()
 
-        rows_written = 0
-        batches_written = 0
+            rows_written = 0
+            batches_written = 0
 
-        first_batch = None
-        try:
-            first_batch = next(iter(reader))
-        except StopIteration:
-            # Empty result set
-            with pq.ParquetWriter(output_path, schema, **writer_kwargs):
-                pass
-            if verbose:
-                success("Wrote 0 rows (empty result)")
-            return
+            first_batch = None
+            try:
+                first_batch = next(iter(reader))
+            except StopIteration:
+                # Empty result set
+                with pq.ParquetWriter(output_path, schema, **writer_kwargs):
+                    pass
+                if verbose:
+                    success("Wrote 0 rows (empty result)")
+                return
 
-        with pq.ParquetWriter(output_path, schema, **writer_kwargs) as writer:
-            # Write first batch
-            table_batch = pa.Table.from_batches([first_batch], schema=schema)
-            writer.write_table(table_batch)
-            rows_written += first_batch.num_rows
-            batches_written += 1
-
-            # Write remaining batches
-            for batch in reader:
-                table_batch = pa.Table.from_batches([batch], schema=schema)
+            with pq.ParquetWriter(output_path, schema, **writer_kwargs) as writer:
+                # Write first batch
+                table_batch = pa.Table.from_batches([first_batch], schema=schema)
                 writer.write_table(table_batch)
-                rows_written += batch.num_rows
+                rows_written += first_batch.num_rows
                 batches_written += 1
 
-        if verbose:
-            success(f"Wrote {rows_written:,} rows in {batches_written} row groups")
+                # Write remaining batches
+                for batch in reader:
+                    table_batch = pa.Table.from_batches([batch], schema=schema)
+                    writer.write_table(table_batch)
+                    rows_written += batch.num_rows
+                    batches_written += 1
+
+            if verbose:
+                success(f"Wrote {rows_written:,} rows in {batches_written} row groups")
