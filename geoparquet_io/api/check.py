@@ -250,9 +250,23 @@ def _one_file(path, command: str) -> str:
     return path
 
 
-def _one_file_only(command: str):
+def _not_geoparquet(path: str, check_type: str) -> CheckResult | None:
+    """The failure ``gpio check`` gives a file that is not GeoParquet, before any check runs."""
+    from geoparquet_io.core.check_verdict import not_geoparquet_result
+
+    refused = not_geoparquet_result(path)
+    if refused is None:
+        return None
+    # check_all's categories are its checks; the refusal is the file's, so it is its own.
+    results = {"geoparquet": refused} if check_type == "all" else refused
+    return CheckResult(results, check_type=check_type, source_path=path)
+
+
+def _one_file_only(command: str, check_type: str | None = None):
     """Refuse a directory or glob before the check runs; ``__wrapped__`` is the check itself.
 
+    With a ``check_type``, a file that is not GeoParquet fails as ``gpio check
+    <command>`` fails it, before the check runs (``check spec`` has no such gate).
     ``Table.check_*`` calls ``__wrapped__``: a Table read from a directory hands
     it to core, which measures the dataset.
     """
@@ -260,7 +274,10 @@ def _one_file_only(command: str):
     def decorate(check):
         @functools.wraps(check)
         def one_file_check(path, *args, **kwargs):
-            return check(_one_file(path, command), *args, **kwargs)
+            path = _one_file(path, command)
+            refused = _not_geoparquet(path, check_type) if check_type else None
+            # Not `or`: a CheckResult is falsy when it did not pass.
+            return refused if refused is not None else check(path, *args, **kwargs)
 
         return one_file_check
 
@@ -294,7 +311,7 @@ def _stage(check, path, stage: str, **kwargs) -> dict:
         return could_not_run(stage, clean_error_text(str(e)))
 
 
-@_one_file_only("all")
+@_one_file_only("all", "all")
 def check_all(
     path: str | os.PathLike,
     profile: CheckProfile | None = None,
@@ -304,7 +321,7 @@ def check_all(
     """Run what ``gpio check all`` runs: the structure checks, spatial order and spec validation.
 
     One category per check -- the structure checks of :meth:`Table.check`,
-    then ``spatial`` (:func:`check_spatial`) and ``spec`` (:func:`validate`,
+    then ``spatial`` (spatial order, as ``check all`` runs it: no pushdown block) and ``spec`` (:func:`validate`,
     data sampled) -- each with the CLI's defaults. ``verdict()`` is the worst
     of them, the answer ``gpio check all`` exits on. As there, a spatial or
     spec check that raises is reported as a failure that could not run.
@@ -326,14 +343,18 @@ def check_all(
     results = {
         **structure.to_dict(),
         "spatial": _stage(
-            check_spatial, path, SPATIAL_ORDER_CHECK, sample_size=sample_size, limit_rows=limit_rows
+            _check_spatial_order,
+            path,
+            SPATIAL_ORDER_CHECK,
+            sample_size=sample_size,
+            limit_rows=limit_rows,
         ),
         "spec": _stage(validate, path, "Spec validation"),
     }
     return CheckResult(results, check_type="all", source_path=path)
 
 
-@_one_file_only("compression")
+@_one_file_only("compression", "compression")
 def check_compression(path: str | os.PathLike) -> CheckResult:
     """Check the geometry column's compression; ZSTD is recommended. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
@@ -341,7 +362,7 @@ def check_compression(path: str | os.PathLike) -> CheckResult:
     return _structure_check(path, "compression", core.check_compression)
 
 
-@_one_file_only("row-group")
+@_one_file_only("row-group", "row_groups")
 def check_row_groups(path: str | os.PathLike, profile: CheckProfile | None = None) -> CheckResult:
     """Check row-group sizes for cloud-native access. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
@@ -349,7 +370,7 @@ def check_row_groups(path: str | os.PathLike, profile: CheckProfile | None = Non
     return _structure_check(path, "row_groups", core.check_row_groups, profile=profile)
 
 
-@_one_file_only("bbox")
+@_one_file_only("bbox", "bbox")
 def check_bbox(
     path: str | os.PathLike, sample_rows: int = DEFAULT_BBOX_SAMPLE_ROWS, all_rows: bool = False
 ) -> CheckResult:
@@ -368,7 +389,7 @@ def check_bbox(
     )
 
 
-@_one_file_only("all")
+@_one_file_only("all", "bloom_filters")
 def check_bloom_filters(path: str | os.PathLike) -> CheckResult:
     """Check which columns carry bloom filters for point lookups. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
@@ -376,7 +397,7 @@ def check_bloom_filters(path: str | os.PathLike) -> CheckResult:
     return _structure_check(path, "bloom_filters", core.check_bloom_filters)
 
 
-@_one_file_only("optimization")
+@_one_file_only("optimization", "optimization")
 def check_optimization(path: str | os.PathLike) -> CheckResult:
     """Score a file's spatial-query optimization (geo types, stats, order, row groups, codec)."""
     from geoparquet_io.core import check_optimization as core
@@ -384,17 +405,10 @@ def check_optimization(path: str | os.PathLike) -> CheckResult:
     return _structure_check(path, "optimization", core.check_optimization)
 
 
-@_one_file_only("spatial")
-def check_spatial(
+def _check_spatial_order(
     path: str | os.PathLike, sample_size: int = 100, limit_rows: int = 500000
 ) -> CheckResult:
-    """Check spatial order: consecutive-feature distance against random pairs (< 0.5 passes).
-
-    Args:
-        path: A local file or remote URL (not a directory or glob)
-        sample_size: Random pairs to sample, as ``--random-sample-size``
-        limit_rows: Maximum rows to analyze, as ``--limit-rows``
-    """
+    """Spatial order alone: ``check all``'s spatial stage and :meth:`Table.check_spatial`."""
     from geoparquet_io.core import check_spatial_order as core
 
     return _structure_check(
@@ -406,14 +420,51 @@ def check_spatial(
     )
 
 
-@_one_file_only("spatial")
-def check_spatial_pushdown(path: str | os.PathLike) -> CheckResult:
-    """Estimate how many row groups a regional query can skip, from per-row-group bbox stats."""
+@_one_file_only("spatial", "spatial")
+def check_spatial(
+    path: str | os.PathLike, sample_size: int = 100, limit_rows: int = 500000
+) -> CheckResult:
+    """Run what ``gpio check spatial`` runs: spatial order, with pushdown readiness folded in.
+
+    Spatial order compares consecutive-feature distance against random pairs
+    (< 0.5 passes). The pushdown block (:func:`check_spatial_pushdown`) is kept
+    under ``"pushdown"``; when it warns, its issues join the result's, so
+    ``verdict()`` is the answer ``gpio check spatial`` exits on.
+    :meth:`Table.check_spatial` is spatial order alone.
+
+    Args:
+        path: A local file or remote URL (not a directory or glob)
+        sample_size: Random pairs to sample, as ``--random-sample-size``
+        limit_rows: Maximum rows to analyze, as ``--limit-rows``
+    """
+    from geoparquet_io.core.check_spatial_order import with_pushdown
+
+    order = _check_spatial_order(path, sample_size, limit_rows)
+    path = order.source_path
+    return CheckResult(with_pushdown(path, order.to_dict()), check_type="spatial", source_path=path)
+
+
+def _pushdown_readiness(path: str | os.PathLike) -> CheckResult:
+    """The unjudged pushdown measurement: :meth:`Table.check_spatial_pushdown`."""
     from geoparquet_io.core import check_spatial_order as core
 
     path = os.fspath(path)
     results = core.check_spatial_pushdown_readiness(path, verbose=False)
     return CheckResult(results, check_type="spatial_pushdown", source_path=path)
+
+
+@_one_file_only("spatial", "spatial_pushdown")
+def check_spatial_pushdown(path: str | os.PathLike) -> CheckResult:
+    """Estimate how many row groups a regional query can skip, as ``gpio check spatial`` judges it.
+
+    A file with native geo types needs no bbox column, and a single row group
+    has nothing to skip: both pass, as the CLI's pushdown block does.
+    :meth:`Table.check_spatial_pushdown` returns the unjudged measurement.
+    """
+    from geoparquet_io.core.check_spatial_order import judged_pushdown
+
+    path = os.fspath(path)
+    return CheckResult(judged_pushdown(path), check_type="spatial_pushdown", source_path=path)
 
 
 @_one_file_only("spec")

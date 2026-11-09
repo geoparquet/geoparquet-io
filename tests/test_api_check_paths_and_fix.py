@@ -21,6 +21,7 @@ import geoparquet_io as gpio
 from geoparquet_io.api import check as check_api
 from geoparquet_io.cli.commands import check as cli_check
 from geoparquet_io.cli.main import cli
+from tests.conftest import TEST_DATA_DIR
 
 # Deterministic checks; check_spatial samples random pairs, so it is pinned by
 # delegation below rather than by equal answers.
@@ -30,9 +31,10 @@ PAIRS = [
     ("check_bbox", "check_bbox"),
     ("check_bloom_filters", "check_bloom_filters"),
     ("check_optimization", "check_optimization"),
-    ("check_spatial_pushdown", "check_spatial_pushdown"),
     ("validate", "validate"),
 ]
+# Not check_spatial / check_spatial_pushdown: the path functions judge what
+# `gpio check spatial` judges; the Table methods keep the bare measurements.
 
 
 def test_every_public_check_wraps_the_check_table_methods_call():
@@ -56,13 +58,13 @@ def test_path_function_answers_as_the_table_method(unsorted_test_file, function,
 
 def test_a_table_check_goes_through_the_path_function(monkeypatch, unsorted_test_file):
     seen = []
-    real = check_api.check_spatial
+    real = check_api._check_spatial_order
 
     def spy(path, **kwargs):
         seen.append((path, kwargs))
         return real(path, **kwargs)
 
-    monkeypatch.setattr(check_api, "check_spatial", spy)
+    monkeypatch.setattr(check_api, "_check_spatial_order", spy)
     result = gpio.read(unsorted_test_file).check_spatial(sample_size=10, limit_rows=1000)
 
     assert seen == [(os.path.abspath(unsorted_test_file), {"sample_size": 10, "limit_rows": 1000})]
@@ -132,6 +134,119 @@ def test_check_all_runs_what_gpio_check_all_runs(monkeypatch, unsorted_misdeclar
     assert structure == set(categories) - {"spatial", "spec"}
 
 
+@pytest.fixture(scope="module")
+def check_fixtures(tmp_path_factory):
+    """Files each check answers with something other than a plain pass."""
+    test_data_dir = TEST_DATA_DIR
+    tmp = tmp_path_factory.mktemp("check_parity")
+    unsorted = pq.read_table(test_data_dir / "unsorted.parquet")
+    # Ordered 1.x points with no bbox column: spatial order passes, pushdown warns.
+    ordered = gpio.read(str(test_data_dir / "unsorted.parquet")).sort_hilbert().to_arrow()
+    gpio.Table(ordered.drop_columns(["bbox"])).write(
+        str(tmp / "ordered.parquet"), geoparquet_version="1.1", row_group_rows=100
+    )
+    # Unsorted, many row groups, declaring Polygon over its Points: spec fails.
+    geo = json.loads(unsorted.schema.metadata[b"geo"])
+    geo["columns"][geo["primary_column"]]["geometry_types"] = ["Polygon"]
+    metadata = {**unsorted.schema.metadata, b"geo": json.dumps(geo).encode()}
+    pq.write_table(
+        unsorted.replace_schema_metadata(metadata), tmp / "misdeclared.parquet", row_group_size=100
+    )
+    pq.write_table(
+        unsorted.drop_columns(["geometry"]).replace_schema_metadata({}), tmp / "plain.parquet"
+    )
+    return {
+        "ordered_1x_no_bbox": str(tmp / "ordered.parquet"),
+        "unsorted_misdeclared": str(tmp / "misdeclared.parquet"),
+        # One row group, 1.0 with a bbox column: nothing for pushdown to skip.
+        "single_row_group": str(test_data_dir / "places_test.parquet"),
+        "not_geoparquet": str(tmp / "plain.parquet"),
+    }
+
+
+#: (path function, the `gpio check` leaf it twins, the block of that leaf's answer it is)
+CLI_TWINS = [
+    ("check_compression", "compression", None),
+    ("check_row_groups", "row-group", None),
+    ("check_bbox", "bbox", None),
+    ("check_spatial", "spatial", None),
+    ("check_optimization", "optimization", None),
+    ("check_all", "all", None),
+    ("validate", "spec", None),
+    # No leaf of their own: each is one block of the leaf that runs it.
+    ("check_spatial_pushdown", "spatial", "pushdown"),
+    ("check_bloom_filters", "all", "bloom_filters"),
+]
+
+
+def _profile(results: dict, check_type: str) -> tuple:
+    """What must match: the verdict and each category's, and how many issues land where."""
+    from geoparquet_io.core.check_verdict import result_verdict
+
+    result = check_api.CheckResult(results, check_type=check_type)
+    categories = {k: result_verdict(v).label for k, v in results.items() if isinstance(v, dict)}
+    if check_type == "all":
+        # Its buckets are its categories', each pinned by that category's own leaf.
+        return result.verdict(), categories
+    buckets = (result.failures(), result.warnings(), result.recommendations())
+    return result.verdict(), categories, *map(len, buckets)
+
+
+def _cli_answer(monkeypatch, leaf: str, path: str) -> tuple[int, dict, dict]:
+    """``gpio check <leaf> --strict``'s exit code, its results, and the last dict it judged."""
+    from geoparquet_io.core.check_verdict import SEVERITY_KEY, spec_result
+
+    judged, parts = [], {}
+    record = cli_check.MultiFileCheckRunner.record_result
+    monkeypatch.setattr(
+        cli_check.MultiFileCheckRunner,
+        "record_result",
+        lambda self, f, r: judged.append(r) or record(self, f, r),
+    )
+    combine = cli_check.all_checks_result
+
+    def categories(structure, spatial, spec):
+        parts.update(structure, spatial=spatial, spec=spec_result(spec))
+        return combine(structure, spatial, spec)
+
+    monkeypatch.setattr(cli_check, "all_checks_result", categories)
+    args = ["check", leaf, path, "--strict", *(["--json"] if leaf == "spec" else [])]
+    run = CliRunner().invoke(cli, args)
+    if leaf == "spec":
+        report = json.loads(run.stdout)
+        named = {
+            s: [c["name"] for c in report["checks"] if c["status"] == s]
+            for s in ("failed", "warning")
+        }
+        results = {SEVERITY_KEY: report["verdict"], "issues": named["failed"]}
+        return run.exit_code, {**results, "warnings": named["warning"]}, results
+    if leaf == "all":
+        # The not-GeoParquet gate refuses the file before any check runs.
+        return run.exit_code, parts or {"geoparquet": judged[-1]}, judged[-1]
+    return run.exit_code, judged[-1], judged[-1]
+
+
+@pytest.mark.parametrize(
+    "fixture", ["ordered_1x_no_bbox", "unsorted_misdeclared", "single_row_group", "not_geoparquet"]
+)
+@pytest.mark.parametrize(("function", "leaf", "block"), CLI_TWINS, ids=[t[0] for t in CLI_TWINS])
+def test_a_path_check_answers_as_its_cli_command(
+    monkeypatch, check_fixtures, function, leaf, block, fixture
+):
+    """The verdict and categories of ``gpio.<function>(path)`` are ``gpio check <leaf>``'s."""
+    path = check_fixtures[fixture]
+    exit_code, cli_results, judged = _cli_answer(monkeypatch, leaf, path)
+    if block is not None:
+        # A file the gate refuses runs no check: the refusal is each block's answer.
+        cli_results = judged if fixture == "not_geoparquet" else cli_results[block]
+
+    result = getattr(gpio, function)(path)
+
+    assert _profile(result.to_dict(), result.check_type) == _profile(cli_results, result.check_type)
+    if block is None:
+        assert exit_code == (result.verdict() != "pass")
+
+
 def _raises(message):
     def check(path, **_):
         raise RuntimeError(message)
@@ -148,7 +263,7 @@ def test_check_all_reports_a_stage_that_could_not_run(monkeypatch, unsorted_test
     assert any("Spec validation could not run" in f for f in result.failures())
 
     # An interrupt is a stop, never a check that failed.
-    monkeypatch.setattr(check_api, "check_spatial", _raises("Query interrupted"))
+    monkeypatch.setattr(check_api, "_check_spatial_order", _raises("Query interrupted"))
     with pytest.raises(RuntimeError, match="interrupted"):
         gpio.check_all(unsorted_test_file)
 

@@ -34,7 +34,8 @@
 # +8: round-4 review fixes (duckdb-kv's row-group sample under the write cap +1,
 # a remote source under a scheme alias +2, PMTiles on a directory-backed Table +2,
 # a remote object named by its last segment +3).
-max_collected = 14640
+# +36: every gpio.check_* answers as its gpio check command (9 checks x 4 fixtures).
+max_collected = 14676
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

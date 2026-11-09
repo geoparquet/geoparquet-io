@@ -3199,6 +3199,9 @@ class Table:
         Compares distance between consecutive features vs random pairs.
         A ratio < 0.5 indicates good spatial clustering.
 
+        Spatial order alone: ``gpio check spatial`` also judges pushdown
+        readiness, so for its answer run ``gpio.check_spatial(path)`` on the file.
+
         Args:
             sample_size: Number of random pairs to sample (default: 100)
             limit_rows: Maximum rows to analyze (default: 500000, matching
@@ -3217,7 +3220,9 @@ class Table:
         """
         from geoparquet_io.api import check
 
-        return self._run_check(check.check_spatial, sample_size=sample_size, limit_rows=limit_rows)
+        return self._run_check(
+            check._check_spatial_order, sample_size=sample_size, limit_rows=limit_rows
+        )
 
     def check_spatial_pushdown(self) -> CheckResult:
         """
@@ -3229,7 +3234,10 @@ class Table:
 
         Measured on the source file when this Table was read from one, the
         same numbers ``gpio check spatial`` prints; see
-        ``CheckResult.prospective``.
+        ``CheckResult.prospective``. The verdict is the raw measurement's: a
+        single row group, or native geo types with no bbox column, does not
+        pass here, while ``gpio check spatial`` (and
+        ``gpio.check_spatial_pushdown(path)``) pass them.
 
         Returns:
             CheckResult with pushdown readiness metrics
@@ -3243,7 +3251,7 @@ class Table:
         """
         from geoparquet_io.api import check
 
-        return self._run_check(check.check_spatial_pushdown)
+        return self._run_check(check._pushdown_readiness)
 
     def check_compression(self) -> CheckResult:
         """
@@ -3477,7 +3485,7 @@ class Table:
         def repair(path: str, target: str) -> None:
             results = check._check_structure(path).to_dict()
             if "spatial" in wanted:
-                results["spatial"] = check.check_spatial(path).to_dict()
+                results["spatial"] = check._check_spatial_order(path).to_dict()
             plan = {name: (found if name in wanted else {}) for name, found in results.items()}
             # The repair keeps the input's GeoParquet version, read off the bbox check.
             plan["bbox"] = plan["bbox"] or {

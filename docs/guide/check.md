@@ -142,8 +142,11 @@ read in place.
 
     `gpio.check_all`, `check_bbox`, `check_row_groups`, `check_spatial`,
     `check_spatial_pushdown`, `check_bloom_filters` and `check_optimization`
-    work the same way. `gpio.read(path).check_*()` calls them on the file it
-    read, so for a local file that has not changed both give the same answer.
+    work the same way, each with the verdict and defaults of its `gpio check`
+    command (`check_spatial` includes the pushdown block). `gpio.read(path).check_*()`
+    calls them on the file it read, so for a local file that has not changed both
+    give the same answer, except that `Table.check()` and `Table.check_spatial()`
+    run less: see the Python API reference.
     A Table read from a remote URL is checked on a temporary local rewrite of
     its rows instead, so its answer describes that rewrite.
 

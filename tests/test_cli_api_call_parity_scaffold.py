@@ -946,11 +946,22 @@ CASES: list[ParityCase] = [
             core_check_spatial.check_spatial_order,
             lambda c: c.gpio_table.check_spatial(),
         ),
+        ops=_ops_via_table(
+            core_check_spatial,
+            "check_spatial_order",
+            core_check_spatial.check_spatial_order,
+            lambda c: check_api.check_spatial(c.input_file),
+            result={},
+        ),
         normalize={
             "sample_size": ("random_sample_size", "random_sample_size"),
             "limit_rows": ("limit_rows", "limit_rows"),
             "return_results": ("return_results", "return_results"),
         },
+        notes=(
+            "`gpio.check_spatial` is the twin (it folds in pushdown readiness, as the CLI "
+            "does); `Table.check_spatial()` is spatial order alone, still compared here.",
+        ),
     ),
     ParityCase(
         id="check compression",

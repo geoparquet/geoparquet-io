@@ -1654,8 +1654,16 @@ were read from, so for a local file that has not changed since it was read,
 a remote URL (or derived, or whose file changed) is checked on a temporary
 local rewrite of its rows, so its verdict describes that rewrite, not the
 remote file.
-`gpio.check_all` is the exception: it runs what `gpio check all` runs (structure,
-spatial order, spec), while `Table.check()` runs the structure checks only.
+Each gives the verdict and categories `gpio check <cmd>` gives on the same file,
+with the same defaults; a file that is not GeoParquet fails, as there.
+`check_spatial_pushdown` and `check_bloom_filters` have no CLI subcommand: they
+answer as the pushdown block of `gpio check spatial` and the bloom-filter block
+of `gpio check all`. Three `Table` methods run less than their path function:
+`Table.check()` runs the structure checks only (`gpio.check_all` adds spatial
+order and spec), `Table.check_spatial()` runs spatial order only
+(`gpio.check_spatial` adds pushdown readiness), and
+`Table.check_spatial_pushdown()` returns the unjudged measurement, so a single
+row group or a native-geo file without a bbox column does not pass there.
 
 ```python
 result = gpio.check_compression('data.parquet')

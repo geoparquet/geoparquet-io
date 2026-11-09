@@ -57,6 +57,8 @@ TWIN_NAMES: dict[str, list[str]] = {
     "check all": ["fix"],
     "check bbox": ["fix"],
     "check compression": ["fix"],
+    # `Table.check_spatial` still resolves by name, but it is spatial order alone;
+    # `gpio.check_spatial` adds the pushdown block `check spatial` judges, and is the twin.
     "check spatial": ["fix"],
     "check spec": ["validate"],
     "check stac": ["validate_stac"],
