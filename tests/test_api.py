@@ -1498,6 +1498,34 @@ class TestTableUpload:
             sample_table.upload("s3://test-bucket/test.parquet", dry_run=True)
         assert mock_upload.call_args.kwargs["dry_run"] is True
 
+    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry_run", "real"])
+    def test_upload_to_a_prefix_names_the_object_after_the_source(
+        self, sample_table, dry_run, capsys
+    ):
+        from geoparquet_io.core import upload as core_upload
+
+        with (
+            patch.object(core_upload, "_setup_store_and_kwargs", return_value=(None, {})),
+            patch.object(core_upload, "_upload_file_sync") as put,
+        ):
+            sample_table.upload("s3://test-bucket/prefix/", dry_run=dry_run)
+
+        key = f"prefix/{PLACES_PARQUET.name}"
+        if dry_run:
+            assert f"Target key:  {key}" in capsys.readouterr().out
+            put.assert_not_called()
+        else:
+            assert put.call_args.args[2] == key
+
+    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry_run", "real"])
+    def test_upload_to_a_prefix_without_a_source_name_is_refused(self, sample_table, dry_run):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            with pytest.raises(InvalidParameterError, match="full object key"):
+                sample_table.head(5).upload("s3://test-bucket/prefix/", dry_run=dry_run)
+        mock_upload.assert_not_called()
+
 
 class TestTableMetadataProperties:
     """Tests for the new metadata properties on Table."""

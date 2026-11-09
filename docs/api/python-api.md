@@ -1667,6 +1667,9 @@ table.upload('s3://bucket/data.parquet', geoparquet_version='2.0')
 table.upload('s3://bucket/dataset/', dry_run=True)
 ```
 
+A destination ending in `/` names the object after the file the Table was read
+from; a Table built in memory or derived by an operation needs a full object key.
+
 #### `create_pmtiles(output, layer=None, min_zoom=None, max_zoom=None, bbox=None, where=None, include_cols=None, ...)`
 
 Tile the table into a PMTiles archive with tippecanoe. Takes the options of

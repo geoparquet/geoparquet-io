@@ -187,6 +187,11 @@ scratch file, so the size it reports is the size of the file you would get.
     gpio.read("data.parquet").upload("s3://bucket/dataset/", dry_run=True)
     ```
 
+A destination ending in `/` is a prefix, and the object is named after the
+file: `s3://bucket/dataset/data.parquet` above. A Table built in memory or
+derived by an operation has no file name to use, so `upload()` asks for a full
+object key instead (`s3://bucket/dataset/data.parquet`).
+
 ## CLI Reference
 
 See the [CLI Reference](../cli/upload.md) for complete options.

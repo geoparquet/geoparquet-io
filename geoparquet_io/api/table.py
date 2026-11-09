@@ -2602,7 +2602,10 @@ class Table:
         Writes the table to a temporary local file, then uploads it to the destination.
 
         Args:
-            destination: Object store URL (e.g., s3://bucket/path/data.parquet)
+            destination: Object store URL (e.g., s3://bucket/path/data.parquet).
+                One ending in ``/`` is a prefix: the object is named after the
+                file this Table was read from, as ``gpio publish upload`` names
+                it after the file it uploads.
             compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
             compression_level: Compression level. None lets the codec pick its
                 own default, matching the CLI -- a fixed value is rejected by
@@ -2621,6 +2624,11 @@ class Table:
                 size, destination, target key) without uploading. Mirrors
                 ``--dry-run``.
 
+        Raises:
+            InvalidParameterError: If ``destination`` ends in ``/`` and the
+                Table has no source file to name the object after (built in
+                memory or derived by an operation).
+
         Example:
             >>> gpio.read('data.parquet').sort_hilbert().upload(
             ...     's3://bucket/data.parquet',
@@ -2630,14 +2638,27 @@ class Table:
         """
         from pathlib import Path
 
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.file_utils import scratch_dir
         from geoparquet_io.core.upload import upload as do_upload
 
-        # Write to temp file with uuid to avoid Windows file locking issues
-        temp_path = Path(scratch_path(prefix="gpio_upload_"))
+        # A destination ending in '/' names the object after the uploaded file,
+        # so the scratch copy carries the source's name, not a temp one.
+        if destination.endswith("/") and self._source_path is None:
+            raise InvalidParameterError(
+                "destination",
+                f"'{destination}' ends in '/', so the object would be named after "
+                "the file this Table was read from, and it has none (it was built "
+                "in memory or derived). Give a full object key, e.g. "
+                f"'{destination}data.parquet'.",
+            )
+        name = Path(self._source_path or "data.parquet").name
 
-        try:
+        with scratch_dir(prefix="gpio_upload_") as scratch:
+            temp_path = Path(scratch) / name
             self.write(
                 temp_path,
+                format="parquet",
                 compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,
@@ -2655,8 +2676,6 @@ class Table:
                 chunk_concurrency=chunk_concurrency,
                 dry_run=dry_run,
             )
-        finally:
-            unlink_released_file(temp_path)
 
     def create_pmtiles(
         self,
