@@ -12,6 +12,7 @@ Provides a chainable API for common GeoParquet operations:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,7 @@ from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.index_ops import get_index_spec, validate_partition_arguments
 from geoparquet_io.core.logging_config import warn
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.process.aggregate.grid_common import BUCKET_POINT_GEOMETRY
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
@@ -483,6 +485,42 @@ def extract_arcgis(
     # (#966): report no geometry column, so write() emits plain Parquet on every
     # strategy instead of asking the writer for a column that is not there.
     return Table(arrow_table, geometry_column=_surviving_geometry_column(None, arrow_table))
+
+
+def _asked_fields(write: WriteOptions) -> set[str]:
+    """The fields of *write* a caller asked for: set, and not the default."""
+    default = WriteOptions()
+    return {
+        f.name
+        for f in dataclasses.fields(write)
+        if getattr(write, f.name) is not None and getattr(write, f.name) != getattr(default, f.name)
+    }
+
+
+def _merge_write_options(options: object, arguments: dict[str, Any]) -> WriteOptions:
+    """``Table.write``'s one ``WriteOptions``: *options* with the write keywords merged in.
+
+    *arguments* is the call's ``locals()``; a keyword left at None was not given.
+    """
+    if options is not None and not isinstance(options, WriteOptions):
+        raise TypeError(
+            f"Table.write() takes a WriteOptions as its second argument, got "
+            f"{type(options).__name__} {options!r}; pass a format by keyword: "
+            f"format={options!r}"
+        )
+    base = options or WriteOptions()
+    keywords = {
+        f.name: arguments[f.name]
+        for f in dataclasses.fields(WriteOptions)
+        if arguments[f.name] is not None
+    }
+    both = sorted(_asked_fields(base) & keywords.keys())
+    if both:
+        raise TypeError(
+            f"Table.write() got {', '.join(both)} both in options and as a keyword; "
+            "set each field in one place"
+        )
+    return dataclasses.replace(base, **keywords)
 
 
 class Table:
@@ -1131,13 +1169,16 @@ class Table:
     def write(
         self,
         path: str | Path,
+        options: WriteOptions | None = None,
+        *,
         format: str | None = None,
         compression: str | None = None,
         compression_level: int | None = None,
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
         geoparquet_version: str | None = None,
-        write_strategy: str = "duckdb-kv",
+        write_strategy: str | None = None,
+        memory_limit: str | None = None,
         profile: str | None = None,
         verbose: bool = False,
         # Format-specific options
@@ -1164,6 +1205,10 @@ class Table:
 
         Args:
             path: Output file path (local or cloud URL)
+            options: How to write GeoParquet, as one :class:`gpio.WriteOptions`.
+                The write keywords below (``compression`` through ``profile``)
+                merge into it; naming one field both there and as a keyword is
+                a ``TypeError``. Every argument after it is keyword-only.
             format: Override format detection ('parquet', 'geopackage', 'flatgeobuf',
                     'csv', 'shapefile', 'geojson'). Default: auto-detect from extension
             compression: Compression type for GeoParquet (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
@@ -1180,7 +1225,12 @@ class Table:
                 1.1-geoarrow converts geometry from any input to native GeoArrow nested-coordinate
                 encoding and omits the bbox column; columns with incompatible mixed types fall back to WKB.
             write_strategy: Write strategy for GeoParquet ('in-memory', 'streaming',
-                           'duckdb-kv', 'disk-rewrite'). Default: 'duckdb-kv'
+                           'duckdb-kv', 'disk-rewrite', or 'auto'). Default
+                           ('auto'): 'duckdb-kv'
+            memory_limit: DuckDB memory cap for the write, e.g. '2GB' (the
+                duckdb-kv and disk-rewrite strategies write the table through
+                DuckDB; in-memory and streaming write it with pyarrow alone).
+                Default: gpio's ceiling-based default
             profile: AWS profile for S3 operations
             overwrite: Overwrite existing file (GeoPackage, Shapefile)
             layer_name: Layer name for GeoPackage (default: the output file stem)
@@ -1205,7 +1255,10 @@ class Table:
             Path to written file (local temp path if uploaded to cloud)
 
         Raises:
-            InvalidParameterError: If this table's geometry column name is not a
+            TypeError: If ``options`` is not a ``WriteOptions`` (a format passed
+                positionally), or a field is set both there and as a keyword.
+            InvalidParameterError: If a GeoParquet write option is set for
+                another format, which would ignore it. Also if this table's geometry column name is not a
                 column of the table -- a stale or mistyped name. Every output
                 format and every write strategy refuses it the same way, rather
                 than one crashing, one writing a `geo` block naming a column the
@@ -1218,7 +1271,9 @@ class Table:
             >>> table.write('output.geojson')              # GeoJSON (auto-detect)
             >>> table.write('s3://bucket/output.fgb')      # FlatGeobuf to S3
             >>> table.write('output.dat', format='csv')    # Explicit format
+            >>> table.write('out.parquet', gpio.WriteOptions(compression='GZIP'))
         """
+        write = _merge_write_options(options, locals())
 
         # Above the format dispatch, so every format refuses a stale geometry
         # name alike. Below it, only `.parquet` did: the GDAL writers re-detect
@@ -1251,23 +1306,24 @@ class Table:
 
         # Handle GeoParquet format
         if detected_format == "parquet":
-            return self._write_geoparquet(
-                path,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                geoparquet_version=geoparquet_version,
-                write_strategy=write_strategy,
-                profile=profile,
-                verbose=verbose,
+            return self._write_geoparquet(path, write, verbose=verbose)
+
+        # Same principle again: a GeoParquet knob on another format used to be
+        # dropped without a word, so `.csv` "written with GZIP" was not (#761).
+        ignored = _asked_fields(write) - {"profile"}
+        if ignored:
+            from geoparquet_io.core.exceptions import InvalidParameterError
+
+            raise InvalidParameterError(
+                "/".join(sorted(ignored)),
+                f"applies to GeoParquet output only, not {detected_format}",
             )
 
         # Handle other formats
         return self._write_format(
             path,
             detected_format,
-            profile=profile,
+            profile=write.profile,
             overwrite=overwrite,
             layer_name=layer_name,
             include_wkt=include_wkt,
@@ -1322,16 +1378,7 @@ class Table:
         resolve_geometry_column(self._table, self._geometry_column, where="the table")
 
     def _write_geoparquet(
-        self,
-        path: str | Path,
-        compression: str,
-        compression_level: int | None,
-        row_group_size_mb: float | None,
-        row_group_rows: int | None,
-        geoparquet_version: str | None,
-        write_strategy: str,
-        profile: str | None,
-        verbose: bool = False,
+        self, path: str | Path, write: WriteOptions, verbose: bool = False
     ) -> Path:
         """Write table to GeoParquet format (supports local and cloud)."""
         from pathlib import Path as PathLib
@@ -1347,6 +1394,10 @@ class Table:
         from geoparquet_io.core.write_strategies import WriteStrategy
 
         self._require_geometry_column_present()
+        # "auto" is duckdb-kv here, the strategy Table.write always defaulted to.
+        write_strategy = (
+            "duckdb-kv" if write.write_strategy in (None, "auto") else write.write_strategy
+        )
 
         # The facade's row-group decision, so the Python API and the CLI agree
         # about what a number means. This path called the write strategy
@@ -1357,9 +1408,10 @@ class Table:
         # rejected value blames `row_group_rows`, not a CLI flag this caller
         # never typed. An MB target is measured on this table here, once, so
         # the four strategies write the same groups for it (#1215).
+        row_group_size_mb = write.row_group_size_mb
         row_group_rows = resolve_row_group_rows_for_table(
             self._table,
-            row_group_rows,
+            write.row_group_rows,
             row_group_size_mb,
             param_name="row_group_rows",
             mb_param_name="row_group_size_mb",
@@ -1373,7 +1425,7 @@ class Table:
         from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         geoparquet_version = resolve_output_geoparquet_version(
-            geoparquet_version,
+            write.geoparquet_version,
             table=self._table,
             source_version=self._auto_version_hint,
             verbose=verbose,
@@ -1458,10 +1510,11 @@ class Table:
                 write_strategy=write_strategy,
                 geometry_column=self._geometry_column,
                 geoparquet_version=geoparquet_version,
-                compression=compression,
-                compression_level=compression_level,
+                compression=write.compression,
+                compression_level=write.compression_level,
                 row_group_size_mb=row_group_size_mb,
                 row_group_rows=row_group_rows,
+                memory_limit=write.memory_limit,
                 verbose=verbose,
                 input_crs=input_crs,
                 custom_metadata={"covering": carried_covering} if carried_covering else None,
@@ -1469,7 +1522,7 @@ class Table:
 
             # Upload to remote if needed
             if is_remote:
-                upload(local_path, path_str, profile=profile)
+                upload(local_path, path_str, profile=write.profile)
                 return PathLib(path)
 
             return local_path
@@ -3024,16 +3077,7 @@ class Table:
         try:
             # The bytes write() would produce with its defaults, so a
             # prospective verdict describes the file the caller would get.
-            self._write_geoparquet(
-                temp_path,
-                compression=None,
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                geoparquet_version=None,
-                write_strategy="duckdb-kv",
-                profile=None,
-            )
+            self._write_geoparquet(temp_path, WriteOptions())
             return func(str(temp_path), *args, **kwargs)
         finally:
             unlink_released_file(temp_path)

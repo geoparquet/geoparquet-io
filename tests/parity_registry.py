@@ -405,6 +405,10 @@ KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
         f"{DEFAULT_ROW_GROUP_ROWS:,} rows (DEFAULT_ROW_GROUP_ROWS); the in-memory API "
         f"spells that same effective default explicitly as tile_size={DEFAULT_ROW_GROUP_ROWS}."
     ),
+    ("convert geoparquet", "table", "compression", "None", "'ZSTD'"): (
+        "The same codec spelled two ways. `WriteOptions` defaults to ZSTD (#761), which is "
+        "what the CLI's unset None resolves to in compression.resolve_codec."
+    ),
     (
         "sort str",
         "table",
@@ -652,14 +656,10 @@ _CHECKS_WITH_FIX = tuple(
     f"check {c}" for c in ("all", "bbox", "compression", "row-group", "spatial")
 )
 
-_NO_MEMORY_LIMIT = (
-    "#761: the API twin and `Table.write` take no memory limit yet, so --write-memory is "
-    "CLI-only until `WriteOptions` carries `memory_limit`."
-)
 _PARTITION_WRITE_OPTIONS = (
     "The partition API writes its directory itself and exposes compression only; the "
-    "GeoParquet version and row-group sizing take the defaults. Belongs with `WriteOptions` "
-    "(#761)."
+    "GeoParquet version, row-group sizing and memory limit take the defaults. Taking a "
+    "`WriteOptions` there is follow-up work after #761, which gave it to `Table.write`."
 )
 _CHECK_FIX = (
     "--fix selects the repair and --no-backup guards an in-place one. The API calls "
@@ -719,24 +719,9 @@ def _each(side: str, reason: str, leaves, params) -> dict[tuple[str, str, str], 
 ONE_SIDED: dict[tuple[str, str, str], str] = {
     **_each(
         "cli",
-        _NO_MEMORY_LIMIT,
-        (
-            *(f"add {c}" for c in ("a5", "admin-divisions", "bbox", "geometry-metrics", "h3")),
-            *(f"add {c}" for c in ("kdtree", "quadkey", "s2")),
-            "convert geoparquet",
-            "convert reproject",
-            "extract bigquery",
-            "extract geoparquet",
-            *_PARTITIONS,
-            *(f"sort {c}" for c in ("column", "hilbert", "quadkey", "str")),
-        ),
-        "write_memory",
-    ),
-    **_each(
-        "cli",
         _PARTITION_WRITE_OPTIONS,
         _PARTITIONS,
-        ("geoparquet_version", "row_group_size", "row_group_size_mb"),
+        ("geoparquet_version", "row_group_size", "row_group_size_mb", "write_memory"),
     ),
     **_each("cli", _GAP, _PARTITIONS, "prefix"),
     **_each("cli", _CHECK_FIX, _CHECKS_WITH_FIX, ("fix", "no_backup")),

@@ -324,3 +324,82 @@ def test_the_sample_resolver_owns_the_bound():
     assert resolve_row_group_rows_for_sample(small, None, 1, final=False) is None
     # An explicit row count wins, exactly as the facade resolves it.
     assert resolve_row_group_rows_for_sample(mixed, 4096, None) == 4096
+
+
+# ---------------------------------------------------------------------------
+# Table.write(path, options=None, *, ...) (#761)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def places(places_test_file):
+    import geoparquet_io as gpio
+
+    return gpio.read(places_test_file)
+
+
+def _footer(path):
+    import pyarrow.parquet as pq
+
+    md = pq.read_metadata(path)
+    return md.row_group(0).column(0).compression, md.row_group(0).num_rows
+
+
+def test_every_table_write_argument_after_options_is_keyword_only():
+    from geoparquet_io.api.table import Table
+
+    params = list(inspect.signature(Table.write).parameters.values())
+    assert [p.name for p in params[:3]] == ["self", "path", "options"]
+    assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params[3:])
+
+
+def test_options_and_keywords_write_the_same_bytes(places, tmp_path):
+    # streaming writes a sub-vector row count exactly (duckdb-kv rounds it up).
+    knobs = {"compression": "GZIP", "row_group_rows": 100, "write_strategy": "streaming"}
+    places.write(tmp_path / "a.parquet", WriteOptions(**knobs))
+    places.write(tmp_path / "b.parquet", **knobs)
+    assert (tmp_path / "a.parquet").read_bytes() == (tmp_path / "b.parquet").read_bytes()
+    assert _footer(tmp_path / "a.parquet") == ("GZIP", 100)
+
+
+def test_a_format_in_the_options_slot_names_format(places, tmp_path):
+    with pytest.raises(TypeError, match="format="):
+        places.write(tmp_path / "out.dat", "csv")  # type: ignore[arg-type]
+
+
+def test_keywords_merge_into_the_options(places, tmp_path):
+    options = WriteOptions(compression="GZIP", write_strategy="streaming")
+    places.write(tmp_path / "out.parquet", options, row_group_rows=100)
+    assert _footer(tmp_path / "out.parquet") == ("GZIP", 100)
+
+
+def test_one_field_set_both_ways_is_an_error(places, tmp_path):
+    with pytest.raises(TypeError, match="compression"):
+        places.write(tmp_path / "out.parquet", WriteOptions(compression="GZIP"), compression="LZ4")
+
+
+@pytest.mark.parametrize(
+    ("name", "kwargs"),
+    [
+        ("out.csv", {"compression": "GZIP"}),
+        ("out.geojson", {"options": WriteOptions(memory_limit="1GB")}),
+        ("out.gpkg", {"write_strategy": "streaming"}),
+    ],
+)
+def test_a_write_option_on_another_format_is_refused(places, tmp_path, name, kwargs):
+    """These were silently ignored; a `.csv` written "with GZIP" was not."""
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    with pytest.raises(InvalidParameterError, match="GeoParquet"):
+        places.write(tmp_path / name, **kwargs)
+    assert not (tmp_path / name).exists()
+
+
+def test_default_options_on_another_format_are_fine(places, tmp_path):
+    places.write(tmp_path / "out.csv", WriteOptions())
+    assert (tmp_path / "out.csv").exists()
+
+
+def test_table_write_honours_memory_limit(places, tmp_path, caplog):
+    places.write(tmp_path / "out.parquet", memory_limit="517MB", verbose=True)
+    assert "DuckDB memory limit: 517MB" in caplog.text
