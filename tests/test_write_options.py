@@ -585,3 +585,10 @@ def test_every_write_flag_reaches_core(leaf, places_test_file, geojson_input, tm
         if call.get(core, MISSING) != value
     }
     assert not dropped, f"`gpio {leaf}` dropped write flags on the way to core: {dropped}"
+
+
+def test_write_options_is_a_root_export():
+    import geoparquet_io as gpio
+
+    assert "WriteOptions" in gpio.__all__
+    assert gpio.WriteOptions is WriteOptions

@@ -509,16 +509,14 @@ def _matrix() -> list[Case]:
     )
     cases.append(
         Case(
-            "partition_string_write_flags",
+            "partition_h3_write_flags",
             (
                 "partition",
-                "string",
+                "h3",
                 "{in}",
                 "{out}",
-                "--column",
-                "name",
-                "--chars",
-                "1",
+                "--resolution",
+                "4",
                 "--force",
                 "--skip-analysis",
                 *flags,

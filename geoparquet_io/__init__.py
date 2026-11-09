@@ -46,6 +46,7 @@ _LAZY_EXPORTS = {
     "generate_stac": "geoparquet_io.api.stac:generate_stac",
     "validate_stac": "geoparquet_io.api.stac:validate_stac",
     "GeoParquetError": "geoparquet_io.core.exceptions:GeoParquetError",
+    "WriteOptions": "geoparquet_io.core.parquet_writer:WriteOptions",
 }
 
 __all__ = [
@@ -57,6 +58,7 @@ __all__ = [
     "extract_arcgis",
     "list_layers",
     "Table",
+    "WriteOptions",
     "pipe",
     "ops",
     "CheckResult",
