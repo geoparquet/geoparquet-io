@@ -65,20 +65,16 @@ class CheckResult:
 
     def passed(self) -> bool:
         """
-        Check if all checks passed.
+        Check if all checks passed: ``verdict() == "pass"``.
+
+        A warning is not a pass, so this is ``gpio check --strict``'s answer.
+        A results dict's own ``passed`` flag is the raw measurement (a single
+        row group fails pushdown's yet is judged a pass) and is not read here.
 
         Returns:
             True if all checks passed, False otherwise
         """
-        # Handle nested results (from check_all)
-        if self._check_type == "all":
-            for _category, cat_results in self._results.items():
-                if isinstance(cat_results, dict) and not cat_results.get("passed", True):
-                    return False
-            return True
-
-        # Handle single check results
-        return self._results.get("passed", False)
+        return self.verdict() == "pass"
 
     def verdict(self) -> str:
         """

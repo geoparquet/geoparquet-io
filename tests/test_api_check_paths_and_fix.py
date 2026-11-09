@@ -243,6 +243,8 @@ def test_a_path_check_answers_as_its_cli_command(
     result = getattr(gpio, function)(path)
 
     assert _profile(result.to_dict(), result.check_type) == _profile(cli_results, result.check_type)
+    # passed() is False for a warning or a failure: the strict reading of verdict().
+    assert bool(result) is result.passed() is (result.verdict() == "pass")
     if block is None:
         assert exit_code == (result.verdict() != "pass")
 
