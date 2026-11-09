@@ -58,6 +58,39 @@ def test_every_leaf_is_covered_or_exempt_on_every_axis():
     assert not problems, "Parity census:\n" + "\n".join(f"  {p}" for p in problems)
 
 
+def _group_problems(leaves: set[str], cases: set[str], exempt: dict, recorded: dict) -> list[str]:
+    """A group with no case must have every leaf exempt, and be recorded as such."""
+    groups: dict[str, set[str]] = {}
+    for leaf in leaves:
+        groups.setdefault(leaf.split()[0], set()).add(leaf)
+    all_exempt = {
+        group
+        for group, members in groups.items()
+        if all({"api_twin", "call_case"} & set(exempt.get(leaf, {})) for leaf in members)
+    }
+    problems = [
+        f"group {g!r} has no call-parity case and a leaf that is not exempt from one"
+        for g in sorted(set(groups) - {c.split()[0] for c in cases} - all_exempt)
+    ]
+    problems += [
+        f"group {g!r}: every leaf is call_case-exempt; record it in GROUPS_WITHOUT_A_CALL_CASE"
+        for g in sorted(all_exempt - set(recorded))
+    ]
+    problems += [
+        f"GROUPS_WITHOUT_A_CALL_CASE[{g!r}] is stale: a leaf in it is not exempt"
+        for g in sorted(set(recorded) - all_exempt)
+    ]
+    return problems
+
+
+def test_every_command_group_has_a_call_case_or_a_recorded_reason():
+    """The WP-7 invariant (#1018): no command group goes entirely uncompared."""
+    problems = _group_problems(
+        reg.cli_leaves(), set(CASES_BY_ID), reg.EXEMPT, reg.GROUPS_WITHOUT_A_CALL_CASE
+    )
+    assert not problems, "Group census:\n" + "\n".join(f"  {p}" for p in problems)
+
+
 def test_root_exported_path_functions_are_twins():
     """#1065: these three twins live at the package root, not on `ops` or `Table`."""
     expected = {
@@ -80,6 +113,7 @@ def test_every_registry_entry_has_a_reason():
         "ONE_SIDED_CLASSES": reg.ONE_SIDED_CLASSES,
         "KNOWN_DIVERGENCES": reg.KNOWN_DIVERGENCES,
         "KNOWN_PARITY_GAPS": reg.KNOWN_PARITY_GAPS,
+        "GROUPS_WITHOUT_A_CALL_CASE": reg.GROUPS_WITHOUT_A_CALL_CASE,
     }
     blank = [
         f"{name}{key}"

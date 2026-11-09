@@ -193,6 +193,14 @@ EXEMPT: dict[str, dict[str, str]] = {
     **{leaf: {"call_case": _NETWORK} for leaf in ("extract arcgis", "extract wfs")},
 }
 
+#: A command group with no call-parity case at all, which is allowed only when
+#: every leaf in it is exempt from `call_case` (directly, or through `api_twin`).
+#: Recorded here as well, so losing a group's last case is a decision, not a drift.
+GROUPS_WITHOUT_A_CALL_CASE: dict[str, str] = {
+    "inspect": _NO_SEAM_INSPECT,
+    "skills": "The group is one leaf with no API twin.",
+}
+
 
 # --------------------------------------------------------------------------
 # KNOWN_DIVERGENCES -- declared-default mismatches (test_cli_api_default_parity.py)
