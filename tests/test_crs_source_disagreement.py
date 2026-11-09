@@ -207,6 +207,55 @@ def test_a_crs_less_file_does_not_warn(tmp_path, _native_rows, caplog):
 
 
 # ---------------------------------------------------------------------------
+# Only one side names an authority id (#1014): pyproj decides
+# ---------------------------------------------------------------------------
+
+
+def _id_less_logical_file(tmp_path: Path, rows, *, logical_epsg: int, block_epsg: int) -> Path:
+    """Logical type: ``logical_epsg``'s full PROJJSON with its ``id`` stripped.
+
+    The ``geo`` block names ``block_epsg`` with its ``id``, so exactly one side
+    carries an authority code.
+    """
+    import geoarrow.pyarrow as ga
+
+    body = json.loads(projjson(logical_epsg))
+    body.pop("id")
+    path = write_native_geo_only(
+        tmp_path / f"idless_{logical_epsg}_{block_epsg}.parquet",
+        rows,
+        {"geometry": (2, ga.wkb().with_crs(json.dumps(body)))},
+    )
+    return _with_geo_block(path, block_epsg)
+
+
+def test_a_one_sided_id_disagreement_warns(tmp_path, _native_rows, caplog):
+    """Block says EPSG:3857 by id; the logical type is EPSG:5070's body without one."""
+    path = _id_less_logical_file(tmp_path, _native_rows, logical_epsg=5070, block_epsg=3857)
+    assert geo_block_crs_id(path) == EPSG_3857
+    assert not isinstance(logical_crs_id(path), dict), "the logical type must carry no id"
+
+    with caplog.at_level(logging.WARNING):
+        resolved = crs_of(str(path))
+
+    assert (resolved or {}).get("id") == EPSG_3857, "the documented preference must not change"
+    warnings = [r.message for r in caplog.records if "Using EPSG:3857" in r.message]
+    assert len(warnings) == 1, caplog.records
+
+
+def test_a_one_sided_id_rendering_of_the_same_crs_does_not_warn(tmp_path, _native_rows, caplog):
+    """Block names EPSG:5070 by id; the logical type is the same body without one."""
+    path = _id_less_logical_file(tmp_path, _native_rows, logical_epsg=5070, block_epsg=5070)
+    assert not isinstance(logical_crs_id(path), dict), "the logical type must carry no id"
+
+    with caplog.at_level(logging.WARNING):
+        resolved = crs_of(str(path))
+
+    assert (resolved or {}).get("id") == EPSG_5070
+    assert caplog.records == []
+
+
+# ---------------------------------------------------------------------------
 # Two geometry columns: the comparison is about the primary one
 # ---------------------------------------------------------------------------
 
