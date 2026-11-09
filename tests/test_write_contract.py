@@ -15,6 +15,8 @@ how it got there. Three matrices, decoupled so the cross-product stays small:
   repeated here.
 * **A3 — kv passthrough.** Non-geo file-level key/value metadata (fiboa,
   vecorel, STAC sidecars) surviving each path, plus ``extra_kv_metadata``.
+* **A4 — entry x strategy x two-geometry shape** lives in
+  ``tests/test_write_contract_two_geometry.py`` and shares the tables below.
 
 ``core/validate.py::validate_geoparquet`` is the oracle — the same pattern
 ``tests/test_geoparquet_corpus.py`` uses. Assertions are *properties* (row
@@ -31,7 +33,8 @@ is the write-facade's job. A divergence that stops reproducing fails loudly so
 the stale entry gets removed; anything *new* fails hard rather than being
 absorbed.
 
-Both allowlists are empty today, and that is the point: every divergence this
+A1 and A2 record no divergence today (A4's open one is in the strategy table),
+and that is the point: every divergence this
 suite was built to record has since been fixed, and the suite reported each one
 as "no longer reproduces" the moment it was. In order — #686 (`gpio convert
 --geoparquet-version 1.0` emitting the 1.1-only `covering` key) by gpio #714,
@@ -129,11 +132,25 @@ AUTO_2_0_CRS_STATE = Divergence(
 # "all four paths agree at every version".
 KNOWN_DIVERGENCES: dict[tuple[str, str], Divergence] = {}
 
-# (strategy, shape) -> Divergence. A2 only.
+REBUILD_DROPS_SECONDARY_TYPES = Divergence(
+    reason=(
+        "ISSUE-TBD: write_parquet_with_metadata(rebuild_geo_metadata=True) on the "
+        "in-memory, streaming and disk-rewrite strategies writes a 1.1 secondary "
+        "geometry entry with no geometry_types: declared_write_metadata strips the "
+        "key and only duckdb-kv recomputes a secondary's types (#952)."
+    ),
+    assertion_contains="other: geometry_types None",
+)
+
+# (strategy, shape) -> Divergence for A2; (entry, "<shape>@<version>") for A4
+# (tests/test_write_contract_two_geometry.py).
 #
-# Also empty: #688 (fixed by #707) covered six streaming shapes and #689 (fixed
-# by #698) the disk-rewrite row-group cell.
-KNOWN_STRATEGY_DIVERGENCES: dict[tuple[str, str], Divergence] = {}
+# A2's entries are gone: #688 (fixed by #707) covered six streaming shapes and
+# #689 (fixed by #698) the disk-rewrite row-group cell.
+KNOWN_STRATEGY_DIVERGENCES: dict[tuple[str, str], Divergence] = {
+    (f"query_rebuild[{strategy}]", "wkb_primary_first@1.1"): REBUILD_DROPS_SECONDARY_TYPES
+    for strategy in ("in-memory", "streaming", "disk-rewrite")
+}
 
 # ---------------------------------------------------------------------------
 # Fixture data: built in-test, no new files under tests/data.

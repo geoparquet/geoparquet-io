@@ -11,17 +11,18 @@ from shapely import Point, to_wkb
 from geoparquet_io.api import ops
 from geoparquet_io.api.table import Table
 from geoparquet_io.core.exceptions import PartitionError
-from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 
 @pytest.mark.parametrize("strategy", ["in-memory", "streaming", "duckdb-kv", "disk-rewrite"])
 @pytest.mark.parametrize("version", ["1.1", "2.0"])
 @pytest.mark.parametrize("secondary", [None, CRS.from_epsg(3857).to_json_dict()])
 @pytest.mark.parametrize("declaration", [{"orientation": "counterclockwise"}, {"epoch": 2020.0}])
-@pytest.mark.parametrize("entrypoint", ["table", "funnel"])
-def test_write_preserves_resolved_column_crs(
-    tmp_path, strategy, version, secondary, declaration, entrypoint
+def test_table_write_preserves_resolved_column_crs(
+    tmp_path, strategy, version, secondary, declaration
 ):
+    """``Table.write`` half of #1400; ``write_geoparquet_table`` is A4's
+    ``{orientation,epoch}_{projected,unknown}_secondary`` shapes
+    (tests/test_write_contract_two_geometry.py)."""
     columns = {
         "geometry": {"encoding": "WKB", "geometry_types": ["Point"], "crs": None, **declaration},
         "other": {"encoding": "WKB", "geometry_types": ["Point"], "crs": secondary},
@@ -36,11 +37,7 @@ def test_write_preserves_resolved_column_crs(
         }
     )
     out = tmp_path / "out.parquet"
-    kwargs = {"write_strategy": strategy, "geoparquet_version": version}
-    if entrypoint == "table":
-        Table(table).write(out, **kwargs)
-    else:
-        write_geoparquet_table(table, str(out), **kwargs)
+    Table(table).write(out, write_strategy=strategy, geoparquet_version=version)
     result = json.loads(pq.read_metadata(out).metadata[b"geo"])["columns"]
     assert result["geometry"]["crs"] is None
     assert result["other"]["crs"] == secondary
