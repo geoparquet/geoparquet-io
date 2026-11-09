@@ -17,7 +17,8 @@
 # +4: a {"init": ...} dict, or JSON text decoding to one, is never read
 # (owner reads and a write).
 # +1: a native srid:3857 secondary keeps EPSG:3857 on every strategy x version.
-max_collected = 14447
+# -3: the cold-import srid subprocess reads move to the slow lane (#1340).
+max_collected = 14444
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
@@ -48,6 +49,8 @@ slow_mark_sites = [
   "test_extract.py::TestExtractRemote",
   "test_filegdb_crs.py::TestFileGDBCrsDetection",
   "test_filegdb_crs.py::TestFileGDBMultiLayerCrs",
+  "test_geoarrow_srid_compat.py::test_gpio_read_of_srid_type_does_not_crash",
+  "test_geoarrow_srid_compat.py::test_pyarrow_written_srid_type_reads_back",
   "test_geoparquet_corpus.py::<module>",
   "test_geoparquet_versions.py::TestComprehensiveRoundTrips",
   "test_geoparquet_versions.py::TestPartitionGeoParquetVersion",
