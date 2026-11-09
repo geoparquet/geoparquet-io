@@ -88,6 +88,7 @@ import pyarrow as pa
 import pytest
 from click.testing import CliRunner
 
+from geoparquet_io.api import check as check_api
 from geoparquet_io.api import ops
 from geoparquet_io.api import stac as api_stac
 from geoparquet_io.api import table as table_module
@@ -912,6 +913,13 @@ CASES: list[ParityCase] = [
             core_check_structure.check_all,
             lambda c: c.gpio_table.check(),
         ),
+        ops=_ops_via_table(
+            core_check_structure,
+            "check_all",
+            core_check_structure.check_all,
+            lambda c: check_api.check_all(c.input_file),
+            result={},
+        ),
         normalize={
             "return_results": ("return_results", "return_results"),
             "profile": ("profile", "profile"),
@@ -920,6 +928,8 @@ CASES: list[ParityCase] = [
             "`Table.check()` takes no `profile` argument at all, so it rides the core "
             "default. That matches `gpio check all` only because the CLI's --profile also "
             "defaults to None; if either default moves, this case fails.",
+            "`gpio.check_all` is the twin (it adds spatial order and spec, as the CLI "
+            "does); `Table.check()` is the structure stage alone, still compared here.",
         ),
     ),
     ParityCase(

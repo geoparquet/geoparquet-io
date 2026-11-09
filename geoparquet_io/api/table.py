@@ -3110,8 +3110,8 @@ class Table:
 
         Not spatial order or spec validation, which ``gpio check all`` also
         runs: ``check().verdict()`` can be ``"warning"`` for a file ``check
-        all`` fails. For ``check all``'s answer, take the worst of this,
-        :meth:`check_spatial` and :meth:`validate`.
+        all`` fails. For ``check all``'s answer, run ``gpio.check_all(path)``
+        on the file.
 
         Measured on the source file when this Table was read from one; see
         ``CheckResult.prospective``.
@@ -3121,14 +3121,12 @@ class Table:
 
         Example:
             >>> table = gpio.read('data.parquet')
-            >>> results = [table.check(), table.check_spatial(), table.validate()]
-            >>> if any(r.verdict() == "failure" for r in results):
-            ...     for r in results:
-            ...         print(*r.failures(), sep="\n")
+            >>> result = table.check()
+            >>> print(result.verdict(), result.failures())
         """
         from geoparquet_io.api import check
 
-        return self._run_check(check.check_all)
+        return self._run_check(check._check_structure)
 
     def check_spatial(self, sample_size: int = 100, limit_rows: int = 500000) -> CheckResult:
         """
@@ -3399,7 +3397,7 @@ class Table:
             )
 
         def repair(path: str, target: str) -> None:
-            results = check.check_all(path).to_dict()
+            results = check._check_structure(path).to_dict()
             if "spatial" in wanted:
                 results["spatial"] = check.check_spatial(path).to_dict()
             plan = {name: (found if name in wanted else {}) for name, found in results.items()}

@@ -53,7 +53,8 @@ TWIN_NAMES: dict[str, list[str]] = {
     "benchmark explain": ["explain_analyze"],
     "convert reproject": ["reproject"],
     # `Table.fix` applies the fixes `--fix` does, selected by its `checks=` (#1078).
-    "check all": ["check", "fix"],
+    # Not `Table.check`: it runs the structure checks only; `gpio.check_all` is the twin.
+    "check all": ["fix"],
     "check bbox": ["fix"],
     "check compression": ["fix"],
     "check spatial": ["fix"],
@@ -662,10 +663,6 @@ _FIX_CHECKS = (
     "`Table.fix` serves every `check` leaf with --fix; `checks=` picks which checks' fixes "
     "run, where the CLI picks by command."
 )
-_CHECK_KNOB = (
-    "`check all` also runs the spatial-order check; the API runs `check_spatial`, which "
-    "takes this knob, alongside `check_all` (#1090)."
-)
 _RENDERING = (
     "Presentation: how the CLI prints the answer (markdown, truncation, which metadata "
     "sections, a report format). The API returns the data itself."
@@ -731,7 +728,6 @@ ONE_SIDED: dict[tuple[str, str, str], str] = {
     **_each("cli", _CHECK_FIX, _CHECKS_WITH_FIX, ("fix", "no_backup")),
     **_each("cli", _CHECK_PMTILES, "check all", "pmtiles"),
     **_each("api", _FIX_CHECKS, _CHECKS_WITH_FIX, "checks"),
-    **_each("cli", _CHECK_KNOB, "check all", ("limit_rows", "random_sample_size")),
     **_each("cli", _RENDERING, ("inspect head", "inspect tail"), ("max_columns", "no_truncate")),
     **_each(
         "cli",

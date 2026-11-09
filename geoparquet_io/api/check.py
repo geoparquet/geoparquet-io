@@ -91,8 +91,8 @@ class CheckResult:
         It covers the checks this result ran. :meth:`Table.check` runs the
         structure checks (row groups, bbox, covering, compression, bloom
         filters) -- not spatial order or spec validation, which ``gpio check
-        all`` adds -- so a CI gate wanting ``check all``'s answer takes the
-        worst of ``check()``, ``check_spatial()`` and ``validate()``.
+        all`` adds -- so a CI gate wanting ``check all``'s answer uses
+        :func:`check_all`.
 
         Returns:
             The verdict's label
@@ -236,24 +236,63 @@ def _structure_check(path, command: str, check_type: str, func, **kwargs) -> Che
     return CheckResult(results, check_type=check_type, source_path=path)
 
 
-def check_all(path: str | os.PathLike, profile: CheckProfile | None = None) -> CheckResult:
-    """Run the structure checks on a file: row groups, bbox, covering, compression, bloom filters.
+def _check_structure(path: str | os.PathLike, profile: CheckProfile | None = None) -> CheckResult:
+    """The structure checks (row groups, bbox, covering, compression, bloom filters): ``Table.check``."""
+    from geoparquet_io.core import check_parquet_structure as core
 
-    The checks :meth:`Table.check` runs -- not spatial order or spec
-    validation, which ``gpio check all`` adds; take the worst of this,
-    :func:`check_spatial` and :func:`validate` for its answer.
+    return _structure_check(path, "all", "all", core.check_all, profile=profile)
+
+
+def _stage(check, path, stage: str, **kwargs) -> dict:
+    """One stage's results, or why it could not run: one dying check does not take the rest (#1082)."""
+    from geoparquet_io.core.check_verdict import could_not_run
+    from geoparquet_io.core.duckdb_utils import is_interrupt
+    from geoparquet_io.core.exceptions import clean_error_text
+
+    try:
+        return check(path, **kwargs).to_dict()
+    except Exception as e:
+        if is_interrupt(e):
+            raise
+        return could_not_run(stage, clean_error_text(str(e)))
+
+
+def check_all(
+    path: str | os.PathLike,
+    profile: CheckProfile | None = None,
+    sample_size: int = 100,
+    limit_rows: int = 500000,
+) -> CheckResult:
+    """Run what ``gpio check all`` runs: the structure checks, spatial order and spec validation.
+
+    One category per check -- the structure checks of :meth:`Table.check`,
+    then ``spatial`` (:func:`check_spatial`) and ``spec`` (:func:`validate`,
+    data sampled) -- each with the CLI's defaults. ``verdict()`` is the worst
+    of them, the answer ``gpio check all`` exits on. As there, a spatial or
+    spec check that raises is reported as a failure that could not run.
 
     Args:
         path: A local file or remote URL (not a directory or glob)
         profile: Row-group size band to judge against, as ``--profile``
+        sample_size: Random pairs for the spatial-order check, as ``--random-sample-size``
+        limit_rows: Maximum rows for the spatial-order check, as ``--limit-rows``
 
     Example:
         >>> result = gpio.check_all("data.parquet")
         >>> print(result.verdict(), result.failures())
     """
-    from geoparquet_io.core import check_parquet_structure as core
+    from geoparquet_io.core.check_spatial_order import SPATIAL_ORDER_CHECK
 
-    return _structure_check(path, "all", "all", core.check_all, profile=profile)
+    structure = _check_structure(path, profile)
+    path = structure.source_path
+    results = {
+        **structure.to_dict(),
+        "spatial": _stage(
+            check_spatial, path, SPATIAL_ORDER_CHECK, sample_size=sample_size, limit_rows=limit_rows
+        ),
+        "spec": _stage(validate, path, "Spec validation"),
+    }
+    return CheckResult(results, check_type="all", source_path=path)
 
 
 def check_compression(path: str | os.PathLike) -> CheckResult:

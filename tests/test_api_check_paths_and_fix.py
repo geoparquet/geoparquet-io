@@ -8,20 +8,23 @@ Table and never touches the file it was read from.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
+from click.testing import CliRunner
 
 import geoparquet_io as gpio
 from geoparquet_io.api import check as check_api
+from geoparquet_io.cli.commands import check as cli_check
+from geoparquet_io.cli.main import cli
 
 # Deterministic checks; check_spatial samples random pairs, so it is pinned by
 # delegation below rather than by equal answers.
 PAIRS = [
-    ("check_all", "check"),
     ("check_compression", "check_compression"),
     ("check_row_groups", "check_row_groups"),
     ("check_bbox", "check_bbox"),
@@ -86,6 +89,61 @@ def test_a_remote_url_goes_straight_to_core(monkeypatch):
 
     assert seen == [url]
     assert result.source_path == url
+
+
+@pytest.fixture
+def unsorted_misdeclared(tmp_path, unsorted_test_file):
+    """unsorted.parquet (a spatial-order problem) declaring Polygon over its Points (a spec one)."""
+    table = pq.read_table(unsorted_test_file)
+    geo = json.loads(table.schema.metadata[b"geo"])
+    geo["columns"][geo["primary_column"]]["geometry_types"] = ["Polygon"]
+    path = tmp_path / "misdeclared.parquet"
+    metadata = {**table.schema.metadata, b"geo": json.dumps(geo).encode()}
+    pq.write_table(table.replace_schema_metadata(metadata), path, row_group_size=100)
+    return str(path)
+
+
+def test_check_all_runs_what_gpio_check_all_runs(monkeypatch, unsorted_misdeclared):
+    categories = []
+    real = cli_check.all_checks_result
+
+    def spy(structure, spatial, spec):
+        categories.extend([*structure, "spatial", "spec"])
+        return real(structure, spatial, spec)
+
+    monkeypatch.setattr(cli_check, "all_checks_result", spy)
+    exit_code = CliRunner().invoke(cli, ["check", "all", unsorted_misdeclared]).exit_code
+
+    result = gpio.check_all(unsorted_misdeclared)
+
+    assert (exit_code, result.verdict()) == (1, "failure")
+    assert list(result.to_dict()) == categories
+    assert result.to_dict()["spatial"]["passed"] is False
+    assert any(f.startswith("[spec] ") for f in result.failures())
+    # Table.check() stays the structure checks only.
+    structure = set(gpio.read(unsorted_misdeclared).check().to_dict())
+    assert structure == set(categories) - {"spatial", "spec"}
+
+
+def _raises(message):
+    def check(path, **_):
+        raise RuntimeError(message)
+
+    return check
+
+
+def test_check_all_reports_a_stage_that_could_not_run(monkeypatch, unsorted_test_file):
+    monkeypatch.setattr(check_api, "validate", _raises("spec reader exploded"))
+    result = gpio.check_all(unsorted_test_file)
+
+    assert result.verdict() == "failure"
+    assert "spatial" in result.to_dict()
+    assert any("Spec validation could not run" in f for f in result.failures())
+
+    # An interrupt is a stop, never a check that failed.
+    monkeypatch.setattr(check_api, "check_spatial", _raises("Query interrupted"))
+    with pytest.raises(RuntimeError, match="interrupted"):
+        gpio.check_all(unsorted_test_file)
 
 
 # --------------------------------------------------------------------------

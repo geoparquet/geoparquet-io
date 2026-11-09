@@ -1526,8 +1526,8 @@ ops.add_stac_metadata('items.parquet', 'collection.json')
 
 Run best-practice checks on the table. `check()` runs the structure checks
 (row groups, bbox and covering, compression, bloom filters); `gpio check all`
-also runs spatial order and spec validation, so for its exit code combine
-`check()`, `check_spatial()` and `validate()`.
+also runs spatial order and spec validation; `gpio.check_all(path)` runs all
+three, as the CLI does.
 
 ```python
 # Run the structure checks
@@ -1537,8 +1537,7 @@ if result.verdict() == "failure":
         print(f"Failed: {failure}")
 
 # What `gpio check all` exits 1 on (`!= "pass"` for `--strict`)
-gate = [table.check(), table.check_spatial(), table.validate()]
-check_all_fails = any(r.verdict() == "failure" for r in gate)
+check_all_fails = gpio.check_all('data.parquet').verdict() == "failure"
 
 # Individual checks
 spatial_result = table.check_spatial()
@@ -1607,11 +1606,13 @@ sorted_only = table.fix(checks=["spatial"], output='sorted.parquet')
 `gpio.check_all`, `check_compression`, `check_row_groups`, `check_bbox`,
 `check_spatial`, `check_spatial_pushdown`, `check_bloom_filters`,
 `check_optimization` and `validate` take a path and the same options as the
-matching `Table` method (and the CLI subcommand), and return a `CheckResult`
+matching CLI subcommand (and `Table` method), and return a `CheckResult`
 with `source_path` set. They check one file: a directory or glob raises
 `InvalidParameterError`, and `gpio check <cmd>` handles a multi-file run. A
 remote URL is read in place. The `Table` methods call these on the file they
 were read from, so `gpio.check_x(path)` and `gpio.read(path).check_x()` agree.
+`gpio.check_all` is the exception: it runs what `gpio check all` runs (structure,
+spatial order, spec), while `Table.check()` runs the structure checks only.
 
 ```python
 result = gpio.check_compression('data.parquet')

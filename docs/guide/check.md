@@ -95,15 +95,14 @@ subcommand; `ℹ️` marks information that does not count either way.
 
     <!-- doctest: prelude="import geoparquet_io as gpio; table = gpio.read('myfile.parquet')" -->
     ```python
-    # table.check() runs the structure checks only; `gpio check all` adds
-    # spatial order and spec validation, so a CI gate combines all three.
-    results = [table.check(), table.check_spatial(), table.validate()]
-    verdicts = {r.verdict() for r in results}  # "pass", "warning" or "failure"
+    # gpio.check_all runs what `gpio check all` runs: the structure checks,
+    # spatial order and spec validation. table.check() is the structure checks only.
+    result = gpio.check_all('myfile.parquet')
+    verdict = result.verdict()  # "pass", "warning" or "failure"
 
-    failed = "failure" in verdicts  # what `gpio check all` exits 1 on
-    strict_failed = verdicts != {"pass"}  # the --strict equivalent
-    for result in results:
-        print(*result.failures(), *result.warnings(), sep="\n")
+    failed = verdict == "failure"  # what `gpio check all` exits 1 on
+    strict_failed = verdict != "pass"  # the --strict equivalent
+    print(*result.failures(), *result.warnings(), sep="\n")
     ```
 
     `failures()` and `warnings()` bucket each issue by the same severity
