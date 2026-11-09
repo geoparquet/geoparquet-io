@@ -44,6 +44,18 @@ if TYPE_CHECKING:
     from geoparquet_io.api.check import CheckResult
 
 
+def _object_name(source: str) -> str:
+    """The basename of *source* as an object key: a URL's path, sans query and fragment."""
+    from pathlib import Path, PurePosixPath
+    from urllib.parse import urlparse
+
+    from geoparquet_io.core.remote import is_remote_url
+
+    if is_remote_url(source):
+        return PurePosixPath(urlparse(source).path).name
+    return Path(source).name
+
+
 def _run_partition_with_temp_file(
     table: pa.Table,
     geometry_column: str | None,
@@ -2653,8 +2665,7 @@ class Table:
         from geoparquet_io.core.file_utils import scratch_dir
         from geoparquet_io.core.upload import upload as do_upload
 
-        # A destination ending in '/' names the object after the uploaded file,
-        # so the scratch copy carries the source's name, not a temp one.
+        # A destination ending in '/' names the object after the source file.
         if destination.endswith("/") and self._source_path is None:
             raise InvalidParameterError(
                 "destination",
@@ -2663,10 +2674,12 @@ class Table:
                 "in memory or derived). Give a full object key, e.g. "
                 f"'{destination}data.parquet'.",
             )
-        name = Path(self._source_path or "data.parquet").name
+        if destination.endswith("/"):
+            destination += _object_name(self._source_path)
 
         with scratch_dir(prefix="gpio_upload_") as scratch:
-            temp_path = Path(scratch) / name
+            # Never the source's name: it may hold ':' or '*' (Windows) or a query.
+            temp_path = Path(scratch) / "upload.parquet"
             self.write(
                 temp_path,
                 format="parquet",
@@ -3009,6 +3022,8 @@ class Table:
         Execute a file-based function with a temporary file containing this table.
 
         Writes the table to a temp file, runs the function, and cleans up.
+        The file goes in func's own ``temporary_directory`` when it takes one
+        (the pmtiles methods), else in the system temp directory.
 
         Args:
             func: Function to call with temp file path as first argument
@@ -3020,8 +3035,12 @@ class Table:
         """
         from pathlib import Path
 
-        temp_path = Path(scratch_path(prefix="gpio_check_"))
-        try:
+        from geoparquet_io.core.file_utils import scratch_dir
+
+        with scratch_dir(
+            prefix="gpio_check_", directory=kwargs.get("temporary_directory")
+        ) as scratch:
+            temp_path = Path(scratch) / "table.parquet"
             # The bytes write() would produce with its defaults, so a
             # prospective verdict describes the file the caller would get.
             self._write_geoparquet(
@@ -3035,8 +3054,6 @@ class Table:
                 profile=None,
             )
             return func(str(temp_path), *args, **kwargs)
-        finally:
-            unlink_released_file(temp_path)
 
     def _check_file(
         self, func: Callable[..., Any], *args: Any, **kwargs: Any

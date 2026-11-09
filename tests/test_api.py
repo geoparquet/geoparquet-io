@@ -1528,6 +1528,57 @@ class TestTableUpload:
                 sample_table.head(5).upload("s3://test-bucket/prefix/", dry_run=dry_run)
         mock_upload.assert_not_called()
 
+    @pytest.mark.parametrize(
+        ("source", "name"),
+        [
+            ("https://host/d/f.parquet?sig=a:b*c", "f.parquet"),
+            ("s3://bucket/d/w*e:i.rd.parquet", "w*e:i.rd.parquet"),
+        ],
+        ids=["query_string", "unsafe_basename"],
+    )
+    def test_upload_scratch_name_is_generated_and_key_takes_the_url_basename(
+        self, sample_table, source, name
+    ):
+        """The scratch file never carries the source's name; the prefix key does, sans query."""
+        with (
+            patch.object(sample_table, "_source_path", source),
+            patch("geoparquet_io.core.upload.upload") as mock_upload,
+        ):
+            sample_table.upload("s3://test-bucket/prefix/")
+
+        kwargs = mock_upload.call_args.kwargs
+        assert kwargs["destination"] == f"s3://test-bucket/prefix/{name}"
+        assert Path(kwargs["source"]).name == "upload.parquet"
+
+
+class TestTablePmtilesScratch:
+    """A derived Table's intermediate file honours ``temporary_directory``."""
+
+    @pytest.mark.parametrize("method", ["create_pmtiles", "create_pmtiles_pyramid"])
+    @pytest.mark.parametrize("fails", [False, True], ids=["ok", "error"])
+    def test_intermediate_file_lives_in_temporary_directory(self, tmp_path, method, fails):
+        seen = []
+
+        def fake(path, output, **kwargs):
+            seen.append(Path(path))
+            assert Path(path).exists()
+            if fails:
+                raise RuntimeError("tippecanoe died")
+
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        derived = read(PLACES_PARQUET).head(5)
+        with patch(f"geoparquet_io.api.ops.{method}", fake):
+            try:
+                getattr(derived, method)(
+                    str(tmp_path / "o.pmtiles"), temporary_directory=str(scratch)
+                )
+            except RuntimeError:
+                assert fails
+
+        assert seen and scratch in seen[0].parents
+        assert list(scratch.iterdir()) == []
+
 
 class TestTableMetadataProperties:
     """Tests for the new metadata properties on Table."""

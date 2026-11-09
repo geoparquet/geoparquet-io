@@ -374,6 +374,18 @@ KNOWN_DIVERGENCES: dict[tuple[str, str, str, str, str], str] = {
 # either side has to come back through this table.
 KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
     (
+        "publish upload",
+        "table",
+        "destination",
+        "'s3://bucket/prefix/'",
+        "'s3://bucket/prefix/places_test.parquet'",
+    ): (
+        "A prefix destination names the object after the source file. The CLI uploads that "
+        "file, so core names it; Table.upload uploads a scratch file whose name is generated "
+        "(a source basename may hold ':' or '*', or a URL query), so it resolves the key "
+        "itself and hands core the full one. Same object key: TestTableUpload pins it."
+    ),
+    (
         "sort hilbert",
         "table",
         "geometry_column",
