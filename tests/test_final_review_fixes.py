@@ -10,7 +10,10 @@ from shapely import Point, to_wkb
 
 from geoparquet_io.api import ops
 from geoparquet_io.api.table import Table
+from geoparquet_io.core.crs_utils import crs_equal
 from geoparquet_io.core.exceptions import PartitionError
+from geoparquet_io.core.validate import CheckStatus, validate_geoparquet
+from geoparquet_io.core.write_funnels import write_geoparquet_table
 
 
 @pytest.mark.parametrize("strategy", ["in-memory", "streaming", "duckdb-kv", "disk-rewrite"])
@@ -86,3 +89,56 @@ def test_quadkey_nonfinite_sort_partition(tmp_path, latitude, path):
 def test_quadkey_null_geometry():
     table = pa.table({"geometry": pa.array([None], type=pa.binary())})
     assert ops.add_quadkey(table, resolution=3)["quadkey"].to_pylist() == [None]
+
+
+def _wkb_field(name: str, crs: dict | None = None) -> pa.Field:
+    """A plain ``binary`` field whose GeoArrow identity lives only in field metadata."""
+    metadata = {b"ARROW:extension:name": b"geoarrow.wkb"}
+    if crs is not None:
+        metadata[b"ARROW:extension:metadata"] = json.dumps({"crs": crs}).encode()
+    return pa.field(name, pa.binary(), metadata=metadata)
+
+
+#: Cells the ``_build_geo_block`` probe does not reach: the other strategies never
+#: call it, and at 1.1 the in-memory path re-composes over the retyped plain-WKB
+#: table, which has lost the field metadata.
+FIELD_METADATA_CRS_GAP = pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "ISSUE-TBD: write_geoparquet_table(t, out, geoparquet_version=V, write_strategy=S), "
+        "t's secondary a plain-binary geoarrow.wkb field whose EPSG:3857 is only in "
+        "ARROW:extension:metadata, writes geo.columns.other with no crs (CRS84)"
+    ),
+)
+FIELD_METADATA_CRS_KEPT = {("2.0", "in-memory"), ("2.0", None)}
+
+
+@pytest.mark.parametrize(
+    ("version", "strategy"),
+    [
+        pytest.param(
+            version,
+            strategy,
+            marks=() if (version, strategy) in FIELD_METADATA_CRS_KEPT else FIELD_METADATA_CRS_GAP,
+            id=f"{version}-{strategy}",
+        )
+        for version in ("1.1", "2.0")
+        for strategy in ("in-memory", "streaming", "duckdb-kv", "disk-rewrite", None)
+    ],
+)
+def test_table_write_keeps_a_field_metadata_only_secondary_crs(tmp_path, version, strategy):
+    """#1400's ``column_crs`` probe in ``_build_geo_block`` reads a secondary's CRS
+    from raw field metadata, which ``table_geometry_info`` (``field.type.crs``)
+    misses: deleting it wrote ``other`` with no crs, i.e. OGC:CRS84."""
+    epsg_3857 = CRS.from_epsg(3857).to_json_dict()
+    schema = pa.schema([_wkb_field("geometry"), _wkb_field("other", epsg_3857)])
+    table = pa.table(
+        {"geometry": [to_wkb(Point(1, 2))], "other": [to_wkb(Point(1e6, 2e6))]}, schema=schema
+    )
+    out = tmp_path / "out.parquet"
+    write_geoparquet_table(table, str(out), geoparquet_version=version, write_strategy=strategy)
+
+    other = json.loads(pq.read_schema(out).metadata[b"geo"])["columns"]["other"]
+    assert crs_equal(other.get("crs"), epsg_3857), other
+    result = validate_geoparquet(str(out))
+    assert result.is_valid, [c.message for c in result.checks if c.status == CheckStatus.FAILED]
