@@ -540,6 +540,35 @@ class TestAPIGeometryInputForms:
         assert not out.exists()
 
     @pytest.mark.parametrize("door", sorted(_API_GEOMETRY_DOORS))
+    def test_a_bare_path_created_after_the_gate_is_never_read(self, door, tmp_path, monkeypatch):
+        """The refusal is by shape, so a file appearing after the gate cannot be read."""
+        from geoparquet_io.core import extract as core_extract
+
+        suffix, call, _ = _API_GEOMETRY_DOORS[door]
+        late = tmp_path / "late.wkt"
+        parse = core_extract.parse_geometry_input
+
+        def create_then_parse(geometry, *args, **kwargs):
+            late.write_text(BBOX_AS_WKT, encoding="utf-8")  # the race
+            return parse(geometry, *args, **kwargs)
+
+        monkeypatch.setattr(core_extract, "parse_geometry_input", create_then_parse)
+        out = tmp_path / f"out{suffix}"
+        with pytest.raises(InvalidParameterError, match="@path"):
+            call(out, str(late))
+        assert not out.exists()
+
+    @pytest.mark.parametrize("door", sorted(_API_GEOMETRY_DOORS))
+    def test_a_pathlib_path_is_refused_naming_at_path(self, door, tmp_path):
+        suffix, call, _ = _API_GEOMETRY_DOORS[door]
+        wkt_file = tmp_path / "box.wkt"
+        wkt_file.write_text(BBOX_AS_WKT, encoding="utf-8")
+        out = tmp_path / f"out{suffix}"
+        with pytest.raises(InvalidParameterError, match="@path"):
+            call(out, wkt_file)
+        assert not out.exists()
+
+    @pytest.mark.parametrize("door", sorted(_API_GEOMETRY_DOORS))
     def test_at_path_and_inline_text_are_accepted(self, door, tmp_path):
         suffix, call, count = _API_GEOMETRY_DOORS[door]
         wkt_file = tmp_path / "box.wkt"
