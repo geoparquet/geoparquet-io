@@ -18,7 +18,14 @@
 # (owner reads and a write).
 # +1: a native srid:3857 secondary keeps EPSG:3857 on every strategy x version.
 # -3: the cold-import srid subprocess reads move to the slow lane (#1340).
-max_collected = 14444
+# +163, the API/CLI parity batch (#1088, #1065, #903, #1085, #1090, #1078,
+# #1108, #1063, #1321, #1087, #761). One parity registry (-3 net, nine
+# per-allowlist tests folded into four), call-parity cases for the fifteen
+# deferred leaves (+32, ops and Table doors), new API legs and their
+# fail-first tests (checks by path and Table.fix +22, pmtiles and upload +10,
+# geometry gate, no-ops and shared stats +21), WriteOptions on every write
+# leaf (+52, incl. the from_cli guard per write leaf), and review fixes (+30).
+max_collected = 14607
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
