@@ -35,7 +35,8 @@
 # a remote source under a scheme alias +2, PMTiles on a directory-backed Table +2,
 # a remote object named by its last segment +3).
 # +36: every gpio.check_* answers as its gpio check command (9 checks x 4 fixtures).
-max_collected = 14676
+# +1: a "not GeoParquet" file-type answer is re-probed, never served from the cache.
+max_collected = 14677
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
