@@ -29,6 +29,7 @@ from geoparquet_io.cli.main import cli
 from geoparquet_io.core import edges as owner
 from geoparquet_io.core.duckdb_metadata import get_schema_info, parse_geometry_logical_type
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from tests._defrag_fixtures import footer_geo, geo_block, polygon_wkb, write_with_geo
 
 # ---------------------------------------------------------------------------
@@ -79,7 +80,9 @@ def test_one_1x_answer_for_every_version(version):
     is_1x = writable_geoparquet_version(version) == "1.1"
     assert is_geoparquet_1x(version) is is_1x
     assert owner.edges_allowed(is_1x) == (owner.GEOPARQUET_1X_EDGES if is_1x else owner.EDGES)
-    check = _check_edges_valid({"edges": "vincenty"}, "geometry", version)
+    check = _check_edges_valid(
+        parse_column_meta("geometry", {"edges": "vincenty"}), "geometry", version
+    )
     assert (check.status.name == "PASSED") is not is_1x
 
 

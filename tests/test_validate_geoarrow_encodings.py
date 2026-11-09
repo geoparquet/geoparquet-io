@@ -17,6 +17,7 @@ from shapely import wkt
 
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_cover_bbox_field_types,
@@ -149,28 +150,38 @@ class TestEncodingVersionGating:
 
     @pytest.mark.parametrize("encoding", sorted(GEOARROW_CASES))
     def test_geoarrow_accepted_for_1_1(self, encoding):
-        check = _check_encoding_valid({"encoding": encoding}, "geometry", "1.1.0")
+        check = _check_encoding_valid(
+            parse_column_meta("geometry", {"encoding": encoding}), "geometry", "1.1.0"
+        )
         assert check.status == CheckStatus.PASSED, check.message
 
     @pytest.mark.parametrize("encoding", sorted(GEOARROW_CASES))
     def test_geoarrow_rejected_for_1_0(self, encoding):
-        check = _check_encoding_valid({"encoding": encoding}, "geometry", "1.0.0")
+        check = _check_encoding_valid(
+            parse_column_meta("geometry", {"encoding": encoding}), "geometry", "1.0.0"
+        )
         assert check.status == CheckStatus.FAILED
         assert "1.1" in check.message
 
     @pytest.mark.parametrize("encoding", sorted(GEOARROW_CASES))
     def test_geoarrow_rejected_for_2_0(self, encoding):
-        check = _check_encoding_valid({"encoding": encoding}, "geometry", "2.0.0")
+        check = _check_encoding_valid(
+            parse_column_meta("geometry", {"encoding": encoding}), "geometry", "2.0.0"
+        )
         assert check.status == CheckStatus.FAILED
 
     @pytest.mark.parametrize("version", ["1.0.0", "1.1.0", "2.0.0"])
     def test_wkb_always_accepted(self, version):
-        check = _check_encoding_valid({"encoding": "WKB"}, "geometry", version)
+        check = _check_encoding_valid(
+            parse_column_meta("geometry", {"encoding": "WKB"}), "geometry", version
+        )
         assert check.status == CheckStatus.PASSED, check.message
 
     @pytest.mark.parametrize("encoding", ["WKT", "geoarrow.point", "Point", "", None])
     def test_unknown_encodings_still_rejected(self, encoding):
-        check = _check_encoding_valid({"encoding": encoding}, "geometry", "1.1.0")
+        check = _check_encoding_valid(
+            parse_column_meta("geometry", {"encoding": encoding}), "geometry", "1.1.0"
+        )
         assert check.status == CheckStatus.FAILED
 
     def test_1_0_file_claiming_geoarrow_encoding_fails_end_to_end(self, tmp_path):
@@ -383,7 +394,9 @@ class TestDuckDBSchemaPath:
                 }
             }
         }
-        check = _check_cover_bbox_field_types(col_meta, "geometry", schema_info)
+        check = _check_cover_bbox_field_types(
+            parse_column_meta("geometry", col_meta), "geometry", schema_info
+        )
         assert check.status == CheckStatus.FAILED, check.message
 
     def test_covering_bbox_field_types_still_accepts_a_real_bbox_column(self):
@@ -404,7 +417,9 @@ class TestDuckDBSchemaPath:
                 }
             }
         }
-        check = _check_cover_bbox_field_types(col_meta, "geometry", schema_info)
+        check = _check_cover_bbox_field_types(
+            parse_column_meta("geometry", col_meta), "geometry", schema_info
+        )
         assert check.status == CheckStatus.PASSED, check.message
 
     @pytest.mark.parametrize("encoding", sorted(GEOARROW_CASES))

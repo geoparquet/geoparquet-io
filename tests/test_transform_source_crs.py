@@ -423,6 +423,104 @@ class TestProjInitFilesAreNeverRead:
         with pytest.raises(UnresolvableCRSError, match="init"):
             transform_source_crs(template.format(path=init_file))
 
+    @pytest.fixture
+    def parsed(self, monkeypatch):
+        """Every text pyproj parses, recorded: ``load_crs`` swallows any exception
+        its parse raises, so a raising stub could not tell a refusal from a read."""
+        import pyproj
+
+        seen: list[str] = []
+        original = pyproj.CRS.from_user_input
+
+        def _record(value, *args, **kwargs):
+            seen.append(str(value))
+            return original(value, *args, **kwargs)
+
+        monkeypatch.setattr(pyproj.CRS, "from_user_input", staticmethod(_record))
+        return seen
+
+    def test_load_crs_refuses_an_init_string_before_pyproj(self, init_file, parsed):
+        """``load_crs`` is the one constructor; every caller inherits its guard.
+        Read, the sentinel is a projected CRS rather than None."""
+        from geoparquet_io.core.crs_utils import load_crs
+
+        assert load_crs(f"+init={init_file}:x") is None
+        assert not [text for text in parsed if "init" in text]
+
+    def test_a_label_naming_an_init_file_is_refused_unread(self, init_file, parsed):
+        """``projjson_for_label`` reads labels from GDAL types and WFS servers too."""
+        from geoparquet_io.core.crs_utils import projjson_for_label
+
+        with pytest.raises(UnresolvableCRSError):
+            projjson_for_label(f"+init={init_file}:x")
+        assert not [text for text in parsed if "init" in text]
+
+    def test_a_disagreement_probe_does_not_read_an_init_file(self, init_file, parsed):
+        """The #1014 one-sided branch loads both values from the file's own
+        metadata; an unreadable side stays silent (a warning fails open). Read,
+        the sentinel's UTM 31N disagrees with EPSG:3857."""
+        from geoparquet_io.core.crs_utils import _crs_sources_disagree
+
+        epsg_3857 = CRS.from_epsg(3857).to_json_dict()
+        assert _crs_sources_disagree(epsg_3857, f"+init={init_file}:x") is False
+        assert not [text for text in parsed if "init" in text]
+
+    @pytest.mark.parametrize("encoded", [False, True], ids=["dict", "json_text"])
+    def test_a_proj_dict_naming_an_init_file_is_never_read(self, init_file, parsed, encoded):
+        """pyproj turns a dict with an ``init`` (or ``proj``) member, or JSON text
+        decoding to one, into a PROJ string, so ``init=`` hides from a text search.
+        Read, the sentinel is UTM 31N: it loads, equals UTM 31N, and disagrees with
+        EPSG:3857."""
+        from geoparquet_io.core.crs_utils import (
+            _crs_sources_disagree,
+            crs_equal,
+            load_crs,
+            projjson_for_label,
+        )
+
+        value = {"init": f"{init_file}:x"}
+        if encoded:
+            value = json.dumps(value)
+        utm_31n = CRS.from_epsg(32631).to_json_dict()
+
+        assert load_crs(value) is None
+        assert crs_equal(utm_31n, value) is False
+        assert _crs_sources_disagree(CRS.from_epsg(3857).to_json_dict(), value) is False
+        with pytest.raises(UnresolvableCRSError):
+            projjson_for_label(value)
+        assert not [text for text in parsed if "init" in text]
+
+    @pytest.mark.parametrize("encoded", [False, True], ids=["dict", "json_text"])
+    def test_a_write_does_not_read_a_secondary_proj_dict(
+        self, init_file, parsed, tmp_path, encoded
+    ):
+        """A field-metadata secondary CRS reaches the write as a dict or as text."""
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        crs = {"init": f"{init_file}:x"}
+        point = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+
+        def field(name, extension_metadata=None):
+            metadata = {b"ARROW:extension:name": b"geoarrow.wkb"}
+            if extension_metadata is not None:
+                metadata[b"ARROW:extension:metadata"] = extension_metadata.encode()
+            return pa.field(name, pa.binary(), metadata=metadata)
+
+        value = json.dumps(crs) if encoded else crs
+        schema = pa.schema([field("geometry"), field("other", json.dumps({"crs": value}))])
+        table = pa.table({"geometry": [point], "other": [point]}, schema=schema)
+        out = tmp_path / "out.parquet"
+        write_geoparquet_table(
+            table, str(out), geoparquet_version="2.0", write_strategy="in-memory"
+        )
+
+        assert not [text for text in parsed if "init" in text]
+        written = json.loads(pq.read_schema(out).metadata[b"geo"])["columns"]["other"]
+        assert written.get("crs") in (None, crs), written
+
     def test_a_remote_init_is_refused(self):
         with pytest.raises(UnresolvableCRSError, match="init"):
             transform_source_crs("+init=https://example.invalid/proj:x")

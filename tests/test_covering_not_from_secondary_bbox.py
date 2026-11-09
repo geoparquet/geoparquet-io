@@ -135,18 +135,11 @@ class TestBboxColumnToDeclare:
 
 @pytest.mark.parametrize("strategy", STRATEGIES)
 class TestRewriteNeverCrossesColumns:
-    """End-to-end (#953): every strategy, same rule."""
+    """End-to-end (#953): every strategy, same rule.
 
-    def test_primary_covering_never_names_the_secondarys_bbox(self, strategy, tmp_path):
-        input_file = tmp_path / "in.parquet"
-        output_file = tmp_path / "out.parquet"
-        create_multi_geometry_with_secondary_bbox(str(input_file))
-
-        _rewrite(input_file, output_file, strategy)
-
-        geo = _geo(output_file)
-        primary_meta = geo["columns"][geo["primary_column"]]
-        assert "boundary_bbox" not in _covering_columns(primary_meta), primary_meta["covering"]
+    An undeclared ``*_bbox`` beside a secondary is A4's
+    ``secondary_bbox_undeclared`` shape (tests/test_write_contract_two_geometry.py).
+    """
 
     def test_secondarys_own_declared_covering_survives_on_its_own_entry(self, strategy, tmp_path):
         """The input's provenance for the SECONDARY is carried where it belongs."""
@@ -165,20 +158,11 @@ class TestRewriteNeverCrossesColumns:
 
 @pytest.mark.parametrize("strategy", STRATEGIES)
 class TestTheExactNameIsNotExempt:
-    """#953 through the conventional name: `bbox` may be the SECONDARY's envelope."""
+    """#953 through the conventional name: `bbox` may be the SECONDARY's envelope.
 
-    def test_a_bbox_the_secondary_declares_is_not_the_primarys(self, strategy, tmp_path):
-        input_file = tmp_path / "in.parquet"
-        output_file = tmp_path / "out.parquet"
-        create_multi_geometry_with_secondary_bbox(
-            str(input_file), declare_boundary_covering=True, bbox_name="bbox"
-        )
-
-        _rewrite(input_file, output_file, strategy)
-
-        geo = _geo(output_file)
-        assert "bbox" not in _covering_columns(geo["columns"][geo["primary_column"]])
-        assert _covering_columns(geo["columns"]["boundary"]) == {"bbox"}
+    The negative half, a ``bbox`` the secondary declares, is A4's
+    ``secondary_declares_bbox`` shape (tests/test_write_contract_two_geometry.py).
+    """
 
     def test_an_undeclared_exact_bbox_is_still_declared(self, strategy, tmp_path):
         """The positive half, on every strategy (disk-rewrite included)."""

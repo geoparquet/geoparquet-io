@@ -783,6 +783,48 @@ def _merge_derived_geometry_info(caller: dict | None, derived: dict | None) -> d
     return merged
 
 
+def _rebuilt_secondary_crs(
+    con,
+    query: str,
+    geometry_info: dict | None,
+    metadata: dict | None,
+    geometry_column: str | None,
+    rebuild: bool,
+    output_columns: list[str] | None,
+    verbose: bool,
+) -> tuple[dict | None, list[str] | None]:
+    """``geometry_info`` keeping each secondary's declared ``crs`` through a rebuild.
+
+    ``declared_write_metadata`` strips every column's ``crs`` for the composer
+    to decide, but only the primary's has a decider (``input_crs``); a declared
+    secondary came out with no ``crs`` key, i.e. OGC:CRS84. ``convert`` hid it
+    by naming the CRS in its own ``geometry_info``, which still wins the merge.
+
+    Only a secondary the query emits is restored: a ``geometry_info`` entry
+    survives the merge, so restoring a projected-away one would declare a
+    column the file does not have. The pruning step's probe is reused; it
+    skips a ``geo``-only input, whose stripped metadata is empty, so the output
+    columns are probed here then, and returned for the later steps to reuse.
+    Unknown output columns restore nothing, the gate ``_resolve_geometry_info``
+    applies.
+    """
+    if not rebuild:
+        return geometry_info, output_columns
+    columns = (sanitized_carried_geo(metadata) or {}).get("columns") or {}
+    declared = {
+        name: {"crs": entry["crs"]}
+        for name, entry in columns.items()
+        if name != geometry_column and "crs" in entry
+    }
+    if declared and output_columns is None:
+        output_columns = _probe_output_columns(con, query, verbose, "restore secondary crs")
+    declared = {name: entry for name, entry in declared.items() if name in (output_columns or ())}
+    if not declared:
+        return geometry_info, output_columns
+    derived = {"primary": geometry_column, "secondary": list(declared), "metadata": declared}
+    return _merge_derived_geometry_info(geometry_info, derived), output_columns
+
+
 def _resolve_geometry_info(
     con,
     query: str,
@@ -1498,6 +1540,7 @@ def write_parquet_with_metadata(
 
     # A conversion rebuilds the input's measured facts. Transforming an
     # existing dataset can still use its carried block as a schema witness.
+    input_metadata = original_metadata
     if rebuild_geo_metadata:
         original_metadata = declared_write_metadata(original_metadata)
 
@@ -1543,6 +1586,16 @@ def write_parquet_with_metadata(
     # names schema roots the output does not have.
     original_metadata, output_columns = _prune_metadata_to_output_columns(
         con, query, original_metadata, geometry_column, verbose
+    )
+    geometry_info, output_columns = _rebuilt_secondary_crs(
+        con,
+        query,
+        geometry_info,
+        input_metadata,
+        geometry_column,
+        rebuild_geo_metadata,
+        output_columns,
+        verbose,
     )
 
     # The facade owns all three of these: how many rows a row group gets, which

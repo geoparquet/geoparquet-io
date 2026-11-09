@@ -7,6 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from geoparquet_io.core.geo_metadata import read_raw_geo
 from geoparquet_io.core.validate import validate_geoparquet
 from scripts.profile_command import CallSpies
 
@@ -116,7 +117,7 @@ def test_wide_validation_bounds_file_work(tmp_path):
         ],
     ]
     for listing in listings:
-        indexed = validate._ValidationSchema(listing, {})
+        indexed = validate._ValidationSchema(listing, {}, read_raw_geo({}))
         for name in ("meta", "broken", "geometry", "missing", ""):
             assert validate._schema_index(indexed, name) == root_schema_index(listing, name)
             assert indexed.nested.get(name) == nested_schema_index(listing, name)
@@ -132,14 +133,16 @@ def test_wide_validation_bounds_file_work(tmp_path):
         path = tmp_path / f"crs-{i}.parquet"
         table = pa.table({"geometry": [None]}, schema=pa.schema([("geometry", pa.binary())]))
         pq.write_table(table.replace_schema_metadata(_metadata({"geometry": entry})), path)
-        schema = validate._ValidationSchema(get_schema_info(str(path)), get_kv_metadata(str(path)))
+        kv = get_kv_metadata(str(path))
+        schema = validate._ValidationSchema(get_schema_info(str(path)), kv, read_raw_geo(kv))
         assert schema.crs_is_unknown(str(path), "geometry") == source_crs_is_unknown(
             str(path), "geometry"
         )
         # A new operation must see replacement metadata at the same path.
         changed = _metadata({"geometry": {"crs": None}})
         pq.write_table(table.replace_schema_metadata(changed), path)
-        fresh = validate._ValidationSchema(get_schema_info(str(path)), get_kv_metadata(str(path)))
+        kv = get_kv_metadata(str(path))
+        fresh = validate._ValidationSchema(get_schema_info(str(path)), kv, read_raw_geo(kv))
         assert fresh.crs_is_unknown(str(path), "geometry")
 
     # Native/geography CRS uses exactly the same type parser and entry precedence.
@@ -161,7 +164,7 @@ def test_wide_validation_bounds_file_work(tmp_path):
                         "geoparquet_io.core.duckdb_metadata.get_kv_metadata", return_value=metadata
                     ),
                 ):
-                    indexed = validate._ValidationSchema(listing, metadata)
+                    indexed = validate._ValidationSchema(listing, metadata, read_raw_geo(metadata))
                     assert indexed.crs_is_unknown(str(path), "geometry") == source_crs_is_unknown(
                         str(path), "geometry"
                     )

@@ -207,6 +207,85 @@ def test_a_crs_less_file_does_not_warn(tmp_path, _native_rows, caplog):
 
 
 # ---------------------------------------------------------------------------
+# Only one side names an authority id (#1014): pyproj decides
+# ---------------------------------------------------------------------------
+
+
+def _id_less_logical_file(tmp_path: Path, rows, *, logical_epsg: int, block_epsg: int) -> Path:
+    """Logical type: ``logical_epsg``'s full PROJJSON with its ``id`` stripped.
+
+    The ``geo`` block names ``block_epsg`` with its ``id``, so exactly one side
+    carries an authority code.
+    """
+    import geoarrow.pyarrow as ga
+
+    body = json.loads(projjson(logical_epsg))
+    body.pop("id")
+    path = write_native_geo_only(
+        tmp_path / f"idless_{logical_epsg}_{block_epsg}.parquet",
+        rows,
+        {"geometry": (2, ga.wkb().with_crs(json.dumps(body)))},
+    )
+    return _with_geo_block(path, block_epsg)
+
+
+def test_a_one_sided_id_disagreement_warns(tmp_path, _native_rows, caplog):
+    """Block says EPSG:3857 by id; the logical type is EPSG:5070's body without one."""
+    path = _id_less_logical_file(tmp_path, _native_rows, logical_epsg=5070, block_epsg=3857)
+    assert geo_block_crs_id(path) == EPSG_3857
+    assert not isinstance(logical_crs_id(path), dict), "the logical type must carry no id"
+
+    with caplog.at_level(logging.WARNING):
+        resolved = crs_of(str(path))
+
+    assert (resolved or {}).get("id") == EPSG_3857, "the documented preference must not change"
+    warnings = [r.message for r in caplog.records if "Using EPSG:3857" in r.message]
+    assert len(warnings) == 1, caplog.records
+
+
+def test_a_one_sided_id_rendering_of_the_same_crs_does_not_warn(tmp_path, _native_rows, caplog):
+    """Block names EPSG:5070 by id; the logical type is the same body without one."""
+    path = _id_less_logical_file(tmp_path, _native_rows, logical_epsg=5070, block_epsg=5070)
+    assert not isinstance(logical_crs_id(path), dict), "the logical type must carry no id"
+
+    with caplog.at_level(logging.WARNING):
+        resolved = crs_of(str(path))
+
+    assert (resolved or {}).get("id") == EPSG_5070
+    assert caplog.records == []
+
+
+def _id_less(epsg: int) -> dict:
+    body = json.loads(projjson(epsg))
+    body.pop("id")
+    return body
+
+
+@pytest.mark.parametrize(
+    ("block", "native", "disagree"),
+    [
+        # A bare code against the same CRS spelled out without one: the same CRS.
+        pytest.param("EPSG:3857", _id_less(3857), False, id="string-block-same-crs"),
+        pytest.param(_id_less(3857), "EPSG:3857", False, id="string-native-same-crs"),
+        pytest.param("EPSG:3857", _id_less(32633), True, id="string-block-different-crs"),
+        # A side pyproj cannot read proves nothing, so it never warns.
+        pytest.param("not a crs", _id_less(3857), False, id="unreadable-string"),
+        pytest.param(
+            {"id": {"authority": "EPSG", "code": 999999}},
+            _id_less(3857),
+            False,
+            id="unreadable-id-stub",
+        ),
+    ],
+)
+def test_a_one_sided_id_warns_only_when_pyproj_proves_a_difference(block, native, disagree):
+    """A warning fails open where ``crs_equal`` fails closed (#1014)."""
+    from geoparquet_io.core.crs_utils import _crs_sources_disagree
+
+    assert _crs_sources_disagree(block, native) is disagree
+
+
+# ---------------------------------------------------------------------------
 # Two geometry columns: the comparison is about the primary one
 # ---------------------------------------------------------------------------
 

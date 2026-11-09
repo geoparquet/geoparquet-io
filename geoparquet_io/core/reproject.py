@@ -13,14 +13,12 @@ from geoparquet_io.core.bbox_structure import bbox_shaped_struct_columns, check_
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import (
-    crs_of,
     entry_crs_is_unknown,
     geoparquet_crs_is_null,
     is_projected,
-    lonlat_source_name,
     projjson_for_label,
+    source_crs_name,
     table_crs_is_unknown,
-    transform_source_crs,
     transform_source_label,
     unknown_crs_error,
     unknown_crs_reason,
@@ -96,21 +94,6 @@ class ReprojectResult:
     source_crs: str
     target_crs: str
     feature_count: int
-
-
-def _detect_crs_from_table(table: pa.Table, geom_col: str) -> str:
-    """Detect the ``ST_Transform`` source CRS of ``geom_col`` in ``table``.
-
-    Reads the ``geo`` block, then the GeoArrow field a native-geo-only table
-    carries its CRS on (#1262), and resolves it through
-    :func:`transform_source_crs`, which raises for a CRS it cannot use.
-
-    Returns:
-        ``"AUTH:CODE"``, canonical PROJJSON, or ``"EPSG:4326"`` when absent
-    """
-    crs = crs_of(table, geometry_column=geom_col)
-    # A missing CRS is WGS84 per the GeoParquet spec.
-    return transform_source_crs(crs) or lonlat_source_name(crs)
 
 
 def _warn_edges_dropped(col_name: str, edges: str, target_crs: str) -> None:
@@ -232,7 +215,7 @@ def reproject_table(
             raise ValueError(NULL_CRS_TABLE_ERROR)
         effective_source_crs = "OGC:CRS84"
     else:
-        effective_source_crs = _detect_crs_from_table(table, geom_col)
+        effective_source_crs = source_crs_name(table, geometry_column=geom_col)
 
     # Create connection and register table
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
@@ -270,29 +253,6 @@ def reproject_table(
         return result
     finally:
         con.close()
-
-
-def _detect_source_crs(input_path: str, verbose: bool, geom_col: str | None = None) -> str:
-    """Detect the source CRS of ``geom_col`` (the primary when ``None``).
-
-    Args:
-        input_path: RAW (unescaped) path/URL to the input file —
-            ``crs_of`` escapes its own argument (#718)
-        verbose: Whether to print verbose output
-
-    Returns:
-        CRS string like "EPSG:4326" or PROJJSON string for ST_Transform
-    """
-    crs_info = crs_of(input_path, verbose=verbose, geometry_column=geom_col)
-
-    resolved = transform_source_crs(crs_info)
-    if resolved:
-        return resolved
-
-    # Default to WGS84 per GeoParquet spec (missing CRS = WGS84)
-    if verbose and not crs_info:
-        debug("No CRS found in metadata, assuming EPSG:4326 (WGS84)")
-    return lonlat_source_name(crs_info)
 
 
 def _get_bbox_column_name(input_path: str, verbose: bool) -> str | None:
@@ -523,8 +483,8 @@ def reproject_impl(
                 info(f"Using source CRS: {source_crs}")
                 effective_source_crs = source_crs
             else:
-                effective_source_crs = forced_source or _detect_source_crs(
-                    read_source, verbose, geom_col
+                effective_source_crs = forced_source or source_crs_name(
+                    read_source, verbose, geometry_column=geom_col
                 )
                 log(f"Source CRS: {transform_source_label(effective_source_crs)}")
 
@@ -717,7 +677,7 @@ def _reproject_streaming(
             effective_source_crs = (
                 source_crs
                 or forced_source
-                or _detect_source_crs(working_file, verbose=False, geom_col=geom_col)
+                or source_crs_name(working_file, geometry_column=geom_col)
             )
 
             # Check for existing bbox column to exclude (will be regenerated)

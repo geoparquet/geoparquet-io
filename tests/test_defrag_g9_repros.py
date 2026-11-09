@@ -255,6 +255,33 @@ def test_1359_convert_geojson_writes_an_empty_collection_for_zero_rows(tmp_path)
     assert collection.get("features") == []
 
 
+def test_1359_convert_geojson_keeps_rows_whose_geometry_is_all_null(tmp_path):
+    """The other half of #1359: rows, but not one geometry among them.
+
+    DuckDB again observes no geometry, writes no ``geo`` key, and the column
+    scans back as BLOB, so this reaches the same ``ST_IsValid(BLOB)`` binder
+    error the zero-row file did unless the column is decoded first. Both
+    GeoJSON writers drop NULL-geometry rows (``geojson_stream``), so the
+    result is an empty collection.
+    """
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+
+    src = tmp_path / "all_null.parquet"
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        con.execute(
+            "COPY (SELECT i AS id, NULL::GEOMETRY AS geometry FROM range(3) t(i)) "
+            f"TO {sql_path(str(src))} (FORMAT parquet)"
+        )
+    finally:
+        con.close()
+    assert b"geo" not in (pq.read_metadata(str(src)).metadata or {})
+    out = tmp_path / "out.geojson"
+    result = _run("convert", "geojson", src, out)
+    assert result.exit_code == 0, _explain(result)
+    assert json.loads(out.read_text()) == {"type": "FeatureCollection", "features": []}
+
+
 # ---------------------------------------------------------------------------
 # #1292 -- Table.bounds is None for a GeoArrow WKB column with no geo key
 # ---------------------------------------------------------------------------

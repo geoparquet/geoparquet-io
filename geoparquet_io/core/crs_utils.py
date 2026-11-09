@@ -229,6 +229,8 @@ def _is_crs84_equivalent(crs) -> bool:
         # No id member (allowed in PROJJSON): fall back to a semantic
         # comparison. Axis order is ignored because GeoParquet fixes
         # coordinate order to (x, y) regardless of the CRS definition.
+        if not _is_projjson_crs(crs):
+            return False
         try:
             from pyproj import CRS as PyprojCRS
 
@@ -383,7 +385,7 @@ def horizontal_crs(crs):
         if "$schema" in crs and "$schema" not in result:
             result = {"$schema": crs["$schema"], **result}
         return result
-    if _axis_count(crs) == 3:
+    if _axis_count(crs) == 3 and _is_projjson_crs(crs):
         try:
             from pyproj import CRS as PyprojCRS
 
@@ -610,6 +612,18 @@ PROJJSON_CRS_TYPES = frozenset(
         "DerivedTemporalCRS",
     }
 )
+
+
+def _is_projjson_crs(value: object) -> bool:
+    """Whether ``value`` is a PROJJSON CRS object, the only dict pyproj is handed.
+
+    pyproj reads a dict with a ``proj`` or ``init`` member (or JSON text that
+    decodes to one) as PROJ parameters, and PROJ opens the file an ``init``
+    names; a CRS value comes from a file's metadata or a server.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("type"), str):
+        return False
+    return value["type"] in PROJJSON_CRS_TYPES and not {"proj", "init"} & value.keys()
 
 
 # PROJJSON members that define a CRS rather than merely identify or annotate it.
@@ -1054,19 +1068,29 @@ def _block_names_the_default(raw) -> bool:
 def _crs_sources_disagree(geo_block_crs, native_crs) -> bool:
     """True only when both sources name a CRS and the two are demonstrably different.
 
-    Deliberately conservative: it reports a disagreement only when *both* sides
-    resolve to an authority identifier and those identifiers differ. A warning on
-    the write path that cries wolf is worse than one that is occasionally quiet,
-    and two PROJJSON objects with no ``id`` can be textually different renderings
-    of the same CRS (different pyproj versions spell the same datum out
-    differently), which is not something to tell a user their file is broken over.
+    When both sides resolve to an authority identifier, the identifiers decide.
+    When exactly one does, pyproj decides (axis order ignored), so a full
+    PROJJSON of a different CRS with its ``id`` stripped is not mistaken for
+    another rendering of the same one (#1014); it warns only when both sides
+    load and differ, because a warning fails open where :func:`crs_equal`
+    (built for consistency checks) fails closed.
 
-    ``crs_equal`` also resolves absent and explicit-null cases; this warning
-    compares only the two stated authority identifiers.
+    When neither has an identifier it stays silent: two PROJJSON objects with no
+    ``id`` can be textually different renderings of the same CRS (different
+    pyproj versions spell the same datum out differently), which is not
+    something to tell a user their file is broken over. A warning on the write
+    path that cries wolf is worse than one that is occasionally quiet.
     """
     left = crs_authority_code(geo_block_crs)
     right = crs_authority_code(native_crs)
-    return bool(left and right and left != right)
+    if left and right:
+        return left != right
+    if not (left or right) or not (geo_block_crs and native_crs):
+        return False
+    left_crs, right_crs = load_crs(geo_block_crs), load_crs(native_crs)
+    if left_crs is None or right_crs is None:
+        return False
+    return not left_crs.equals(right_crs, ignore_axis_order=True)
 
 
 @lru_cache(maxsize=256)
@@ -1420,10 +1444,16 @@ def _load_crs_cached(kind: str, key: str):
     from pyproj import CRS
 
     try:
-        if kind == "json":
-            return CRS.from_json(key)
         if kind == "authority":
             return CRS.from_authority(*key.split(":", 1))
+        if kind == "json" or "{" in key:
+            # Classified by its decoded shape: pyproj decodes any text with a
+            # "{" and reads a non-PROJJSON dict as PROJ parameters.
+            return CRS.from_json(key) if _is_projjson_crs(json.loads(key)) else None
+        # PROJ opens (or fetches) whatever an init= parameter names, and this
+        # text comes from files and servers: refused before pyproj sees it.
+        if names_proj_init_file(key):
+            return None
         return CRS.from_user_input(key)
     except Exception:  # pyproj raises CRSError, ValueError, TypeError
         return None
@@ -1781,6 +1811,8 @@ def _canonical_projjson(key: str) -> tuple[bool, str | None]:
     from pyproj.exceptions import CRSError
 
     try:
+        if not _is_projjson_crs(json.loads(key)):
+            return False, None
         parsed = CRS.from_json(key)
     except (CRSError, TypeError, ValueError):
         return False, None
@@ -2043,6 +2075,23 @@ def source_crs_string(
     :func:`transform_source_crs` returns, ``None`` for lon/lat input.
     """
     return transform_source_crs(crs_of(parquet_file, verbose, geometry_column=geometry_column))
+
+
+def source_crs_name(source, verbose: bool = False, geometry_column: str | None = None) -> str:
+    """``source``'s CRS as an ``ST_Transform`` source, naming lon/lat too.
+
+    ``source`` is anything :func:`crs_of` reads (a RAW path/URL or a table).
+    What :func:`source_crs_string` returns, except that lon/lat input is named
+    by :func:`lonlat_source_name` (``"EPSG:4326"`` when absent, per the
+    GeoParquet spec) instead of ``None``, for a caller that always transforms.
+    """
+    crs = crs_of(source, verbose, geometry_column=geometry_column)
+    resolved = transform_source_crs(crs)
+    if resolved:
+        return resolved
+    if verbose and not crs:
+        debug("No CRS found in metadata, assuming EPSG:4326 (WGS84)")
+    return lonlat_source_name(crs)
 
 
 def reproject_to_source_sql(geom_expr: str, source_crs, base_crs: str = DEFAULT_TARGET_CRS) -> str:

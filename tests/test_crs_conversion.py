@@ -31,14 +31,11 @@ from geoparquet_io.core.crs_utils import (
     _extract_crs_identifier,
     crs_of,
     is_default_crs,
+    source_crs_name,
 )
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.parquet_writer import WriteOptions
-from geoparquet_io.core.reproject import (
-    _detect_crs_from_table,
-    _detect_source_crs,
-)
 from tests.geo_schema_helpers import parse_geometry_type_from_schema
 
 # Helper functions for CRS testing
@@ -727,7 +724,7 @@ class TestCRSDetectionHelpers:
         )
         table = pa.table({"geometry": [b""]}, schema=schema)
 
-        crs = _detect_crs_from_table(table, "geometry")
+        crs = source_crs_name(table, geometry_column="geometry")
         assert crs == "EPSG:3857"
 
     def test_detect_crs_from_table_defaults_to_4326(self):
@@ -737,7 +734,7 @@ class TestCRSDetectionHelpers:
         schema = pa.schema([pa.field("geometry", pa.binary())])
         table = pa.table({"geometry": [b""]}, schema=schema)
 
-        crs = _detect_crs_from_table(table, "geometry")
+        crs = source_crs_name(table, geometry_column="geometry")
         assert crs == "EPSG:4326"
 
     def test_detect_crs_from_table_handles_missing_column(self):
@@ -755,7 +752,7 @@ class TestCRSDetectionHelpers:
         table = pa.table({"geometry": [b""]}, schema=schema)
 
         # Looking for 'geometry' but metadata only has 'geom'
-        crs = _detect_crs_from_table(table, "geometry")
+        crs = source_crs_name(table, geometry_column="geometry")
         assert crs == "EPSG:4326"
 
     def test_detect_crs_from_table_handles_invalid_json(self):
@@ -767,7 +764,7 @@ class TestCRSDetectionHelpers:
         )
         table = pa.table({"geometry": [b""]}, schema=schema)
 
-        crs = _detect_crs_from_table(table, "geometry")
+        crs = source_crs_name(table, geometry_column="geometry")
         assert crs == "EPSG:4326"
 
     def test_detect_crs_from_table_projjson_without_id(self):
@@ -794,13 +791,13 @@ class TestCRSDetectionHelpers:
         )
         table = pa.table({"geometry": [b""]}, schema=schema)
 
-        crs = _detect_crs_from_table(table, "geometry")
+        crs = source_crs_name(table, geometry_column="geometry")
         assert crs != "EPSG:4326", "Should not fall back to 4326 when valid PROJJSON exists"
         # Should resolve to EPSG:32145 via pyproj, or be a PROJJSON string DuckDB can use
         assert "32145" in crs or crs.startswith("{")
 
     def test_detect_source_crs_projjson_without_id(self, tmp_path):
-        """_detect_source_crs should not fall back to 4326 when PROJJSON lacks id field."""
+        """source_crs_name should not fall back to 4326 when PROJJSON lacks id field."""
         import pyarrow as pa
         import pyarrow.parquet as pq
         from pyproj import CRS as PyprojCRS
@@ -825,7 +822,7 @@ class TestCRSDetectionHelpers:
         test_file = str(tmp_path / "test.parquet")
         pq.write_table(table, test_file)
 
-        crs = _detect_source_crs(test_file, verbose=False)
+        crs = source_crs_name(test_file)
         assert crs != "EPSG:4326", "Should not fall back to 4326 when valid PROJJSON exists"
         assert "32145" in crs or crs.startswith("{")
 

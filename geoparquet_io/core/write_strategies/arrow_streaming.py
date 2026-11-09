@@ -26,6 +26,7 @@ from geoparquet_io.core.duckdb_utils import (
     _wrap_query_with_wkb_conversion,
     describe_query,
     duckdb_type_is_geometry,
+    query_schema,
 )
 from geoparquet_io.core.edges import edges_of
 from geoparquet_io.core.geo_metadata import (
@@ -37,6 +38,7 @@ from geoparquet_io.core.geo_metadata import (
     compose_geo_block,
     geometry_stats_of,
     geometry_types_of,
+    missing_geometry_types,
     sanitized_carried_geo,
     with_geo_key,
 )
@@ -342,12 +344,9 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             if verbose:
                 debug(f"1.1-geoarrow target encoding: {geoarrow_encoding}")
 
-        if verbose:
-            debug(f"Executing query with batch size {batch_size:,}...")
-
-        # Nothing below queries `con` while the reader is open.
-        reader = _sized_reader(con, final_sql, batch_size)
-        schema = reader.schema
+        # The block is composed over a zero-row probe, before the reader opens:
+        # measuring a secondary's missing geometry_types queries `con` (#1433).
+        schema = query_schema(con, final_sql)
 
         if geometry_column not in schema.names:
             raise ValueError(
@@ -371,6 +370,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geometry_info,
             geoarrow_encoding=geoarrow_encoding,
             custom_metadata=custom_metadata,
+            measure_source=QuerySource(con, query),
         )
         native_crs = native_geometry_crs(
             geoparquet_version, geo_meta, geometry_column, geometry_info
@@ -380,6 +380,13 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
 
         # Prepare writer kwargs
         writer_kwargs = codec.pyarrow_kwargs()
+
+        if verbose:
+            debug(f"Executing query with batch size {batch_size:,}...")
+
+        # Nothing below queries `con` while the reader is open.
+        reader = _sized_reader(con, final_sql, batch_size)
+        schema = reader.schema
 
         if verbose:
             progress(f"Streaming to {output_path}...")
@@ -441,6 +448,8 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         geometry_info: dict | None = None,
         geoarrow_encoding: str | None = None,
         custom_metadata: dict | None = None,
+        *,
+        measure_source: QuerySource,
     ) -> dict:
         """Compose the geo block for query results, over the query's own schema.
 
@@ -465,6 +474,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 crs=input_crs,
                 stats={geometry_column: measured},
                 geometry_info=geometry_info,
+                measure_missing=lambda block: missing_geometry_types(measure_source, block),
                 verbose=verbose,
             ),
         )
@@ -772,6 +782,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 crs=input_crs,
                 stats={geometry_column: measured or {"geometry_types": geom_types}},
                 geometry_info=geometry_info,
+                measure_missing=lambda block: missing_geometry_types(table, block),
                 verbose=verbose,
             ),
         )

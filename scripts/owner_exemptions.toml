@@ -344,6 +344,12 @@ reason = "permanent: constant geometry filter, not a spatial join"
 "*rows_for_*target*" = ["geoparquet_io/core/parquet_writer.py"]
 "estimate_row_size" = ["geoparquet_io/core/parquet_writer.py"]
 "align_to_writer_vector" = ["geoparquet_io/core/parquet_writer.py"]
+# Geometry-column and CRS detection: the owners answer them for files, tables
+# and schemas. A source-specific probe (a GDAL bind, a service's schema) is an
+# exemption with its reason, never a new wrapper around the owner.
+"*detect_geometry_column*" = ["geoparquet_io/core/geometry_detection.py"]
+"*detect*crs*" = ["geoparquet_io/core/crs_utils.py"]
+"*source_crs*" = ["geoparquet_io/core/crs_utils.py"]
 
 # Renamed copies no glob sees, by the family they belong to (the #1367
 # Copies rows and the T0b audit). A name here is banned outside the owner even
@@ -363,6 +369,22 @@ reason = "permanent: constant geometry filter, not a spatial join"
 path = "geoparquet_io/core/carto.py"
 name = "_fetch_with_retry"
 reason = "permanent: caller-specific classify wrapper over run_with_retry, accepted caller-specific classification"
+[[G2.exemptions]]
+path = "geoparquet_io/core/convert.py"
+name = "_detect_geometry_column"
+reason = "permanent: the GDAL source's ST_Read ... LIMIT 0 bind, which also hands back the bound columns (#1079, #1242); the naming decision is primary_geometry_column's"
+[[G2.exemptions]]
+path = "geoparquet_io/core/duckdb_metadata.py"
+name = "detect_geometry_columns"
+reason = "permanent: lists every Parquet GEOMETRY/GEOGRAPHY logical-type column of a file, the native-type probe duckdb_metadata owns (native_geo_type); not primary-column detection"
+[[G2.exemptions]]
+path = "geoparquet_io/core/extract_bigquery.py"
+name = "_detect_geometry_column_from_schema"
+reason = "permanent: a BigQuery table's native GEOMETRY column only; a VARCHAR WKT/GeoJSON column falls through to --geography-column, unlike primary_geometry_column"
+[[G2.exemptions]]
+path = "geoparquet_io/core/wfs.py"
+name = "_reconcile_source_crs"
+reason = "permanent: reconciles the CRS a WFS server declared against the srsName requested (reproject, raise or relabel, #499); not CRS detection"
 
 # ---------------------------------------------------------------------------
 # G3: near-duplicate functions (scripts/check_duplicates.py; pylint R0801)

@@ -18,13 +18,13 @@ like -- are not re-exported, and nothing outside this module reached them).
 from geoparquet_io.core.arrow_types import _rebuild_array_with_type
 from geoparquet_io.core.bbox_structure import _bbox_column_from_covering
 from geoparquet_io.core.crs_utils import (
-    PARQUET_UNKNOWN_CRS,
+    UnresolvableCRSError,
+    _crs_from_geoarrow_field,
     _format_crs_display,
-    crs_of,
     field_type_crs_is_unknown,
     is_default_crs,
     is_empty_crs_value,
-    table_crs_is_unknown,
+    projjson_for_label,
 )
 from geoparquet_io.core.duckdb_utils import geoarrow_extension, planar_view
 from geoparquet_io.core.edges import (
@@ -45,6 +45,7 @@ from geoparquet_io.core.geo_metadata import (
     geometry_stats_of,
     geometry_types_of,
     is_bbox_struct_field,
+    missing_geometry_types,
     sanitized_carried_geo,
     with_geo_key,
 )
@@ -196,9 +197,28 @@ def _secondary_crs_from_field(field) -> dict:
     """
     if field_type_crs_is_unknown(field):
         return {"crs": None}
-    crs = _crs_as_projjson(getattr(field.type, "crs", None))
+    import pyarrow as pa
+
+    # crs_of's field reader: the type's crs, or on a plain binary field the raw
+    # ARROW:extension:metadata (#1400's probe was the only other reader of it).
+    crs = _crs_from_geoarrow_field(pa.schema([field]), field.name)
     if is_empty_crs_value(crs):
         return {"crs": None}
+    if isinstance(crs, str) and crs.strip().lower().startswith("srid:"):
+        from geoparquet_io.core.duckdb_metadata import resolve_crs_reference
+
+        # srid:<N> is the Parquet type's EPSG:<N> (geoarrow_compat keeps it as
+        # this text); the reference owner maps it. No file is read for it.
+        crs = resolve_crs_reference("", crs)
+        if crs is None:  # srid:0, unknown
+            return {"crs": None}
+    if isinstance(crs, str):
+        # Text (AUTH:CODE, PROJJSON, WKT) goes through the label owner, which
+        # never reads an init= file; text nothing defines is unknown, not CRS84.
+        try:
+            crs = projjson_for_label(crs)
+        except UnresolvableCRSError:
+            return {"crs": None}
     if isinstance(crs, dict) and not is_default_crs(crs):
         return {"crs": crs}
     return {}
@@ -762,7 +782,12 @@ def _apply_geoparquet_metadata(
             measured["bbox"] = stats.bbox
         if need_types:
             measured["geometry_types"] = stats.geometry_types
-    geo_meta = _build_geo_block(table, *block_args, stats={geometry_column: measured})
+    geo_meta = _build_geo_block(
+        table,
+        *block_args,
+        stats={geometry_column: measured},
+        measure_missing=lambda block: missing_geometry_types(table, block),
+    )
 
     return _assemble_and_apply_geo_metadata(table, geo_meta, metadata_version, verbose)
 
@@ -778,6 +803,7 @@ def _build_geo_block(
     geometry_info: dict | None,
     verbose: bool,
     stats: dict | None = None,
+    measure_missing=None,
 ) -> dict:
     """The output's ``geo`` block, composed over the table's schema.
 
@@ -793,18 +819,6 @@ def _build_geo_block(
     """
     if verbose and input_crs and not is_default_crs(input_crs):
         debug(f"Added CRS to geo metadata: {_format_crs_display(input_crs)}")
-    # Resolve CRS data from the intact table before composing stripped declarations.
-    column_crs = {
-        name: (
-            PARQUET_UNKNOWN_CRS
-            if table_crs_is_unknown(table, name)
-            else crs_of(table, geometry_column=name, quiet=True)
-        )
-        for name in (
-            table_geometry_info(table, None, sanitized_carried_geo(table.schema.metadata)) or {}
-        ).get("metadata", {})
-        if name != geometry_column
-    }
     return compose_geo_block(
         SchemaSource(table.schema, original_metadata),
         GeoBlockOptions(
@@ -815,9 +829,9 @@ def _build_geo_block(
             custom_metadata=custom_metadata,
             edges=edges,
             crs=input_crs,
-            column_crs=column_crs,
             stats=stats,
             geometry_info=geometry_info,
+            measure_missing=measure_missing,
             verbose=verbose,
         ),
     )

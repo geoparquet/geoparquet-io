@@ -11,6 +11,7 @@ import pytest
 
 from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_geometry_types_list,
@@ -47,12 +48,16 @@ def _col(*types):
 class TestGeometryTypesUnique:
     @pytest.mark.parametrize("types", [["Point", "Point"], ["Polygon Z", "Polygon Z", "Polygon"]])
     def test_duplicates_fail(self, types):
-        check = _check_geometry_types_list({"geometry_types": types}, "geometry")
+        check = _check_geometry_types_list(
+            parse_column_meta("geometry", {"geometry_types": types}), "geometry"
+        )
         assert check.status == CheckStatus.FAILED
         assert "duplicate" in check.message
 
     def test_distinct_pass(self):
-        check = _check_geometry_types_list({"geometry_types": ["Polygon", "Polygon Z"]}, "geometry")
+        check = _check_geometry_types_list(
+            parse_column_meta("geometry", {"geometry_types": ["Polygon", "Polygon Z"]}), "geometry"
+        )
         assert check.status == CheckStatus.PASSED
 
 

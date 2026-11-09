@@ -18,6 +18,7 @@ from geoparquet_io.core.crs_utils import (
     geoparquet_crs_is_null,
     reset_null_crs_warnings,
 )
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.reproject import _reproject_streaming, reproject, reproject_table
 from geoparquet_io.core.validate import CheckStatus, _check_crs_valid
@@ -66,20 +67,23 @@ def test_geoparquet_crs_is_null_false_for_normal(buildings_test_file):
 
 
 def test_validate_crs_null_is_warning():
-    check = _check_crs_valid({"crs": None}, "geometry")
+    check = _check_crs_valid(parse_column_meta("geometry", {"crs": None}), "geometry")
     assert check.status == CheckStatus.WARNING
     assert "unknown" in check.message.lower()
     assert "assume-crs84" in check.message
 
 
 def test_validate_crs_absent_is_passed():
-    check = _check_crs_valid({}, "geometry")
+    check = _check_crs_valid(parse_column_meta("geometry", {}), "geometry")
     assert check.status == CheckStatus.PASSED
     assert "CRS84" in check.message
 
 
 def test_validate_crs_projjson_still_passes():
-    check = _check_crs_valid({"crs": {"type": "GeographicCRS", "name": "WGS 84"}}, "geometry")
+    check = _check_crs_valid(
+        parse_column_meta("geometry", {"crs": {"type": "GeographicCRS", "name": "WGS 84"}}),
+        "geometry",
+    )
     assert check.status == CheckStatus.PASSED
 
 

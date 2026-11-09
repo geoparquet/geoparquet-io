@@ -141,10 +141,15 @@ def _write_via_query(source: str, out: str, version: str, strategy: str) -> None
 
 
 class TestSecondaryCarrierMatchesTheTargetVersion:
-    """The carrier decision is per version and applies to every geometry column."""
+    """The carrier decision is per version and applies to every geometry column.
+
+    1.1 and 2.0, and row conservation, are A4's carrier and row legs on every
+    two-geometry shape (tests/test_write_contract_two_geometry.py); 1.0 is not
+    on that version axis, so it stays here.
+    """
 
     @pytest.mark.parametrize("strategy", STRATEGIES)
-    @pytest.mark.parametrize("version", ["1.0", "1.1"])
+    @pytest.mark.parametrize("version", ["1.0"])
     def test_v1x_writes_plain_wkb_for_both_columns(
         self, strategy, version, two_geometry_source, tmp_path
     ):
@@ -161,7 +166,7 @@ class TestSecondaryCarrierMatchesTheTargetVersion:
         )
 
     @pytest.mark.parametrize("strategy", STRATEGIES)
-    @pytest.mark.parametrize("version", ["1.0", "1.1"])
+    @pytest.mark.parametrize("version", ["1.0"])
     def test_v1x_output_is_valid(self, strategy, version, two_geometry_source, tmp_path):
         """The file a native secondary produced failed version_features_match."""
         out = str(tmp_path / f"valid_{strategy}_{version}.parquet")
@@ -169,31 +174,6 @@ class TestSecondaryCarrierMatchesTheTargetVersion:
         _write_via_query(two_geometry_source, out, version, strategy)
 
         assert _failed_checks(out) == []
-
-    @pytest.mark.parametrize("strategy", STRATEGIES)
-    def test_v20_writes_native_for_both_columns(self, strategy, two_geometry_source, tmp_path):
-        """2.0 requires a native Parquet GEOMETRY type for every declared column."""
-        out = str(tmp_path / f"{strategy}_20.parquet")
-
-        _write_via_query(two_geometry_source, out, "2.0", strategy)
-
-        carriers = _carriers(out)
-        assert carriers["geometry"] == "native"
-        assert carriers["geom2"] == "native", (
-            f"{strategy} left the secondary column as {carriers['geom2']} in a 2.0 file"
-        )
-        assert _failed_checks(out) == []
-
-    @pytest.mark.parametrize("strategy", STRATEGIES)
-    def test_rows_survive(self, strategy, two_geometry_source, tmp_path):
-        """Converting a second column must not drop or reorder rows."""
-        out = str(tmp_path / f"rows_{strategy}.parquet")
-
-        _write_via_query(two_geometry_source, out, "1.1", strategy)
-
-        table = pq.read_table(out)
-        assert table.num_rows == 2
-        assert table.column("id").to_pylist() == [1, 2]
 
 
 class TestSecondaryCarrierOnTheTableEntryPoint:

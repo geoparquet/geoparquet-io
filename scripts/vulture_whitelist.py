@@ -35,10 +35,10 @@ has_estimate  # unused variable (geoparquet_io/core/preview.py:60) -- dynamic: f
 stats_source  # unused variable (geoparquet_io/core/preview.py:64) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 est_rows  # unused variable (geoparquet_io/core/preview.py:68) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
 est_bytes  # unused variable (geoparquet_io/core/preview.py:70) -- dynamic: field of a dataclass/TypedDict, part of the result's public shape
-_.maxstring  # unused attribute (geoparquet_io/core/validate.py:1833) -- dynamic: reprlib.Repr setting, read by reprlib
-_.maxdict  # unused attribute (geoparquet_io/core/validate.py:1834) -- dynamic: reprlib.Repr setting, read by reprlib
-_.maxlist  # unused attribute (geoparquet_io/core/validate.py:1834) -- dynamic: reprlib.Repr setting, read by reprlib
-_.maxother  # unused attribute (geoparquet_io/core/validate.py:1835) -- dynamic: reprlib.Repr setting, read by reprlib
+_.maxstring  # unused attribute (geoparquet_io/core/geo_metadata.py:685) -- dynamic: reprlib.Repr setting, read by reprlib
+_.maxdict  # unused attribute (geoparquet_io/core/geo_metadata.py:686) -- dynamic: reprlib.Repr setting, read by reprlib
+_.maxlist  # unused attribute (geoparquet_io/core/geo_metadata.py:686) -- dynamic: reprlib.Repr setting, read by reprlib
+_.maxother  # unused attribute (geoparquet_io/core/geo_metadata.py:687) -- dynamic: reprlib.Repr setting, read by reprlib
 supports_streaming  # unused variable (geoparquet_io/core/write_strategies/arrow_memory.py:42) -- dynamic: write-strategy capability flag of the strategy protocol
 supports_remote  # unused variable (geoparquet_io/core/write_strategies/arrow_memory.py:43) -- dynamic: write-strategy capability flag of the strategy protocol
 supports_streaming  # unused variable (geoparquet_io/core/write_strategies/arrow_streaming.py:299) -- dynamic: write-strategy capability flag of the strategy protocol
