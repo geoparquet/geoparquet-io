@@ -8,6 +8,7 @@ pass/fail status and for the warnings and failures.
 
 from __future__ import annotations
 
+import functools
 import os
 from typing import TYPE_CHECKING
 
@@ -248,8 +249,25 @@ def _one_file(path, command: str) -> str:
     return path
 
 
-def _structure_check(path, command: str, check_type: str, func, **kwargs) -> CheckResult:
-    path = _one_file(path, command)
+def _one_file_only(command: str):
+    """Refuse a directory or glob before the check runs; ``__wrapped__`` is the check itself.
+
+    ``Table.check_*`` calls ``__wrapped__``: a Table read from a directory hands
+    it to core, which measures the dataset.
+    """
+
+    def decorate(check):
+        @functools.wraps(check)
+        def one_file_check(path, *args, **kwargs):
+            return check(_one_file(path, command), *args, **kwargs)
+
+        return one_file_check
+
+    return decorate
+
+
+def _structure_check(path, check_type: str, func, **kwargs) -> CheckResult:
+    path = os.fspath(path)
     results = func(path, verbose=False, return_results=True, quiet=True, **kwargs)
     return CheckResult(results, check_type=check_type, source_path=path)
 
@@ -258,7 +276,7 @@ def _check_structure(path: str | os.PathLike, profile: CheckProfile | None = Non
     """The structure checks (row groups, bbox, covering, compression, bloom filters): ``Table.check``."""
     from geoparquet_io.core import check_parquet_structure as core
 
-    return _structure_check(path, "all", "all", core.check_all, profile=profile)
+    return _structure_check(path, "all", core.check_all, profile=profile)
 
 
 def _stage(check, path, stage: str, **kwargs) -> dict:
@@ -275,6 +293,7 @@ def _stage(check, path, stage: str, **kwargs) -> dict:
         return could_not_run(stage, clean_error_text(str(e)))
 
 
+@_one_file_only("all")
 def check_all(
     path: str | os.PathLike,
     profile: CheckProfile | None = None,
@@ -313,20 +332,23 @@ def check_all(
     return CheckResult(results, check_type="all", source_path=path)
 
 
+@_one_file_only("compression")
 def check_compression(path: str | os.PathLike) -> CheckResult:
     """Check the geometry column's compression; ZSTD is recommended. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
 
-    return _structure_check(path, "compression", "compression", core.check_compression)
+    return _structure_check(path, "compression", core.check_compression)
 
 
+@_one_file_only("row-group")
 def check_row_groups(path: str | os.PathLike, profile: CheckProfile | None = None) -> CheckResult:
     """Check row-group sizes for cloud-native access. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
 
-    return _structure_check(path, "row-group", "row_groups", core.check_row_groups, profile=profile)
+    return _structure_check(path, "row_groups", core.check_row_groups, profile=profile)
 
 
+@_one_file_only("bbox")
 def check_bbox(
     path: str | os.PathLike, sample_rows: int = DEFAULT_BBOX_SAMPLE_ROWS, all_rows: bool = False
 ) -> CheckResult:
@@ -341,24 +363,27 @@ def check_bbox(
     from geoparquet_io.core import check_parquet_structure as core
 
     return _structure_check(
-        path, "bbox", "bbox", core.check_bbox, verify_rows=sample_rows, all_rows=all_rows
+        path, "bbox", core.check_bbox, verify_rows=sample_rows, all_rows=all_rows
     )
 
 
+@_one_file_only("all")
 def check_bloom_filters(path: str | os.PathLike) -> CheckResult:
     """Check which columns carry bloom filters for point lookups. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
 
-    return _structure_check(path, "all", "bloom_filters", core.check_bloom_filters)
+    return _structure_check(path, "bloom_filters", core.check_bloom_filters)
 
 
+@_one_file_only("optimization")
 def check_optimization(path: str | os.PathLike) -> CheckResult:
     """Score a file's spatial-query optimization (geo types, stats, order, row groups, codec)."""
     from geoparquet_io.core import check_optimization as core
 
-    return _structure_check(path, "optimization", "optimization", core.check_optimization)
+    return _structure_check(path, "optimization", core.check_optimization)
 
 
+@_one_file_only("spatial")
 def check_spatial(
     path: str | os.PathLike, sample_size: int = 100, limit_rows: int = 500000
 ) -> CheckResult:
@@ -374,22 +399,23 @@ def check_spatial(
     return _structure_check(
         path,
         "spatial",
-        "spatial",
         core.check_spatial_order,
         random_sample_size=sample_size,
         limit_rows=limit_rows,
     )
 
 
+@_one_file_only("spatial")
 def check_spatial_pushdown(path: str | os.PathLike) -> CheckResult:
     """Estimate how many row groups a regional query can skip, from per-row-group bbox stats."""
     from geoparquet_io.core import check_spatial_order as core
 
-    path = _one_file(path, "spatial")
+    path = os.fspath(path)
     results = core.check_spatial_pushdown_readiness(path, verbose=False)
     return CheckResult(results, check_type="spatial_pushdown", source_path=path)
 
 
+@_one_file_only("spec")
 def validate(
     path: str | os.PathLike,
     version: str | None = None,
@@ -407,7 +433,7 @@ def validate(
     from geoparquet_io.core.check_verdict import SEVERITY_KEY, validation_verdict
     from geoparquet_io.core.validate import validate_geoparquet
 
-    path = _one_file(path, "spec")
+    path = os.fspath(path)
     outcome = validate_geoparquet(
         path,
         target_version=version,

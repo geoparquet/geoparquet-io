@@ -1070,19 +1070,10 @@ class Table:
         self._source_stat = (stat.st_size, stat.st_mtime_ns)
 
     def _measurable_source(self) -> str | None:
-        """The source file, if it is one local file and still the bytes this Table was read from.
-
-        A directory or glob is several files, which the path-level checks refuse,
-        so its rows are checked as the prospective copy instead.
-        """
-        from geoparquet_io.core.file_utils import is_partition_path
+        """The source file, if it is local and still the bytes this Table was read from."""
         from geoparquet_io.core.remote import is_remote_url
 
-        if (
-            self._source_path is None
-            or is_remote_url(self._source_path)
-            or is_partition_path(self._source_path)
-        ):
+        if self._source_path is None or is_remote_url(self._source_path):
             return None
         try:
             stat = os.stat(self._source_path)
@@ -3125,10 +3116,14 @@ class Table:
         return self._with_temp_file(func, *args, **kwargs), None
 
     def _run_check(self, check: Callable[..., CheckResult], **kwargs: Any) -> CheckResult:
-        """Run a path-level check from ``api/check.py`` through :meth:`_check_file`."""
+        """Run a path-level check from ``api/check.py`` through :meth:`_check_file`.
+
+        Without the path functions' one-file refusal: a Table read from a
+        directory hands it to core, which measures the dataset, as before #1090.
+        """
         from geoparquet_io.api.check import CheckResult
 
-        result, source = self._check_file(check, **kwargs)
+        result, source = self._check_file(getattr(check, "__wrapped__", check), **kwargs)
         return CheckResult(result.to_dict(), check_type=result.check_type, source_path=source)
 
     def _with_temp_io_files(self, func, **kwargs) -> pa.Table:

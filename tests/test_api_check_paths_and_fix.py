@@ -283,13 +283,20 @@ def test_fix_covering_on_a_good_file_leaves_codec_and_row_groups(tmp_path, unsor
     assert meta.row_group(0).column(0).compression == "SNAPPY"
 
 
-def test_a_table_read_from_a_directory_checks_a_prospective_copy(tmp_path, unsorted_test_file):
-    """The path-level door refuses a directory, so the Table checks its rows as on main."""
+def test_a_table_read_from_a_directory_checks_it_as_main_did(tmp_path, unsorted_test_file):
+    """The path functions refuse a directory; a Table read from one still hands it to core.
+
+    Pinned from main: core measures the dataset (its first file, SNAPPY here),
+    and the verdict names the directory as its source.
+    """
     for name in ("a.parquet", "b.parquet"):
         shutil.copy(unsorted_test_file, tmp_path / name)
-    result = gpio.read(str(tmp_path)).check_compression()
-    assert result.prospective
-    assert result.passed()
+    table = gpio.read(str(tmp_path))
+    compression, spec = table.check_compression(), table.validate()
+    assert compression.to_dict()["current_compression"] == "SNAPPY"
+    assert (compression.verdict(), spec.verdict()) == ("warning", "pass")
+    for result in (compression, spec):
+        assert (result.source_path, result.prospective) == (str(tmp_path), False)
 
 
 def test_spec_warnings_reach_the_result(tmp_path, unsorted_test_file):
