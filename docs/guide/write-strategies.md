@@ -289,7 +289,7 @@ Override auto-detection when needed:
 
     !!! note "`--write-memory` applies to every write strategy"
         Each strategy bounds its own DuckDB work by the limit: the COPY of
-        `duckdb-kv` and of `disk-rewrite`'s first phase, the query `streaming`
+        `duckdb-kv`, every scan of `disk-rewrite`'s first phase, the query `streaming`
         reads in batches, and the query `in-memory` materializes. What a
         strategy then does in pyarrow is outside DuckDB's accounting. Streaming
         Arrow IPC to stdout (`-`) has no write engine to configure, so the limit

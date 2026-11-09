@@ -1010,8 +1010,9 @@ If you need a pandas round trip, write the file with geopandas `to_parquet`
 instead.
 
 DuckDB's memory limit is auto-detected and respects container cgroup limits. To
-set it explicitly, use the CLI `gpio extract --write-memory` flag; the Python
-API does not expose a memory-limit argument.
+set it explicitly, pass `memory_limit` to `Table.write` (or set it in a
+`gpio.WriteOptions`), as `--write-memory` does on the CLI:
+`table.write('output.parquet', memory_limit='2GB')`.
 
 See the [Write Strategies Guide](../guide/write-strategies.md) for detailed information on each strategy.
 
