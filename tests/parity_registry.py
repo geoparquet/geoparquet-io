@@ -52,10 +52,14 @@ TWIN_NAMES: dict[str, list[str]] = {
     "inspect layers": ["list_layers"],
     "benchmark explain": ["explain_analyze"],
     "convert reproject": ["reproject"],
-    "check all": ["check"],
+    # `Table.fix` applies the fixes `--fix` does, selected by its `checks=` (#1078).
+    "check all": ["check", "fix"],
+    "check bbox": ["fix"],
+    "check compression": ["fix"],
+    "check spatial": ["fix"],
     "check spec": ["validate"],
     "check stac": ["validate_stac"],
-    "check row-group": ["check_row_groups"],
+    "check row-group": ["check_row_groups", "fix"],
     "check optimization": ["check_optimization"],
     "inspect summary": ["info"],
     "convert geoparquet": ["write", "convert"],
@@ -492,6 +496,7 @@ API_SPELLING = {
     "no_vecorel": "vecorel",
     "no_rs": "rs",
     "s3_no_ssl": "s3_use_ssl",
+    "fix_output": "output",
 }
 
 
@@ -649,8 +654,16 @@ _PARTITION_WRITE_OPTIONS = (
     "(#761)."
 )
 _CHECK_FIX = (
-    "#1078: repairs the file in place or into --fix-output. The API's `Table.fix` returns a "
-    "new Table instead, so the backup, overwrite and PMTiles knobs have nothing to act on."
+    "--fix selects the repair and --no-backup guards an in-place one. The API calls "
+    "`Table.fix`, which returns a new Table and never rewrites its input (#1078)."
+)
+_CHECK_PMTILES = (
+    "A second operation `check all` runs on request; the API runs it on the file: "
+    "`ops.create_pmtiles(...)`."
+)
+_FIX_CHECKS = (
+    "`Table.fix` serves every `check` leaf with --fix; `checks=` picks which checks' fixes "
+    "run, where the CLI picks by command."
 )
 _CHECK_KNOB = (
     "`check all` also runs the spatial-order check; the API runs `check_spatial`, which "
@@ -718,8 +731,9 @@ ONE_SIDED: dict[tuple[str, str, str], str] = {
         ("geoparquet_version", "row_group_size", "row_group_size_mb"),
     ),
     **_each("cli", _GAP, _PARTITIONS, "prefix"),
-    **_each("cli", _CHECK_FIX, _CHECKS_WITH_FIX, ("fix", "fix_output", "no_backup", "overwrite")),
-    **_each("cli", _CHECK_FIX, "check all", "pmtiles"),
+    **_each("cli", _CHECK_FIX, _CHECKS_WITH_FIX, ("fix", "no_backup")),
+    **_each("cli", _CHECK_PMTILES, "check all", "pmtiles"),
+    **_each("api", _FIX_CHECKS, _CHECKS_WITH_FIX, "checks"),
     **_each("cli", _CHECK_KNOB, "check all", ("limit_rows", "random_sample_size")),
     **_each("cli", _RENDERING, ("inspect head", "inspect tail"), ("max_columns", "no_truncate")),
     **_each(

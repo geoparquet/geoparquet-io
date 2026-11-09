@@ -11,6 +11,8 @@ from __future__ import annotations
 import os
 import shutil
 
+import pyarrow.compute as pc
+import pyarrow.parquet as pq
 import pytest
 
 import geoparquet_io as gpio
@@ -84,3 +86,62 @@ def test_a_remote_url_goes_straight_to_core(monkeypatch):
 
     assert seen == [url]
     assert result.source_path == url
+
+
+# --------------------------------------------------------------------------
+# Table.fix
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def unsorted_copy(tmp_path, unsorted_test_file):
+    path = tmp_path / "in.parquet"
+    shutil.copy(unsorted_test_file, path)
+    return path
+
+
+def test_fix_returns_a_fixed_table_and_leaves_the_input_alone(unsorted_copy):
+    before = unsorted_copy.read_bytes()
+    table = gpio.read(unsorted_copy)
+
+    fixed = table.fix()
+
+    assert unsorted_copy.read_bytes() == before
+    assert fixed is not table
+    assert fixed.source_path is None  # never a view of a scratch file
+    assert fixed.num_rows == table.num_rows
+    ids = fixed.to_arrow().column("id")
+    assert ids != table.to_arrow().column("id")  # Hilbert-sorted
+
+
+def test_fix_into_output_returns_a_view_of_the_repaired_file(tmp_path, unsorted_copy):
+    out = tmp_path / "fixed.parquet"
+
+    fixed = gpio.read(unsorted_copy).fix(output=out)
+
+    assert fixed.source_path == os.path.abspath(out)
+    assert gpio.check_compression(out).passed()
+    assert gpio.check_row_groups(out).passed()
+
+
+def test_fix_refuses_to_write_over_its_source(unsorted_copy):
+    alias = os.path.join(os.path.dirname(unsorted_copy), ".", unsorted_copy.name)
+
+    with pytest.raises(gpio.InvalidParameterError, match="source"):
+        gpio.read(unsorted_copy).fix(output=alias)
+
+
+def test_fix_refuses_an_unknown_check(unsorted_copy):
+    with pytest.raises(gpio.InvalidParameterError, match="bloom_filters"):
+        gpio.read(unsorted_copy).fix(checks=["compression", "bloom_filters"])
+
+
+def test_fix_honours_the_checks_subset(tmp_path, unsorted_copy):
+    out = tmp_path / "fixed.parquet"
+
+    gpio.read(unsorted_copy).fix(checks=["compression"], output=out)
+
+    source = pq.read_table(unsorted_copy)
+    fixed = pq.read_table(out)
+    assert pc.all(pc.equal(fixed.column("id"), source.column("id"))).as_py()  # not sorted
+    assert gpio.check_compression(out).passed()

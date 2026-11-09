@@ -3252,6 +3252,87 @@ class Table:
 
         return self._run_check(check.validate, version=version)
 
+    def fix(
+        self,
+        checks: list[str] | None = None,
+        output: str | Path | None = None,
+        *,
+        verbose: bool = False,
+    ) -> Table:
+        """
+        Repair what the checks find, into a new Table, as ``gpio check all --fix``.
+
+        Runs the structure checks and the spatial-order check on the source
+        file (or, for a Table with no file behind it, on a temp write of its
+        rows), then applies the fixes they offer: drop a disallowed covering,
+        add or remove the bbox column and its metadata, Hilbert-sort, and
+        rewrite with ZSTD and :data:`DEFAULT_ROW_GROUP_ROWS` rows per group.
+        Never writes in place: the file this Table was read from is untouched.
+
+        The compression and row-group fixes are one rewrite: selecting either
+        applies both whenever that one is needed.
+
+        Args:
+            checks: The checks whose fixes to apply, from ``"bbox"``,
+                ``"covering"``, ``"compression"``, ``"row_groups"`` and
+                ``"spatial"``. None (default) applies them all.
+            output: Write the repaired file here and return a Table read from
+                it. None (default) repairs into a scratch file and returns the
+                rows in memory. Refused when it is this Table's source.
+            verbose: Log each fix as it runs
+
+        Returns:
+            A new Table with the fixes applied
+
+        Raises:
+            InvalidParameterError: An unknown check name, or ``output`` naming
+                the source file
+
+        Example:
+            >>> fixed = gpio.read('data.parquet').fix()
+            >>> gpio.read('data.parquet').fix(checks=["spatial"], output='sorted.parquet')
+        """
+        from pathlib import Path
+
+        from geoparquet_io.api import check
+        from geoparquet_io.core.check_fixes import apply_all_fixes
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.file_utils import is_same_file_path
+
+        fixable = ("bbox", "covering", "compression", "row_groups", "spatial")
+        wanted = set(fixable if checks is None else [checks] if isinstance(checks, str) else checks)
+        unknown = sorted(wanted - set(fixable))
+        if unknown:
+            raise InvalidParameterError("checks", f"unknown {unknown}; choose from {list(fixable)}")
+        if output is not None and is_same_file_path(os.fspath(output), self._source_path):
+            raise InvalidParameterError(
+                "output",
+                "is this Table's source file, and fix() never rewrites its input. Name "
+                "another path, or leave output unset for the result in memory.",
+            )
+
+        def repair(path: str, target: str) -> None:
+            results = check.check_all(path).to_dict()
+            if "spatial" in wanted:
+                results["spatial"] = check.check_spatial(path).to_dict()
+            plan = {name: (found if name in wanted else {}) for name, found in results.items()}
+            # The repair keeps the input's GeoParquet version, read off the bbox check.
+            plan["bbox"] = plan["bbox"] or {
+                key: results["bbox"].get(key) for key in ("file_type", "version")
+            }
+            apply_all_fixes(path, target, plan, verbose=verbose)
+
+        if output is not None:
+            self._check_file(repair, os.fspath(output))
+            return read(output)
+        target = scratch_path(prefix="gpio_fix_")
+        try:
+            self._check_file(repair, target)
+            # Read with pyarrow, not read(): the Table must not be a view of a scratch file.
+            return Table(pq.read_table(target), geometry_column=self._geometry_column)
+        finally:
+            unlink_released_file(Path(target))
+
     def add_admin_divisions(
         self,
         *,
