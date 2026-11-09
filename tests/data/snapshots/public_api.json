@@ -435,7 +435,8 @@
     "scratch_path",
     "unlink_released_file",
     "validate_output_path",
-    "validate_parquet_extension"
+    "validate_parquet_extension",
+    "without_http_query"
   ],
   "geoparquet_io.core.format_writers": [
     "ERROR_CONVERSION_FAILED",

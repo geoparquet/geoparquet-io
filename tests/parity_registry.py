@@ -426,10 +426,6 @@ KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
         f"{DEFAULT_ROW_GROUP_ROWS:,} rows (DEFAULT_ROW_GROUP_ROWS); the in-memory API "
         f"spells that same effective default explicitly as tile_size={DEFAULT_ROW_GROUP_ROWS}."
     ),
-    ("convert geoparquet", "table", "compression", "None", "'ZSTD'"): (
-        "The same codec spelled two ways. `WriteOptions` defaults to ZSTD (#761), which is "
-        "what the CLI's unset None resolves to in compression.resolve_codec."
-    ),
     (
         "sort str",
         "table",

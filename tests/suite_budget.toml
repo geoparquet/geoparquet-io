@@ -25,7 +25,10 @@
 # fail-first tests (checks by path and Table.fix +22, pmtiles and upload +10,
 # geometry gate, no-ops and shared stats +21), WriteOptions on every write
 # leaf (+52, incl. the from_cli guard per write leaf), and review fixes (+30).
-max_collected = 14607
+# +13: round-2 review fixes (explicit-ZSTD asks, covering ownership, object-store
+# globs, directory checks, spec warnings, upload keys, write memory scope), less
+# the convert-geoparquet compression gap they closed.
+max_collected = 14620
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
