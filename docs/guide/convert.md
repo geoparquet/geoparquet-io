@@ -169,7 +169,10 @@ The check reads every file of a glob or directory input, so a planar first file
 cannot hide a later declaration, and it applies to the CLI, `Table.write()`,
 `Table.to_geojson()` and the `ops.convert_to_*` functions alike. An explicit
 `edges: planar` in the `geo` block, or an `edges` value gpio does not
-recognize, is no declaration it can honor and exports as before.
+recognize, is no declaration it can honor and exports as before. So does
+`gpio convert csv --no-wkt`, which leaves the geometry column out of the CSV
+altogether: an attribute-only export carries no coordinates, so there is no
+edge interpretation for it to lose.
 
 Keep non-planar data in GeoParquet, or first use a geodesic-aware tool to
 densify and cut the shapes into a planar representation; gpio does not yet

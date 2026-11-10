@@ -169,6 +169,30 @@ def test_a_nonplanar_secondary_column_does_not_block_a_planar_export(tmp_path):
     require_planar_export_file(str(source), "FlatGeobuf")
 
 
+def test_csv_without_wkt_exports_a_nonplanar_input(tmp_path):
+    """``--no-wkt`` leaves the geometry out of the SELECT: nothing to refuse.
+
+    The attribute-only CSV carries no coordinates at all, so no edge
+    interpretation is lost and the export must go through -- while the same
+    file with its WKT column still refuses.
+    """
+    source = _source(tmp_path)
+    attributes_only = tmp_path / "attrs.csv"
+    write_csv(str(source), str(attributes_only), include_wkt=False)
+    assert attributes_only.exists()
+    assert "wkt" not in attributes_only.read_text().splitlines()[0]
+    with pytest.raises(GeoParquetError, match="non-planar"):
+        write_csv(str(source), str(tmp_path / "with_wkt.csv"))
+
+
+def test_cli_csv_no_wkt_exports_a_nonplanar_input(tmp_path):
+    source = _source(tmp_path)
+    output = tmp_path / "out.csv"
+    result = CliRunner().invoke(cli, ["convert", "csv", str(source), str(output), "--no-wkt"])
+    assert result.exit_code == 0, result.output
+    assert output.exists()
+
+
 def test_a_glob_is_checked_past_its_first_file(tmp_path):
     """A planar first file cannot hide a later spherical declaration."""
     pq.write_table(_table("POINT(1 2)", edges=None), tmp_path / "a.parquet")

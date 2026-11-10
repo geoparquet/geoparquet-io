@@ -639,7 +639,10 @@ def write_csv(
 
     # The geometry leaves as WKT, which says no more about edge interpolation
     # than GeoJSON does, so a non-planar column is refused here too (#1289).
-    require_planar_export_file(input_path, "CSV", profile=profile)
+    # `--no-wkt` leaves the geometry column out of the SELECT entirely, so that
+    # export carries no coordinates and no edge interpretation to lose.
+    if include_wkt:
+        require_planar_export_file(input_path, "CSV", profile=profile)
 
     handle_output_overwrite(output_path, overwrite, remove=False)
 
