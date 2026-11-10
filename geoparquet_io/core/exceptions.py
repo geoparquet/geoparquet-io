@@ -12,7 +12,8 @@ Exception Hierarchy:
     ├── RemoteAccessError - S3/GCS/Azure access issues
     ├── GeometryError - geometry column issues
     ├── PartitionError - partitioning failures
-    └── ValidationError - spec validation failures
+    ├── ValidationError - spec validation failures
+    └── VariantExportError - this DuckDB cannot export VARIANT over Arrow
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ import json
 import re
 import socket
 import xml.etree.ElementTree  # nosec B405 -- only classifies ParseError; never parses XML
+from collections.abc import Sequence
 from typing import NamedTuple, TypeGuard
 
 
@@ -192,6 +194,61 @@ class ValidationError(GeoParquetError):
     """Raised when GeoParquet validation fails."""
 
     pass
+
+
+class VariantExportError(GeoParquetError):
+    """Raised when this DuckDB cannot export a VARIANT column over Arrow (#1370).
+
+    DuckDB 1.5 has no Arrow representation for VARIANT, so handing such a
+    column to ``.arrow()`` or ``to_arrow_reader()`` raises a bare ``OSError:
+    Not implemented Error: Unsupported Arrow type VARIANT`` -- an unhandled
+    traceback out of a write that was going fine. DuckDB 2.0 exports it as the
+    ``arrow.parquet.variant`` extension struct, and the default duckdb-kv
+    strategy never crosses Arrow with the data at all (#1362 rescued its LIMIT-0
+    schema probe), so there are two ways out and this names both.
+
+    ``geoparquet_version`` is the output version when that version is what
+    *chose* the Arrow strategy: 1.1-geoarrow is written by the streaming
+    writer, so a user who asked only for it never typed ``--write-strategy``
+    and "use the default strategy" alone would not say what to change.
+
+    ``duckdb_version`` is data the raiser passes in, not something this module
+    looks up: ``duckdb_capabilities`` lives in ``duckdb_utils``, which imports
+    this module, so asking it here closes an import cycle the
+    ``core-common-split-layers`` contract refuses.
+    """
+
+    def __init__(
+        self,
+        columns: Sequence[str],
+        strategy: str,
+        geoparquet_version: str | None = None,
+        duckdb_version: str | None = None,
+    ) -> None:
+        self.columns = list(columns)
+        self.strategy = strategy
+        self.geoparquet_version = geoparquet_version
+        named = ", ".join(repr(column) for column in self.columns) or "a column"
+        plural = "s" if len(self.columns) != 1 else ""
+        verb = "hold" if len(self.columns) != 1 else "holds"
+        duckdb_named = f" ({duckdb_version})" if duckdb_version else ""
+        # The two ways out, and which one to reach for first: a version that
+        # routed the write here has to change before the strategy can.
+        if geoparquet_version:
+            change = (
+                f"GeoParquet {geoparquet_version} output is written by that strategy, so "
+                "the version is what needs the export here: write another "
+                "--geoparquet-version to use the default write strategy (duckdb-kv), "
+            )
+        else:
+            change = "Write with the default write strategy (duckdb-kv), "
+        super().__init__(
+            f"Column{plural} {named} {verb} VARIANT values, which this DuckDB"
+            f"{duckdb_named} cannot export over Arrow, and the {strategy} write strategy "
+            f"writes through that export. {change}which carries a VARIANT column through "
+            "without crossing Arrow, or use DuckDB 2.0, which exports VARIANT as the "
+            "arrow.parquet.variant extension type."
+        )
 
 
 # DuckDB's own text for "this extension is not built/published for your DuckDB".
