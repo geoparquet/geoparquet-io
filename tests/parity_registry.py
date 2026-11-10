@@ -572,6 +572,12 @@ ONE_SIDED_CLASSES: dict[str, str] = {
         "`decorators.pack_remote_options`, so no leaf declares `remote` as a flag; the "
         "API takes that value by name, beside the deprecated per-keyword spellings."
     ),
+    "check_options": (
+        "What a check looks at and what its fix writes, as one `gpio.CheckOptions` "
+        "(#1436). The CLI packs its band, sample-bound and repair flags into one value "
+        "with `decorators.pack_check_options`; the API takes that value as `options=`, "
+        "beside the deprecated per-keyword spellings."
+    ),
 }
 
 
@@ -616,6 +622,8 @@ def _api_class(name: str, fn: Callable) -> str | None:
     # the remote-access concern wherever it appears, not a write setting (#1436).
     if name == "remote":
         return "remote_access"
+    if name == "options" and fn.__name__ != "write":
+        return "check_options"
     if name in _TABLE_WRITE:
         return "write_on_api"
     return None

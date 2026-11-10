@@ -150,15 +150,55 @@ read in place.
     A Table read from a remote URL is checked on a temporary local rewrite of
     its rows instead, so its answer describes that rewrite.
 
+### One value for the check options: `gpio.CheckOptions`
+
+What a check looks at — the use-case band, the sample bounds — and what its fix
+writes are one concern, so they travel as one value
+([#1436](https://github.com/geoparquet/geoparquet-io/issues/1436)). Every
+`gpio check` command builds exactly one `CheckOptions` from its flags, and the
+Python API takes the same object as `options=`:
+
+=== "CLI"
+
+    ```bash
+    gpio check bbox myfile.parquet --sample-rows 50000 --fix --fix-output fixed.parquet
+    ```
+
+=== "Python"
+
+    <!-- doctest: prelude="import geoparquet_io as gpio; table = gpio.read('myfile.parquet')" -->
+    ```python
+    options = gpio.CheckOptions(sample_rows=50000, fix_output='fixed.parquet')
+    report = table.check_bbox(options=options)
+    fixed = table.fix(options=options)
+    ```
+
+Its fields are the band (`profile`), the sample bounds (`sample_rows`,
+`all_rows`, `random_sample_size`, `limit_rows`, `spec_sample_size`), the repair
+selection (`fix`, `checks`, `fix_output`, `no_backup`, `overwrite`) and
+`remote`, the one [`gpio.RemoteOptions`](remote-files.md) that owns how the file
+is reached. Each field defaults to `None`, "not asked", and the object then
+answers with the same default the matching CLI flag declares.
+
+`--verbose`, `--strict`, `--all-files` and `--sample-files` are *not* check
+options: the first two are output and exit-status policy, and the last two
+select which files of a dataset to read, which a `Table` has no equivalent of.
+
+The older per-keyword spellings (`profile=`, `sample_rows=`, `all_rows=`,
+`sample_size=`, `limit_rows=`, `checks=`, `output=`, `overwrite=`) still work.
+Each warns once per process and will be removed in the next minor release;
+naming a field both ways raises `TypeError`.
+
 ### Fix from Python
 
 `Table.fix()` applies the repairs `--fix` would, but into a new Table: the file
-it was read from is never rewritten. Pass `output=` to write the repaired file
-there (it must not be the source, and an existing file needs `overwrite=True`),
-or leave it unset to get the rows in memory.
-`checks=` picks which checks' fixes run, from `"bbox"`, `"covering"`,
-`"compression"`, `"row_groups"` and `"spatial"`. The compression and row-group
-fixes are one rewrite, so picking either applies both when it is needed.
+it was read from is never rewritten. Pass `options=gpio.CheckOptions(fix_output=...)`
+to write the repaired file there (it must not be the source, and an existing
+file needs `overwrite=True`), or leave it unset to get the rows in memory.
+`checks=` on the options picks which checks' fixes run, from `"bbox"`,
+`"covering"`, `"compression"`, `"row_groups"` and `"spatial"`. The compression
+and row-group fixes are one rewrite, so picking either applies both when it is
+needed.
 
 === "CLI"
 
@@ -173,8 +213,10 @@ fixes are one rewrite, so picking either applies both when it is needed.
     import geoparquet_io as gpio
 
     table = gpio.read('myfile.parquet')
-    fixed = table.fix(output='fixed.parquet')
-    sorted_only = table.fix(checks=["spatial"], output='sorted.parquet')
+    fixed = table.fix(options=gpio.CheckOptions(fix_output='fixed.parquet'))
+    sorted_only = table.fix(
+        options=gpio.CheckOptions(checks=["spatial"], fix_output='sorted.parquet')
+    )
     in_memory = table.fix()  # no file written
     ```
 
@@ -417,7 +459,9 @@ metadata only.
         print(warning)
 
     # Wider sample, and the per-row report behind the verdict
-    report = table.check_bbox(sample_rows=50000).to_dict()['bbox_values']
+    report = table.check_bbox(options=gpio.CheckOptions(sample_rows=50000)).to_dict()[
+        'bbox_values'
+    ]
     print(report['undersized_rows'], report['undersized_examples'])
     ```
 
@@ -862,11 +906,13 @@ Validates STAC Item or Collection JSON:
     <!-- doctest: prelude="import geoparquet_io as gpio; table = gpio.read('myfile.parquet')" -->
     ```python
     # Custom sampling for spatial check
-    result = table.check_spatial(sample_size=200, limit_rows=1000000)
+    result = table.check_spatial(
+        options=gpio.CheckOptions(random_sample_size=200, limit_rows=1000000)
+    )
 
     # Custom sampling for the bbox-vs-geometry comparison
-    result = table.check_bbox(sample_rows=50000)
-    result = table.check_bbox(all_rows=True)
+    result = table.check_bbox(options=gpio.CheckOptions(sample_rows=50000))
+    result = table.check_bbox(options=gpio.CheckOptions(all_rows=True))
     ```
 
 ## Checking Partitioned Data

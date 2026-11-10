@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         validate,
     )
     from geoparquet_io.api.stac import generate_stac, validate_stac
+    from geoparquet_io.core.check_options import CheckOptions
     from geoparquet_io.core.exceptions import GeoParquetError
     from geoparquet_io.core.parquet_writer import WriteOptions
     from geoparquet_io.core.remote import RemoteOptions
@@ -71,6 +72,7 @@ _LAZY_EXPORTS = {
     "read": "geoparquet_io.api:read",
     "read_bigquery": "geoparquet_io.api:read_bigquery",
     "read_partition": "geoparquet_io.api:read_partition",
+    "CheckOptions": "geoparquet_io.core.check_options:CheckOptions",
     "CheckResult": "geoparquet_io.api.check:CheckResult",
     "check_all": "geoparquet_io.api.check:check_all",
     "check_bbox": "geoparquet_io.api.check:check_bbox",
@@ -101,6 +103,7 @@ __all__ = [
     "WriteOptions",
     "pipe",
     "ops",
+    "CheckOptions",
     "CheckResult",
     "check_all",
     "check_bbox",

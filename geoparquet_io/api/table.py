@@ -27,6 +27,11 @@ from geoparquet_io.core.add.kdtree import (
 )
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
+from geoparquet_io.core.check_options import (
+    DEFAULT_SPATIAL_LIMIT_ROWS,
+    DEFAULT_SPATIAL_SAMPLE_PAIRS,
+    CheckOptions,
+)
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.edges import edges_of, state_edges
 from geoparquet_io.core.file_utils import get_all_parquet_files, scratch_path, unlink_released_file
@@ -514,6 +519,15 @@ def extract_arcgis(
     # (#966): report no geometry column, so write() emits plain Parquet on every
     # strategy instead of asking the writer for a column that is not there.
     return Table(arrow_table, geometry_column=_surviving_geometry_column(None, arrow_table))
+
+
+def _asked_true(flag: bool) -> bool | None:
+    """A boolean keyword's value, or None when it is still its ``False`` default.
+
+    The deprecated flags keep their declared ``False``, so the CLI flag and the
+    Python parameter still declare the same default (#1436).
+    """
+    return flag or None
 
 
 def _asked_fields(write: WriteOptions) -> set[str]:
@@ -3261,7 +3275,12 @@ class Table:
 
         return self._run_check(check._check_structure)
 
-    def check_spatial(self, sample_size: int = 100, limit_rows: int = 500000) -> CheckResult:
+    def check_spatial(
+        self,
+        sample_size: int = DEFAULT_SPATIAL_SAMPLE_PAIRS,
+        limit_rows: int = DEFAULT_SPATIAL_LIMIT_ROWS,
+        options: CheckOptions | None = None,
+    ) -> CheckResult:
         """
         Check if data is spatially ordered.
 
@@ -3272,9 +3291,12 @@ class Table:
         readiness, so for its answer run ``gpio.check_spatial(path)`` on the file.
 
         Args:
-            sample_size: Number of random pairs to sample (default: 100)
-            limit_rows: Maximum rows to analyze (default: 500000, matching
-                `gpio check spatial --limit-rows`)
+            options: What to look at, as one :class:`gpio.CheckOptions` -- the
+                same value ``gpio check spatial`` builds from its flags.
+            sample_size: **Deprecated** (#1436), removed in the next minor
+                release: use ``options=gpio.CheckOptions(random_sample_size=...)``.
+            limit_rows: **Deprecated** (#1436): use
+                ``options=gpio.CheckOptions(limit_rows=...)``.
 
         Returns:
             CheckResult with spatial ordering analysis
@@ -3288,9 +3310,20 @@ class Table:
             ...     print("Consider using sort_hilbert()")
         """
         from geoparquet_io.api import check
+        from geoparquet_io.core.check_options import check_options_from_keywords
 
+        asked = check_options_from_keywords(
+            "Table.check_spatial",
+            options,
+            random_sample_size=(
+                None if sample_size == DEFAULT_SPATIAL_SAMPLE_PAIRS else sample_size
+            ),
+            limit_rows=None if limit_rows == DEFAULT_SPATIAL_LIMIT_ROWS else limit_rows,
+        )
         return self._run_check(
-            check._check_spatial_order, sample_size=sample_size, limit_rows=limit_rows
+            check._check_spatial_order,
+            sample_size=asked.resolved_random_sample_size(),
+            limit_rows=asked.resolved_limit_rows(),
         )
 
     def check_spatial_pushdown(self) -> CheckResult:
@@ -3347,6 +3380,7 @@ class Table:
         self,
         sample_rows: int = DEFAULT_BBOX_SAMPLE_ROWS,
         all_rows: bool = False,
+        options: CheckOptions | None = None,
     ) -> CheckResult:
         """
         Check bbox structure, metadata, and whether the values cover the geometry.
@@ -3367,10 +3401,13 @@ class Table:
         ``CheckResult.prospective``.
 
         Args:
-            sample_rows: Rows compared against their geometry, mirroring
-                ``gpio check bbox --sample-rows``. 0 skips that comparison and
-                checks structure and metadata only.
-            all_rows: Compare every row, mirroring ``--all-rows``
+            options: What to look at, as one :class:`gpio.CheckOptions` -- the
+                same value ``gpio check bbox`` builds from its flags.
+            sample_rows: **Deprecated** (#1436), removed in the next minor
+                release: use ``options=gpio.CheckOptions(sample_rows=...)``.
+                0 skips the comparison and checks structure and metadata only.
+            all_rows: **Deprecated** (#1436): use
+                ``options=gpio.CheckOptions(all_rows=True)``.
 
         Returns:
             CheckResult with bbox analysis
@@ -3382,10 +3419,21 @@ class Table:
             ...     table = table.add_bbox()
         """
         from geoparquet_io.api import check
+        from geoparquet_io.core.check_options import check_options_from_keywords
 
-        return self._run_check(check.check_bbox, sample_rows=sample_rows, all_rows=all_rows)
+        asked = check_options_from_keywords(
+            "Table.check_bbox",
+            options,
+            sample_rows=None if sample_rows == DEFAULT_BBOX_SAMPLE_ROWS else sample_rows,
+            all_rows=_asked_true(all_rows),
+        )
+        return self._run_check(check.check_bbox, options=asked)
 
-    def check_row_groups(self, profile: CheckProfile | None = None) -> CheckResult:
+    def check_row_groups(
+        self,
+        profile: CheckProfile | None = None,
+        options: CheckOptions | None = None,
+    ) -> CheckResult:
         """
         Check row group optimization.
 
@@ -3394,6 +3442,11 @@ class Table:
 
         Measured on the source file when this Table was read from one; see
         ``CheckResult.prospective``.
+
+        Args:
+            options: What to look at, as one :class:`gpio.CheckOptions`.
+            profile: **Deprecated** (#1436), removed in the next minor release:
+                use ``options=gpio.CheckOptions(profile=...)``.
 
         Returns:
             CheckResult with row group analysis
@@ -3404,8 +3457,10 @@ class Table:
             >>> print(result.recommendations())
         """
         from geoparquet_io.api import check
+        from geoparquet_io.core.check_options import check_options_from_keywords
 
-        return self._run_check(check.check_row_groups, profile=profile)
+        asked = check_options_from_keywords("Table.check_row_groups", options, profile=profile)
+        return self._run_check(check.check_row_groups, options=asked)
 
     def check_bloom_filters(self) -> CheckResult:
         """
@@ -3483,6 +3538,7 @@ class Table:
         checks: list[str] | None = None,
         output: str | Path | None = None,
         *,
+        options: CheckOptions | None = None,
         overwrite: bool = False,
         verbose: bool = False,
     ) -> Table:
@@ -3500,13 +3556,23 @@ class Table:
         applies both whenever that one is needed.
 
         Args:
-            checks: The checks whose fixes to apply, from ``"bbox"``,
-                ``"covering"``, ``"compression"``, ``"row_groups"`` and
-                ``"spatial"``. None (default) applies them all.
-            output: Write the repaired file here and return a Table read from
-                it. None (default) repairs into a scratch file and returns the
-                rows in memory. Refused when it is this Table's source.
-            overwrite: Replace an existing ``output``. Without it an existing
+            options: Which repairs to apply and where to write them, as one
+                :class:`gpio.CheckOptions` -- the same value ``gpio check``
+                builds from ``--fix``/``--fix-output``/``--overwrite``. Its
+                ``checks``, ``fix_output`` and ``overwrite`` are what the three
+                keywords below set.
+            checks: **Deprecated** (#1436), removed in the next minor release:
+                use ``options=gpio.CheckOptions(checks=...)``. The checks whose
+                fixes to apply, from ``"bbox"``, ``"covering"``,
+                ``"compression"``, ``"row_groups"`` and ``"spatial"``. None
+                (default) applies them all.
+            output: **Deprecated** (#1436): use
+                ``options=gpio.CheckOptions(fix_output=...)``. Write the
+                repaired file here and return a Table read from it. None
+                (default) repairs into a scratch file and returns the rows in
+                memory. Refused when it is this Table's source.
+            overwrite: **Deprecated** (#1436): use
+                ``options=gpio.CheckOptions(overwrite=True)``. Replace an existing ``output``. Without it an existing
                 file is refused, as ``--fix-output`` refuses one without
                 ``--overwrite``. A remote ``output`` is not looked up (gpio
                 does not stat an object store), so an existing remote object
@@ -3530,14 +3596,25 @@ class Table:
 
         from geoparquet_io.api import check
         from geoparquet_io.core.check_fixes import apply_all_fixes
+        from geoparquet_io.core.check_options import FIXABLE_CHECKS, check_options_from_keywords
         from geoparquet_io.core.exceptions import InvalidParameterError
         from geoparquet_io.core.file_utils import handle_output_overwrite, is_same_file_path
 
-        fixable = ("bbox", "covering", "compression", "row_groups", "spatial")
-        wanted = set(fixable if checks is None else [checks] if isinstance(checks, str) else checks)
-        unknown = sorted(wanted - set(fixable))
+        plan_options = check_options_from_keywords(
+            "Table.fix",
+            options,
+            checks=checks,
+            fix_output=None if output is None else os.fspath(output),
+            overwrite=_asked_true(overwrite),
+        )
+        output = plan_options.fix_output
+        overwrite = bool(plan_options.overwrite)
+        wanted = set(plan_options.resolved_checks())
+        unknown = sorted(wanted - set(FIXABLE_CHECKS))
         if unknown:
-            raise InvalidParameterError("checks", f"unknown {unknown}; choose from {list(fixable)}")
+            raise InvalidParameterError(
+                "checks", f"unknown {unknown}; choose from {list(FIXABLE_CHECKS)}"
+            )
         if output is not None and is_same_file_path(os.fspath(output), self._source_path):
             raise InvalidParameterError(
                 "output",

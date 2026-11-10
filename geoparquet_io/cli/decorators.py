@@ -13,6 +13,11 @@ import click
 from click.core import ParameterSource
 
 from geoparquet_io.cli.exception_handler import click_error_for, error_boundary, error_text
+from geoparquet_io.core.check_options import (
+    DEFAULT_SPATIAL_LIMIT_ROWS,
+    DEFAULT_SPATIAL_SAMPLE_PAIRS,
+    CheckOptions,
+)
 from geoparquet_io.core.compression import (
     ACCEPTED_CODEC_NAMES,
     ALLOWED_CODECS,
@@ -1153,6 +1158,110 @@ def partition_input_options(func):
         "Auto-detected for directories with key=value subdirectories.",
     )(func)
     return func
+
+
+#: The Click parameters a ``gpio check`` command's check flags arrive as; the packer
+#: takes them. ``verbose``, ``strict``, ``check_all_files`` and ``check_sample`` are
+#: deliberately absent -- see :mod:`geoparquet_io.core.check_options`.
+CHECK_OPTION_PARAMS = (
+    "profile",
+    "sample_rows",
+    "all_rows",
+    "random_sample_size",
+    "limit_rows",
+    "sample_size",
+    "fix",
+    "fix_output",
+    "no_backup",
+    "overwrite",
+)
+
+
+def check_fix_options(*, help_text: str):
+    """Add the ``--fix`` / ``--fix-output`` / ``--no-backup`` / ``--overwrite`` set.
+
+    One definition, shared: five ``gpio check`` commands carried their own copy
+    of this set, so the help text of ``--fix-output`` and ``--no-backup`` had to
+    be kept identical by hand. Only ``--fix``'s own help differs per command --
+    what it repairs -- so that is the one argument (#1436).
+    """
+
+    def decorate(func):
+        func = overwrite_option(func)
+        func = click.option(
+            "--no-backup",
+            is_flag=True,
+            help="Skip .bak backup when fixing",
+        )(func)
+        func = click.option(
+            "--fix-output",
+            type=click.Path(),
+            help="Output path (default: overwrites with .bak backup)",
+        )(func)
+        return click.option("--fix", is_flag=True, help=help_text)(func)
+
+    return decorate
+
+
+def check_profile_option(func):
+    """Add ``--profile``: the use-case band a check judges against.
+
+    Not an AWS profile. ``--aws-profile`` is the credential (see
+    ``pack_remote_options``); this names a best-practice band such as ``web``.
+    """
+    from geoparquet_io.core.check_parquet_structure import CheckProfile
+
+    return click.option(
+        "--profile",
+        type=click.Choice([c.value for c in CheckProfile], case_sensitive=False),
+        required=False,
+        default=None,
+        help="Check best practices for specific use case",
+    )(func)
+
+
+def spatial_sample_options(func):
+    """Add ``--random-sample-size`` and ``--limit-rows``, the spatial-order check's bounds.
+
+    Both defaults come from ``core.check_options``, the one owner of the
+    numbers, so the Click default and the Python API's resolved default cannot
+    drift apart.
+    """
+    func = click.option(
+        "--limit-rows",
+        default=DEFAULT_SPATIAL_LIMIT_ROWS,
+        show_default=True,
+        help="Max rows for spatial order check",
+    )(func)
+    return click.option(
+        "--random-sample-size",
+        default=DEFAULT_SPATIAL_SAMPLE_PAIRS,
+        show_default=True,
+        help="Sample size for spatial order check",
+    )(func)
+
+
+def pack_check_options(func):
+    """Hand a ``gpio check`` command one ``check`` (a ``CheckOptions``) instead of its flags.
+
+    The check-concern twin of :func:`pack_write_options` and
+    :func:`pack_remote_options` (#1436). Each command took the size band, the
+    sample bounds and the repair selection by name and forwarded them by name
+    through ``begin_check_run`` and four ``*_impl`` helpers, which is how
+    ``--sample-rows`` and friends came to be accepted and then dropped (#627,
+    #663). The command now receives one value and passes it on whole.
+
+    Put it directly above the ``def``, below every Click option decorator. It
+    composes with the other packers in any order: each pops only its own
+    parameters and passes the rest through.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        params = {name: kwargs.pop(name) for name in CHECK_OPTION_PARAMS if name in kwargs}
+        return func(*args, check=CheckOptions.from_cli(**params), **kwargs)
+
+    return wrapper
 
 
 def check_partition_options(func):

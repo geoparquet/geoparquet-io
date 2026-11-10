@@ -47,7 +47,12 @@
 # over a command's own and the flags reaching the store (6), the deprecated
 # `profile` on WriteOptions forwarding without warning twice (7), the API's
 # `remote=` on every migrated entry point and the keyword migration path (15).
-max_collected = 14734
+# +45, the check-options object (#1436): the third per-concern object gets the
+# same construction-time guard. The value itself and the one-owner defaults
+# (17), the CLI packer and no leaf taking a raw check flag (7), the API's
+# `options=` on the five migrated checks plus the keyword migration path (16),
+# and `Table.fix`'s repair selection travelling in the object (5).
+max_collected = 14779
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

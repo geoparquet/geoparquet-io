@@ -1607,6 +1607,27 @@ from geoparquet_io.api import ops
 ops.add_stac_metadata('items.parquet', 'collection.json')
 ```
 
+**`CheckOptions`**
+
+`gpio.CheckOptions` holds what a check looks at and what its fix writes as one
+value — the use-case band, the sample bounds, the repair selection, and the
+`gpio.RemoteOptions` that owns how the file is reached
+([#1436](https://github.com/geoparquet/geoparquet-io/issues/1436)). Pass it as
+`options=` to `gpio.check_all`, `check_bbox`, `check_row_groups`,
+`check_spatial`, `validate`, `Table.check_bbox`, `Table.check_row_groups` and
+`Table.fix`. Every field defaults to `None`, "not asked", which resolves to the
+same default the matching CLI flag declares.
+
+```python
+options = gpio.CheckOptions(profile='web', limit_rows=1_000_000)
+gpio.check_all('data.parquet', options=options)
+```
+
+The older per-keyword spellings (`profile=`, `sample_rows=`, `all_rows=`,
+`sample_size=`, `limit_rows=`, `checks=`, `output=`, `overwrite=`) still work,
+warn once per process, and will be removed in the next minor release. Naming a
+field both ways raises `TypeError`.
+
 #### `check()` / `check_spatial()` / `check_compression()` / `check_bbox()` / `check_row_groups()`
 
 Run best-practice checks on the table. `check()` runs the structure checks
@@ -1644,8 +1665,8 @@ default, though it reads the geometry and bbox columns in full:
 
 ```python
 bbox_result = table.check_bbox(all_rows=True)       # compare every row
-bbox_result = table.check_bbox(sample_rows=50000)   # wider sample
-bbox_result = table.check_bbox(sample_rows=0)       # structure and metadata only
+bbox_result = table.check_bbox(options=gpio.CheckOptions(sample_rows=50000))  # wider sample
+bbox_result = table.check_bbox(options=gpio.CheckOptions(sample_rows=0))  # structure only
 
 report = table.check_bbox().to_dict()['bbox_values']
 print(report['undersized_rows'], report['undersized_examples'])
@@ -1683,8 +1704,10 @@ row-group fixes are one rewrite, so picking either applies both when needed.
 
 ```python
 fixed = table.fix()                                    # every fix, in memory
-fixed = table.fix(output='fixed.parquet')              # a view of the new file
-sorted_only = table.fix(checks=["spatial"], output='sorted.parquet')
+fixed = table.fix(options=gpio.CheckOptions(fix_output='fixed.parquet'))  # a view of the file
+sorted_only = table.fix(
+    options=gpio.CheckOptions(checks=["spatial"], fix_output='sorted.parquet')
+)
 ```
 
 #### Path-level checks
@@ -1714,7 +1737,7 @@ row group or a native-geo file without a bbox column does not pass there.
 
 ```python
 result = gpio.check_compression('data.parquet')
-result = gpio.check_row_groups('data.parquet', profile='web')
+result = gpio.check_row_groups('data.parquet', options=gpio.CheckOptions(profile='web'))
 result = gpio.validate('data.parquet', version='1.1', skip_data_validation=True)
 ```
 
