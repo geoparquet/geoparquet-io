@@ -1096,12 +1096,9 @@ class Table:
             >>> table = gpio.read('data.parquet')
             >>> print(table.geoparquet_version)  # e.g., '1.0.0'
         """
-        from geoparquet_io.core.geo_metadata import declared_version, read_raw_geo
+        from geoparquet_io.core.geo_metadata import geo_info_from_metadata
 
-        geo_meta = read_raw_geo(self._table.schema.metadata).block
-        if geo_meta is None:
-            return None
-        return declared_version(geo_meta, default=None)
+        return geo_info_from_metadata(self._table.schema.metadata)["version"]
 
     def info(self, verbose: bool = True) -> dict | None:
         """
@@ -2961,11 +2958,16 @@ class Table:
             {'id': {'authority': 'EPSG', 'code': 4326}}
         """
 
+        from geoparquet_io.core.geo_metadata import geo_info_from_metadata, read_raw_geo
+
+        schema_metadata = self._table.schema.metadata
+        # The derived keys come from the reading `gpio inspect` uses (#1087).
+        geo_info = geo_info_from_metadata(schema_metadata, column=self._geometry_column)
         result = {
             "rows": self.num_rows,
             "columns_count": len(self.column_names),
             "geometry_column": self._geometry_column,
-            "geoparquet_version": self.geoparquet_version,
+            "geoparquet_version": geo_info["version"],
             "crs": self.crs,
             "bounds": self.bounds,
             "columns": [
@@ -2978,29 +2980,19 @@ class Table:
             ],
         }
 
-        # Extract full geo metadata if available
-        from geoparquet_io.core.geo_metadata import read_raw_geo
-
-        schema_metadata = self._table.schema.metadata
         raw_geo = read_raw_geo(schema_metadata)
         if raw_geo.present:
             # A read-only reader, the Python API's `gpio inspect meta`:
             # `geo_metadata` is documented as the file's full `geo` block, so it
             # is handed back exactly as the file holds it and is NOT sanitized --
             # the same line #883 drew around the raw reader (`read_raw_geo`) and
-            # `check`. Undecodable reads as None. Only the derived keys below
-            # need guarding: they indexed the raw block and crashed on a
-            # `columns` that is not an object, or an entry that is not one (#947).
+            # `check`. Undecodable reads as None. The derived keys below come
+            # from the sanitized entry, so a malformed one cannot crash them (#947).
             result["geo_metadata"] = raw_geo.value
 
-            # Extract geometry_types from geo metadata
-            columns_meta = raw_geo.block.get("columns") if raw_geo.block else None
-            col_meta = (
-                columns_meta.get(self._geometry_column)
-                if isinstance(columns_meta, dict) and self._geometry_column
-                else None
-            )
-            if isinstance(col_meta, dict):
+            # No geometry column, no entry: None would ask for the block's primary.
+            col_meta = geo_info["column_meta"] if self._geometry_column else None
+            if col_meta is not None:
                 result["geometry_types"] = col_meta.get("geometry_types")
                 state_edges(result, edges_of(col_meta))
                 result["orientation"] = col_meta.get("orientation")

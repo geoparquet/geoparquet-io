@@ -26,8 +26,8 @@ from geoparquet_io.core.edges import declares_edges, edges_of, logical_type_edge
 from geoparquet_io.core.geo_metadata import (
     bbox_xy,
     declared_version,
+    geo_info_of_file,
     row_group_geometry_stats,
-    sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.parquet_schema import root_schema_columns
@@ -623,7 +623,7 @@ def format_geoparquet_metadata(parquet_file: str, json_output: bool) -> None:
         json_output: Whether to output as JSON
     """
 
-    geo_meta = sanitized_carried_geo_of_file(parquet_file)
+    geo_meta = geo_info_of_file(parquet_file)["geo"]
 
     if not geo_meta:
         if json_output:
@@ -786,7 +786,7 @@ def format_all_metadata(
     if json_output:
         # For JSON, combine all metadata into one object
         # `or None`: an absent block is JSON `null` here, as it always was.
-        geo_meta = sanitized_carried_geo_of_file(parquet_file) or None
+        geo_meta = geo_info_of_file(parquet_file)["geo"] or None
 
         # We need to manually construct the combined JSON output
         # This is a simplified version - in production you'd want to extract the actual data

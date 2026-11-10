@@ -147,9 +147,10 @@ _INSPECTION_NOT_A_TABLE = (
     "column statistics) rather than transforming one, so an `ops.<fn>(table) -> table` "
     "twin would have nothing to return. `Table` is the reviewed home for it."
 )
-_NO_SEAM_INSPECT = (
-    "No shared seam: the CLI goes through `core.inspect`, the Table method is inline "
-    "pyarrow/DuckDB and calls no core function. Compared behaviourally in "
+_NO_SEAM_PREVIEW = (
+    "No shared seam: the CLI reads the first or last rows from the file through "
+    "`core.inspect_utils.get_preview_data` (DuckDB, geometry rendered as WKT), the Table "
+    "slices the Arrow table it already holds. Compared behaviourally in "
     "tests/test_api_cli_behaviour_parity.py::TestInspectGroupAgreesWithTable."
 )
 _ONE_DOOR = (
@@ -172,16 +173,10 @@ EXEMPT: dict[str, dict[str, str]] = {
     },
     "skills": {"api_twin": "Prints the bundled LLM skill documents; no data operation."},
     **{
-        f"inspect {c}": {"ops_twin": _INSPECTION_NOT_A_TABLE, "call_case": _NO_SEAM_INSPECT}
-        for c in ("head", "meta", "summary", "tail")
+        f"inspect {c}": {"ops_twin": _INSPECTION_NOT_A_TABLE, "call_case": _NO_SEAM_PREVIEW}
+        for c in ("head", "tail")
     },
-    "inspect stats": {
-        "ops_twin": _INSPECTION_NOT_A_TABLE,
-        "call_case": "Both doors call `core.inspect_utils.compute_column_statistics` (#1087), "
-        "but on different sources (the CLI's file, the Table's registered Arrow table), so "
-        "there is no one call to compare. Both outputs are pinned in "
-        "tests/test_column_statistics_snapshot.py.",
-    },
+    **{f"inspect {c}": {"ops_twin": _INSPECTION_NOT_A_TABLE} for c in ("meta", "stats", "summary")},
     "publish upload": {
         "ops_twin": "Uploads a file already on disk; the unit of work is a path, not the "
         "in-memory table an `ops` function receives. `Table.upload` writes first."
@@ -199,7 +194,6 @@ EXEMPT: dict[str, dict[str, str]] = {
 #: every leaf in it is exempt from `call_case` (directly, or through `api_twin`).
 #: Recorded here as well, so losing a group's last case is a decision, not a drift.
 GROUPS_WITHOUT_A_CALL_CASE: dict[str, str] = {
-    "inspect": _NO_SEAM_INSPECT,
     "skills": "The group is one leaf with no API twin.",
 }
 

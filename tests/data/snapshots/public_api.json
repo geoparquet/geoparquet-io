@@ -504,6 +504,8 @@
     "declared_version",
     "declared_write_metadata",
     "declares_covering_member",
+    "geo_info_from_metadata",
+    "geo_info_of_file",
     "geo_key_value",
     "geoarrow_dimension",
     "geoarrow_primary_encoding",

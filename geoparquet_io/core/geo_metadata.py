@@ -622,6 +622,36 @@ def sanitized_carried_geo_of_file(parquet_file, con=None) -> dict:
     return sanitized_carried_geo(get_kv_metadata(str(parquet_file), con), source=str(parquet_file))
 
 
+def geo_info_from_metadata(metadata, column: str | None = None, source: str | None = None) -> dict:
+    """The ``geo`` facts ``gpio inspect`` and ``Table.metadata`` both report (#1087).
+
+    One reading of a Parquet/Arrow metadata mapping for both doors, so they
+    cannot drift: ``geo``, the sanitized block (``{}`` when absent or unusable);
+    ``version``, the version it declares (None when none); ``primary_column``,
+    ``column`` when the caller names one, else the block's own primary; and
+    ``column_meta``, that column's entry, or None when the block has none.
+    ``Table.metadata``'s ``geo_metadata`` key stays the raw block
+    (:func:`read_raw_geo`); only the facts derived from it come from here.
+    """
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
+
+    geo = sanitized_carried_geo(metadata, source)
+    primary = column if column is not None else primary_geometry_column(None, geo=geo)
+    return {
+        "geo": geo,
+        "version": declared_version(geo, default=None),
+        "primary_column": primary,
+        "column_meta": geo.get("columns", {}).get(primary),
+    }
+
+
+def geo_info_of_file(parquet_file, con=None) -> dict:
+    """:func:`geo_info_from_metadata` of a Parquet file's footer, warning with its path."""
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata
+
+    return geo_info_from_metadata(get_kv_metadata(str(parquet_file), con), source=str(parquet_file))
+
+
 def raw_geo_of_file(parquet_file, con=None) -> RawGeo:
     """:func:`read_raw_geo` of a Parquet file's footer, for the check paths.
 
