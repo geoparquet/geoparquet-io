@@ -109,8 +109,10 @@ from geoparquet_io.core import check_spatial_order as core_check_spatial
 from geoparquet_io.core import extract as core_extract
 from geoparquet_io.core import extract_bigquery as core_extract_bigquery
 from geoparquet_io.core import format_writers as core_format_writers
+from geoparquet_io.core import geo_metadata as core_geo_metadata
 from geoparquet_io.core import geojson_stream as core_geojson_stream
 from geoparquet_io.core import hilbert_order as core_hilbert
+from geoparquet_io.core import inspect_utils as core_inspect_utils
 from geoparquet_io.core import pmtiles as core_pmtiles
 from geoparquet_io.core import pmtiles_pyramid as core_pmtiles_pyramid
 from geoparquet_io.core import reproject as core_reproject
@@ -249,6 +251,7 @@ def _cli(
     args: Callable[[Ctx], list[str]],
     module: Any = cli_main,
     wrap: Callable[[], AbstractContextManager[Any]] = contextlib.nullcontext,
+    result: Any = None,
 ) -> Frontend:
     """A CLI front end; `wrap` holds a context manager open around the invocation."""
 
@@ -256,7 +259,7 @@ def _cli(
         with wrap():
             return ctx.run_cli(args(ctx))
 
-    return Frontend(patch_site=(module, alias), reference=reference, invoke=_invoke)
+    return Frontend(patch_site=(module, alias), reference=reference, invoke=_invoke, result=result)
 
 
 def _with_credentials():
@@ -321,6 +324,29 @@ STAC_BUCKET = "s3://example-bucket/data/"
 _STUB_VALIDATION_RESULT = core_validate.ValidationResult(
     file_path="", detected_version=None, target_version=None
 )
+
+
+# What `geo_info_from_metadata` hands back for a file with no `geo` block: the
+# recorded doors carry on with it rather than crash on a None.
+_NO_GEO_INFO = {"geo": {}, "version": None, "primary_column": None, "column_meta": None}
+
+
+def _inspect_geo_case(leaf: str, call: Callable[[Ctx], Any], normalize: dict, note: str):
+    """`gpio inspect <leaf>` and its Table twin read the `geo` block through one seam."""
+    reference = core_geo_metadata.geo_info_from_metadata
+    return ParityCase(
+        id=f"inspect {leaf}",
+        cli=_cli(
+            "geo_info_from_metadata",
+            reference,
+            lambda c: ["inspect", leaf, c.input_file],
+            module=core_geo_metadata,
+            result=_NO_GEO_INFO,
+        ),
+        table=_table(core_geo_metadata, "geo_info_from_metadata", reference, call, _NO_GEO_INFO),
+        normalize=normalize,
+        notes=(note,),
+    )
 
 
 # A one-row geometry table for a recorded core function whose caller wraps the
@@ -892,7 +918,8 @@ CASES: list[ParityCase] = [
     # WP-7 (#1018): the seven command groups that had no call-parity case.
     #
     # `check`, `benchmark`, `process`, `pmtiles` and `publish` are added here.
-    # `inspect` and `skills` cannot be: see `EXEMPT` in tests/parity_registry.py.
+    # `inspect` has its cases below the check group (#1087); `skills` cannot
+    # have one: see `EXEMPT` in tests/parity_registry.py.
     #
     # A recurring shape in this batch: `verbose` and `quiet` are deliberately
     # absent from every `normalize` map. They are rendering knobs, and the API
@@ -1060,6 +1087,49 @@ CASES: list[ParityCase] = [
             "`--sample-size` (1000) and `--skip-data-validation` (off) are the two knobs "
             "that change which rows are inspected; `Table.validate()` hard-codes both. "
             "A move on either side changes what the API is willing to call valid.",
+        ),
+    ),
+    # ----------------------------------------------------------------------
+    # inspect (#1087): each door makes exactly one call to the shared seam. The
+    # answers are compared in tests/test_api_cli_behaviour_parity.py::
+    # TestInspectGroupAgreesWithTable.
+    # ----------------------------------------------------------------------
+    _inspect_geo_case(
+        "summary",
+        lambda c: c.gpio_table.info(verbose=False),
+        {"column": ("column", "column")},
+        "Both read the block's own primary column (`column=None`); `Table.info` "
+        "reports only the version from it.",
+    ),
+    _inspect_geo_case(
+        "meta",
+        lambda c: c.gpio_table.metadata(),
+        {},
+        "No knob to compare: the CLI shows the whole block, `Table.metadata` names "
+        "its own geometry column for the derived keys. The case pins the one seam.",
+    ),
+    ParityCase(
+        id="inspect stats",
+        cli=_cli(
+            "compute_column_statistics",
+            core_inspect_utils.compute_column_statistics,
+            lambda c: ["inspect", "stats", c.input_file],
+            module=core_inspect_utils,
+            result={},
+        ),
+        table=_table(
+            core_inspect_utils,
+            "compute_column_statistics",
+            core_inspect_utils.compute_column_statistics,
+            lambda c: c.gpio_table.stats(),
+            result={},
+        ),
+        normalize={},
+        notes=(
+            "No knob to compare: `source` is the file on one side and the registered "
+            "Arrow table on the other, and `columns_info` lists the same columns in "
+            "each door's own order. Both outputs are pinned in "
+            "tests/test_column_statistics_snapshot.py; the case pins the one seam.",
         ),
     ),
     ParityCase(

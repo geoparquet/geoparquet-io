@@ -36,7 +36,9 @@
 # a remote object named by its last segment +3).
 # +36: every gpio.check_* answers as its gpio check command (9 checks x 4 fixtures).
 # +1: a "not GeoParquet" file-type answer is re-probed, never served from the cache.
-max_collected = 14677
+# +4 (#1087): Table-door call-parity cases for inspect meta, summary and stats (+3),
+# and one malformed block read alike by gpio inspect and Table.metadata (+1).
+max_collected = 14681
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

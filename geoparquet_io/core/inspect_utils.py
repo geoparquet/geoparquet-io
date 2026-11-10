@@ -55,7 +55,7 @@ from geoparquet_io.core.edges import (
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     GeometryStats,
-    declared_version,
+    geo_info_of_file,
     merged_geometry_stats,
     sanitized_carried_geo_of_file,
 )
@@ -267,8 +267,9 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
         resolve_crs_reference,
     )
 
-    # Get metadata using DuckDB
-    geo_meta = sanitized_carried_geo_of_file(parquet_file, con=con)
+    # The geo block's facts, read as Table.metadata reads them (#1087).
+    block_info = geo_info_of_file(parquet_file, con=con)
+    geo_meta = block_info["geo"]
     schema_info = get_schema_info(parquet_file, con=con)
     geo_columns = detect_geometry_columns(parquet_file, con=con)
 
@@ -297,29 +298,15 @@ def extract_geo_info(parquet_file: str, con=None) -> dict[str, Any]:
     # Extract GeoParquet metadata
     geoparquet_info = {}
     if geo_meta:
-        version = declared_version(geo_meta, default=None)
-        primary_column = primary_geometry_column(None, geo=geo_meta)
-        columns_meta = geo_meta.get("columns", {})
-
-        crs = None
-        bbox = None
-        geometry_types = None
-        col_meta = None
-
-        if primary_column in columns_meta:
-            col_meta = columns_meta[primary_column]
-            crs = col_meta.get("crs")  # Keep raw PROJJSON, don't convert to string
-            bbox = col_meta.get("bbox")
-            geometry_types = col_meta.get("geometry_types")
-
+        col_meta = block_info["column_meta"]
+        entry = col_meta or {}
         # Note: Keep crs as None if not specified - default handling is a display concern
-
         geoparquet_info = {
-            "version": version,
-            "crs": crs,
-            "bbox": bbox,
-            "primary_column": primary_column,
-            "geometry_types": geometry_types,
+            "version": block_info["version"],
+            "crs": entry.get("crs"),  # Keep raw PROJJSON, don't convert to string
+            "bbox": entry.get("bbox"),
+            "primary_column": block_info["primary_column"],
+            "geometry_types": entry.get("geometry_types"),
         }
         if declares_edges(col_meta):
             state_edges(geoparquet_info, edges_of(col_meta))
