@@ -3194,15 +3194,27 @@ class Table:
             return self._with_temp_file(func, *args, **kwargs)
         return self._check_file(func, *args, **kwargs)[0]
 
-    def _run_check(self, check: Callable[..., CheckResult], **kwargs: Any) -> CheckResult:
+    def _run_check(
+        self,
+        check: Callable[..., CheckResult],
+        *,
+        reach: CheckOptions | None = None,
+        **kwargs: Any,
+    ) -> CheckResult:
         """Run a path-level check from ``api/check.py`` through :meth:`_check_file`.
 
         Without the path functions' one-file refusal: a Table read from a
         directory hands it to core, which measures the dataset, as before #1090.
-        """
-        from geoparquet_io.api.check import CheckResult
 
-        result, source = self._check_file(getattr(check, "__wrapped__", check), **kwargs)
+        *reach* is the ``CheckOptions`` whose ``remote`` says how to reach the
+        file. Calling ``__wrapped__`` steps around the path function's own
+        activation, so this is the one place a ``Table`` check activates it
+        (#1436); a method with no options to pass leaves it unset.
+        """
+        from geoparquet_io.api.check import CheckResult, _reaching
+
+        with _reaching(reach):
+            result, source = self._check_file(getattr(check, "__wrapped__", check), **kwargs)
         return CheckResult(result.to_dict(), check_type=result.check_type, source_path=source)
 
     def _with_temp_io_files(self, func, **kwargs) -> pa.Table:
@@ -3322,6 +3334,7 @@ class Table:
         )
         return self._run_check(
             check._check_spatial_order,
+            reach=asked,
             sample_size=asked.resolved_random_sample_size(),
             limit_rows=asked.resolved_limit_rows(),
         )
@@ -3427,7 +3440,7 @@ class Table:
             sample_rows=None if sample_rows == DEFAULT_BBOX_SAMPLE_ROWS else sample_rows,
             all_rows=_asked_true(all_rows),
         )
-        return self._run_check(check.check_bbox, options=asked)
+        return self._run_check(check.check_bbox, reach=asked, options=asked)
 
     def check_row_groups(
         self,
@@ -3460,7 +3473,7 @@ class Table:
         from geoparquet_io.core.check_options import check_options_from_keywords
 
         asked = check_options_from_keywords("Table.check_row_groups", options, profile=profile)
-        return self._run_check(check.check_row_groups, options=asked)
+        return self._run_check(check.check_row_groups, reach=asked, options=asked)
 
     def check_bloom_filters(self) -> CheckResult:
         """
@@ -3639,16 +3652,19 @@ class Table:
             }
             apply_all_fixes(path, target, plan, verbose=verbose)
 
-        if output is not None:
-            self._run_on_one_file(repair, os.fspath(output))
-            return read(output)
-        target = scratch_path(prefix="gpio_fix_")
-        try:
-            self._run_on_one_file(repair, target)
-            # Read with pyarrow, not read(): the Table must not be a view of a scratch file.
-            return Table(pq.read_table(target), geometry_column=self._geometry_column)
-        finally:
-            unlink_released_file(Path(target))
+        # One activation for the whole repair: the checks, the rewrite and the
+        # read-back all reach the store the way ``plan_options.remote`` asks.
+        with check._reaching(plan_options):
+            if output is not None:
+                self._run_on_one_file(repair, os.fspath(output))
+                return read(output)
+            target = scratch_path(prefix="gpio_fix_")
+            try:
+                self._run_on_one_file(repair, target)
+                # Read with pyarrow, not read(): the Table must not be a view of a scratch file.
+                return Table(pq.read_table(target), geometry_column=self._geometry_column)
+            finally:
+                unlink_released_file(Path(target))
 
     def add_admin_divisions(
         self,
