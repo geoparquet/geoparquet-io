@@ -100,6 +100,19 @@ def test_the_owner_passes_anything_that_is_not_a_known_algorithm(edges):
     require_planar_export("GeoPackage", "geometry", edges)
 
 
+def test_the_geojson_refusal_still_answers_the_repair_opt_out():
+    """``convert geojson --no-repair-geometry`` is the flag the sentence is for."""
+    with pytest.raises(GeoParquetError, match="does not make this conversion safe"):
+        require_planar_export("GeoJSON", "geometry", "spherical")
+
+
+def test_a_target_with_no_repair_opt_out_does_not_mention_one():
+    """GeoPackage, FlatGeobuf, Shapefile and CSV have no repair flag to disable."""
+    with pytest.raises(GeoParquetError) as raised:
+        require_planar_export("CSV", "geometry", "spherical")
+    assert "geometry repair" not in str(raised.value)
+
+
 # ---------------------------------------------------------------------------
 # The writers
 # ---------------------------------------------------------------------------

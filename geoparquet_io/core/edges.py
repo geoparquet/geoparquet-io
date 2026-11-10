@@ -385,6 +385,14 @@ def agree_across_files(per_file: Mapping[str, Mapping[str, str]]) -> dict[str, s
 # ---------------------------------------------------------------------------
 
 
+#: The planar-only export targets whose command offers a geometry-repair
+#: opt-out (``gpio convert geojson --no-repair-geometry``, and ``gpio pmtiles``
+#: through it). Skipping the repair leaves the planar reinterpretation exactly
+#: where it was, so the refusal says so wherever the flag exists -- and stays
+#: quiet for GeoPackage, FlatGeobuf, Shapefile and CSV, which have no such flag.
+_REPAIR_OPT_OUT_TARGETS = frozenset({"GeoJSON"})
+
+
 def require_planar_export(target: str, column: str, edges: object) -> None:
     """Refuse an export to the planar-only format ``target`` for a non-planar column.
 
@@ -399,19 +407,25 @@ def require_planar_export(target: str, column: str, edges: object) -> None:
     Only a GeoParquet edge algorithm counts (:func:`is_nonplanar`): a typo, a
     number or an explicit ``planar`` is no declaration gpio can honor and
     exports as before. The declaration alone decides, including for point-only,
-    null and empty data, and skipping the planar geometry repair (where the
-    format's command has that option) does not make the conversion safe.
-    ``target`` names the format in the message, as a user spells it; ``column``
-    is the geometry column being exported.
+    null and empty data, and skipping the planar geometry repair does not make
+    the conversion safe -- which the message says for the targets whose command
+    has that option (:data:`_REPAIR_OPT_OUT_TARGETS`). ``target`` names the
+    format in the message, as a user spells it; ``column`` is the geometry
+    column being exported.
     """
     if not is_nonplanar(edges):
         return
+    repair = (
+        " Disabling geometry repair does not make this conversion safe."
+        if target in _REPAIR_OPT_OUT_TARGETS
+        else ""
+    )
     raise GeoParquetError(
         f"{target} export does not support non-planar edges. Column {column!r} "
         f"declares {edges!r} edges, and {target} gives its segments straight "
         "Cartesian interpretation. Keep the data in GeoParquet, or use a "
         "geodesic-aware tool to densify and cut the shapes into a planar "
-        "representation before exporting."
+        f"representation before exporting.{repair}"
     )
 
 
