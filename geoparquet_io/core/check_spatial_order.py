@@ -465,7 +465,13 @@ def _row_group_weights(parquet_file: str, bboxes: list[dict]) -> dict:
         groups = []
     if not groups:
         uniform = [1.0] * len(bboxes)
-        return {"rows": uniform, "bytes": list(uniform), "file_bytes": None, "total_groups": None}
+        return {
+            "rows": uniform,
+            "bytes": list(uniform),
+            "file_bytes": None,
+            "total_rows": None,
+            "total_groups": None,
+        }
     per_group = {group["row_group_id"]: group for group in groups}
     rows = [
         max(float(per_group.get(b["row_group_id"], {}).get("num_rows", 0)), 1.0) for b in bboxes
@@ -478,6 +484,7 @@ def _row_group_weights(parquet_file: str, bboxes: list[dict]) -> dict:
         "rows": rows,
         "bytes": sizes,
         "file_bytes": float(sum(group["compressed_bytes"] for group in groups)),
+        "total_rows": float(sum(group["num_rows"] for group in groups)),
         "total_groups": len(groups),
     }
 
@@ -861,15 +868,18 @@ def check_spatial_pushdown_readiness(
             geographic=column_is_geographic(parquet_file),
         )
         if num_rgs > len(row_group_bboxes):
-            # Missing statistics cannot prove a row group is skippable, so
-            # only the covered groups' byte share may count as skippable;
-            # when the footer gives no sizes the group count stands in.
+            # Missing statistics cannot prove a row group is skippable, and a
+            # query placed by an uncovered group's rows lands where this model
+            # cannot see, so it counts as skipping nothing: the rate scales by
+            # the covered groups' row share (the queries the model can place)
+            # and their byte share (the bytes those queries can prove skipped).
+            # When the footer gives no sizes the group count stands in.
             file_bytes = weights["file_bytes"]
-            scale = (
-                sum(weights["bytes"]) / file_bytes
-                if file_bytes
-                else len(row_group_bboxes) / num_rgs
-            )
+            total_rows = weights["total_rows"]
+            if file_bytes and total_rows:
+                scale = (sum(weights["rows"]) / total_rows) * (sum(weights["bytes"]) / file_bytes)
+            else:
+                scale = len(row_group_bboxes) / num_rgs
             metrics = {**metrics, "estimated_skip_rate": metrics["estimated_skip_rate"] * scale}
     return pushdown_readiness_from_locality(len(row_group_bboxes), metrics)
 
