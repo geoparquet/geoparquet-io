@@ -44,7 +44,8 @@
 # +6 (#1370): the VARIANT Arrow-export refusal -- the two strategies that export
 # the data, the error's type and the CLI message together, the automatic
 # 1.1-geoarrow route, a non-VARIANT Arrow failure, and the column lookup.
-max_collected = 14699
+# +1 (#1370): the empty-columns VariantExportError message stays grammatical.
+max_collected = 14700
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

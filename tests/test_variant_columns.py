@@ -356,3 +356,11 @@ class TestArrowExportRefusal:
         finally:
             con.close()
         assert found == ["props", "many"]
+
+    def test_empty_columns_message_stays_grammatical(self):
+        """No column name to give still reads as one sentence, not "Columns a column hold"."""
+        from geoparquet_io.core.exceptions import VariantExportError
+
+        message = str(VariantExportError([], "streaming", None, "1.5.6"))
+        assert "Columns a column hold" not in message
+        assert message.startswith("A column holds VARIANT values")

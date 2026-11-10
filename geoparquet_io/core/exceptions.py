@@ -228,9 +228,18 @@ class VariantExportError(GeoParquetError):
         self.columns = list(columns)
         self.strategy = strategy
         self.geoparquet_version = geoparquet_version
-        named = ", ".join(repr(column) for column in self.columns) or "a column"
-        plural = "s" if len(self.columns) != 1 else ""
-        verb = "hold" if len(self.columns) != 1 else "holds"
+        named = ", ".join(repr(column) for column in self.columns)
+        # No column name to give is still singular ("A column holds..."), not
+        # "a column" glued onto the plural branch below ("Columns a column hold...").
+        if not self.columns:
+            subject = "A column"
+            verb = "holds"
+        elif len(self.columns) == 1:
+            subject = f"Column {named}"
+            verb = "holds"
+        else:
+            subject = f"Columns {named}"
+            verb = "hold"
         duckdb_named = f" ({duckdb_version})" if duckdb_version else ""
         # The two ways out, and which one to reach for first: a version that
         # routed the write here has to change before the strategy can.
@@ -243,7 +252,7 @@ class VariantExportError(GeoParquetError):
         else:
             change = "Write with the default write strategy (duckdb-kv), "
         super().__init__(
-            f"Column{plural} {named} {verb} VARIANT values, which this DuckDB"
+            f"{subject} {verb} VARIANT values, which this DuckDB"
             f"{duckdb_named} cannot export over Arrow, and the {strategy} write strategy "
             f"writes through that export. {change}which carries a VARIANT column through "
             "without crossing Arrow, or use DuckDB 2.0, which exports VARIANT as the "
