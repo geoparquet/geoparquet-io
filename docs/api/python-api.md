@@ -100,15 +100,17 @@ Read from MinIO, Cloudflare R2, source.coop, and other S3-compatible services:
     # Read from source.coop
     table = gpio.read_partition(
         's3://bucket/data/*.parquet',
-        s3_endpoint='data.source.coop'
+        remote=gpio.RemoteOptions(s3_endpoint='data.source.coop'),
     )
 
     # Read from MinIO (no SSL)
     table = gpio.read_partition(
         's3://bucket/data/',
-        s3_endpoint='minio.local:9000',
-        s3_use_ssl=False,
-        aws_profile='minio-dev'
+        remote=gpio.RemoteOptions(
+            s3_endpoint='minio.local:9000',
+            s3_use_ssl=False,
+            profile='minio-dev',
+        ),
     )
 
     # Environment variables also work
@@ -871,7 +873,7 @@ table = gpio.read('input.parquet').extract(bbox=(-122.5, 37.5, -122.0, 38.0))
 table = gpio.read('input.parquet').extract(where="population > 10000")
 ```
 
-#### `write(path, options=None, *, format=None, compression=None, compression_level=None, row_group_size_mb=None, row_group_rows=None, geoparquet_version=None, write_strategy=None, memory_limit=None, profile=None, verbose=False, ...)`
+#### `write(path, options=None, *, format=None, compression=None, compression_level=None, row_group_size_mb=None, row_group_rows=None, geoparquet_version=None, write_strategy=None, memory_limit=None, profile=None, remote=None, verbose=False, ...)`
 
 Write the table to a GeoParquet file. Returns the output `Path` for chaining or confirmation.
 Every argument after `options` is keyword-only, so `table.write('out.dat', 'csv')`
@@ -898,6 +900,26 @@ Every field defaults to `None`, "not asked": the write resolves an unset
 `compression` to ZSTD and an unset `write_strategy` to auto (`duckdb-kv` here).
 A field set to anything else, ZSTD included, counts as asked: a non-Parquet
 format refuses it.
+
+**`RemoteOptions`**
+
+`gpio.RemoteOptions` holds how an object store is reached as one value --
+`profile`, `s3_endpoint`, `s3_region`, `s3_use_ssl` -- the same one every CLI
+command builds from `--aws-profile` and `--s3-*`
+([#1436](https://github.com/geoparquet/geoparquet-io/issues/1436)). Pass it as
+`remote=` to `gpio.read_partition`, `gpio.convert`, `Table.write` and
+`Table.upload`. Every field defaults to `None`, "not asked", which falls back to
+the AWS environment variables and then to gpio's defaults.
+
+```python
+remote = gpio.RemoteOptions(profile='prod', s3_region='us-west-2')
+gpio.read('data.parquet').write('s3://bucket/data.parquet', remote=remote)
+```
+
+The older per-keyword spellings (`profile=`, `aws_profile=`, `s3_endpoint=`,
+`s3_region=`, `s3_use_ssl=`) still work and still reach the store, warn once per
+process, and will be removed in the next minor release. Naming a field both ways
+raises `TypeError`.
 `memory_limit` caps the write's DuckDB work on every strategy.
 
 === "CLI"
@@ -1754,7 +1776,7 @@ if result.passed():
 result = table.validate(version='1.1')
 ```
 
-#### `upload(destination, compression='ZSTD', compression_level=None, row_group_size_mb=None, row_group_rows=None, geoparquet_version=None, profile=None, s3_endpoint=None, ...)`
+#### `upload(destination, *, compression=None, compression_level=None, row_group_size_mb=None, row_group_rows=None, geoparquet_version=None, remote=None, ...)`
 
 Write and upload the table to cloud object storage (S3, GCS, Azure).
 
@@ -1766,13 +1788,15 @@ gpio.read('input.parquet') \
     .upload('s3://bucket/data.parquet')
 
 # Upload with AWS profile
-table.upload('s3://bucket/data.parquet', profile='my-aws-profile')
+table.upload('s3://bucket/data.parquet', remote=gpio.RemoteOptions(profile='my-aws-profile'))
 
 # Upload to S3-compatible storage (MinIO, source.coop)
 table.upload(
     's3://bucket/data.parquet',
-    s3_endpoint='minio.example.com:9000',
-    s3_use_ssl=False
+    remote=gpio.RemoteOptions(
+        s3_endpoint='minio.example.com:9000',
+        s3_use_ssl=False,
+    ),
 )
 
 # Upload to GCS
@@ -1835,7 +1859,7 @@ table = gpio.convert('data.csv', wkt_column='geometry')
 table = gpio.convert('data.csv', lat_column='latitude', lon_column='longitude')
 
 # Convert from S3 with authentication
-table = gpio.convert('s3://bucket/data.gpkg', profile='my-aws')
+table = gpio.convert('s3://bucket/data.gpkg', remote=gpio.RemoteOptions(profile='my-aws'))
 
 # Name the text encoding of a source that cannot say (a DBF without .cpg, a Latin-1 CSV)
 table = gpio.convert('ehak.shp', encoding='ISO-8859-1')

@@ -9,7 +9,11 @@ import os
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
+from geoparquet_io.cli._shared import (
+    activate_remote,
+    create_default_group,
+    init_group_context,
+)
 from geoparquet_io.cli.decorators import (
     GlobAwareCommand,
     ParquetInputCommand,
@@ -216,7 +220,7 @@ def inspect_summary(ctx, parquet_file, json_output, markdown_output, check_all_f
 
     Displays file size, row count, columns, geometry type, CRS, and bounding box.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         _inspect_summary_impl(parquet_file, json_output, markdown_output, check_all_files)
 
 
@@ -251,7 +255,7 @@ def inspect_head(
         gpio inspect head data.parquet        # First 10 rows
         gpio inspect head data.parquet 20     # First 20 rows
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         _inspect_preview_impl(
             parquet_file,
             count,
@@ -294,7 +298,7 @@ def inspect_tail(
         gpio inspect tail data.parquet        # Last 10 rows
         gpio inspect tail data.parquet 5      # Last 5 rows
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         _inspect_preview_impl(
             parquet_file,
             count,
@@ -316,7 +320,7 @@ def inspect_tail(
 @click.pass_context
 def inspect_stats(ctx, parquet_file, json_output, markdown_output, verbose):
     """Show column statistics (nulls, min/max, unique counts)."""
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         _inspect_stats_impl(parquet_file, json_output, markdown_output)
 
 
@@ -367,7 +371,7 @@ def inspect_meta(
     """
     _validate_parquet_input(parquet_file)
 
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         _handle_meta_display(
             parquet_file,
             meta_parquet,
@@ -400,7 +404,7 @@ def inspect_layers(ctx, input_file, json_output, verbose):
 
     from geoparquet_io.core.layers import list_layers
 
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         try:
             layers = list_layers(input_file)
         except FileNotFoundError as e:

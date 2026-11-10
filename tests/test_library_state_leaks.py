@@ -199,10 +199,12 @@ def test_api_upload_to_s3_passes_profile_without_touching_env(buildings_test_fil
     monkeypatch.setenv("AWS_PROFILE", "original-profile")
     seen: list = []
     with patch("geoparquet_io.core.upload.upload", side_effect=_recording_upload(seen)):
-        gpio.read(buildings_test_file).upload(S3_DEST, profile="upload-profile")
+        gpio.read(buildings_test_file).upload(
+            S3_DEST, remote=gpio.RemoteOptions(profile="upload-profile")
+        )
 
     assert len(seen) == 1
-    assert seen[0]["kwargs"].get("profile") == "upload-profile"
+    assert seen[0]["kwargs"]["remote"].profile == "upload-profile"
     assert seen[0]["env_profile"] == "original-profile"
     assert os.environ.get("AWS_PROFILE") == "original-profile"
 

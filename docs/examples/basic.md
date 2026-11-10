@@ -220,7 +220,7 @@ gpio.read('input.parquet') \
 
 # With AWS profile
 gpio.read('input.parquet') \
-    .upload('s3://bucket/data.parquet', profile='my-aws-profile')
+    .upload('s3://bucket/data.parquet', remote=gpio.RemoteOptions(profile='my-aws-profile'))
 
 # S3-compatible storage (MinIO, source.coop)
 gpio.read('input.parquet') \

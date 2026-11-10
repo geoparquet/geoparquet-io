@@ -7,7 +7,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3, init_group_context, prepare_output
+from geoparquet_io.cli._shared import activate_remote, init_group_context, prepare_output
 from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     allow_schema_diff_option,
@@ -80,7 +80,7 @@ def hilbert_order(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         prepare_output(output_parquet, any_extension)
 
         hilbert_impl(
@@ -138,7 +138,7 @@ def str_order_command(
     vector before either use, so tiles and row groups line up whatever you
     pass.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         prepare_output(output_parquet, any_extension)
         str_impl(
             input_parquet,
@@ -195,7 +195,7 @@ def sort_column(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         # Validate .parquet extension
         validate_parquet_extension(output_parquet, any_extension)
 
@@ -273,7 +273,7 @@ def sort_quadkey(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         # Validate .parquet extension
         validate_parquet_extension(output_parquet, any_extension)
 

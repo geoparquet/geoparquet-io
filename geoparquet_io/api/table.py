@@ -36,6 +36,7 @@ from geoparquet_io.core.index_ops import get_index_spec, validate_partition_argu
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.process.aggregate.grid_common import BUCKET_POINT_GEOMETRY
+from geoparquet_io.core.remote import RemoteOptions, remote_options_from_keywords
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
 from geoparquet_io.core.write_funnels import write_geoparquet_table
@@ -206,6 +207,7 @@ def read_partition(
     *,
     hive_input: bool | None = None,
     allow_schema_diff: bool = False,
+    remote: RemoteOptions | None = None,
     s3_endpoint: str | None = None,
     s3_region: str | None = None,
     s3_use_ssl: bool = True,
@@ -224,10 +226,18 @@ def read_partition(
         hive_input: Explicitly enable/disable hive partitioning. None = auto-detect.
         allow_schema_diff: If True, allow merging schemas across files with
                            different columns (uses DuckDB union_by_name)
-        s3_endpoint: Custom S3 endpoint (e.g., 'data.source.coop')
-        s3_region: S3 region for custom endpoints
-        s3_use_ssl: Whether to use SSL (default: True)
-        aws_profile: AWS profile name for S3 operations
+        remote: How the dataset's object store is reached, as one
+                :class:`gpio.RemoteOptions` (AWS profile, S3 endpoint, region,
+                SSL). The same object the writers and ``Table.upload`` take.
+        s3_endpoint: **Deprecated** (#1436), removed in the next minor release:
+                use ``remote=gpio.RemoteOptions(s3_endpoint=...)``.
+        s3_region: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(s3_region=...)``.
+        s3_use_ssl: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(s3_use_ssl=...)``. ``True`` is this
+                signature's default, so only ``False`` counts as asked for.
+        aws_profile: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(profile=...)``.
 
     Returns:
         Table containing all partition data combined
@@ -236,6 +246,9 @@ def read_partition(
         >>> import geoparquet_io as gpio
         >>> table = gpio.read_partition('partitioned_output/')
         >>> table = gpio.read_partition('data/quadkey=*/*.parquet')
+        >>> table = gpio.read_partition(
+        ...     's3://bucket/dataset/', remote=gpio.RemoteOptions(profile='my-aws')
+        ... )
     """
     from geoparquet_io.core.duckdb_utils import (
         _wrap_query_with_wkb_conversion,
@@ -246,14 +259,17 @@ def read_partition(
     )
     from geoparquet_io.core.geometry_detection import primary_geometry_column
     from geoparquet_io.core.partition.reader import build_read_parquet_expr
-    from geoparquet_io.core.remote import needs_httpfs, resolve_s3_config
+    from geoparquet_io.core.remote import needs_httpfs
 
-    s3_config = resolve_s3_config(
+    remote = remote_options_from_keywords(
+        "read_partition",
+        remote,
+        aws_profile=aws_profile,
         s3_endpoint=s3_endpoint,
         s3_region=s3_region,
-        s3_no_ssl=not s3_use_ssl,
-        aws_profile=aws_profile,
+        s3_use_ssl=s3_use_ssl,
     )
+    s3_config = remote.resolved()
     path_str = str(path)
     expr = build_read_parquet_expr(
         path_str,
@@ -290,6 +306,7 @@ def convert(
     delimiter: str | None = None,
     skip_invalid: bool = False,
     profile: str | None = None,
+    remote: RemoteOptions | None = None,
     layer: str | None = None,
     repair_geometry: bool = True,
     linearize_curves: bool = True,
@@ -322,7 +339,12 @@ def convert(
                longitude column (auto-detected if not specified)
         delimiter: For CSV: field delimiter (auto-detected if not specified)
         skip_invalid: Skip invalid geometries instead of erroring
-        profile: AWS profile name for S3 authentication (default: None)
+        profile: **Deprecated** (#1436), removed in the next minor release: use
+               ``remote=gpio.RemoteOptions(profile=...)``. Still honoured, with
+               a warning once per process.
+        remote: How the source's object store is reached, as one
+               :class:`gpio.RemoteOptions` (AWS profile, S3 endpoint, region,
+               SSL).
         layer: Layer name for multi-layer formats (GeoPackage, FileGDB). If not specified,
                reads the first/default layer.
         linearize_curves: Stroke curved geometries (CircularString..MultiSurface) into
@@ -345,30 +367,37 @@ def convert(
         >>> import geoparquet_io as gpio
         >>> gpio.convert('data.gpkg').sort_hilbert().write('out.parquet')
         >>> gpio.convert('data.csv', lat_column='lat', lon_column='lon').write('out.parquet')
-        >>> gpio.convert('s3://bucket/data.gpkg', profile='my-aws').write('out.parquet')
+        >>> gpio.convert(
+        ...     's3://bucket/data.gpkg', remote=gpio.RemoteOptions(profile='my-aws')
+        ... ).write('out.parquet')
         >>> gpio.convert('multilayer.gpkg', layer='buildings').write('buildings.parquet')
         >>> gpio.convert('ehak.shp', encoding='ISO-8859-1').write('ehak.parquet')
         >>> gpio.convert('etak_3d.shp', force_2d=True).write('etak.parquet')
     """
     from geoparquet_io.core.convert import read_spatial_to_arrow
 
-    arrow_table, detected_crs, geom_col = read_spatial_to_arrow(
-        str(path),
-        verbose=False,
-        wkt_column=wkt_column,
-        lat_column=lat_column,
-        lon_column=lon_column,
-        delimiter=delimiter,
-        skip_invalid=skip_invalid,
-        profile=profile,
-        geometry_column=geometry_column,
-        layer=layer,
-        repair_geometry=repair_geometry,
-        linearize_curves=linearize_curves,
-        max_angle_deg=max_angle_deg,
-        encoding=encoding,
-        force_2d=force_2d,
-    )
+    remote = remote_options_from_keywords("convert", remote, profile=profile)
+    # The endpoint and region reach DuckDB through the ambient S3 config, the
+    # same channel `gpio convert` activates them on; the profile is also passed
+    # explicitly because `read_spatial_to_arrow` hands it to GDAL (#1436).
+    with remote.activate():
+        arrow_table, detected_crs, geom_col = read_spatial_to_arrow(
+            str(path),
+            verbose=False,
+            wkt_column=wkt_column,
+            lat_column=lat_column,
+            lon_column=lon_column,
+            delimiter=delimiter,
+            skip_invalid=skip_invalid,
+            profile=remote.profile,
+            geometry_column=geometry_column,
+            layer=layer,
+            repair_geometry=repair_geometry,
+            linearize_curves=linearize_curves,
+            max_angle_deg=max_angle_deg,
+            encoding=encoding,
+            force_2d=force_2d,
+        )
 
     return Table(arrow_table, geometry_column=geom_col, crs=detected_crs)
 
@@ -491,12 +520,15 @@ def _asked_fields(write: WriteOptions) -> set[str]:
     """The fields of *write* a caller asked for: every one that is not None.
 
     ``write_strategy="auto"`` is the documented spelling of None, so it is not asked.
+    ``remote`` is never None -- an empty ``RemoteOptions()`` is its "not asked"
+    (#1436) -- so it is asked for exactly when something in it is.
     """
     return {
         f.name
         for f in dataclasses.fields(write)
         if getattr(write, f.name) is not None
         and not (f.name == "write_strategy" and write.write_strategy == "auto")
+        and not (f.name == "remote" and not write.remote)
     }
 
 
@@ -1185,6 +1217,7 @@ class Table:
         write_strategy: str | None = None,
         memory_limit: str | None = None,
         profile: str | None = None,
+        remote: RemoteOptions | None = None,
         verbose: bool = False,
         # Format-specific options
         overwrite: bool = False,
@@ -1236,7 +1269,13 @@ class Table:
                 duckdb-kv and disk-rewrite strategies write the table through
                 DuckDB; in-memory and streaming write it with pyarrow alone).
                 Default: gpio's ceiling-based default
-            profile: AWS profile for S3 operations
+            profile: **Deprecated** (#1436), removed in the next minor release:
+                use ``remote=gpio.RemoteOptions(profile=...)``. Still honoured,
+                with a warning once per process.
+            remote: How the destination's object store is reached, as one
+                :class:`gpio.RemoteOptions` (AWS profile, S3 endpoint, region,
+                SSL). The same object ``gpio publish upload`` and
+                ``Table.upload`` take, so one value serves the whole chain.
             overwrite: Overwrite existing file (GeoPackage, Shapefile)
             layer_name: Layer name for GeoPackage (default: the output file stem)
             include_wkt: Include WKT geometry column for CSV (default: True)
@@ -1278,6 +1317,13 @@ class Table:
             >>> table.write('output.dat', format='csv')    # Explicit format
             >>> table.write('out.parquet', gpio.WriteOptions(compression='GZIP'))
         """
+        # The deprecated `profile=` is folded into `remote=` here, so the
+        # warning names this method rather than `WriteOptions` (#1436). Both
+        # spellings still reach the store; naming the profile twice raises.
+        # `or None`: an empty value is "not asked", and must not overwrite a
+        # `remote` carried in `options`.
+        remote = remote_options_from_keywords("Table.write", remote, profile=profile) or None
+        profile = None
         write = _merge_write_options(options, locals())
 
         # Above the format dispatch, so every format refuses a stale geometry
@@ -1315,7 +1361,7 @@ class Table:
 
         # Same principle again: a GeoParquet knob on another format used to be
         # dropped without a word, so `.csv` "written with GZIP" was not (#761).
-        ignored = _asked_fields(write) - {"profile"}
+        ignored = _asked_fields(write) - {"profile", "remote"}
         if ignored:
             from geoparquet_io.core.exceptions import InvalidParameterError
 
@@ -1328,7 +1374,7 @@ class Table:
         return self._write_format(
             path,
             detected_format,
-            profile=write.profile,
+            profile=write.remote.profile,
             overwrite=overwrite,
             layer_name=layer_name,
             include_wkt=include_wkt,
@@ -1528,7 +1574,7 @@ class Table:
 
             # Upload to remote if needed
             if is_remote:
-                upload(local_path, path_str, profile=write.profile)
+                upload(local_path, path_str, profile=write.remote.profile)
                 return PathLib(path)
 
             return local_path
@@ -2658,6 +2704,7 @@ class Table:
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
         geoparquet_version: str | None = None,
+        remote: RemoteOptions | None = None,
         profile: str | None = None,
         s3_endpoint: str | None = None,
         s3_region: str | None = None,
@@ -2685,10 +2732,19 @@ class Table:
             geoparquet_version: GeoParquet version (1.0, 1.1, 1.1-geoarrow, 2.0, or None to preserve).
                 1.1-geoarrow converts geometry from any input to native GeoArrow nested-coordinate
                 encoding and omits the bbox column; columns with incompatible mixed types fall back to WKB.
-            profile: AWS profile name for S3
-            s3_endpoint: Custom S3-compatible endpoint (e.g., "minio.example.com:9000")
-            s3_region: S3 region (default: us-east-1 when using custom endpoint)
-            s3_use_ssl: Whether to use HTTPS for S3 endpoint (default: True)
+            remote: How the destination's object store is reached, as one
+                :class:`gpio.RemoteOptions` (AWS profile, S3 endpoint, region,
+                SSL). The same object ``gpio publish upload`` builds from its
+                flags and ``Table.write`` takes.
+            profile: **Deprecated** (#1436), removed in the next minor release:
+                use ``remote=gpio.RemoteOptions(profile=...)``.
+            s3_endpoint: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(s3_endpoint=...)``.
+            s3_region: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(s3_region=...)``.
+            s3_use_ssl: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(s3_use_ssl=...)``. ``True`` is this
+                signature's default, so only ``False`` counts as asked for.
             chunk_concurrency: Max concurrent chunks per file upload (default: 12)
             dry_run: Write the file and print what would be uploaded (source,
                 size, destination, target key) without uploading. Mirrors
@@ -2702,8 +2758,9 @@ class Table:
         Example:
             >>> gpio.read('data.parquet').sort_hilbert().upload(
             ...     's3://bucket/data.parquet',
-            ...     s3_endpoint='minio.example.com:9000',
-            ...     s3_use_ssl=False,
+            ...     remote=gpio.RemoteOptions(
+            ...         s3_endpoint='minio.example.com:9000', s3_use_ssl=False
+            ...     ),
             ... )
         """
         from pathlib import Path
@@ -2712,6 +2769,15 @@ class Table:
         from geoparquet_io.core.file_utils import is_partition_path, scratch_dir
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload as do_upload
+
+        remote = remote_options_from_keywords(
+            "Table.upload",
+            remote,
+            profile=profile,
+            s3_endpoint=s3_endpoint,
+            s3_region=s3_region,
+            s3_use_ssl=s3_use_ssl,
+        )
 
         # A destination ending in '/' names the object after a local source file only.
         if destination.endswith("/"):
@@ -2743,10 +2809,7 @@ class Table:
             do_upload(
                 source=temp_path,
                 destination=destination,
-                profile=profile,
-                s3_endpoint=s3_endpoint,
-                s3_region=s3_region,
-                s3_use_ssl=s3_use_ssl,
+                remote=remote,
                 chunk_concurrency=chunk_concurrency,
                 dry_run=dry_run,
             )

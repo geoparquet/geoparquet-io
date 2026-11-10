@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Collection, Iterator, Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any, cast, overload
 
 from geoparquet_io.core.compression import resolve_codec
@@ -87,6 +87,7 @@ from geoparquet_io.core.geo_metadata import (
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
 from geoparquet_io.core.logging_config import debug, info, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.remote import RemoteOptions, remote_options_from_keywords
 from geoparquet_io.core.sizing import mb_to_bytes
 
 if TYPE_CHECKING:
@@ -1364,7 +1365,16 @@ class WriteOptions:
         row_group_size_mb: Target row-group size in MB (exclusive with
             ``row_group_rows``).
         row_group_rows: Rows per row group.
-        profile: AWS profile for an ``s3://`` destination.
+        profile: **Deprecated** (#1436), removed in the next minor release: the
+            AWS profile is a remote-access fact, so it lives on ``remote``.
+            Setting it here still works and still reaches the store -- it is
+            folded into ``remote`` and both read the same value afterwards --
+            but it warns once per process. Use
+            ``remote=gpio.RemoteOptions(profile=...)``.
+        remote: How the destination's object store is reached, as one
+            :class:`gpio.RemoteOptions <geoparquet_io.core.remote.RemoteOptions>`
+            (profile, S3 endpoint, region, SSL). Not a layout field: it does not
+            change the written bytes.
         geoparquet_version: Output version; None preserves or auto-detects.
         memory_limit: DuckDB memory cap for the write's DuckDB work, on every
             strategy (e.g. ``"2GB"``); None takes gpio's default.
@@ -1381,6 +1391,40 @@ class WriteOptions:
     geoparquet_version: str | None = None
     memory_limit: str | None = None
     write_strategy: str | None = None
+    remote: RemoteOptions = RemoteOptions()
+
+    def __post_init__(self) -> None:
+        """Reconcile the deprecated ``profile`` field with ``remote`` (#1436).
+
+        ``profile`` is a remote-access fact, not a write fact, and it moved to
+        :class:`~geoparquet_io.core.remote.RemoteOptions`. It stays here as a
+        deprecated mirror so the call sites that carry S3 credentials through
+        ``WriteOptions`` keep working: whichever side is given, both read the
+        same value afterwards.
+
+        The deprecation warning fires only for ``WriteOptions(profile=...)``
+        with no ``remote`` -- the old spelling used on its own.
+        ``dataclasses.replace`` on an already-reconciled value passes both, so
+        it stays quiet, and so does the new spelling.
+        """
+        if self.remote is None:  # a caller that forwards `remote=None` by name
+            object.__setattr__(self, "remote", RemoteOptions())
+        if self.profile is None:
+            if self.remote.profile is not None:
+                object.__setattr__(self, "profile", self.remote.profile)
+            return
+        if not self.remote:
+            built = remote_options_from_keywords("WriteOptions", None, profile=self.profile)
+            object.__setattr__(self, "remote", built)
+            return
+        if self.remote.profile is None:
+            object.__setattr__(self, "remote", replace(self.remote, profile=self.profile))
+        elif self.remote.profile != self.profile:
+            raise TypeError(
+                f"WriteOptions got profile={self.profile!r} and "
+                f"remote=RemoteOptions(profile={self.remote.profile!r}); "
+                "set the AWS profile in one place"
+            )
 
     @classmethod
     def pick(cls, values: Mapping[str, Any]) -> WriteOptions:

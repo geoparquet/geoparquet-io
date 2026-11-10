@@ -26,7 +26,11 @@ from typing import TypeVar
 import click
 from click.core import ParameterSource
 
-from geoparquet_io.cli._shared import _activate_s3, create_default_group, init_group_context
+from geoparquet_io.cli._shared import (
+    activate_remote,
+    create_default_group,
+    init_group_context,
+)
 from geoparquet_io.cli.decorators import (
     ParquetInputCommand,
     check_partition_options,
@@ -824,7 +828,7 @@ def check_all(
     from geoparquet_io.core.remote import is_remote_url, show_remote_read_message
 
     configure_verbose(verbose)
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
             check_all_files=check_all_files,
@@ -1104,7 +1108,7 @@ def check_spatial(
 
     configure_verbose(verbose)
 
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
             check_all_files=check_all_files,
@@ -1213,7 +1217,7 @@ def check_compression_cmd(
 
     configure_verbose(verbose)
 
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
             check_all_files=check_all_files,
@@ -1362,7 +1366,7 @@ def check_bbox_cmd(
     )
     bbox_recheck = quiet_recheck(check_bbox, False, verify_rows=sample_rows, all_rows=all_rows)
 
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
             check_all_files=check_all_files,
@@ -1514,7 +1518,7 @@ def check_row_group_cmd(
 
     configure_verbose(verbose)
 
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
             check_all_files=check_all_files,
@@ -1600,7 +1604,7 @@ def check_stac_cmd(ctx, stac_file, verbose, strict):
       \b
       gpio check stac output.json
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         from geoparquet_io.core.remote import validate_profile_for_urls
         from geoparquet_io.core.stac_check import check_stac
 
@@ -1693,7 +1697,7 @@ def check_spec(
 
     configure_verbose(verbose)
 
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         # Validate profile is only used with S3
         validate_profile_for_urls(None, parquet_file)
         refuse_no_parquet_match(parquet_file)
@@ -1764,7 +1768,7 @@ def check_optimization_cmd(
 
     configure_verbose(verbose)
 
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
             check_all_files=check_all_files,

@@ -57,6 +57,7 @@ if TYPE_CHECKING:
     from geoparquet_io.api.stac import generate_stac, validate_stac
     from geoparquet_io.core.exceptions import GeoParquetError
     from geoparquet_io.core.parquet_writer import WriteOptions
+    from geoparquet_io.core.remote import RemoteOptions
 
 #: name -> "module:attribute" it is imported from, on first access.
 _LAZY_EXPORTS = {
@@ -83,6 +84,7 @@ _LAZY_EXPORTS = {
     "generate_stac": "geoparquet_io.api.stac:generate_stac",
     "validate_stac": "geoparquet_io.api.stac:validate_stac",
     "GeoParquetError": "geoparquet_io.core.exceptions:GeoParquetError",
+    "RemoteOptions": "geoparquet_io.core.remote:RemoteOptions",
     "WriteOptions": "geoparquet_io.core.parquet_writer:WriteOptions",
 }
 
@@ -95,6 +97,7 @@ __all__ = [
     "extract_arcgis",
     "list_layers",
     "Table",
+    "RemoteOptions",
     "WriteOptions",
     "pipe",
     "ops",

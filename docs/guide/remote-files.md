@@ -12,6 +12,38 @@ gpio uses different libraries for reads and writes:
 
 The `--aws-profile` global flag is available on all commands for AWS authentication. See also `--s3-endpoint`, `--s3-region`, and `--s3-no-ssl` for S3-compatible storage.
 
+### One value for remote access: `gpio.RemoteOptions`
+
+Those four settings are one concern, so they travel as one value ([#1436](https://github.com/geoparquet/geoparquet-io/issues/1436)). Every CLI command builds exactly one `RemoteOptions` from the root group's flags and its own, and the Python API takes the same object by name:
+
+=== "CLI"
+
+    <!-- doctest: skip="needs cloud credentials" -->
+    ```bash
+    gpio --aws-profile prod --s3-endpoint minio.example.com:9000 --s3-no-ssl \
+      publish upload data.parquet s3://bucket/data.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    remote = gpio.RemoteOptions(
+        profile='prod',
+        s3_endpoint='minio.example.com:9000',
+        s3_use_ssl=False,
+    )
+    assert remote.profile == 'prod'
+
+    # Then, with credentials for that profile:
+    # gpio.read('data.parquet').upload('s3://bucket/data.parquet', remote=remote)
+    ```
+
+Its fields are `profile`, `s3_endpoint`, `s3_region` and `s3_use_ssl`. Each defaults to `None`, meaning "not asked": the value then falls back to the AWS environment variables and finally to gpio's defaults. It is frozen and keyword-only, like [`gpio.WriteOptions`](write-strategies.md), and one object serves a whole chain — `gpio.read_partition(..., remote=...)`, `gpio.convert(..., remote=...)`, `Table.write(..., remote=...)` and `Table.upload(..., remote=...)`.
+
+The older per-keyword spellings (`profile=`, `aws_profile=`, `s3_endpoint=`, `s3_region=`, `s3_use_ssl=`) still work and still reach the store. Each warns once per process and will be removed in the next minor release; naming a field both ways raises `TypeError`.
+
 ### URLs are taken as-is
 
 A URL you pass to gpio is used exactly as you typed it: gpio assumes it is already percent-encoded, as a URL is by definition, and never re-encodes it. Paste the URL that works in your browser or in `curl` — `gpio inspect meta 'https://example.com/my%20file.parquet'` requests `my%20file.parquet`, not `my%2520file.parquet`. A URL containing a raw space, bracket or other character that has to be escaped is yours to encode before passing it in.
@@ -42,9 +74,9 @@ Credentials come from the standard AWS credential chain, so anything the AWS CLI
 5. **`credential_process`**: an external command that prints credentials
 6. **IAM role**: EC2 instance, ECS task or EKS pod identity metadata
 
-For DuckDB reads, precedence follows the AWS CLI. Naming a profile with `--aws-profile` (or `profile=` in Python) makes that profile win over environment keys. An exported `AWS_PROFILE` does not, so when `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are also set, DuckDB reads sign with the environment keys. Uploads and copies go through obstore, where an exported `AWS_PROFILE` still wins over environment keys.
+For DuckDB reads, precedence follows the AWS CLI. Naming a profile with `--aws-profile` (or `remote=gpio.RemoteOptions(profile=...)` in Python) makes that profile win over environment keys. An exported `AWS_PROFILE` does not, so when `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are also set, DuckDB reads sign with the environment keys. Uploads and copies go through obstore, where an exported `AWS_PROFILE` still wins over environment keys.
 
-The region comes from `--s3-region` (or `s3_region=` in Python) first, then `AWS_REGION` or `AWS_DEFAULT_REGION`. After that, a profile named with `--aws-profile` gives its own `region`. An exported `AWS_PROFILE` does not, and DuckDB reads use the `region` of the `default` profile instead. If the bucket is in another region, pass `--s3-region` (or `s3_region=`) or set `AWS_REGION`.
+The region comes from `--s3-region` (or `remote=gpio.RemoteOptions(s3_region=...)` in Python) first, then `AWS_REGION` or `AWS_DEFAULT_REGION`. After that, a profile named with `--aws-profile` gives its own `region`. An exported `AWS_PROFILE` does not, and DuckDB reads use the `region` of the `default` profile instead. If the bucket is in another region, pass `--s3-region` (or `s3_region=` on `RemoteOptions`) or set `AWS_REGION`.
 
 Credentials from SSO, assume-role and `credential_process` are short-lived. gpio resolves them once at the start of a command, which is fine for a single upload or copy; a run that outlives the credential lifetime needs to be restarted.
 
@@ -85,7 +117,7 @@ Credentials from SSO, assume-role and `credential_process` are short-lived. gpio
     # Use a named AWS profile
     gpio.read('s3://bucket/input.parquet').add_bbox().upload(
         's3://bucket/output.parquet',
-        profile='production'
+        remote=gpio.RemoteOptions(profile='production'),
     )
 
     # Or set AWS_PROFILE environment variable
@@ -225,7 +257,7 @@ table = gpio.read('input.parquet') \
 <!-- doctest: skip="needs cloud credentials" -->
 ```python
 # Upload directly (writes temp file, uploads, cleans up)
-table.upload('s3://bucket/output.parquet', profile='prod')
+table.upload('s3://bucket/output.parquet', remote=gpio.RemoteOptions(profile='prod'))
 ```
 
 See [Command Piping](piping.md) for more streaming patterns.

@@ -5,9 +5,15 @@ This module provides utilities for detecting and working with remote URLs
 in cloud object storage (S3, GCS, Azure) and HTTP/HTTPS endpoints.
 """
 
+from __future__ import annotations
+
 import os
+import warnings
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
+from typing import Any
 
 from geoparquet_io.core.exceptions import (
     FailureKind,
@@ -266,6 +272,219 @@ def validate_profile_for_urls(profile, *urls):
             )
 
 
+# ---------------------------------------------------------------------------
+# The remote-access options object (#1436)
+# ---------------------------------------------------------------------------
+
+
+#: Click parameter -> ``RemoteOptions`` field, for every remote-access flag.
+#: ``--aws-profile`` is spelled ``profile`` here and ``--s3-no-ssl`` is the
+#: *negation* of ``s3_use_ssl``, inverted by :meth:`RemoteOptions.from_cli`. A
+#: parameter absent from this table is not a remote-access flag and is ignored.
+_CLI_SPELLINGS = {
+    "aws_profile": "profile",
+    "s3_endpoint": "s3_endpoint",
+    "s3_region": "s3_region",
+    "s3_no_ssl": "s3_use_ssl",
+}
+
+#: One warning per deprecated spelling per process, keyed ``"<entry point>.<keyword>"``.
+_warned_spellings: set[str] = set()
+
+
+@dataclass(frozen=True, kw_only=True)
+class RemoteOptions:
+    """How gpio reaches an object store, as one value (``gpio.RemoteOptions``, #1436).
+
+    The second per-concern options object, after
+    :class:`~geoparquet_io.core.parquet_writer.WriteOptions` (#761). Every CLI
+    command that reads or writes a remote path builds exactly one from its
+    flags and the root group's (:meth:`from_cli` plus
+    ``cli.decorators.pack_remote_options``), and the Python API takes one
+    directly, so a credential cannot be accepted by one door and dropped on the
+    way to the store (#627, #663).
+
+    Every field defaults to ``None``, which means "not asked": :meth:`resolved`
+    then falls back to the AWS environment variables and finally to gpio's
+    defaults (no endpoint, no region, SSL on, no profile). A field is asked for
+    exactly when it is not None, so :meth:`merge` can let a command's own flag
+    beat the root group's without a second sentinel.
+
+    Attributes:
+        profile: AWS profile name, as ``--aws-profile``. S3 only;
+            :func:`validate_profile_for_urls` refuses it for another store.
+        s3_endpoint: Custom S3-compatible endpoint, as ``--s3-endpoint``
+            (e.g. ``"minio.example.com:9000"``). A scheme is stripped by
+            :meth:`resolved`, which reads ``http://`` as ``s3_use_ssl=False``.
+        s3_region: S3 region, as ``--s3-region``.
+        s3_use_ssl: Whether to speak HTTPS to the endpoint. ``--s3-no-ssl`` is
+            its negation; None means "not asked", which resolves to True.
+    """
+
+    profile: str | None = None
+    s3_endpoint: str | None = None
+    s3_region: str | None = None
+    s3_use_ssl: bool | None = None
+
+    @classmethod
+    def pick(cls, values: Mapping[str, Any]) -> RemoteOptions:
+        """The options named in *values*; other keys are ignored, absent fields stay unset."""
+        return cls(
+            **{
+                f.name: values[f.name]
+                for f in fields(cls)
+                if f.name in values and values[f.name] is not None
+            }
+        )
+
+    @classmethod
+    def from_cli(cls, **params: Any) -> RemoteOptions:
+        """The one ``RemoteOptions`` a CLI command builds from its Click parameters.
+
+        ``--aws-profile`` is ``profile`` and ``--s3-no-ssl`` is the negation of
+        ``s3_use_ssl``: the flag's ``False`` is "not asked", so it leaves the
+        field unset rather than asking for SSL. Every other parameter is
+        ignored -- ``profile`` above all, because ``gpio check --profile`` is a
+        row-group size band and ``gpio benchmark --profile`` turns profiling on.
+        Neither is a credential, and reading them here would hand an AWS
+        profile named ``"balanced"`` to the credential chain.
+        """
+        values: dict[str, Any] = {}
+        for name, value in params.items():
+            field = _CLI_SPELLINGS.get(name)
+            if field is None:
+                continue
+            # `--s3-no-ssl` absent is False, which is "not asked", not "use SSL":
+            # asking would make an unset command flag beat the root group's.
+            values[field] = (False if value else None) if name == "s3_no_ssl" else value
+        return cls.pick(values)
+
+    def merge(self, other: RemoteOptions | None) -> RemoteOptions:
+        """This value with *other*'s asked-for fields on top.
+
+        How a command's own ``--aws-profile`` beats the root group's: the root
+        options are the base and the command's are *other*. A None field of
+        *other* was not asked for and leaves this one as it is.
+        """
+        if other is None:
+            return self
+        return replace(self, **{name: getattr(other, name) for name in other.asked()})
+
+    def asked(self) -> frozenset[str]:
+        """The names of the fields that were asked for (not None)."""
+        return frozenset(f.name for f in fields(self) if getattr(self, f.name) is not None)
+
+    def __bool__(self) -> bool:
+        """Whether anything was asked for at all."""
+        return bool(self.asked())
+
+    def resolved(self) -> dict:
+        """The S3 config dict :func:`resolve_s3_config` builds from these options.
+
+        The one bridge to the ambient config every DuckDB connection and the
+        obstore store read, so an endpoint given here and an exported
+        ``AWS_ENDPOINT_URL`` are reconciled in one place.
+        """
+        return resolve_s3_config(
+            s3_endpoint=self.s3_endpoint,
+            s3_region=self.s3_region,
+            s3_no_ssl=self.s3_use_ssl is False,
+            aws_profile=self.profile,
+        )
+
+    @contextmanager
+    def activate(self) -> Iterator[dict]:
+        """Make these options the ambient S3 config for the duration of the block.
+
+        Yields the resolved config, as ``cli._shared._activate_s3`` did, so a
+        caller that has to hand the individual values to a non-DuckDB client
+        (obstore, in ``upload``) reads them from the same resolution.
+        """
+        from geoparquet_io.core.duckdb_utils import s3_config_scope
+
+        config = self.resolved()
+        with s3_config_scope(config):
+            yield config
+
+
+#: Deprecated API keyword -> ``RemoteOptions`` field. ``gpio.read_partition``
+#: spells the profile ``aws_profile`` and everything else spells it ``profile``;
+#: the warning has to name the keyword the caller actually wrote.
+_KEYWORD_FIELDS = {
+    "profile": "profile",
+    "aws_profile": "profile",
+    "s3_endpoint": "s3_endpoint",
+    "s3_region": "s3_region",
+    "s3_use_ssl": "s3_use_ssl",
+}
+
+
+def remote_options_from_keywords(
+    where: str,
+    remote: RemoteOptions | None,
+    **legacy: Any,
+) -> RemoteOptions:
+    """*remote*, or one built from the deprecated per-keyword spellings.
+
+    The migration path off the loose credential keywords (#1436). An entry point
+    that used to take ``profile=``/``s3_endpoint=``/``s3_region=``/``s3_use_ssl=``
+    keeps taking them: each is folded into the returned ``RemoteOptions`` and
+    warned about once per process, under the horizon "removed in the next
+    minor". Naming a field both in *remote* and as a keyword is a ``TypeError``,
+    as ``Table.write`` already refuses a write field set twice.
+
+    ``s3_use_ssl=True`` is the old signature's default, not a request, so it is
+    not treated as asked for; ``s3_use_ssl=False`` is.
+
+    Args:
+        where: The entry point's name, for the warning and the error message.
+        remote: The new spelling, or None.
+        **legacy: The old keywords, by their old names.
+
+    Returns:
+        The one ``RemoteOptions`` the entry point should pass on.
+    """
+    asked = {
+        name: value
+        for name, value in legacy.items()
+        if value is not None and not (name == "s3_use_ssl" and value is True)
+    }
+    base = remote or RemoteOptions()
+    if not asked:
+        return base
+
+    fields_asked = {_KEYWORD_FIELDS[name]: value for name, value in asked.items()}
+    both = sorted(fields_asked.keys() & base.asked())
+    if both:
+        raise TypeError(
+            f"{where}() got {', '.join(both)} both in remote= and as a keyword; "
+            "set each field in one place"
+        )
+    _warn_deprecated_spellings(where, asked)
+    return base.merge(RemoteOptions.pick(fields_asked))
+
+
+def _warn_deprecated_spellings(where: str, asked: Iterable[str]) -> None:
+    """Warn once per process for each deprecated keyword *where* was given.
+
+    The replacement names the ``RemoteOptions`` *field*, which is not always the
+    old keyword: ``gpio.read_partition(aws_profile=...)`` becomes
+    ``remote=gpio.RemoteOptions(profile=...)``.
+    """
+    for name in sorted(asked):
+        key = f"{where}.{name}"
+        if key in _warned_spellings:
+            continue
+        _warned_spellings.add(key)
+        warnings.warn(
+            f"{where}({name}=...) is deprecated and will be removed in the next "
+            f"minor release; pass "
+            f"remote=gpio.RemoteOptions({_KEYWORD_FIELDS[name]}=...) instead",
+            DeprecationWarning,
+            stacklevel=4,
+        )
+
+
 def show_remote_read_message(file_path, verbose=False):
     """
     Show consistent message when reading from remote files.
@@ -387,7 +606,7 @@ def upload_if_remote(local_path, remote_path, profile=None, is_directory=False, 
     upload(
         source=Path(local_path),
         destination=remote_path,
-        profile=profile,
+        remote=RemoteOptions(profile=profile),
         pattern=pattern,
         dry_run=False,
     )

@@ -1165,7 +1165,7 @@ def _rewrite_parquet(
                         writer.write_table(
                             pa.Table.from_batches([group]), row_group_size=group.num_rows
                         )
-        upload_if_remote(local, destination, profile=write.profile, verbose=verbose)
+        upload_if_remote(local, destination, profile=write.remote.profile, verbose=verbose)
 
 
 def _carries_more_than_duckdb_generates(geo_dict: dict) -> bool:

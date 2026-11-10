@@ -566,6 +566,12 @@ ONE_SIDED_CLASSES: dict[str, str] = {
         "A `Table.write` parameter: the API twin writes a Table itself (`Table.write` "
         "serves every format; `Table.upload` writes before it uploads)."
     ),
+    "remote_access": (
+        "How an object store is reached, as one `gpio.RemoteOptions` (#1436). The CLI "
+        "packs its `--aws-profile`/`--s3-*` flags into one value with "
+        "`decorators.pack_remote_options`, so no leaf declares `remote` as a flag; the "
+        "API takes that value by name, beside the deprecated per-keyword spellings."
+    ),
 }
 
 
@@ -606,6 +612,10 @@ def _cli_class(leaf: str, param: click.Parameter, twins: list[tuple[str, Callabl
 def _api_class(name: str, fn: Callable) -> str | None:
     if inspect.signature(fn).parameters[name].default is inspect.Parameter.empty:
         return "operand"
+    # Before the `Table.write` check: `remote` is on `Table.write` too, but it is
+    # the remote-access concern wherever it appears, not a write setting (#1436).
+    if name == "remote":
+        return "remote_access"
     if name in _TABLE_WRITE:
         return "write_on_api"
     return None

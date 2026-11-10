@@ -41,7 +41,13 @@
 # +3: Table.write/create_pmtiles/create_pmtiles_pyramid forward exactly their signature.
 # +4 (#1087): Table-door call-parity cases for inspect meta, summary and stats (+3),
 # and one malformed block read alike by gpio inspect and Table.metadata (+1).
-max_collected = 14693
+# +41, the remote-access options object (#1436): the second per-concern object
+# gets the same construction-time guard the write concern has. The value itself
+# and its CLI spellings (13), the one-place layering of the root group's flags
+# over a command's own and the flags reaching the store (6), the deprecated
+# `profile` on WriteOptions forwarding without warning twice (7), the API's
+# `remote=` on every migrated entry point and the keyword migration path (15).
+max_collected = 14734
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
