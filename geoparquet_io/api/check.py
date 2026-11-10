@@ -10,14 +10,16 @@ from __future__ import annotations
 
 import functools
 import os
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
     from geoparquet_io.core.check_parquet_structure import CheckProfile
+
+#: One of the path-level checks, kept as itself through ``_one_file_only``.
+_Check = TypeVar("_Check", bound=Callable[..., "CheckResult"])
 
 
 class CheckResult:
@@ -265,7 +267,9 @@ def _not_geoparquet(path: str, check_type: str, categorised: bool) -> CheckResul
     return CheckResult(results, check_type=check_type, source_path=path)
 
 
-def _one_file_only(command: str, *, gate: bool = True, categorised: bool = False):
+def _one_file_only(
+    command: str, *, gate: bool = True, categorised: bool = False
+) -> Callable[[_Check], _Check]:
     """Refuse a directory or glob before the check runs; ``__wrapped__`` is the check itself.
 
     With ``gate``, a file that is not GeoParquet fails before the check runs,
@@ -274,19 +278,24 @@ def _one_file_only(command: str, *, gate: bool = True, categorised: bool = False
     check gives; ``categorised`` nests it as one category, as ``check_all``'s.
     ``Table.check_*`` calls ``__wrapped__``: a Table read from a directory hands
     it to core, which measures the dataset.
+
+    Typed as ``(_Check) -> _Check`` so each check keeps its own signature: an
+    untyped decorator makes every name it wraps ``Any`` to a type checker,
+    which would leave the public ``check_*`` functions and ``validate``
+    untyped for the callers py.typed promises them to.
     """
 
-    def decorate(check):
+    def decorate(check: _Check) -> _Check:
         label = check.__name__.removeprefix("check_")
 
         @functools.wraps(check)
-        def one_file_check(path, *args, **kwargs):
-            path = _one_file(path, command)
-            refused = _not_geoparquet(path, label, categorised) if gate else None
+        def one_file_check(path: str | os.PathLike[str], *args: Any, **kwargs: Any) -> CheckResult:
+            text = _one_file(path, command)
+            refused = _not_geoparquet(text, label, categorised) if gate else None
             # Not `or`: a CheckResult is falsy when it did not pass.
-            return refused if refused is not None else check(path, *args, **kwargs)
+            return refused if refused is not None else check(text, *args, **kwargs)
 
-        return one_file_check
+        return cast("_Check", one_file_check)
 
     return decorate
 
