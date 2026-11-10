@@ -53,9 +53,9 @@ def tidy(src: str, dst: str) -> str:
     return f"{rows} rows, {gpio.check_all(dst).verdict()}"
 ```
 
-Every path argument accepts `pathlib.Path` as well as `str` — `read()` and
-`write()` declare `str | Path`, the `check_*` functions
-`str | os.PathLike[str]`. Two things still widen to `Any`: pyarrow ships no
+Every path argument accepts `pathlib.Path` as well as `str` — `read()`,
+`write()` and the `ops` functions declare `str | Path`, the `check_*`
+functions `str | os.PathLike[str]`. Two things still widen to `Any`: pyarrow ships no
 type stubs, so a `pa.Table` in or out of the `ops` functions is untyped, and
 the modules under `geoparquet_io.core` are not yet annotated throughout.
 
