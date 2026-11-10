@@ -399,8 +399,17 @@ def test_a_write_option_on_another_format_is_refused(places, tmp_path, name, kwa
     assert not (tmp_path / name).exists()
 
 
-def test_default_options_on_another_format_are_fine(places, tmp_path):
-    places.write(tmp_path / "out.csv", WriteOptions())
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"options": WriteOptions()},
+        {"options": WriteOptions(write_strategy="auto")},
+        {"write_strategy": "auto"},
+    ],
+)
+def test_default_options_on_another_format_are_fine(places, tmp_path, kwargs):
+    """``write_strategy="auto"`` is the documented spelling of None, not a strategy asked for."""
+    places.write(tmp_path / "out.csv", **kwargs)
     assert (tmp_path / "out.csv").exists()
 
 

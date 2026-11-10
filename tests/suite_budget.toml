@@ -37,7 +37,8 @@
 # +36: every gpio.check_* answers as its gpio check command (9 checks x 4 fixtures).
 # +1: a "not GeoParquet" file-type answer is re-probed, never served from the cache.
 # +7: Table.write on each GeoArrow-native encoding matches convert (6), and a head of one (1).
-max_collected = 14684
+# +2: write_strategy="auto" is not a GeoParquet option asked of another format.
+max_collected = 14686
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

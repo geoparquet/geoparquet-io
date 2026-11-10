@@ -488,8 +488,16 @@ def extract_arcgis(
 
 
 def _asked_fields(write: WriteOptions) -> set[str]:
-    """The fields of *write* a caller asked for: every one that is not None."""
-    return {f.name for f in dataclasses.fields(write) if getattr(write, f.name) is not None}
+    """The fields of *write* a caller asked for: every one that is not None.
+
+    ``write_strategy="auto"`` is the documented spelling of None, so it is not asked.
+    """
+    return {
+        f.name
+        for f in dataclasses.fields(write)
+        if getattr(write, f.name) is not None
+        and not (f.name == "write_strategy" and write.write_strategy == "auto")
+    }
 
 
 def _merge_write_options(options: object, arguments: dict[str, Any]) -> WriteOptions:
