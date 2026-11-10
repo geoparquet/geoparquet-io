@@ -26,7 +26,7 @@ policy each one applies belongs to ``core/edges``; gathering a file's or a
 table's declaration is this module's half.
 """
 
-from geoparquet_io.core.column_selection import fold
+from geoparquet_io.core.column_selection import find_column
 from geoparquet_io.core.duckdb_utils import (
     as_wkb_sql,
     fetch_one,
@@ -177,29 +177,28 @@ def require_planar_export_file(
     under the same scoped AWS profile as the rest of the command.
 
     The declarations come back in the *block's* spelling and the resolved
-    column in the *schema's*, so the lookup folds both (the column-name
-    owner's :func:`~geoparquet_io.core.column_selection.fold`): a block that
-    says ``Geometry`` beside a ``geometry`` column means that column. A block
-    that names a column the schema does not have resolves to no column at all,
-    and nothing non-planar can then be exported, so the export goes on.
+    column in the *schema's*, so which declaration is the exported column's is
+    the column-name owner's lookup (:func:`find_column`): a block that says
+    ``Geometry`` beside a ``geometry`` column means that column. A block that
+    names a column the schema does not have resolves to no column at all, and
+    nothing non-planar can then be exported, so the export goes on.
     """
     from geoparquet_io.core.write_funnels import collect_nonplanar_edges
 
     files = _export_input_files(input_path)
     edges = {
-        fold(column): algorithm
+        column: algorithm
         for path in files
         for column, algorithm in collect_nonplanar_edges(path).items()
     }
     if not edges:
         return
     if geometry_column is None:
-        geometry_column = resolve_geometry_column(
-            files[0] if files else input_path, required=False
-        )
+        geometry_column = resolve_geometry_column(files[0] if files else input_path, required=False)
     if geometry_column is None:
         return
-    require_planar_export(target, geometry_column, edges.get(fold(geometry_column)))
+    declared = find_column(geometry_column, edges, option_name="geometry_column")
+    require_planar_export(target, geometry_column, None if declared is None else edges[declared])
 
 
 def _warn_planar_edges(op: str, geometry_column: str, edges: str | None) -> None:
