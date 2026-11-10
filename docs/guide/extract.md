@@ -2288,13 +2288,13 @@ features too, which writes the layer's remaining columns with zero rows.
 A **blank entry** in the list — `--include-cols id,,name`, or `--include-cols '   '` —
 is a usage error and is rejected before anything is opened or contacted. That
 holds for the Python API too (`ops.from_carto`, `ops.from_arcgis`,
-`ops.read_bigquery`, `ops.extract`, `ops.create_pmtiles`), which never goes
+`ops.from_bigquery`, `ops.extract`, `ops.create_pmtiles`), which never goes
 through the CLI's option parsing. A **wholly empty** value is not a blank entry:
 `--include-cols ""` means "option not given", so `--include-cols "$COLS"` keeps
 working when `COLS` is unset.
 
 That last rule is about the *string* option. The Python API's list arguments —
-`ops.read_bigquery(columns=[...])` and `gpio.Table.from_bigquery(columns=[...])`
+`ops.from_bigquery(columns=[...])` and `gpio.Table.from_bigquery(columns=[...])`
 — have their own "unset", which is `None` or `[]`. A list holding a blank entry,
 including `[""]` on its own, is a mistake and raises rather than quietly
 selecting every column.

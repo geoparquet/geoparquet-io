@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.api._deprecation import deprecated_alias as _deprecated_alias
 from geoparquet_io.core.add.kdtree import (
     DEFAULT_KDTREE_TARGET_ROWS,
     ITERATIONS_CONFLICT,
@@ -2180,7 +2181,7 @@ class Table:
             result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
         )
 
-    def overview(
+    def create_overviews(
         self,
         level: int | str,
         cell_column: str | None = None,
@@ -2189,6 +2190,11 @@ class Table:
     ) -> Table:
         """
         Roll an aggregate table up to a coarser overview level.
+
+        The method-side spelling of `gpio process overview`, named as its `ops`
+        twin is (#1436): `ops.create_overviews` writes one GeoParquet sibling
+        per coarser level, where this returns the one rolled-up level a Table
+        can hold in memory.
 
         The table must be a `process aggregate` output (carrying an
         ``a5_cell``/``h3_cell``/``admin_code`` column plus ``count``). Counts,
@@ -2218,6 +2224,13 @@ class Table:
         )
         has_geometry = BUILT_GEOMETRY_COLUMN in result.column_names
         return self._wrap_geographic(result, BUILT_GEOMETRY_COLUMN if has_geometry else None)
+
+    #: The pre-#1436 spelling. `process overview` was the one twin whose Table
+    #: method and `ops` function were named differently; this keeps the old name
+    #: working, warning once per process, for one minor release.
+    overview = _deprecated_alias(
+        create_overviews, old="Table.overview", new="Table.create_overviews"
+    )
 
     def add_s2(
         self,

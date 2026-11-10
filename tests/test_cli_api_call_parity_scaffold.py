@@ -1184,8 +1184,8 @@ CASES: list[ParityCase] = [
             "compression_level": ("compression_level", "compression_level"),
         },
         notes=(
-            "`Table.overview()` rolls a table up to *one* level and is a different "
-            "operation; `ops.create_overviews` is the command's twin.",
+            "`Table.create_overviews()` rolls a table up to *one* level and is a "
+            "different operation; `ops.create_overviews` is the command's twin.",
         ),
     ),
     ParityCase(
@@ -1711,7 +1711,7 @@ CASES: list[ParityCase] = [
         ops=Frontend(
             patch_site=(core_extract_bigquery, "extract_bigquery"),
             reference=core_extract_bigquery.extract_bigquery,
-            invoke=lambda c: ops.read_bigquery(BIGQUERY_TABLE),
+            invoke=lambda c: ops.from_bigquery(BIGQUERY_TABLE),
             result=_TINY_GEOMETRY_TABLE,
         ),
         table=Frontend(

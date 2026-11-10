@@ -52,7 +52,13 @@
 # (17), the CLI packer and no leaf taking a raw check flag (7), the API's
 # `options=` on the five migrated checks plus the keyword migration path (16),
 # and `Table.fix`'s repair selection travelling in the object (5).
-max_collected = 14779
+# +13, one canonical name per twin (#1436 decision 4): the two census checks
+# that fail a new Table/ops name mismatch and an unrecorded deprecated alias
+# (2), and the alias mechanism across both collapsed twins -- the marker the
+# census reads, the kept signature, warning once per process, the canonical
+# name staying silent, and the alias handing core the call the canonical name
+# does, plus the root keeping both BigQuery spellings (11).
+max_collected = 14792
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

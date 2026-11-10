@@ -35,6 +35,7 @@ if TYPE_CHECKING:
         Table,
         convert,
         extract_arcgis,
+        from_bigquery,
         list_layers,
         ops,
         pipe,
@@ -66,6 +67,7 @@ _LAZY_EXPORTS = {
     "Table": "geoparquet_io.api:Table",
     "convert": "geoparquet_io.api:convert",
     "extract_arcgis": "geoparquet_io.api:extract_arcgis",
+    "from_bigquery": "geoparquet_io.api:from_bigquery",
     "list_layers": "geoparquet_io.api:list_layers",
     "ops": "geoparquet_io.api:ops",
     "pipe": "geoparquet_io.api:pipe",
@@ -94,6 +96,9 @@ __all__ = [
     "cli",
     "read",
     "read_partition",
+    "from_bigquery",
+    # The deprecated spelling of `from_bigquery` (#1436), importable until the
+    # next minor release.
     "read_bigquery",
     "convert",
     "extract_arcgis",

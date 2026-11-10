@@ -38,7 +38,7 @@ The input's scheme (`a5_cell` / `h3_cell` / `admin_code`) and base level are det
 
     # In-memory: roll a single level with the Table API
     import geoparquet_io as gpio
-    coarse = gpio.read('cells.parquet').overview(4)
+    coarse = gpio.read('cells.parquet').create_overviews(4)
     coarse.write('cells_r4.parquet')
     ```
 

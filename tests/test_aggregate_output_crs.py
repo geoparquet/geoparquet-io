@@ -115,7 +115,7 @@ def test_overview_replaces_a_projected_aggregate_crs(projected_pair, tmp_path, s
     projected = aggregate.reproject("EPSG:6933")
     assert CRS.from_user_input(projected.crs).to_epsg() == 6933
 
-    result = projected.overview(resolution - 1)
+    result = projected.create_overviews(resolution - 1)
 
     assert result.table.column("count").to_pylist() == [3]
     _assert_geographic_output(result, tmp_path / "overview.parquet")

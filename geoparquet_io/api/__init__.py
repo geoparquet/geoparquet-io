@@ -27,7 +27,11 @@ Also provides pure table-centric functions:
 """
 
 from geoparquet_io.api import ops
-from geoparquet_io.api.ops import read_bigquery
+
+# `read_bigquery` is the deprecated spelling of `from_bigquery` (#1436): kept
+# importable from here, and warning once per process, until it is removed in the
+# next minor release.
+from geoparquet_io.api.ops import from_bigquery, read_bigquery
 from geoparquet_io.api.pipeline import pipe
 from geoparquet_io.api.table import Table, convert, extract_arcgis, read, read_partition
 from geoparquet_io.core.exceptions import InvalidParameterError
@@ -38,6 +42,7 @@ __all__ = [
     "Table",
     "read",
     "read_partition",
+    "from_bigquery",
     "read_bigquery",
     "convert",
     "extract_arcgis",
