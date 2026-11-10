@@ -47,7 +47,6 @@ from geoparquet_io.core.geo_metadata import (
     geometry_types_of,
     sanitized_carried_geo,
 )
-from geoparquet_io.core.geoarrow_encoding import arrow_extension_name
 from geoparquet_io.core.geometry_detection import GeometryRead
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
@@ -132,16 +131,40 @@ def _plain_wkb_for_secondary_columns(
     )
 
 
+def _with_declared_primary_encoding(
+    table, geometry_column: str, geometry_info: dict | None
+) -> dict | None:
+    """``geometry_info`` naming the encoding the table declares for its primary.
+
+    At 1.1-geoarrow the primary passes through untouched, so the encoding this
+    write produces is the one the table's ``geo`` key declares. The composer
+    reads it from ``geometry_info`` -- convert's witness -- because the carried
+    block reaching it has its step keys stripped; without it the block said
+    ``WKB`` over a coordinate struct. The list depth alone cannot say it:
+    ``multipoint`` and ``linestring`` are both ``STRUCT(x, y)[]``.
+    """
+    declared = (sanitized_carried_geo(table.schema.metadata).get("columns") or {}).get(
+        geometry_column
+    )
+    encoding = declared.get("encoding") if isinstance(declared, dict) else None
+    if not encoding:
+        return geometry_info
+    info = geometry_info or {"secondary": [], "metadata": {}}
+    metadata = {**(info.get("metadata") or {}), geometry_column: {"encoding": encoding}}
+    return {**info, "primary": geometry_column, "metadata": metadata}
+
+
 def _table_query_with_native_geometry(
-    table, geometry_column: str, geometry_info: dict | None, geoparquet_version: str
+    con, table, geometry_column: str, geometry_info: dict | None, geoparquet_version: str
 ) -> str:
     """``SELECT`` over the registered ``input_table`` with its WKB columns made GEOMETRY.
 
-    geoarrow.wkb extension columns already register as GEOMETRY in DuckDB, where
-    ST_GeomFromWKB(GEOMETRY) is a binder error. The extension name has to be read
-    from the field metadata as well as the Arrow type: gpio's own `add`
-    operations hand back a plain `large_binary` column carrying
-    `ARROW:extension:name`, which DuckDB still registers as GEOMETRY (#727).
+    Only a column the owner reads as WKB (``GeometryRead.kind == "wkb"``, a
+    BLOB on ``con``) is decoded. A geoarrow.wkb column -- including gpio's own
+    plain ``large_binary`` carrying ``ARROW:extension:name`` (#727) -- already
+    registers as GEOMETRY, a GeoArrow coordinate struct is passed through as the
+    native encoding it is, and a WKT string is not WKB at all: handing any of
+    them to ST_GeomFromWKB is a binder error.
 
     At 2.0 the same goes for a secondary the table's carried ``geo`` key declares
     as plain WKB bytes: left a BLOB, it is described in ``geo.columns`` but not
@@ -156,18 +179,9 @@ def _table_query_with_native_geometry(
     if geoparquet_version in NATIVE_GEOMETRY_VERSIONS:
         columns += list((geometry_info or {}).get("secondary") or ())
     metadata = (geometry_info or {}).get("metadata") or {}
+    types = dict(describe_query(con, "SELECT * FROM input_table"))
     for name in columns:
-        if name not in table.schema.names:
-            continue
-        field = table.schema.field(name)
-        if arrow_extension_name(field) == "geoarrow.wkb":
-            continue
-        # A secondary is converted only when it really is plain WKB bytes: a
-        # native GeoArrow struct or a WKT string is not ST_GeomFromWKB's to read.
-        if name != geometry_column and (
-            arrow_extension_name(field)
-            or not (pa.types.is_binary(field.type) or pa.types.is_large_binary(field.type))
-        ):
+        if name not in table.schema.names or GeometryRead.for_type(name, types[name]).kind != "wkb":
             continue
         ident = quote_identifier(name)
         expr = geom_from_wkb_sql(ident)
@@ -583,6 +597,9 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             table, geometry_column, sanitized_carried_geo(table.schema.metadata)
         )
 
+        if effective_version == "1.1-geoarrow":
+            geometry_info = _with_declared_primary_encoding(table, geometry_column, geometry_info)
+
         if effective_version in ("1.0", "1.1"):
             table = _plain_wkb_for_secondary_columns(
                 table, geometry_column, verbose, geometry_info=geometry_info
@@ -594,7 +611,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
 
             # Convert WKB bytes to GEOMETRY for proper spatial processing.
             query = _table_query_with_native_geometry(
-                table, geometry_column, geometry_info, effective_version
+                con, table, geometry_column, geometry_info, effective_version
             )
 
             self._write_table_query(

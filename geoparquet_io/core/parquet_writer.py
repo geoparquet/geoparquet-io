@@ -883,7 +883,16 @@ def _version_of_table(
     """
     metadata = table.schema.metadata
     if metadata and b"geo" in metadata:
-        return carried_geoparquet_version(metadata, preserve_input=preserve_input)
+        carried = carried_geoparquet_version(metadata, preserve_input=preserve_input)
+        if (
+            carried == "1.1"
+            and not preserve_input
+            and geoarrow_primary_encoding(sanitized_carried_geo(metadata))
+        ):
+            # A GeoArrow-native 1.x table keeps its encoding, as a file does in
+            # _version_of_file: plain "1.1" relabelled the struct `WKB` (#1176).
+            return "1.1-geoarrow"
+        return carried
     if any(is_geoarrow_extension_field(field) for field in table.schema):
         if verbose:
             debug("Native geo types with no geo key: native-geo-only data")
