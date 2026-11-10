@@ -184,6 +184,7 @@ slow_mark_sites = [
   "test_table_write_geoarrow_encodings.py::test_check_all_fix_repairs_every_native_encoding",
   "test_table_write_geoarrow_encodings.py::test_every_strategy_keeps_every_native_encoding",
   "test_table_write_geoarrow_encodings.py::test_sort_hilbert_reads_every_native_encoding",
+  "test_table_write_geoarrow_encodings.py::test_sort_str_reads_every_native_encoding",
   "test_uncoded_crs_paths.py::test_pmtiles_create_lands_in_tokyo",
   "test_wfs.py::TestDuckDBNativeWFS",
   "test_wfs.py::TestGMLOnlyServerEndToEnd",
