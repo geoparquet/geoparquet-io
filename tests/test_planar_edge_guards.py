@@ -224,44 +224,29 @@ def test_table_write_shares_the_guard(tmp_path, fmt):
 # ---------------------------------------------------------------------------
 
 
-def _admin_region_aggregate(path, edges: str | None):
-    """A tiny ``gpio process aggregate admin`` output, declaring ``edges``."""
-    from shapely import box
-
-    rows = [("US-CA", 2, -120.0, 37.0), ("US-NV", 3, -116.0, 39.0), ("FR-IDF", 4, 2.3, 48.8)]
-    table = pa.table(
-        {
-            "admin_code": pa.array([row[0] for row in rows]),
-            "admin_name": pa.array([row[0] for row in rows]),
-            "count": pa.array([row[1] for row in rows], pa.int64()),
-            "geometry": pa.array(
-                [
-                    to_wkb(box(row[2] - 0.5, row[3] - 0.5, row[2] + 0.5, row[3] + 0.5))
-                    for row in rows
-                ],
-                pa.binary(),
-            ),
-        }
-    )
-    column: dict = {"encoding": "WKB", "geometry_types": ["Polygon"]}
-    if edges is not None:
-        column["edges"] = edges
-    geo = {"version": "1.1.0", "primary_column": "geometry", "columns": {"geometry": column}}
-    pq.write_table(table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}), path)
-    return path
+class _RollupStarted(RuntimeError):
+    """Raised in place of the rollup, to mark the point the warning precedes."""
 
 
 @pytest.mark.parametrize("edges", ["spherical", None])
-def test_overview_says_when_its_rollup_is_planar(tmp_path, caplog, edges):
-    """The rollup still runs; a non-planar input now gets the one warning."""
+def test_overview_says_its_rollup_is_planar_before_it_starts(tmp_path, monkeypatch, caplog, edges):
+    """A warning, not a refusal: the rollup goes on, having said what it is.
+
+    The rollup itself is not what is under test here (and a real one reads an
+    administrative dataset), so it is replaced by a marker: the warning has to
+    be out before ``create_overviews`` opens its connection at all.
+    """
     import logging
 
-    from geoparquet_io.core.process.overview import create_overviews
+    from geoparquet_io.core.process.overview import create_overviews, run
 
-    source = _admin_region_aggregate(tmp_path / "by_region.parquet", edges)
-    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-        written = create_overviews(str(source), levels="country")
-    assert written, "the rollup must still produce its overview level"
+    def refuse_to_start(*args, **kwargs):
+        raise _RollupStarted
+
+    monkeypatch.setattr(run, "aggregate_connection", refuse_to_start)
+    source = _source(tmp_path, name="by_region.parquet", wkt=CAP, edges=edges)
+    with caplog.at_level(logging.WARNING, logger="geoparquet_io"), pytest.raises(_RollupStarted):
+        create_overviews(str(source), levels="country")
     planar = [r.getMessage() for r in caplog.records if "planar math" in r.getMessage()]
     if edges is None:
         assert planar == []
