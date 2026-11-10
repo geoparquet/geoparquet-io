@@ -59,6 +59,7 @@ from geoparquet_io.core.parquet_writer import (
 from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.write_funnels import (
     apply_nonplanar_edges,
+    ensure_located_row_groups,
     open_parquet_writer,
     table_nonplanar_edges,
     write_geoparquet_table,
@@ -637,6 +638,17 @@ def _simplify_file_streaming(
                         write,
                     )
                 )
+        # This loop cuts its own row groups, so it owes the file the same
+        # spatial-layout guarantee the two write funnels apply after their
+        # writers choose groups: no group of only NULL/EMPTY geometry while the
+        # file has located rows (#1146). Simplify's input is typically a sorted
+        # file, whose unlocated rows sit last, and simplify also *makes* rows
+        # empty at the tolerance, so either can leave a covering-less group.
+        # Before apply_nonplanar_edges, as in the funnels: layout precedes the
+        # final statistics patch.
+        ensure_located_row_groups(
+            actual_output, geom_col, write.compression, write.compression_level
+        )
         # A non-planar column's block bbox is the geodesic bound over the
         # written rows, which the zero-row footer table cannot give: the funnel
         # computes it from the real file, as for every other write.

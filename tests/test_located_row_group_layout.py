@@ -11,7 +11,7 @@ import pytest
 
 import geoparquet_io as gpio
 from geoparquet_io.core.geo_metadata import geometry_stats_of
-from tests._defrag_fixtures import geo_block, point_wkb, write_with_geo
+from tests._defrag_fixtures import geo_block, point_wkb, polygon_wkb, write_with_geo
 
 _CELLS = [("duckdb-kv", p) for p in ("leading", "middle", "trailing", "all")] + [
     (s, "middle") for s in ("in-memory", "streaming", "disk-rewrite")
@@ -68,3 +68,72 @@ def test_spherical_layout_retains_footer_statistics(tmp_path, strategy):
     stats = metadata.row_group(0).column(1).geo_statistics
     assert stats is not None
     assert stats.ymax == pytest.approx(63.43494982292201)
+
+
+# ---------------------------------------------------------------------------
+# #1146 -- the streamed simplify write cuts its own row groups, so it has to
+# ask the same owner for the layout the two write funnels already ask for.
+# ---------------------------------------------------------------------------
+
+_GROUP = 2048
+
+
+def _simplify_source(tmp_path, position):
+    """A WKB source whose unlocated rows sit at ``position``; ``id`` is row order."""
+    from shapely import Point, to_wkb
+
+    located = [polygon_wkb([(x, 0.0), (x + 0.5, 0.0), (x + 0.25, 0.5)]) for x in range(_GROUP)]
+    # NULL and EMPTY are both unlocated; a null-count-only check would miss EMPTY.
+    unlocated = [None, to_wkb(Point())]
+    geoms = {
+        # The issue's shape: the located rows are an exact multiple of the group.
+        "trailing": located + located + unlocated + [None],
+        # More unlocated rows than one group holds.
+        "trailing-run": located + unlocated * _GROUP,
+        "middle": located + unlocated * (_GROUP // 2) + located,
+        "leading": unlocated + located + located,
+        # Nothing to fold in: the requested layout must survive untouched.
+        "none": located + located,
+        # No layout can give a group a located row when the file has none.
+        "all": unlocated * _GROUP,
+    }[position]
+    table = pa.table(
+        {"id": pa.array(range(len(geoms)), pa.int64()), "geometry": pa.array(geoms, pa.binary())}
+    )
+    block = geo_block(geometry_types=["Polygon"])
+    return write_with_geo(tmp_path / "source.parquet", table, block), geoms
+
+
+@pytest.mark.parametrize(
+    "position", ["trailing", "trailing-run", "middle", "leading", "none", "all"]
+)
+def test_streamed_simplify_leaves_no_row_group_without_a_located_row(tmp_path, position):
+    """``gpio process simplify`` streams its own row groups, and must still fold.
+
+    ``sort hilbert`` / ``convert geoparquet`` put the NULL and EMPTY rows last,
+    so a simplify of their output cuts a trailing group with no bbox covering
+    at all when the located count is an exact multiple of the group size.
+    """
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    src, geoms = _simplify_source(tmp_path, position)
+    out = tmp_path / "out.parquet"
+    args = ["process", "simplify", str(src), str(out), "--tolerance", "0.01"]
+    result = CliRunner().invoke(cli, [*args, "--row-group-size", str(_GROUP)])
+    assert result.exit_code == 0, f"exit {result.exit_code}: {result.exception!r}\n{result.output}"
+    pf = pq.ParquetFile(out)
+    assert pq.read_table(out)["id"].to_pylist() == list(range(len(geoms)))
+    located = [
+        geometry_stats_of(pf.read_row_group(i, columns=["geometry"]), "geometry").bbox is not None
+        for i in range(pf.num_row_groups)
+    ]
+    sizes = [pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups)]
+    if position == "all":
+        # Every row is unlocated: the groups the writer cut are left alone.
+        assert located == [False] * pf.num_row_groups, sizes
+    else:
+        assert all(located), (sizes, located)
+    if position == "none":
+        assert sizes == [_GROUP, _GROUP]

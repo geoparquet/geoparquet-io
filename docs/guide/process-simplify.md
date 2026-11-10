@@ -110,6 +110,17 @@ counted in a warning) by default; `--drop-empty` removes those rows instead
 — empty geometries otherwise become NaN covering values and zero-area
 features downstream. Null geometries are kept either way.
 
+Because null and empty rows carry no location, they are never left to form a
+row group of their own: a group that would hold nothing but null or empty
+geometry is folded into the neighbouring group that does have a located row,
+so `--row-group-size` can come out a few rows over on one group. Row order is
+untouched. Without that fold, a covering-aware reader or validator sees a row
+group whose `bbox` statistics are entirely absent and reads it as a defect —
+which is what happens when a sorted input (`gpio sort hilbert` orders null and
+empty geometries last) has a located-row count that is an exact multiple of
+the row-group size. A file whose every geometry is null or empty has no
+located row to fold into, so its groups are left as written.
+
 ## Scaling to planet-sized files
 
 Plain mode **streams**: batches are read, simplified and written one row
