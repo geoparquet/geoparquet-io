@@ -354,6 +354,39 @@ def test_every_table_write_argument_after_options_is_keyword_only():
     assert all(p.kind is inspect.Parameter.KEYWORD_ONLY for p in params[3:])
 
 
+class _Forwarded(Exception):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("method", "seam", "not_forwarded"),
+    [
+        ("write", "_merge_write_options", {"options"}),
+        ("create_pmtiles", "_run_on_one_file", {"output"}),
+        ("create_pmtiles_pyramid", "_run_on_one_file", {"output"}),
+    ],
+)
+def test_forwarded_locals_are_exactly_the_signature(
+    places, monkeypatch, method, seam, not_forwarded
+):
+    """These methods forward ``locals()``: a local added above that line would leak through."""
+    from geoparquet_io.api import table as table_module
+    from geoparquet_io.api.table import Table
+
+    seen: dict = {}
+
+    def capture(*args, **kwargs):
+        seen.update(args[-1] if seam == "_merge_write_options" else kwargs)
+        raise _Forwarded
+
+    monkeypatch.setattr(table_module if seam == "_merge_write_options" else Table, seam, capture)
+    with pytest.raises(_Forwarded):
+        getattr(places, method)("out.x")
+
+    expected = set(inspect.signature(getattr(Table, method)).parameters) - {"self"}
+    assert set(seen) - {"self"} - not_forwarded == expected - not_forwarded
+
+
 def test_options_and_keywords_write_the_same_bytes(places, tmp_path):
     # streaming writes a sub-vector row count exactly (duckdb-kv rounds it up).
     knobs = {"compression": "GZIP", "row_group_rows": 100, "write_strategy": "streaming"}

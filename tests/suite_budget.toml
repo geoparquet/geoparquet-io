@@ -38,7 +38,8 @@
 # +1: a "not GeoParquet" file-type answer is re-probed, never served from the cache.
 # +7: Table.write on each GeoArrow-native encoding matches convert (6), and a head of one (1).
 # +2: write_strategy="auto" is not a GeoParquet option asked of another format.
-max_collected = 14686
+# +3: Table.write/create_pmtiles/create_pmtiles_pyramid forward exactly their signature.
+max_collected = 14689
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
