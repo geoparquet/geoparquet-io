@@ -111,9 +111,11 @@ counted in a warning) by default; `--drop-empty` removes those rows instead
 features downstream. Null geometries are kept either way.
 
 Because null and empty rows carry no location, they are never left to form a
-row group of their own: a group that would hold nothing but null or empty
-geometry is folded into the neighbouring group that does have a located row,
-so `--row-group-size` can come out a few rows over on one group. Row order is
+row group of their own: every consecutive run of null-or-empty-only groups is
+merged into the nearest preceding located group (a leading run joins the first
+located group instead). So `--row-group-size` is a target, and one group can
+come out larger by the whole length of that run — a 2,048-row request over a
+120,000-row trailing run of nulls yields a 122,048-row group. Row order is
 untouched. Without that fold, a covering-aware reader or validator sees a row
 group whose `bbox` statistics are entirely absent and reads it as a defect —
 which is what happens when a sorted input (`gpio sort hilbert` orders null and
@@ -126,7 +128,9 @@ located row to fold into, so its groups are left as written.
 Plain mode **streams**: batches are read, simplified and written one row
 group at a time, so peak memory is bounded by a single row group no matter
 how large the file — a 40 GB, 100M+-row GeoParquet simplifies within a
-laptop's RAM. (The streaming writer covers plain-WKB 1.x outputs; a 2.0
+laptop's RAM. The one exception is the merged group described above: a long
+run of null or empty geometries folds into one group, and that group is held
+whole. (The streaming writer covers plain-WKB 1.x outputs; a 2.0
 native output or a `--row-group-size-mb` byte target takes the in-memory
 path.)
 
