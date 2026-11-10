@@ -41,14 +41,15 @@
 # +3: Table.write/create_pmtiles/create_pmtiles_pyramid forward exactly their signature.
 # +4 (#1087): Table-door call-parity cases for inspect meta, summary and stats (+3),
 # and one malformed block read alike by gpio inspect and Table.metadata (+1).
-# +34 (#1438): the sites that still hand-rolled a WKB assumption, one fast case
+# +47 (#1438): the sites that still hand-rolled a WKB assumption, one fast case
 # each over the point fixture (4 strategies, sort hilbert x CLI/Table, check
-# --fix x CLI/Table), the measured geometry_types over the six encodings, and
-# the output-version rule -- a 1.1/1.1-geoarrow request keeps the native
-# encoding, a WKB-only one is refused -- per version, per door and over the four
-# convert fixtures. The exhaustive six-encoding x four-strategy combinations are
-# `slow`.
-max_collected = 14727
+# --fix x CLI/Table), the measured geometry_types over the six encodings, the
+# output-version rule -- a 1.1/1.1-geoarrow request keeps the native encoding, a
+# WKB-only one is refused -- per version, per door and over the four convert
+# fixtures, and the type-naming rule's own cases (the Z/M suffixes it reads the
+# Arrow type for, and the guards that leave a measured answer alone). The
+# exhaustive six-encoding x four-strategy combinations are `slow`.
+max_collected = 14740
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

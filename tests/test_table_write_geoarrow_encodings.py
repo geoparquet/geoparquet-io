@@ -280,3 +280,134 @@ def test_check_all_fix_repairs_every_native_encoding(encoding, tmp_path):
     )
     assert result.exit_code == 0, result.output
     _assert_native_output(out, encoding)
+
+
+# -- the type-naming rule, and the guards around it ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("encoding", "arrow_type", "expected"),
+    [
+        ("point", pa.struct([("x", pa.float64()), ("y", pa.float64())]), ["Point"]),
+        (
+            "point",
+            pa.struct([("x", pa.float64()), ("y", pa.float64()), ("z", pa.float64())]),
+            ["Point Z"],
+        ),
+        (
+            "linestring",
+            pa.list_(pa.struct([("x", pa.float64()), ("y", pa.float64()), ("m", pa.float64())])),
+            ["LineString M"],
+        ),
+        (
+            "multipolygon",
+            pa.list_(
+                pa.list_(
+                    pa.list_(
+                        pa.struct(
+                            [
+                                ("x", pa.float64()),
+                                ("y", pa.float64()),
+                                ("z", pa.float64()),
+                                ("m", pa.float64()),
+                            ]
+                        )
+                    )
+                )
+            ),
+            ["MultiPolygon ZM"],
+        ),
+        # The dimension is why the Arrow type is read at all: "LineString" and
+        # "LineString ZM" are distinct geometry_types entries.
+        ("WKB", pa.binary(), []),
+        ("point", pa.binary(), []),
+        ("point", pa.struct([("a", pa.float64()), ("b", pa.float64())]), []),
+    ],
+)
+def test_geoarrow_geometry_types_reads_the_encoding_and_the_coordinates(
+    encoding, arrow_type, expected
+):
+    from geoparquet_io.core.geo_metadata import geoarrow_geometry_types
+
+    assert geoarrow_geometry_types(encoding, arrow_type) == expected
+
+
+def test_a_native_encoding_over_wkb_bytes_keeps_the_measured_types():
+    """A block that claims an encoding its column does not hold names no type.
+
+    The encoding is only a type witness while the column really is a coordinate
+    struct; over WKB bytes (what a transform leaves a stale block on) the
+    measured answer stands.
+    """
+    from geoparquet_io.core.geo_metadata import (
+        GeoBlockOptions,
+        SchemaSource,
+        compose_geo_block,
+    )
+
+    schema = pa.schema([pa.field("geometry", pa.binary())])
+    block = compose_geo_block(
+        SchemaSource(schema, None),
+        GeoBlockOptions("geometry", version="1.1", encoding="point", covering=None),
+    )
+    assert "geometry_types" not in block["columns"]["geometry"]
+
+
+@pytest.mark.parametrize("primary", ["geometry", "absent"])
+def test_an_unreadable_output_schema_leaves_the_measured_types(primary):
+    """A query the composer cannot probe, and a primary the schema lacks (#1438)."""
+    from geoparquet_io.core.geo_metadata import _name_geoarrow_geometry_types
+
+    class _Unprobeable:
+        @property
+        def schema(self):
+            raise RuntimeError("this query does not bind")
+
+    class _Other:
+        schema = pa.schema([pa.field("geometry", pa.binary())])
+
+    for view in (_Unprobeable(), _Other()):
+        col_meta = {"encoding": "point", "geometry_types": []}
+        _name_geoarrow_geometry_types(col_meta, view, primary)
+        assert col_meta["geometry_types"] == []
+
+
+def test_a_write_with_no_geometry_column_exports_nothing_as_wkb():
+    """``wkb_export_query`` leaves a geometry-less query alone (#1438)."""
+    from geoparquet_io.core.write_strategies.base import wkb_export_query
+
+    assert wkb_export_query(None, "SELECT 1 AS id", None) == "SELECT 1 AS id"
+
+
+# -- the streaming strategy's two 1.1-geoarrow arms ---------------------------
+
+
+def test_the_streaming_query_path_passes_a_native_column_through(tmp_path):
+    """Asked for explicitly, streaming writes a native input as itself (#1438)."""
+    out = tmp_path / "out.parquet"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "extract",
+            "geoparquet",
+            str(_fixture("multipoint")),
+            str(out),
+            "--write-strategy",
+            "streaming",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    _assert_native_output(out, "multipoint")
+
+
+def test_the_streaming_table_path_still_converts_wkb_to_native(tmp_path):
+    """The other arm: WKB in, the encoding the converter resolved out."""
+    out = tmp_path / "out.parquet"
+    # verbose: the strategy says which encoding it resolved, which is the one
+    # line that distinguishes this arm from the pass-through one.
+    gpio.read(DATA / "buildings_test.parquet").write(
+        out, write_strategy="streaming", geoparquet_version="1.1-geoarrow", verbose=True
+    )
+    column = _geo_column(out)
+    assert column["encoding"] in SPEC_TYPE
+    assert not pa.types.is_binary(pq.read_schema(out).field("geometry").type)
