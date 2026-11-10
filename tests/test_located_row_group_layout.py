@@ -11,7 +11,14 @@ import pytest
 
 import geoparquet_io as gpio
 from geoparquet_io.core.geo_metadata import geometry_stats_of
-from tests._defrag_fixtures import geo_block, point_wkb, polygon_wkb, write_with_geo
+from tests._defrag_fixtures import (
+    footer_geo,
+    footer_kv,
+    geo_block,
+    point_wkb,
+    polygon_wkb,
+    write_with_geo,
+)
 
 _CELLS = [("duckdb-kv", p) for p in ("leading", "middle", "trailing", "all")] + [
     (s, "middle") for s in ("in-memory", "streaming", "disk-rewrite")
@@ -91,7 +98,10 @@ def _simplify_source(tmp_path, position):
         # More unlocated rows than one group holds.
         "trailing-run": located + unlocated * _GROUP,
         "middle": located + unlocated * (_GROUP // 2) + located,
-        "leading": unlocated + located + located,
+        # A full group of unlocated rows ahead of the located ones, so the
+        # writer really does flush a leading group with no located row and the
+        # layout's leading-merge branch has something to fold.
+        "leading": unlocated * (_GROUP // 2) + located + located,
         # Nothing to fold in: the requested layout must survive untouched.
         "none": located + located,
         # No layout can give a group a located row when the file has none.
@@ -137,3 +147,49 @@ def test_streamed_simplify_leaves_no_row_group_without_a_located_row(tmp_path, p
         assert all(located), (sizes, located)
     if position == "none":
         assert sizes == [_GROUP, _GROUP]
+    if position == "leading":
+        # The leading unlocated group joins the first located one.
+        assert sizes == [2 * _GROUP, _GROUP], located
+    if position == "trailing":
+        # The fold is a re-encode, not a footer patch, so it re-derives every
+        # footer key. A fold that dropped the `geo` block would still satisfy
+        # every assertion above, so pin the footer the rewrite hands back.
+        keys = set(footer_kv(out))
+        assert b"geo" in keys, keys
+        block = footer_geo(out)
+        assert block["primary_column"] == "geometry"
+        assert block["columns"]["geometry"]["bbox"]
+
+
+def test_located_repair_reads_at_the_callers_row_group_size(tmp_path, monkeypatch):
+    """The repair must re-encode at the caller's group size, not the facade default.
+
+    ``_rewrite_parquet`` sizes its *read* batches from the ``WriteOptions`` it is
+    handed, so a repair that forgets the caller's ``--row-group-size`` re-reads a
+    2,048-row file in 49,152-row batches -- undoing exactly the memory the small
+    group was asked for (measured 87.5 MB against 9.4 MB).
+    """
+    from geoparquet_io.core import write_funnels
+
+    geoms = [point_wkb(1.0, 2.0)] * (2 * _GROUP) + [None] * _GROUP
+    table = pa.table(
+        {"id": pa.array(range(len(geoms)), pa.int64()), "geometry": pa.array(geoms, pa.binary())}
+    )
+    out = write_with_geo(tmp_path / "out.parquet", table, geo_block(), row_group_size=_GROUP)
+
+    seen: list[int | None] = []
+    rewrite = write_funnels._rewrite_parquet
+
+    def record(*args, **kwargs):
+        seen.append(kwargs["write"].row_group_rows)
+        return rewrite(*args, **kwargs)
+
+    monkeypatch.setattr(write_funnels, "_rewrite_parquet", record)
+    write_funnels.ensure_located_row_groups(str(out), "geometry", None, None, row_group_rows=_GROUP)
+
+    assert seen == [_GROUP]
+    pf = pq.ParquetFile(out)
+    assert [pf.metadata.row_group(i).num_rows for i in range(pf.num_row_groups)] == [
+        _GROUP,
+        2 * _GROUP,
+    ]

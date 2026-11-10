@@ -647,7 +647,12 @@ def _simplify_file_streaming(
         # Before apply_nonplanar_edges, as in the funnels: layout precedes the
         # final statistics patch.
         ensure_located_row_groups(
-            actual_output, geom_col, write.compression, write.compression_level
+            actual_output,
+            geom_col,
+            write.compression,
+            write.compression_level,
+            row_group_rows=write.row_group_rows,
+            row_group_size_mb=write.row_group_size_mb,
         )
         # A non-planar column's block bbox is the geodesic bound over the
         # written rows, which the zero-row footer table cannot give: the funnel
