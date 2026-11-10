@@ -193,6 +193,58 @@ def test_cli_csv_no_wkt_exports_a_nonplanar_input(tmp_path):
     assert output.exists()
 
 
+def test_a_declaration_for_a_column_the_schema_lacks_lets_the_export_through(tmp_path):
+    """A stale ``geo`` block must be judged, not turned into a missing-column error.
+
+    Nothing non-planar can leave a file whose schema has no such column, so the
+    attribute-only export runs as it did before the guard existed.
+    """
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "ghost",
+        "columns": {"ghost": {"encoding": "WKB", "geometry_types": [], "edges": "spherical"}},
+    }
+    source = tmp_path / "stale.parquet"
+    table = pa.table({"id": pa.array([1])}).replace_schema_metadata(
+        {b"geo": json.dumps(geo).encode()}
+    )
+    pq.write_table(table, source)
+    output = tmp_path / "out.csv"
+    write_csv(str(source), str(output))
+    assert output.exists()
+    assert "id" in output.read_text()
+
+
+def test_a_block_key_spelled_in_another_case_is_still_refused(tmp_path):
+    """The block spells the exported column one way, the schema another.
+
+    ``collect_nonplanar_edges`` answers in the block's spelling and the
+    resolver in the schema's, so an exact-match lookup let a ``Geometry``
+    declaration beside a ``geometry`` column export unrefused.
+    """
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "Geometry",
+        "columns": {
+            "Geometry": {
+                "encoding": "WKB",
+                "geometry_types": ["Polygon"],
+                "edges": "spherical",
+            }
+        },
+    }
+    storage = pa.array([to_wkb(from_wkt(CAP))], type=pa.binary())
+    source = tmp_path / "mixed_case.parquet"
+    table = pa.table({"id": pa.array([1]), "geometry": storage}).replace_schema_metadata(
+        {b"geo": json.dumps(geo).encode()}
+    )
+    pq.write_table(table, source)
+    output = tmp_path / "out.gpkg"
+    with pytest.raises(GeoParquetError, match="non-planar"):
+        write_geopackage(str(source), str(output))
+    assert not output.exists()
+
+
 def test_a_glob_is_checked_past_its_first_file(tmp_path):
     """A planar first file cannot hide a later spherical declaration."""
     pq.write_table(_table("POINT(1 2)", edges=None), tmp_path / "a.parquet")
