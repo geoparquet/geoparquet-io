@@ -1578,11 +1578,12 @@ def test_stac_projection_properties_still_read_a_real_crs(tmp_path):
 
 @pytest.mark.parametrize(("col", "case", "block"), VALIDATION_BLOCKS, ids=VALIDATION_BLOCK_IDS)
 def test_api_table_metadata_survives_a_malformed_block(col, case, block, tmp_path):
-    """``Table.metadata()`` is a read-only reader: it guards, it does not sanitize.
+    """``Table.metadata()`` is a read-only reader: its ``geo_metadata`` is not sanitized.
 
     It is the Python API's ``gpio inspect meta``, and its ``geo_metadata`` key is
     documented as the file's full ``geo`` block, so the caller must get the block
-    the file really holds -- while the *derived* keys beside it stop crashing
+    the file really holds -- while the *derived* keys beside it come from the
+    sanitized reading ``gpio inspect`` shares (#1087), so they stop crashing
     with ``'list' object has no attribute 'get'`` (#947).
     """
     from geoparquet_io.api import read as gpio_read
@@ -1621,6 +1622,35 @@ def test_api_table_metadata_still_reports_a_well_formed_block(tmp_path):
     assert meta["geo_metadata"] == block
     assert meta["geometry_types"] == ["Point"]
     assert meta["edges"] == "planar"
+
+
+def test_inspect_and_table_metadata_read_a_wrong_typed_entry_through_one_seam(tmp_path):
+    """`gpio inspect` and `Table.metadata()` derive geo facts through one reading (#1087).
+
+    A ``geometry_types`` holding a non-string is dropped by the sanitized reading
+    both doors share, so neither reports it; ``geo_metadata`` stays raw.
+    """
+    from click.testing import CliRunner
+
+    from geoparquet_io.api import read as gpio_read
+    from geoparquet_io.cli.main import cli
+
+    block = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point", 5]}},
+    }
+    path = _file_with_geo(tmp_path, "one_seam", block)
+    reset_malformed_geo_warnings()
+    result = CliRunner().invoke(cli, ["inspect", "summary", path, "--json"])
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.stdout)
+    meta = gpio_read(path).metadata()
+
+    assert meta["geo_metadata"] == block
+    assert summary["geometry_types"] is None
+    assert meta["geometry_types"] == summary["geometry_types"]
+    assert meta["geoparquet_version"] == summary["geoparquet_version"] == "1.1.0"
 
 
 # =============================================================================

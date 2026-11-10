@@ -16,7 +16,7 @@ from geoparquet_io.cli.decorators import (
     geoparquet_version_option,
     handle_directory_sub_partition,
     output_format_options,
-    parse_row_group_options,
+    pack_write_options,
     partition_options,
     partition_options_base,
     resolve_kdtree_options,
@@ -80,6 +80,7 @@ def partition(ctx):
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def partition_admin(
     ctx,
     input_parquet,
@@ -94,13 +95,8 @@ def partition_admin(
     force,
     skip_analysis,
     prefix,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Partition by administrative boundaries via spatial join with remote datasets.
@@ -148,9 +144,6 @@ def partition_admin(
         if not preview and not output_folder:
             raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
-        # Validate mutual exclusivity of row group options and get MB value
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
         # Handle --vecorel: force Overture dataset with country,region levels
         if vecorel:
             from geoparquet_io.core.logging_config import warn as log_warn
@@ -181,12 +174,7 @@ def partition_admin(
             force=force,
             skip_analysis=skip_analysis,
             filename_prefix=prefix,
-            geoparquet_version=geoparquet_version,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            memory_limit=write_memory,
+            **write.funnel_kwargs(),
         )
 
 
@@ -201,6 +189,7 @@ def partition_admin(
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def partition_string(
     ctx,
     input_parquet,
@@ -214,13 +203,8 @@ def partition_string(
     force,
     skip_analysis,
     prefix,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Partition a GeoParquet file by string column values.
@@ -251,9 +235,6 @@ def partition_string(
         if not preview and not output_folder:
             raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
-        # Validate mutual exclusivity of row group options and get MB value
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
         try:
             partition_by_string_impl(
                 input_parquet,
@@ -269,12 +250,7 @@ def partition_string(
                 skip_analysis,
                 prefix,
                 None,
-                geoparquet_version,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_mb,
-                row_group_rows=row_group_size,
-                memory_limit=write_memory,
+                **write.funnel_kwargs(),
             )
         except StreamingError as e:
             raise click_error_for(e) from None
@@ -322,6 +298,7 @@ def partition_string(
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def partition_h3(
     ctx,
     input_parquet,
@@ -341,13 +318,8 @@ def partition_h3(
     min_size,
     in_place,
     prefix,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Partition a GeoParquet file by H3 cells at specified resolution.
@@ -409,13 +381,8 @@ def partition_h3(
         min_size,
         in_place,
         prefix,
-        compression,
-        compression_level,
-        row_group_size,
-        row_group_size_mb,
-        write_memory,
+        write,
         verbose,
-        geoparquet_version,
         show_sql,
     )
 
@@ -462,6 +429,7 @@ def partition_h3(
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def partition_s2(
     ctx,
     input_parquet,
@@ -481,13 +449,8 @@ def partition_s2(
     min_size,
     in_place,
     prefix,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Partition a GeoParquet file by S2 cells at specified level.
@@ -553,13 +516,8 @@ def partition_s2(
         min_size,
         in_place,
         prefix,
-        compression,
-        compression_level,
-        row_group_size,
-        row_group_size_mb,
-        write_memory,
+        write,
         verbose,
-        geoparquet_version,
         show_sql,
     )
 
@@ -606,6 +564,7 @@ def partition_s2(
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def partition_a5(
     ctx,
     input_parquet,
@@ -625,13 +584,8 @@ def partition_a5(
     min_size,
     in_place,
     prefix,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Partition a GeoParquet file by A5 cells at specified resolution.
@@ -693,13 +647,8 @@ def partition_a5(
         min_size,
         in_place,
         prefix,
-        compression,
-        compression_level,
-        row_group_size,
-        row_group_size_mb,
-        write_memory,
+        write,
         verbose,
-        geoparquet_version,
         show_sql,
     )
 
@@ -746,6 +695,7 @@ def partition_a5(
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def partition_kdtree(
     ctx,
     input_parquet,
@@ -763,13 +713,8 @@ def partition_kdtree(
     force,
     skip_analysis,
     prefix,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Partition a GeoParquet file by KD-tree cells.
@@ -808,9 +753,6 @@ def partition_kdtree(
         if not preview and not output_folder:
             raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
-        # Validate mutual exclusivity of row group options and get MB value
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
         # Convert flag to None if not explicitly set, so implementation can determine default
         keep_kdtree_col = True if keep_kdtree_column else None
 
@@ -831,12 +773,7 @@ def partition_kdtree(
             auto_target,
             prefix,
             None,
-            geoparquet_version,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            memory_limit=write_memory,
+            **write.funnel_kwargs(),
         )
 
 
@@ -897,6 +834,7 @@ def partition_kdtree(
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def partition_quadkey(
     ctx,
     input_parquet,
@@ -918,13 +856,8 @@ def partition_quadkey(
     min_size,
     in_place,
     prefix,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Partition a GeoParquet file by quadkey cells.
@@ -991,13 +924,8 @@ def partition_quadkey(
         min_size,
         in_place,
         prefix,
-        compression,
-        compression_level,
-        row_group_size,
-        row_group_size_mb,
-        write_memory,
+        write,
         verbose,
-        geoparquet_version,
         show_sql,
         partition_resolution=partition_resolution,
         use_centroid=use_centroid,
@@ -1025,13 +953,8 @@ def _partition_cell_index(
     min_size,
     in_place,
     prefix,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
     partition_resolution=None,
     use_centroid=False,
@@ -1043,7 +966,7 @@ def _partition_cell_index(
         index_options.update(partition_resolution=partition_resolution, use_centroid=use_centroid)
     # A directory run writes each partition with the codec only (its row groups
     # and memory are the defaults), as it always has.
-    codec = WriteOptions(compression=compression, compression_level=compression_level)
+    codec = WriteOptions(compression=write.compression, compression_level=write.compression_level)
     with _activate_s3(ctx):
         # Handle directory input with --min-size
         if handle_directory_sub_partition(
@@ -1073,9 +996,6 @@ def _partition_cell_index(
         if not preview and not output_folder:
             raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
 
-        # Validate mutual exclusivity of row group options and get MB value
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
         # Convert flag to None if not explicitly set, so implementation can determine default
         keep_col = True if keep_column else None
 
@@ -1093,12 +1013,7 @@ def _partition_cell_index(
             skip_analysis=skip_analysis,
             filename_prefix=prefix,
             profile=None,
-            geoparquet_version=geoparquet_version,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            memory_limit=write_memory,
+            **write.funnel_kwargs(),
             auto=auto,
             target_rows=target_rows,
             max_partitions=max_partitions,

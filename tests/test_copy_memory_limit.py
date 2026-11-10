@@ -199,6 +199,169 @@ class TestFastPathMemoryLimit:
         assert (_setting(con, "memory_limit"), _setting(con, "threads")) == (before, 8)
 
 
+class TestEveryStrategyHonoursTheLimit:
+    """``memory_limit`` caps the DuckDB work of every strategy, not only duckdb-kv (#761).
+
+    It used to reach duckdb-kv alone: the funnel refused it for the other three
+    (exit 2) or warned and dropped it when it had routed the write itself.
+    """
+
+    @pytest.mark.parametrize("strategy", ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"])
+    def test_query_write_is_bounded(self, tmp_path, con, strategy):
+        query = _points_parquet(con, str(tmp_path / "src.parquet"), rows=200_000)
+        with pytest.raises(duckdb.OutOfMemoryException):
+            write_parquet_with_metadata(
+                con,
+                f"{query} ORDER BY id DESC",
+                str(tmp_path / "out.parquet"),
+                geoparquet_version="1.1",
+                write_strategy=strategy,
+                memory_limit="1MB",
+            )
+
+    @pytest.mark.parametrize("strategy", ["duckdb-kv", "disk-rewrite"])
+    def test_table_write_is_bounded(self, tmp_path, con, strategy, caplog):
+        """The table strategies that open a DuckDB connection bound it too."""
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+
+        query = _points_parquet(con, str(tmp_path / "src.parquet"))
+        table = con.sql(query).arrow().read_all()
+        write_geoparquet_table(
+            table,
+            str(tmp_path / "out.parquet"),
+            write_strategy=strategy,
+            memory_limit="517MB",
+            verbose=True,
+        )
+        assert "DuckDB memory limit: 517MB" in caplog.text
+
+    @pytest.mark.parametrize(
+        "table",
+        [None, "disk-rewrite", "duckdb-kv"],
+        ids=["funnel_query", "disk_rewrite_table", "duckdb_kv_table"],
+    )
+    def test_the_row_group_sample_is_bounded(self, tmp_path, con, monkeypatch, table):
+        """An MB target samples the query before any strategy's scope was entered."""
+        from geoparquet_io.core import parquet_writer
+        from geoparquet_io.core.write_funnels import write_geoparquet_table
+        from geoparquet_io.core.write_strategies import duckdb_kv
+
+        real = parquet_writer.resolve_row_group_rows_for_query
+        sampled: list[str] = []
+
+        def recording(con_, query, row_group_rows, *args, **kwargs):
+            if row_group_rows is None:  # a sample is taken only without a row count
+                sampled.append(_setting(con_, "memory_limit"))
+            return real(con_, query, row_group_rows, *args, **kwargs)
+
+        monkeypatch.setattr(parquet_writer, "resolve_row_group_rows_for_query", recording)
+        # A strategy holding its own reference to the sampler is spied too.
+        monkeypatch.setattr(duckdb_kv, "resolve_row_group_rows_for_query", recording, raising=False)
+        query = _points_parquet(con, str(tmp_path / "src.parquet"))
+        out = str(tmp_path / "out.parquet")
+        if table:
+            write_geoparquet_table(
+                con.sql(query).arrow().read_all(),
+                out,
+                write_strategy=table,
+                row_group_size_mb=1,
+                memory_limit="517MB",
+            )
+        else:
+            write_parquet_with_metadata(
+                con, query, out, geoparquet_version="2.0", row_group_size_mb=1, memory_limit="517MB"
+            )
+        bounded = duckdb.connect()
+        bounded.execute("SET memory_limit='517MB'")
+        expected = _setting(bounded, "memory_limit")
+        bounded.close()
+        assert sampled and set(sampled) == {expected}
+
+    def test_disk_rewrite_bounds_every_scan_of_the_write(self, tmp_path, con, monkeypatch):
+        """The stats scan before the COPY and the type scan after it ran unbounded."""
+        from geoparquet_io.core.write_strategies import disk_rewrite
+
+        seen: dict[str, list[str]] = {}
+
+        def spy(name):
+            real = getattr(disk_rewrite, name)
+
+            def recording(*args, **kwargs):
+                seen.setdefault(name, []).append(_setting(con, "memory_limit"))
+                return real(*args, **kwargs)
+
+            monkeypatch.setattr(disk_rewrite, name, recording)
+
+        spy("geometry_stats_of")
+        spy("missing_geometry_types")
+        query = _points_parquet(con, str(tmp_path / "src.parquet"))
+        write_parquet_with_metadata(
+            con,
+            f"SELECT *, geometry AS boundary FROM ({query})",
+            str(tmp_path / "out.parquet"),
+            geoparquet_version="1.1",
+            write_strategy="disk-rewrite",
+            row_group_size_mb=1,
+            memory_limit="517MB",
+        )
+        bounded = duckdb.connect()
+        bounded.execute("SET memory_limit='517MB'")
+        expected = _setting(bounded, "memory_limit")
+        bounded.close()
+        assert seen.keys() == {"geometry_stats_of", "missing_geometry_types"}
+        assert {v for values in seen.values() for v in values} == {expected}
+
+    def test_streaming_closes_its_reader_before_restoring_settings(
+        self, tmp_path, con, monkeypatch
+    ):
+        """A mid-stream failure restored the settings over an open reader.
+
+        DuckDB 2.0 refuses any statement on a connection whose reader is open
+        (ResourceInUseException), and the restore swallows it: the write's
+        limit and thread cap would outlive the write.
+        """
+        import itertools
+
+        import pyarrow as pa
+
+        from geoparquet_io.core.write_strategies import arrow_streaming
+
+        readers, open_at_restore = [], []
+        real_regroup = arrow_streaming.regroup
+        real_restore = memory_limits.restore_duckdb_settings
+
+        def failing_regroup(reader, batch_size):
+            readers.append(reader)
+            yield from itertools.islice(real_regroup(reader, batch_size), 1)
+            raise RuntimeError("mid-stream")
+
+        def restore(*args, **kwargs):
+            try:
+                readers[-1].read_next_batch()
+                open_at_restore.append(True)
+            except (pa.ArrowInvalid, StopIteration):
+                open_at_restore.append(False)
+            return real_restore(*args, **kwargs)
+
+        monkeypatch.setattr(arrow_streaming, "regroup", failing_regroup)
+        monkeypatch.setattr(memory_limits, "restore_duckdb_settings", restore)
+        query = _points_parquet(con, str(tmp_path / "src.parquet"))
+        con.execute("SET threads=3")
+        before = _setting(con, "memory_limit")
+        with pytest.raises(RuntimeError, match="mid-stream"):
+            write_parquet_with_metadata(
+                con,
+                query,
+                str(tmp_path / "out.parquet"),
+                geoparquet_version="1.1",
+                write_strategy="streaming",
+                row_group_rows=100,
+                memory_limit="517MB",
+            )
+        assert open_at_restore == [False]
+        assert (_setting(con, "memory_limit"), _setting(con, "threads")) == (before, 3)
+
+
 @pytest.mark.fresh_duckdb
 class TestResolveLimitReadsTheSessionThroughTheDisplay:
     """``current_setting`` truncates a size, so the session reads back smaller.

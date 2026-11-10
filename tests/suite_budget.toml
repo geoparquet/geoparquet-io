@@ -18,7 +18,30 @@
 # (owner reads and a write).
 # +1: a native srid:3857 secondary keeps EPSG:3857 on every strategy x version.
 # -3: the cold-import srid subprocess reads move to the slow lane (#1340).
-max_collected = 14444
+# +163, the API/CLI parity batch (#1088, #1065, #903, #1085, #1090, #1078,
+# #1108, #1063, #1321, #1087, #761). One parity registry (-3 net, nine
+# per-allowlist tests folded into four), call-parity cases for the fifteen
+# deferred leaves (+32, ops and Table doors), new API legs and their
+# fail-first tests (checks by path and Table.fix +22, pmtiles and upload +10,
+# geometry gate, no-ops and shared stats +21), WriteOptions on every write
+# leaf (+52, incl. the from_cli guard per write leaf), and review fixes (+30).
+# +13: round-2 review fixes (explicit-ZSTD asks, covering ownership, object-store
+# globs, directory checks, spec warnings, upload keys, write memory scope), less
+# the convert-geoparquet compression gap they closed.
+# +12: round-3 review fixes (upload prefix keys only from a local file +1, IPv6
+# http URLs are not globs +6, Table.fix on a directory +2, the funnel's
+# row-group sample under the write cap +2, every public check has __wrapped__ +1).
+# +8: round-4 review fixes (duckdb-kv's row-group sample under the write cap +1,
+# a remote source under a scheme alias +2, PMTiles on a directory-backed Table +2,
+# a remote object named by its last segment +3).
+# +36: every gpio.check_* answers as its gpio check command (9 checks x 4 fixtures).
+# +1: a "not GeoParquet" file-type answer is re-probed, never served from the cache.
+# +7: Table.write on each GeoArrow-native encoding matches convert (6), and a head of one (1).
+# +2: write_strategy="auto" is not a GeoParquet option asked of another format.
+# +3: Table.write/create_pmtiles/create_pmtiles_pyramid forward exactly their signature.
+# +4 (#1087): Table-door call-parity cases for inspect meta, summary and stats (+3),
+# and one malformed block read alike by gpio inspect and Table.metadata (+1).
+max_collected = 14693
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

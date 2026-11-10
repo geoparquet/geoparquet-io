@@ -12,6 +12,7 @@ Provides a chainable API for common GeoParquet operations:
 
 from __future__ import annotations
 
+import dataclasses
 import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
@@ -27,13 +28,13 @@ from geoparquet_io.core.add.kdtree import (
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_parquet_structure import CheckProfile
-from geoparquet_io.core.duckdb_utils import quote_identifier
 from geoparquet_io.core.edges import edges_of, state_edges
 from geoparquet_io.core.file_utils import get_all_parquet_files, scratch_path, unlink_released_file
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.http_retry import DEFAULT_TIMEOUT
 from geoparquet_io.core.index_ops import get_index_spec, validate_partition_arguments
 from geoparquet_io.core.logging_config import warn
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.process.aggregate.grid_common import BUCKET_POINT_GEOMETRY
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
@@ -484,6 +485,45 @@ def extract_arcgis(
     # (#966): report no geometry column, so write() emits plain Parquet on every
     # strategy instead of asking the writer for a column that is not there.
     return Table(arrow_table, geometry_column=_surviving_geometry_column(None, arrow_table))
+
+
+def _asked_fields(write: WriteOptions) -> set[str]:
+    """The fields of *write* a caller asked for: every one that is not None.
+
+    ``write_strategy="auto"`` is the documented spelling of None, so it is not asked.
+    """
+    return {
+        f.name
+        for f in dataclasses.fields(write)
+        if getattr(write, f.name) is not None
+        and not (f.name == "write_strategy" and write.write_strategy == "auto")
+    }
+
+
+def _merge_write_options(options: object, arguments: dict[str, Any]) -> WriteOptions:
+    """``Table.write``'s one ``WriteOptions``: *options* with the write keywords merged in.
+
+    *arguments* is the call's ``locals()``; a keyword left at None was not given.
+    """
+    if options is not None and not isinstance(options, WriteOptions):
+        raise TypeError(
+            f"Table.write() takes a WriteOptions as its second argument, got "
+            f"{type(options).__name__} {options!r}; pass a format by keyword: "
+            f"format={options!r}"
+        )
+    base = options or WriteOptions()
+    keywords = {
+        f.name: arguments[f.name]
+        for f in dataclasses.fields(WriteOptions)
+        if arguments[f.name] is not None
+    }
+    both = sorted(_asked_fields(base) & keywords.keys())
+    if both:
+        raise TypeError(
+            f"Table.write() got {', '.join(both)} both in options and as a keyword; "
+            "set each field in one place"
+        )
+    return dataclasses.replace(base, **keywords)
 
 
 class Table:
@@ -991,7 +1031,10 @@ class Table:
 
         ``gpio.read(path)`` sets it (as an absolute path for a local file).
         A Table built in memory, read with ``columns=`` or ``filters=``, or
-        derived by any operation has none: it is no longer a view of a file.
+        derived by an operation that changes it has none: it is no longer a
+        view of a file. A no-op (``head(n)``/``tail(n)`` with
+        ``n >= num_rows``, or ``extract()`` with no filter and
+        ``repair_geometry=False``) returns the same Table, source included.
         ``check_*`` and ``validate()`` measure this file when it is still the
         one that was read; if it has been replaced or removed since, or it is
         a remote URL, they answer prospectively instead.
@@ -1053,12 +1096,9 @@ class Table:
             >>> table = gpio.read('data.parquet')
             >>> print(table.geoparquet_version)  # e.g., '1.0.0'
         """
-        from geoparquet_io.core.geo_metadata import declared_version, read_raw_geo
+        from geoparquet_io.core.geo_metadata import geo_info_from_metadata
 
-        geo_meta = read_raw_geo(self._table.schema.metadata).block
-        if geo_meta is None:
-            return None
-        return declared_version(geo_meta, default=None)
+        return geo_info_from_metadata(self._table.schema.metadata)["version"]
 
     def info(self, verbose: bool = True) -> dict | None:
         """
@@ -1129,13 +1169,16 @@ class Table:
     def write(
         self,
         path: str | Path,
+        options: WriteOptions | None = None,
+        *,
         format: str | None = None,
         compression: str | None = None,
         compression_level: int | None = None,
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
         geoparquet_version: str | None = None,
-        write_strategy: str = "duckdb-kv",
+        write_strategy: str | None = None,
+        memory_limit: str | None = None,
         profile: str | None = None,
         verbose: bool = False,
         # Format-specific options
@@ -1162,6 +1205,10 @@ class Table:
 
         Args:
             path: Output file path (local or cloud URL)
+            options: How to write GeoParquet, as one :class:`gpio.WriteOptions`.
+                The write keywords below (``compression`` through ``profile``)
+                merge into it; naming one field both there and as a keyword is
+                a ``TypeError``. Every argument after it is keyword-only.
             format: Override format detection ('parquet', 'geopackage', 'flatgeobuf',
                     'csv', 'shapefile', 'geojson'). Default: auto-detect from extension
             compression: Compression type for GeoParquet (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
@@ -1178,7 +1225,12 @@ class Table:
                 1.1-geoarrow converts geometry from any input to native GeoArrow nested-coordinate
                 encoding and omits the bbox column; columns with incompatible mixed types fall back to WKB.
             write_strategy: Write strategy for GeoParquet ('in-memory', 'streaming',
-                           'duckdb-kv', 'disk-rewrite'). Default: 'duckdb-kv'
+                           'duckdb-kv', 'disk-rewrite', or 'auto'). Default
+                           ('auto'): 'duckdb-kv'
+            memory_limit: DuckDB memory cap for the write, e.g. '2GB' (the
+                duckdb-kv and disk-rewrite strategies write the table through
+                DuckDB; in-memory and streaming write it with pyarrow alone).
+                Default: gpio's ceiling-based default
             profile: AWS profile for S3 operations
             overwrite: Overwrite existing file (GeoPackage, Shapefile)
             layer_name: Layer name for GeoPackage (default: the output file stem)
@@ -1203,7 +1255,10 @@ class Table:
             Path to written file (local temp path if uploaded to cloud)
 
         Raises:
-            InvalidParameterError: If this table's geometry column name is not a
+            TypeError: If ``options`` is not a ``WriteOptions`` (a format passed
+                positionally), or a field is set both there and as a keyword.
+            InvalidParameterError: If a GeoParquet write option is set for
+                another format, which would ignore it. Also if this table's geometry column name is not a
                 column of the table -- a stale or mistyped name. Every output
                 format and every write strategy refuses it the same way, rather
                 than one crashing, one writing a `geo` block naming a column the
@@ -1216,7 +1271,9 @@ class Table:
             >>> table.write('output.geojson')              # GeoJSON (auto-detect)
             >>> table.write('s3://bucket/output.fgb')      # FlatGeobuf to S3
             >>> table.write('output.dat', format='csv')    # Explicit format
+            >>> table.write('out.parquet', gpio.WriteOptions(compression='GZIP'))
         """
+        write = _merge_write_options(options, locals())
 
         # Above the format dispatch, so every format refuses a stale geometry
         # name alike. Below it, only `.parquet` did: the GDAL writers re-detect
@@ -1242,26 +1299,31 @@ class Table:
                 f"row filters are not supported for {detected_format} output; "
                 "they apply to geopackage, flatgeobuf and csv",
             )
+        if geometry is not None:
+            from geoparquet_io.core.extract import refuse_cli_only_geometry_forms
+
+            refuse_cli_only_geometry_forms(geometry)
 
         # Handle GeoParquet format
         if detected_format == "parquet":
-            return self._write_geoparquet(
-                path,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                geoparquet_version=geoparquet_version,
-                write_strategy=write_strategy,
-                profile=profile,
-                verbose=verbose,
+            return self._write_geoparquet(path, write, verbose=verbose)
+
+        # Same principle again: a GeoParquet knob on another format used to be
+        # dropped without a word, so `.csv` "written with GZIP" was not (#761).
+        ignored = _asked_fields(write) - {"profile"}
+        if ignored:
+            from geoparquet_io.core.exceptions import InvalidParameterError
+
+            raise InvalidParameterError(
+                "/".join(sorted(ignored)),
+                f"applies to GeoParquet output only, not {detected_format}",
             )
 
         # Handle other formats
         return self._write_format(
             path,
             detected_format,
-            profile=profile,
+            profile=write.profile,
             overwrite=overwrite,
             layer_name=layer_name,
             include_wkt=include_wkt,
@@ -1316,16 +1378,7 @@ class Table:
         resolve_geometry_column(self._table, self._geometry_column, where="the table")
 
     def _write_geoparquet(
-        self,
-        path: str | Path,
-        compression: str,
-        compression_level: int | None,
-        row_group_size_mb: float | None,
-        row_group_rows: int | None,
-        geoparquet_version: str | None,
-        write_strategy: str,
-        profile: str | None,
-        verbose: bool = False,
+        self, path: str | Path, write: WriteOptions, verbose: bool = False
     ) -> Path:
         """Write table to GeoParquet format (supports local and cloud)."""
         from pathlib import Path as PathLib
@@ -1341,6 +1394,10 @@ class Table:
         from geoparquet_io.core.write_strategies import WriteStrategy
 
         self._require_geometry_column_present()
+        # "auto" is duckdb-kv here, the strategy Table.write always defaulted to.
+        write_strategy = (
+            "duckdb-kv" if write.write_strategy in (None, "auto") else write.write_strategy
+        )
 
         # The facade's row-group decision, so the Python API and the CLI agree
         # about what a number means. This path called the write strategy
@@ -1351,9 +1408,10 @@ class Table:
         # rejected value blames `row_group_rows`, not a CLI flag this caller
         # never typed. An MB target is measured on this table here, once, so
         # the four strategies write the same groups for it (#1215).
+        row_group_size_mb = write.row_group_size_mb
         row_group_rows = resolve_row_group_rows_for_table(
             self._table,
-            row_group_rows,
+            write.row_group_rows,
             row_group_size_mb,
             param_name="row_group_rows",
             mb_param_name="row_group_size_mb",
@@ -1367,7 +1425,7 @@ class Table:
         from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         geoparquet_version = resolve_output_geoparquet_version(
-            geoparquet_version,
+            write.geoparquet_version,
             table=self._table,
             source_version=self._auto_version_hint,
             verbose=verbose,
@@ -1452,10 +1510,11 @@ class Table:
                 write_strategy=write_strategy,
                 geometry_column=self._geometry_column,
                 geoparquet_version=geoparquet_version,
-                compression=compression,
-                compression_level=compression_level,
+                compression=write.compression,
+                compression_level=write.compression_level,
                 row_group_size_mb=row_group_size_mb,
                 row_group_rows=row_group_rows,
+                memory_limit=write.memory_limit,
                 verbose=verbose,
                 input_crs=input_crs,
                 custom_metadata={"covering": carried_covering} if carried_covering else None,
@@ -1463,7 +1522,7 @@ class Table:
 
             # Upload to remote if needed
             if is_remote:
-                upload(local_path, path_str, profile=profile)
+                upload(local_path, path_str, profile=write.profile)
                 return PathLib(path)
 
             return local_path
@@ -1815,13 +1874,18 @@ class Table:
 
         Returns:
             New filtered Table. Excluding every geometry column yields an
-            attribute table, which ``write()`` emits as plain Parquet.
+            attribute table, which ``write()`` emits as plain Parquet. With no
+            filter and ``repair_geometry=False`` nothing can change, so this
+            Table itself is returned.
 
         Raises:
             InvalidParameterError: If a requested column does not exist, if a
                 column is in both lists, or if ``bbox`` is used on a table with
                 no geometry column.
         """
+        unfiltered = all(arg is None for arg in (columns, exclude_columns, bbox, where, limit))
+        if unfiltered and not repair_geometry:
+            return self
         from geoparquet_io.core.extract import extract_table
 
         result = extract_table(
@@ -2593,6 +2657,7 @@ class Table:
         s3_region: str | None = None,
         s3_use_ssl: bool = True,
         chunk_concurrency: int = 12,
+        dry_run: bool = False,
     ) -> None:
         """
         Write and upload the table to cloud object storage.
@@ -2601,7 +2666,10 @@ class Table:
         Writes the table to a temporary local file, then uploads it to the destination.
 
         Args:
-            destination: Object store URL (e.g., s3://bucket/path/data.parquet)
+            destination: Object store URL (e.g., s3://bucket/path/data.parquet).
+                One ending in ``/`` is a prefix: the object is named after the
+                local file this Table was read from, as ``gpio publish upload``
+                names it after the file it uploads.
             compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
             compression_level: Compression level. None lets the codec pick its
                 own default, matching the CLI -- a fixed value is rejected by
@@ -2616,6 +2684,14 @@ class Table:
             s3_region: S3 region (default: us-east-1 when using custom endpoint)
             s3_use_ssl: Whether to use HTTPS for S3 endpoint (default: True)
             chunk_concurrency: Max concurrent chunks per file upload (default: 12)
+            dry_run: Write the file and print what would be uploaded (source,
+                size, destination, target key) without uploading. Mirrors
+                ``--dry-run``.
+
+        Raises:
+            InvalidParameterError: If ``destination`` ends in ``/`` and the
+                Table was not read from a single local file (built in memory,
+                derived by an operation, or read from a URL, directory or glob).
 
         Example:
             >>> gpio.read('data.parquet').sort_hilbert().upload(
@@ -2626,14 +2702,31 @@ class Table:
         """
         from pathlib import Path
 
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.file_utils import is_partition_path, scratch_dir
+        from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload as do_upload
 
-        # Write to temp file with uuid to avoid Windows file locking issues
-        temp_path = Path(scratch_path(prefix="gpio_upload_"))
+        # A destination ending in '/' names the object after a local source file only.
+        if destination.endswith("/"):
+            src = self._source_path
+            if src is None or is_remote_url(src) or is_partition_path(src):
+                raise InvalidParameterError(
+                    "destination",
+                    f"'{destination}' ends in '/', so the object would be named after "
+                    "the local file this Table was read from, and it has none (it was "
+                    "built in memory or derived, or read from a remote URL, a directory "
+                    "or a glob). Give a full object key, e.g. "
+                    f"'{destination}data.parquet'.",
+                )
+            destination += Path(src).name
 
-        try:
+        with scratch_dir(prefix="gpio_upload_") as scratch:
+            # Never the source's name: it may hold ':' or '*' (Windows) or a query.
+            temp_path = Path(scratch) / "upload.parquet"
             self.write(
                 temp_path,
+                format="parquet",
                 compression=compression,
                 compression_level=compression_level,
                 row_group_size_mb=row_group_size_mb,
@@ -2649,9 +2742,100 @@ class Table:
                 s3_region=s3_region,
                 s3_use_ssl=s3_use_ssl,
                 chunk_concurrency=chunk_concurrency,
+                dry_run=dry_run,
             )
-        finally:
-            unlink_released_file(temp_path)
+
+    def create_pmtiles(
+        self,
+        output: str,
+        *,
+        layer: str | None = None,
+        min_zoom: int | None = None,
+        max_zoom: int | None = None,
+        bbox: str | None = None,
+        where: str | None = None,
+        include_cols: str | None = None,
+        precision: int = 6,
+        verbose: bool = False,
+        src_crs: str | None = None,
+        attribution: str | None = None,
+        layer_by_column: str | None = None,
+        simplify_only_low_zooms: bool = True,
+        no_simplification_of_shared_nodes: bool = True,
+        no_tile_size_limit: bool = True,
+        drop_densest_as_needed: bool = True,
+        maximum_tile_bytes: int | None = None,
+        force: bool = False,
+        repair_geometry: bool = True,
+        temporary_directory: str | None = None,
+        chunks: str | None = None,
+    ) -> None:
+        """
+        Create PMTiles from the table using tippecanoe.
+
+        Tiles the file this Table was read from when it is one file and still a view of it;
+        otherwise writes the rows to a scratch file first and removes it after.
+        Takes the options of ``ops.create_pmtiles`` (see it for each one),
+        less ``profile``, which ``gpio.read()`` already took. Mirrors
+        ``gpio pmtiles create``. Requires tippecanoe in PATH.
+
+        Args:
+            output: Path for the output PMTiles file
+
+        Example:
+            >>> gpio.read('buildings.parquet').create_pmtiles('buildings.pmtiles')
+            >>> gpio.read('data.parquet').extract(where="kind = 'road'").create_pmtiles(
+            ...     'roads.pmtiles', layer='roads', max_zoom=14
+            ... )
+        """
+        # Every keyword is forwarded to ops unchanged (captured before the import).
+        options = {k: v for k, v in locals().items() if k not in ("self", "output")}
+        from geoparquet_io.api.ops import create_pmtiles
+
+        self._run_on_one_file(create_pmtiles, output, **options)
+
+    def create_pmtiles_pyramid(
+        self,
+        output: str,
+        *,
+        levels: str | list[int | str] | None = None,
+        bands: str | None = None,
+        max_tile_kb: int = 500,
+        bytes_per_cell: float | None = None,
+        layer_mode: str = "grouped",
+        include_features: bool = False,
+        features_source: str | None = None,
+        features_min_zoom: int | None = None,
+        max_zoom: int | None = None,
+        attribution: str | None = None,
+        force: bool = False,
+        verbose: bool = False,
+        temporary_directory: str | None = None,
+        memory_limit: str | None = None,
+    ) -> None:
+        """
+        Create a banded multi-level PMTiles pyramid from an aggregate table.
+
+        Tiles the file this Table was read from when it is one file and still a view of it,
+        which also reuses that file's overview siblings; otherwise writes the
+        rows to a scratch file first and removes it after (missing levels are
+        built in the run's own scratch either way). Takes the options of
+        ``ops.create_pmtiles_pyramid`` (see it for each one). Mirrors
+        ``gpio pmtiles pyramid``. Requires tippecanoe and tile-join in PATH.
+
+        Args:
+            output: Path for the output PMTiles archive
+
+        Example:
+            >>> gpio.read('buildings.parquet').aggregate_a5(resolution=10).create_pmtiles_pyramid(
+            ...     'cells.pmtiles'
+            ... )
+        """
+        # Every keyword is forwarded to ops unchanged (captured before the import).
+        options = {k: v for k, v in locals().items() if k not in ("self", "output")}
+        from geoparquet_io.api.ops import create_pmtiles_pyramid
+
+        self._run_on_one_file(create_pmtiles_pyramid, output, **options)
 
     def head(self, n: int = 10) -> Table:
         """
@@ -2661,7 +2845,8 @@ class Table:
             n: Number of rows to return (default: 10). Must be non-negative.
 
         Returns:
-            New Table with the first n rows
+            New Table with the first n rows, or this Table itself when
+            ``n >= num_rows`` (nothing to drop, so it stays a view of its file)
 
         Raises:
             ValueError: If n is negative
@@ -2673,7 +2858,8 @@ class Table:
         """
         if n < 0:
             raise ValueError(f"n must be non-negative, got {n}")
-        n = min(n, self.num_rows)
+        if n >= self.num_rows:
+            return self
         return self._wrap(self._table.slice(0, n), self._geometry_column)
 
     def tail(self, n: int = 10) -> Table:
@@ -2684,7 +2870,8 @@ class Table:
             n: Number of rows to return (default: 10). Must be non-negative.
 
         Returns:
-            New Table with the last n rows
+            New Table with the last n rows, or this Table itself when
+            ``n >= num_rows`` (nothing to drop, so it stays a view of its file)
 
         Raises:
             ValueError: If n is negative
@@ -2696,9 +2883,9 @@ class Table:
         """
         if n < 0:
             raise ValueError(f"n must be non-negative, got {n}")
-        n = min(n, self.num_rows)
-        offset = max(0, self.num_rows - n)
-        return self._wrap(self._table.slice(offset, n), self._geometry_column)
+        if n >= self.num_rows:
+            return self
+        return self._wrap(self._table.slice(self.num_rows - n, n), self._geometry_column)
 
     def stats(self) -> dict:
         """
@@ -2721,66 +2908,23 @@ class Table:
             >>> print(stats['population']['max'])
             10000000
         """
-        import duckdb
-
-        from geoparquet_io.core.duckdb_utils import (
-            fetch_row,
-            get_duckdb_connection,
-            is_interrupt,
-            register_arrow,
-        )
-        from geoparquet_io.core.inspect_utils import compute_column_stats
-        from geoparquet_io.core.logging_config import debug
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, register_arrow
+        from geoparquet_io.core.inspect_utils import compute_column_statistics
 
         con = None
         try:
             con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
             register_arrow(con, "input_table", self._table)
-
-            regular_cols = [f.name for f in self._table.schema if f.name != self._geometry_column]
-            stats = {}
-
-            # One batched query for all non-geometry columns, so one DESCRIBE.
-            # fetch_row reads TIMESTAMPTZ min and max as UTC and makes them aware
-            # with zoneinfo, so they need no pytz.
-            if regular_cols:
-                select_parts = []
-                for col_name in regular_cols:
-                    quoted_col = quote_identifier(col_name)
-                    select_parts.extend(
-                        [
-                            f"COUNT(*) FILTER (WHERE {quoted_col} IS NULL)",
-                            f"MIN({quoted_col})",
-                            f"MAX({quoted_col})",
-                            f"APPROX_COUNT_DISTINCT({quoted_col})",
-                        ]
-                    )
-                query = f"SELECT {', '.join(select_parts)} FROM input_table"
-                try:
-                    row = fetch_row(con, query)
-                except duckdb.Error as e:
-                    if is_interrupt(e):
-                        raise
-                    debug(f"Batched stats query failed, falling back to per-column queries: {e}")
-                    row = None
-                for i, col_name in enumerate(regular_cols):
-                    if row is None:
-                        stats[col_name] = compute_column_stats(con, col_name, False, "input_table")
-                    else:
-                        nulls, min_val, max_val, unique = row[i * 4 : i * 4 + 4]
-                        stats[col_name] = {
-                            "nulls": nulls,
-                            "min": min_val,
-                            "max": max_val,
-                            "unique": unique,
-                        }
-
+            # The primary geometry column goes last; every other column,
+            # secondary geometry included, gets the full four figures.
+            columns_info = [
+                {"name": f.name, "is_geometry": False}
+                for f in self._table.schema
+                if f.name != self._geometry_column
+            ]
             if self._geometry_column in self._table.schema.names:
-                stats[self._geometry_column] = compute_column_stats(
-                    con, self._geometry_column, True, "input_table"
-                )
-
-            return stats
+                columns_info.append({"name": self._geometry_column, "is_geometry": True})
+            return compute_column_statistics(con, "input_table", columns_info)
 
         finally:
             if con is not None:
@@ -2814,11 +2958,16 @@ class Table:
             {'id': {'authority': 'EPSG', 'code': 4326}}
         """
 
+        from geoparquet_io.core.geo_metadata import geo_info_from_metadata, read_raw_geo
+
+        schema_metadata = self._table.schema.metadata
+        # The derived keys come from the reading `gpio inspect` uses (#1087).
+        geo_info = geo_info_from_metadata(schema_metadata, column=self._geometry_column)
         result = {
             "rows": self.num_rows,
             "columns_count": len(self.column_names),
             "geometry_column": self._geometry_column,
-            "geoparquet_version": self.geoparquet_version,
+            "geoparquet_version": geo_info["version"],
             "crs": self.crs,
             "bounds": self.bounds,
             "columns": [
@@ -2831,29 +2980,19 @@ class Table:
             ],
         }
 
-        # Extract full geo metadata if available
-        from geoparquet_io.core.geo_metadata import read_raw_geo
-
-        schema_metadata = self._table.schema.metadata
         raw_geo = read_raw_geo(schema_metadata)
         if raw_geo.present:
             # A read-only reader, the Python API's `gpio inspect meta`:
             # `geo_metadata` is documented as the file's full `geo` block, so it
             # is handed back exactly as the file holds it and is NOT sanitized --
             # the same line #883 drew around the raw reader (`read_raw_geo`) and
-            # `check`. Undecodable reads as None. Only the derived keys below
-            # need guarding: they indexed the raw block and crashed on a
-            # `columns` that is not an object, or an entry that is not one (#947).
+            # `check`. Undecodable reads as None. The derived keys below come
+            # from the sanitized entry, so a malformed one cannot crash them (#947).
             result["geo_metadata"] = raw_geo.value
 
-            # Extract geometry_types from geo metadata
-            columns_meta = raw_geo.block.get("columns") if raw_geo.block else None
-            col_meta = (
-                columns_meta.get(self._geometry_column)
-                if isinstance(columns_meta, dict) and self._geometry_column
-                else None
-            )
-            if isinstance(col_meta, dict):
+            # No geometry column, no entry: None would ask for the block's primary.
+            col_meta = geo_info["column_meta"] if self._geometry_column else None
+            if col_meta is not None:
                 result["geometry_types"] = col_meta.get("geometry_types")
                 state_edges(result, edges_of(col_meta))
                 result["orientation"] = col_meta.get("orientation")
@@ -2922,6 +3061,8 @@ class Table:
         Execute a file-based function with a temporary file containing this table.
 
         Writes the table to a temp file, runs the function, and cleans up.
+        The file goes in func's own ``temporary_directory`` when it takes one
+        (the pmtiles methods), else in the system temp directory.
 
         Args:
             func: Function to call with temp file path as first argument
@@ -2933,23 +3074,16 @@ class Table:
         """
         from pathlib import Path
 
-        temp_path = Path(scratch_path(prefix="gpio_check_"))
-        try:
+        from geoparquet_io.core.file_utils import scratch_dir
+
+        with scratch_dir(
+            prefix="gpio_check_", directory=kwargs.get("temporary_directory")
+        ) as scratch:
+            temp_path = Path(scratch) / "table.parquet"
             # The bytes write() would produce with its defaults, so a
             # prospective verdict describes the file the caller would get.
-            self._write_geoparquet(
-                temp_path,
-                compression=None,
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                geoparquet_version=None,
-                write_strategy="duckdb-kv",
-                profile=None,
-            )
+            self._write_geoparquet(temp_path, WriteOptions())
             return func(str(temp_path), *args, **kwargs)
-        finally:
-            unlink_released_file(temp_path)
 
     def _check_file(
         self, func: Callable[..., Any], *args: Any, **kwargs: Any
@@ -2964,13 +3098,29 @@ class Table:
             return func(source, *args, **kwargs), source
         return self._with_temp_file(func, *args, **kwargs), None
 
-    def _run_check(
-        self, check_type: str, func: Callable[..., Any], *args: Any, **kwargs: Any
-    ) -> CheckResult:
+    def _run_on_one_file(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        """:meth:`_check_file` for work that reads one file (tiling, ``fix``).
+
+        A directory or glob source always goes through a scratch write of the
+        rows: a member rewritten in place leaves the directory's size and mtime
+        as they were, so :meth:`_measurable_source` cannot see it change.
+        """
+        from geoparquet_io.core.file_utils import is_partition_path
+
+        if self._source_path is not None and is_partition_path(self._source_path):
+            return self._with_temp_file(func, *args, **kwargs)
+        return self._check_file(func, *args, **kwargs)[0]
+
+    def _run_check(self, check: Callable[..., CheckResult], **kwargs: Any) -> CheckResult:
+        """Run a path-level check from ``api/check.py`` through :meth:`_check_file`.
+
+        Without the path functions' one-file refusal: a Table read from a
+        directory hands it to core, which measures the dataset, as before #1090.
+        """
         from geoparquet_io.api.check import CheckResult
 
-        results, source = self._check_file(func, *args, **kwargs)
-        return CheckResult(results, check_type=check_type, source_path=source)
+        result, source = self._check_file(getattr(check, "__wrapped__", check), **kwargs)
+        return CheckResult(result.to_dict(), check_type=result.check_type, source_path=source)
 
     def _with_temp_io_files(self, func, **kwargs) -> pa.Table:
         """
@@ -3024,8 +3174,8 @@ class Table:
 
         Not spatial order or spec validation, which ``gpio check all`` also
         runs: ``check().verdict()`` can be ``"warning"`` for a file ``check
-        all`` fails. For ``check all``'s answer, take the worst of this,
-        :meth:`check_spatial` and :meth:`validate`.
+        all`` fails. For ``check all``'s answer, run ``gpio.check_all(path)``
+        on the file.
 
         Measured on the source file when this Table was read from one; see
         ``CheckResult.prospective``.
@@ -3035,14 +3185,12 @@ class Table:
 
         Example:
             >>> table = gpio.read('data.parquet')
-            >>> results = [table.check(), table.check_spatial(), table.validate()]
-            >>> if any(r.verdict() == "failure" for r in results):
-            ...     for r in results:
-            ...         print(*r.failures(), sep="\n")
+            >>> result = table.check()
+            >>> print(result.verdict(), result.failures())
         """
-        from geoparquet_io.core.check_parquet_structure import check_all
+        from geoparquet_io.api import check
 
-        return self._run_check("all", check_all, verbose=False, return_results=True, quiet=True)
+        return self._run_check(check._check_structure)
 
     def check_spatial(self, sample_size: int = 100, limit_rows: int = 500000) -> CheckResult:
         """
@@ -3050,6 +3198,9 @@ class Table:
 
         Compares distance between consecutive features vs random pairs.
         A ratio < 0.5 indicates good spatial clustering.
+
+        Spatial order alone: ``gpio check spatial`` also judges pushdown
+        readiness, so for its answer run ``gpio.check_spatial(path)`` on the file.
 
         Args:
             sample_size: Number of random pairs to sample (default: 100)
@@ -3067,16 +3218,10 @@ class Table:
             >>> else:
             ...     print("Consider using sort_hilbert()")
         """
-        from geoparquet_io.core.check_spatial_order import check_spatial_order
+        from geoparquet_io.api import check
 
         return self._run_check(
-            "spatial",
-            check_spatial_order,
-            random_sample_size=sample_size,
-            limit_rows=limit_rows,
-            verbose=False,
-            return_results=True,
-            quiet=True,
+            check._check_spatial_order, sample_size=sample_size, limit_rows=limit_rows
         )
 
     def check_spatial_pushdown(self) -> CheckResult:
@@ -3089,7 +3234,10 @@ class Table:
 
         Measured on the source file when this Table was read from one, the
         same numbers ``gpio check spatial`` prints; see
-        ``CheckResult.prospective``.
+        ``CheckResult.prospective``. The verdict is the raw measurement's: a
+        single row group, or native geo types with no bbox column, does not
+        pass here, while ``gpio check spatial`` (and
+        ``gpio.check_spatial_pushdown(path)``) pass them.
 
         Returns:
             CheckResult with pushdown readiness metrics
@@ -3101,13 +3249,9 @@ class Table:
             ...     print("Good pushdown readiness")
             >>> print(result.details())
         """
-        from geoparquet_io.core.check_spatial_order import check_spatial_pushdown_readiness
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "spatial_pushdown",
-            check_spatial_pushdown_readiness,
-            verbose=False,
-        )
+        return self._run_check(check._pushdown_readiness)
 
     def check_compression(self) -> CheckResult:
         """
@@ -3126,11 +3270,9 @@ class Table:
             >>> result = table.check_compression()
             >>> print(result.to_dict())
         """
-        from geoparquet_io.core.check_parquet_structure import check_compression
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "compression", check_compression, verbose=False, return_results=True, quiet=True
-        )
+        return self._run_check(check.check_compression)
 
     def check_bbox(
         self,
@@ -3170,17 +3312,9 @@ class Table:
             >>> if not result.passed():
             ...     table = table.add_bbox()
         """
-        from geoparquet_io.core.check_parquet_structure import check_bbox
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "bbox",
-            check_bbox,
-            verbose=False,
-            return_results=True,
-            quiet=True,
-            verify_rows=sample_rows,
-            all_rows=all_rows,
-        )
+        return self._run_check(check.check_bbox, sample_rows=sample_rows, all_rows=all_rows)
 
     def check_row_groups(self, profile: CheckProfile | None = None) -> CheckResult:
         """
@@ -3200,16 +3334,9 @@ class Table:
             >>> result = table.check_row_groups()
             >>> print(result.recommendations())
         """
-        from geoparquet_io.core.check_parquet_structure import check_row_groups
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "row_groups",
-            check_row_groups,
-            verbose=False,
-            return_results=True,
-            quiet=True,
-            profile=profile,
-        )
+        return self._run_check(check.check_row_groups, profile=profile)
 
     def check_bloom_filters(self) -> CheckResult:
         """
@@ -3229,11 +3356,9 @@ class Table:
             >>> result = table.check_bloom_filters()
             >>> print(result.to_dict())
         """
-        from geoparquet_io.core.check_parquet_structure import check_bloom_filters
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "bloom_filters", check_bloom_filters, verbose=False, return_results=True, quiet=True
-        )
+        return self._run_check(check.check_bloom_filters)
 
     def check_optimization(self) -> CheckResult:
         """
@@ -3254,11 +3379,9 @@ class Table:
             >>> result = table.check_optimization()
             >>> print(result.to_dict()['score'], '/', result.to_dict()['total_checks'])
         """
-        from geoparquet_io.core.check_optimization import check_optimization
+        from geoparquet_io.api import check
 
-        return self._run_check(
-            "optimization", check_optimization, verbose=False, return_results=True, quiet=True
-        )
+        return self._run_check(check.check_optimization)
 
     def validate(self, version: str | None = None) -> CheckResult:
         """
@@ -3282,39 +3405,104 @@ class Table:
             >>> if result.passed():
             ...     print(f"Valid GeoParquet {table.geoparquet_version}")
         """
-        from geoparquet_io.core.validate import validate_geoparquet
+        from geoparquet_io.api import check
 
-        validation_result, source = self._check_file(
-            validate_geoparquet,
-            target_version=version,
-            validate_data=True,
-            sample_size=1000,
-            verbose=False,
-        )
+        return self._run_check(check.validate, version=version)
 
-        # Convert ValidationResult to dict for CheckResult
-        from geoparquet_io.core.check_verdict import SEVERITY_KEY, validation_verdict
+    def fix(
+        self,
+        checks: list[str] | None = None,
+        output: str | Path | None = None,
+        *,
+        overwrite: bool = False,
+        verbose: bool = False,
+    ) -> Table:
+        """
+        Repair what the checks find, into a new Table, as ``gpio check all --fix``.
 
-        results = {
-            "passed": validation_result.is_valid,
-            SEVERITY_KEY: validation_verdict(
-                failed=validation_result.failed_count, warnings=validation_result.warning_count
-            ).label,
-            "file_path": validation_result.file_path,
-            "detected_version": validation_result.detected_version,
-            "target_version": validation_result.target_version,
-            "passed_count": validation_result.passed_count,
-            "failed_count": validation_result.failed_count,
-            "warning_count": validation_result.warning_count,
-            "issues": [
-                f"{c.name}: {c.message}"
-                for c in validation_result.checks
-                if c.status.value == "failed"
-            ],
-        }
-        from geoparquet_io.api.check import CheckResult
+        Runs the structure checks and the spatial-order check on the source
+        file (or, for a Table with no single file behind it, on a temp write of
+        its rows), then applies the fixes they offer: drop a disallowed covering,
+        add or remove the bbox column and its metadata, Hilbert-sort, and
+        rewrite with ZSTD and :data:`DEFAULT_ROW_GROUP_ROWS` rows per group.
+        Never writes in place: the file this Table was read from is untouched.
 
-        return CheckResult(results, check_type="validate", source_path=source)
+        The compression and row-group fixes are one rewrite: selecting either
+        applies both whenever that one is needed.
+
+        Args:
+            checks: The checks whose fixes to apply, from ``"bbox"``,
+                ``"covering"``, ``"compression"``, ``"row_groups"`` and
+                ``"spatial"``. None (default) applies them all.
+            output: Write the repaired file here and return a Table read from
+                it. None (default) repairs into a scratch file and returns the
+                rows in memory. Refused when it is this Table's source.
+            overwrite: Replace an existing ``output``. Without it an existing
+                file is refused, as ``--fix-output`` refuses one without
+                ``--overwrite``. A remote ``output`` is not looked up (gpio
+                does not stat an object store), so an existing remote object
+                is replaced whatever this is set to; only the source itself,
+                under any scheme alias (``s3a://`` for ``s3://``), is refused.
+            verbose: Log each fix as it runs
+
+        Returns:
+            A new Table with the fixes applied
+
+        Raises:
+            InvalidParameterError: An unknown check name, or ``output`` naming
+                the source file
+            GeoParquetError: ``output`` exists and ``overwrite`` is not set
+
+        Example:
+            >>> fixed = gpio.read('data.parquet').fix()
+            >>> gpio.read('data.parquet').fix(checks=["spatial"], output='sorted.parquet')
+        """
+        from pathlib import Path
+
+        from geoparquet_io.api import check
+        from geoparquet_io.core.check_fixes import apply_all_fixes
+        from geoparquet_io.core.exceptions import InvalidParameterError
+        from geoparquet_io.core.file_utils import handle_output_overwrite, is_same_file_path
+
+        fixable = ("bbox", "covering", "compression", "row_groups", "spatial")
+        wanted = set(fixable if checks is None else [checks] if isinstance(checks, str) else checks)
+        unknown = sorted(wanted - set(fixable))
+        if unknown:
+            raise InvalidParameterError("checks", f"unknown {unknown}; choose from {list(fixable)}")
+        if output is not None and is_same_file_path(os.fspath(output), self._source_path):
+            raise InvalidParameterError(
+                "output",
+                "is this Table's source file, and fix() never rewrites its input. Name "
+                "another path, or leave output unset for the result in memory.",
+            )
+        if output is not None:
+            # The CLI repair path's policy (_copy_to_fix_output): the old file
+            # survives until the repaired one replaces it.
+            handle_output_overwrite(
+                os.fspath(output), overwrite, self._source_path, flag="overwrite=True", remove=False
+            )
+
+        def repair(path: str, target: str) -> None:
+            results = check._check_structure(path).to_dict()
+            if "spatial" in wanted:
+                results["spatial"] = check._check_spatial_order(path).to_dict()
+            plan = {name: (found if name in wanted else {}) for name, found in results.items()}
+            # The repair keeps the input's GeoParquet version, read off the bbox check.
+            plan["bbox"] = plan["bbox"] or {
+                key: results["bbox"].get(key) for key in ("file_type", "version")
+            }
+            apply_all_fixes(path, target, plan, verbose=verbose)
+
+        if output is not None:
+            self._run_on_one_file(repair, os.fspath(output))
+            return read(output)
+        target = scratch_path(prefix="gpio_fix_")
+        try:
+            self._run_on_one_file(repair, target)
+            # Read with pyarrow, not read(): the Table must not be a view of a scratch file.
+            return Table(pq.read_table(target), geometry_column=self._geometry_column)
+        finally:
+            unlink_released_file(Path(target))
 
     def add_admin_divisions(
         self,
@@ -3374,7 +3562,7 @@ class Table:
         )
         return self._wrap(result_table, self._geometry_column)
 
-    def add_bbox_metadata(self, bbox_column: str = "bbox") -> Table:
+    def add_bbox_metadata(self, bbox_column: str | None = None) -> Table:
         """
         Add bbox covering metadata to the table schema.
 
@@ -3392,7 +3580,8 @@ class Table:
         `gpio add bbox-metadata` refuses the file.
 
         Args:
-            bbox_column: Name of the bbox column (default "bbox")
+            bbox_column: Name of the bbox column. None (the default) detects it
+                as `gpio add bbox-metadata` does: the covering's column, else "bbox".
 
         Returns:
             Table with updated metadata

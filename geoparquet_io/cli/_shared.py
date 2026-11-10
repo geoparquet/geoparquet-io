@@ -74,15 +74,8 @@ def _activate_s3(ctx, aws_profile=None, s3_endpoint=None, s3_region=None, s3_no_
         yield config
 
 
-def prepare_output(
-    output_path: str | None,
-    any_extension: bool,
-    row_group_size: int | None,
-    row_group_size_mb: str | None,
-) -> float | None:
-    """Run the three checks every write command performs before it does any work.
-
-    In order:
+def prepare_output(output_path: str | None, any_extension: bool) -> None:
+    """Run the two output checks every write command performs before it does any work.
 
     1. :func:`~geoparquet_io.core.streaming.validate_output` - refuses a missing
        output when stdout is a terminal, and warns when binary Arrow IPC would
@@ -91,37 +84,22 @@ def prepare_output(
        a user, and the traceback behind it is noise.
     2. :func:`~geoparquet_io.core.file_utils.validate_parquet_extension` -
        rejects a non-``.parquet`` output unless ``--any-extension`` was given.
-    3. :func:`~geoparquet_io.cli.decorators.parse_row_group_options` - enforces
-       that ``--row-group-size`` and ``--row-group-size-mb`` are mutually
-       exclusive and converts the size string to MB.
 
-    The order matters and is part of what this helper pins, though not between
-    steps 1 and 2: those two can never both fire, since ``validate_output``
-    raises only for a missing output and ``validate_parquet_extension`` returns
-    immediately on one. The live constraint is step 1 before step 3 -- a user
-    who piped nothing anywhere and also passed both row-group options should be
-    told how to name an output, which is actionable, rather than which pair of
-    size flags conflict.
+    The two can never both fire: ``validate_output`` raises only for a missing
+    output and ``validate_parquet_extension`` returns immediately on one. The
+    row-group flags it used to parse as a third step are parsed before the
+    command body runs, by ``pack_write_options`` (#761).
 
     Args:
         output_path: The command's output argument. ``None`` means "stream to
             stdout" and ``"-"`` means it explicitly.
         any_extension: Value of ``--any-extension``.
-        row_group_size: Value of ``--row-group-size`` (rows).
-        row_group_size_mb: Value of ``--row-group-size-mb`` (size string).
-
-    Returns:
-        The row group size in MB, or ``None`` when it was not requested -- pass
-        it to the core writer as ``row_group_size_mb``.
 
     Raises:
         click.ClickException: No output was given and stdout is a terminal.
-        click.UsageError: Both row-group options were given, or the size string
-            is invalid.
         InvalidParameterError: The output has a non-``.parquet`` extension and
             ``--any-extension`` was not given.
     """
-    from geoparquet_io.cli.decorators import parse_row_group_options
     from geoparquet_io.core.file_utils import validate_parquet_extension
     from geoparquet_io.core.streaming import StreamingError, validate_output
 
@@ -135,8 +113,6 @@ def prepare_output(
     # rather than relying on an annotation that does not admit it.
     if output_path is not None:
         validate_parquet_extension(output_path, any_extension)
-
-    return parse_row_group_options(row_group_size, row_group_size_mb)
 
 
 def create_default_group(default_subcommand: str, description: str) -> type:

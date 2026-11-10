@@ -699,6 +699,19 @@ def pushdown_verdict(pushdown: dict, *, native_geo: bool) -> Verdict:
     return Verdict.WARNING
 
 
+def judged_pushdown(parquet_file: str, verbose: bool = False) -> dict:
+    """:func:`check_spatial_pushdown_readiness` with :func:`pushdown_verdict`'s severity.
+
+    The pushdown block ``gpio check spatial`` judges; raises when it cannot be measured.
+    """
+    from geoparquet_io.core.file_type import detect_geoparquet_file_type
+
+    pushdown = check_spatial_pushdown_readiness(parquet_file, verbose=verbose)
+    file_type = detect_geoparquet_file_type(parquet_file)["file_type"]
+    verdict = pushdown_verdict(pushdown, native_geo=file_type in _NATIVE_GEO_FILE_TYPES)
+    return {**pushdown, SEVERITY_KEY: verdict.label}
+
+
 def with_pushdown(parquet_file: str, spatial: dict, verbose: bool = False) -> dict:
     """``spatial`` (a :func:`check_spatial_order` result) with pushdown readiness folded in.
 
@@ -709,20 +722,16 @@ def with_pushdown(parquet_file: str, spatial: dict, verbose: bool = False) -> di
     pushdown measurement that cannot be taken is left out (``None``) rather
     than guessed.
     """
-    from geoparquet_io.core.file_type import detect_geoparquet_file_type
-
     if is_could_not_run(spatial):
         return spatial
     try:
-        pushdown = check_spatial_pushdown_readiness(parquet_file, verbose=verbose)
-        file_type = detect_geoparquet_file_type(parquet_file)["file_type"]
+        pushdown = judged_pushdown(parquet_file, verbose=verbose)
     except Exception as e:
         if is_interrupt(e):
             raise
         debug(f"Pushdown readiness could not be measured: {e}")
         return {**spatial, "pushdown": None}
-    verdict = pushdown_verdict(pushdown, native_geo=file_type in _NATIVE_GEO_FILE_TYPES)
-    pushdown = {**pushdown, SEVERITY_KEY: verdict.label}
+    verdict = result_verdict(pushdown)
     merged = {**spatial, "pushdown": pushdown}
     if verdict is Verdict.PASS:
         return merged

@@ -95,15 +95,14 @@ subcommand; `ℹ️` marks information that does not count either way.
 
     <!-- doctest: prelude="import geoparquet_io as gpio; table = gpio.read('myfile.parquet')" -->
     ```python
-    # table.check() runs the structure checks only; `gpio check all` adds
-    # spatial order and spec validation, so a CI gate combines all three.
-    results = [table.check(), table.check_spatial(), table.validate()]
-    verdicts = {r.verdict() for r in results}  # "pass", "warning" or "failure"
+    # gpio.check_all runs what `gpio check all` runs: the structure checks,
+    # spatial order and spec validation. table.check() is the structure checks only.
+    result = gpio.check_all('myfile.parquet')
+    verdict = result.verdict()  # "pass", "warning" or "failure"
 
-    failed = "failure" in verdicts  # what `gpio check all` exits 1 on
-    strict_failed = verdicts != {"pass"}  # the --strict equivalent
-    for result in results:
-        print(*result.failures(), *result.warnings(), sep="\n")
+    failed = verdict == "failure"  # what `gpio check all` exits 1 on
+    strict_failed = verdict != "pass"  # the --strict equivalent
+    print(*result.failures(), *result.warnings(), sep="\n")
     ```
 
     `failures()` and `warnings()` bucket each issue by the same severity
@@ -115,6 +114,69 @@ declines because it cannot repair the problem, exits 1 (and says
 `✗ No automatic fix available`). With `--fix-output`, a file that needed no
 repair is copied there, so a pipeline always gets the file it named; a failing
 file that `--fix` cannot repair is not.
+
+### Check a file by path
+
+Each check also takes a path directly, with the same options as the CLI
+subcommand, and no Table to read first. It checks one file: a directory or glob
+is refused, and `gpio check <cmd>` handles a multi-file run. A remote URL is
+read in place.
+
+=== "CLI"
+
+    ```bash
+    gpio check compression myfile.parquet
+    gpio check spec myfile.parquet --skip-data-validation
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    result = gpio.check_compression('myfile.parquet')
+    print(result.verdict(), result.source_path)
+
+    spec = gpio.validate('myfile.parquet', skip_data_validation=True)
+    ```
+
+    `gpio.check_all`, `check_bbox`, `check_row_groups`, `check_spatial`,
+    `check_spatial_pushdown`, `check_bloom_filters` and `check_optimization`
+    work the same way, each with the verdict and defaults of its `gpio check`
+    command (`check_spatial` includes the pushdown block). `gpio.read(path).check_*()`
+    calls them on the file it read, so for a local file that has not changed both
+    give the same answer, except that `Table.check()` and `Table.check_spatial()`
+    run less: see the Python API reference.
+    A Table read from a remote URL is checked on a temporary local rewrite of
+    its rows instead, so its answer describes that rewrite.
+
+### Fix from Python
+
+`Table.fix()` applies the repairs `--fix` would, but into a new Table: the file
+it was read from is never rewritten. Pass `output=` to write the repaired file
+there (it must not be the source, and an existing file needs `overwrite=True`),
+or leave it unset to get the rows in memory.
+`checks=` picks which checks' fixes run, from `"bbox"`, `"covering"`,
+`"compression"`, `"row_groups"` and `"spatial"`. The compression and row-group
+fixes are one rewrite, so picking either applies both when it is needed.
+
+=== "CLI"
+
+    ```bash
+    gpio check all myfile.parquet --fix --fix-output fixed.parquet
+    gpio check spatial myfile.parquet --fix --fix-output sorted.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('myfile.parquet')
+    fixed = table.fix(output='fixed.parquet')
+    sorted_only = table.fix(checks=["spatial"], output='sorted.parquet')
+    in_memory = table.fix()  # no file written
+    ```
 
 An input that resolves to no parquet files — a glob that matches nothing, or an
 empty directory — exits 1 with `No parquet files found` on stderr, with or

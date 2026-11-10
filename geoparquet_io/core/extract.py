@@ -180,6 +180,17 @@ def _read_geometry_from_stdin() -> str:
     return sys.stdin.read().strip()
 
 
+def _is_bare_geometry_path(geometry_input: str) -> bool:
+    """Whether a non-``@`` string has the shape of a geometry file path.
+
+    Shape only, never existence: the one test both the parser's bare-path read
+    and the API's refusal of it share, so they cannot drift apart.
+    """
+    if geometry_input.strip().startswith(("{", "POLYGON", "POINT", "LINESTRING", "MULTI")):
+        return False
+    return Path(geometry_input).suffix.lower() in (".geojson", ".json", ".wkt")
+
+
 def _resolve_geometry_file(geometry_input: str) -> str | None:
     """
     Resolve file path from geometry input.
@@ -188,18 +199,40 @@ def _resolve_geometry_file(geometry_input: str) -> str | None:
     """
     if geometry_input.startswith("@"):
         return geometry_input[1:]
-
-    # Check if it looks like a file path (not inline geometry)
-    if not geometry_input.strip().startswith(("{", "POLYGON", "POINT", "LINESTRING", "MULTI")):
-        potential_path = Path(geometry_input)
-        if potential_path.exists() and potential_path.suffix.lower() in (
-            ".geojson",
-            ".json",
-            ".wkt",
-        ):
-            return geometry_input
-
+    if _is_bare_geometry_path(geometry_input) and Path(geometry_input).exists():
+        return geometry_input
     return None
+
+
+def refuse_cli_only_geometry_forms(geometry_input: str | None) -> None:
+    """Refuse the geometry forms only the CLI takes: ``"-"`` and a bare file path (#1321).
+
+    :func:`parse_geometry_input` reads stdin for ``"-"`` and reads a bare string
+    naming an existing ``.geojson``/``.json``/``.wkt`` file. Those are shell
+    conveniences; a library caller passing an untrusted string must not be made
+    to read stdin or a local file, so the Python API calls this first and
+    accepts only GeoJSON/WKT text or the explicit ``@path`` form.
+
+    A bare path is refused by its shape whether or not the file exists yet, so
+    a file created between this check and the parse is still never read. A
+    non-string (a ``pathlib.Path``) is refused too: the file form is ``@path``.
+    """
+    if geometry_input is None:
+        return
+    if not isinstance(geometry_input, str):
+        raise InvalidParameterError(
+            "geometry",
+            f"takes GeoJSON or WKT text, or '@path' to read a geometry file, "
+            f"not a {type(geometry_input).__name__}",
+        )
+    if geometry_input.startswith("@"):
+        return
+    if geometry_input == "-" or _is_bare_geometry_path(geometry_input):
+        raise InvalidParameterError(
+            "geometry",
+            f"{geometry_input[:100]!r} is a CLI-only form (stdin or a bare file path); "
+            "pass GeoJSON or WKT text, or '@path' to read a geometry file",
+        )
 
 
 def _extract_geometry_from_geojson(geojson: dict, use_first: bool) -> dict:

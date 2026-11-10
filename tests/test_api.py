@@ -9,6 +9,7 @@ import functools
 import inspect
 import json
 import os
+import re
 import struct
 import tempfile
 import uuid
@@ -752,6 +753,11 @@ NOT_TABLE_IN_TABLE_OUT: dict[str, str] = {
     "partition_by_quadkey": "writes a partition tree; covered by TestOpsPartition",
     "partition_by_s2": "writes a partition tree; covered by TestOpsPartition",
     "partition_by_string": "writes a partition tree; covered by TestOpsPartition",
+    # Table/file in, PMTiles out: no table comes back to compare. The Table door
+    # hands ops the source file or a scratch copy; both doors are pinned against
+    # the CLI by the call-parity scaffold's `pmtiles create`/`pmtiles pyramid`.
+    "create_pmtiles": "PMTiles out through tippecanoe; call parity in the scaffold",
+    "create_pmtiles_pyramid": "banded PMTiles out; call parity in the scaffold",
 }
 
 
@@ -835,8 +841,6 @@ OPS_ONLY_SURFACE: dict[str, str] = {
     "handed back in memory cannot carry",
     "create_overviews": "`Table.overview` <-> `ops.create_overviews`, differently spelled "
     "twin: the method rolls one level in memory, the function writes a whole pyramid",
-    "create_pmtiles": "file in, PMTiles out through tippecanoe: no table on either end",
-    "create_pmtiles_pyramid": "file in, banded PMTiles out: no table on either end",
     "from_arcgis": "reader: fetches a service over the network, no input table",
     "from_carto": "reader: fetches a service over the network, no input table",
     "from_wfs_layers": "reader: writes many layers to a directory, so there is no single "
@@ -866,6 +870,8 @@ TABLE_ONLY_SURFACE: dict[str, str] = {
     "check_row_groups": "returns a CheckResult, not a table",
     "check_spatial": "returns a CheckResult, not a table",
     "check_spatial_pushdown": "returns a CheckResult, not a table",
+    "fix": "repairs the file the Table measures: the checks it acts on are file facts, "
+    "and the file-level repair is `gpio check <cmd> --fix`",
     "from_bigquery": "`Table.from_bigquery` <-> `ops.read_bigquery`, differently spelled twin",
     "head": "row preview off the wrapped table; `ops` callers can slice the pa.Table",
     "info": "prints a summary of the wrapped table",
@@ -1489,6 +1495,118 @@ class TestTableUpload:
             assert len(captured_paths) == 1
             temp_path = captured_paths[0]
             assert not Path(temp_path).exists(), "Temp file should be deleted after error"
+
+    def test_upload_forwards_dry_run(self, sample_table):
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            sample_table.upload("s3://test-bucket/test.parquet", dry_run=True)
+        assert mock_upload.call_args.kwargs["dry_run"] is True
+
+    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry_run", "real"])
+    def test_upload_to_a_prefix_names_the_object_after_the_source(
+        self, sample_table, dry_run, capsys
+    ):
+        from geoparquet_io.core import upload as core_upload
+
+        with (
+            patch.object(core_upload, "_setup_store_and_kwargs", return_value=(None, {})),
+            patch.object(core_upload, "_upload_file_sync") as put,
+        ):
+            sample_table.upload("s3://test-bucket/prefix/", dry_run=dry_run)
+
+        key = f"prefix/{PLACES_PARQUET.name}"
+        if dry_run:
+            assert f"Target key:  {key}" in capsys.readouterr().out
+            put.assert_not_called()
+        else:
+            assert put.call_args.args[2] == key
+
+    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry_run", "real"])
+    def test_upload_to_a_prefix_without_a_source_name_is_refused(self, sample_table, dry_run):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            with pytest.raises(InvalidParameterError, match="full object key"):
+                sample_table.head(5).upload("s3://test-bucket/prefix/", dry_run=dry_run)
+        mock_upload.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "s3://b/d/data.parquet",
+            "https://h.example/d/data.parquet",
+            "https://h.example/d/a%20b.parquet?X-Amz-Signature=x#f",
+            "s3://b/d/year=2024/data.parquet",
+            "http://[::1]/data.parquet",
+            "s3://test-bucket/data/*.parquet",
+        ],
+        ids=["s3", "https", "signed", "hive_s3", "ipv6", "glob"],
+    )
+    def test_upload_to_a_prefix_from_a_non_local_source_is_refused(self, sample_table, source):
+        """Only a local single file names the object; anything else needs a full key."""
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with (
+            patch.object(sample_table, "_source_path", source),
+            patch("geoparquet_io.core.upload.upload") as mock_upload,
+        ):
+            with pytest.raises(
+                InvalidParameterError,
+                match=re.escape("full object key, e.g. 's3://test-bucket/prefix/data.parquet'"),
+            ):
+                sample_table.upload("s3://test-bucket/prefix/", dry_run=True)
+        mock_upload.assert_not_called()
+
+    def test_upload_to_a_prefix_from_a_directory_source_is_refused(self, sample_table, tmp_path):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with (
+            patch.object(sample_table, "_source_path", str(tmp_path)),
+            patch("geoparquet_io.core.upload.upload") as mock_upload,
+        ):
+            with pytest.raises(InvalidParameterError, match="full object key"):
+                sample_table.upload("s3://test-bucket/prefix/", dry_run=True)
+        mock_upload.assert_not_called()
+
+    def test_upload_scratch_name_is_generated_and_key_takes_the_local_basename(self, sample_table):
+        """The scratch file never carries the source's name (':' is unsafe on Windows)."""
+        with (
+            patch.object(sample_table, "_source_path", "/data/d/w:e:i.rd.parquet"),
+            patch("geoparquet_io.core.upload.upload") as mock_upload,
+        ):
+            sample_table.upload("s3://test-bucket/prefix/")
+
+        kwargs = mock_upload.call_args.kwargs
+        assert kwargs["destination"] == "s3://test-bucket/prefix/w:e:i.rd.parquet"
+        assert Path(kwargs["source"]).name == "upload.parquet"
+
+
+class TestTablePmtilesScratch:
+    """A derived Table's intermediate file honours ``temporary_directory``."""
+
+    @pytest.mark.parametrize("method", ["create_pmtiles", "create_pmtiles_pyramid"])
+    @pytest.mark.parametrize("fails", [False, True], ids=["ok", "error"])
+    def test_intermediate_file_lives_in_temporary_directory(self, tmp_path, method, fails):
+        seen = []
+
+        def fake(path, output, **kwargs):
+            seen.append(Path(path))
+            assert Path(path).exists()
+            if fails:
+                raise RuntimeError("tippecanoe died")
+
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        derived = read(PLACES_PARQUET).head(5)
+        with patch(f"geoparquet_io.api.ops.{method}", fake):
+            try:
+                getattr(derived, method)(
+                    str(tmp_path / "o.pmtiles"), temporary_directory=str(scratch)
+                )
+            except RuntimeError:
+                assert fails
+
+        assert seen and scratch in seen[0].parents
+        assert list(scratch.iterdir()) == []
 
 
 class TestTableMetadataProperties:
@@ -2721,6 +2839,69 @@ class TestTableCheck:
 
 class TestTableAddBboxMetadata:
     """Tests for add_bbox_metadata() method."""
+
+    @staticmethod
+    def _covering_column(arrow_table) -> str:
+        geo = json.loads(arrow_table.schema.metadata[b"geo"])
+        return geo["columns"][geo["primary_column"]]["covering"]["bbox"]["xmin"][0]
+
+    @pytest.mark.parametrize(
+        "call",
+        [lambda t: ops.add_bbox_metadata(t.to_arrow()), lambda t: t.add_bbox_metadata().to_arrow()],
+        ids=["ops", "table"],
+    )
+    def test_default_detects_the_bbox_column_like_the_cli(self, austria_bbox_covering_file, call):
+        """No name means detect, as `gpio add bbox-metadata` does: the covering's column."""
+        assert self._covering_column(call(read(austria_bbox_covering_file))) == "geometry_bbox"
+
+    @staticmethod
+    def _two_geometries(path, boundary_covering: bool):
+        """``geometry`` covered by ``geometry_bbox``; a secondary ``boundary`` with its own."""
+        arrow = read(path).to_arrow()
+        arrow = arrow.append_column("boundary", arrow.column("geometry"))
+        arrow = arrow.append_column("boundary_bbox", arrow.column("geometry_bbox"))
+        arrow = arrow.append_column("bbox", arrow.column("geometry_bbox"))
+        geo = json.loads(arrow.schema.metadata[b"geo"])
+        entry = {k: v for k, v in geo["columns"]["geometry"].items() if k != "covering"}
+        if boundary_covering:
+            entry["covering"] = {
+                "bbox": {axis: ["boundary_bbox", axis] for axis in ("xmin", "ymin", "xmax", "ymax")}
+            }
+        geo["columns"]["boundary"] = entry
+        return arrow.replace_schema_metadata({**arrow.schema.metadata, b"geo": json.dumps(geo)})
+
+    def test_secondary_geometry_keeps_its_own_covering(self, austria_bbox_covering_file):
+        """Detection resolves the SELECTED column's covering, not the primary's."""
+        arrow = self._two_geometries(austria_bbox_covering_file, boundary_covering=True)
+
+        out = ops.add_bbox_metadata(arrow, geometry_column="boundary")
+
+        columns = json.loads(out.schema.metadata[b"geo"])["columns"]
+        assert columns["boundary"]["covering"]["bbox"]["xmin"] == ["boundary_bbox", "xmin"]
+        assert columns["geometry"]["covering"]["bbox"]["xmin"] == ["geometry_bbox", "xmin"]
+
+    def test_secondary_geometry_without_a_covering_is_refused(self, austria_bbox_covering_file):
+        """Neither the primary's covering nor a ``bbox`` column bounds a secondary geometry."""
+        arrow = self._two_geometries(austria_bbox_covering_file, boundary_covering=False)
+
+        with pytest.raises(ValueError, match="No valid bbox column found"):
+            ops.add_bbox_metadata(arrow, geometry_column="boundary")
+
+    def test_explicit_bbox_column_is_honoured(self, austria_bbox_covering_file):
+        """A named column wins over the one detection would pick."""
+        arrow = read(austria_bbox_covering_file).to_arrow()
+        arrow = arrow.append_column("my_box", arrow.column("geometry_bbox"))
+        assert self._covering_column(ops.add_bbox_metadata(arrow, bbox_column="my_box")) == "my_box"
+
+    def test_explicit_bbox_column_of_another_geometry_is_refused(self, austria_bbox_covering_file):
+        """`geometry_bbox` bounds the primary; declaring it on `boundary` would lie (#953)."""
+        arrow = self._two_geometries(austria_bbox_covering_file, boundary_covering=False)
+        with pytest.raises(ValueError, match="covering of 'geometry'"):
+            ops.add_bbox_metadata(arrow, bbox_column="geometry_bbox", geometry_column="boundary")
+        # A struct that is nobody's covering yet is still the caller's to name.
+        out = ops.add_bbox_metadata(arrow, bbox_column="bbox", geometry_column="boundary")
+        geo = json.loads(out.schema.metadata[b"geo"])
+        assert geo["columns"]["boundary"]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
 
     @pytest.fixture
     def sample_table(self):

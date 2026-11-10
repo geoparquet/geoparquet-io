@@ -851,7 +851,7 @@ def _get_target_key(source: Path, prefix: str, is_dir_destination: bool) -> str:
     """
     if is_dir_destination:
         # Destination is a directory, append filename
-        return f"{prefix}/{source.name}".strip("/")
+        return f"{prefix.rstrip('/')}/{source.name}".strip("/")
     else:
         # Destination is the exact key
         return prefix.strip("/")

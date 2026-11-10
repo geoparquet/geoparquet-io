@@ -77,7 +77,7 @@ def add_bbox(
 
 def add_bbox_metadata(
     table: pa.Table,
-    bbox_column: str = "bbox",
+    bbox_column: str | None = None,
     geometry_column: str | None = None,
 ) -> pa.Table:
     """
@@ -90,7 +90,9 @@ def add_bbox_metadata(
 
     Args:
         table: Input PyArrow Table, carrying GeoParquet `geo` metadata
-        bbox_column: Name of the existing bbox column (default: 'bbox')
+        bbox_column: Name of the existing bbox column (None: detect it as
+            `gpio add bbox-metadata` does -- the covering's column, else 'bbox'.
+            A non-primary ``geometry_column`` takes only its own covering)
         geometry_column: Geometry column name (auto-detected if None)
 
     Returns:
@@ -2220,6 +2222,9 @@ def _table_to_temp_parquet_and_convert(
 
     if not isinstance(table, pa.Table):
         raise TypeError(f"Expected pa.Table, got {type(table).__name__}")
+    from geoparquet_io.core.extract import refuse_cli_only_geometry_forms
+
+    refuse_cli_only_geometry_forms(writer_kwargs.get("geometry"))
 
     # Write table to temp parquet file for processing
     temp_input = Path(_scratch_path(prefix=f"gpio_{prefix}_"))

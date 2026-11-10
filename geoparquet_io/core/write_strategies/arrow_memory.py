@@ -20,6 +20,7 @@ from geoparquet_io.core.arrow_geo_metadata import (
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import _get_query_columns, _wrap_query_with_wkb_conversion
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata, write_arrow_table
 from geoparquet_io.core.write_strategies.base import BaseWriteStrategy
 
@@ -58,8 +59,13 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         custom_metadata: dict | None = None,
         geometry_info: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        memory_limit: str | None = None,
     ) -> None:
-        """Write query results to GeoParquet using in-memory Arrow approach."""
+        """Write query results to GeoParquet using in-memory Arrow approach.
+
+        ``memory_limit`` bounds the query's materialization into Arrow; the
+        Parquet write after it is pyarrow's and runs no DuckDB.
+        """
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
@@ -90,8 +96,8 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         if verbose:
             debug("Fetching query results as Arrow table...")
 
-        result = con.sql(final_query)
-        table = result.arrow().read_all()
+        with scoped_write_memory_limit(con, memory_limit, verbose):
+            table = con.sql(final_query).arrow().read_all()
 
         table = _normalize_arrow_large_types(table)
 
@@ -140,8 +146,12 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
         original_metadata: dict | None = None,
+        memory_limit: str | None = None,
     ) -> None:
-        """Write Arrow table to GeoParquet file."""
+        """Write Arrow table to GeoParquet file.
+
+        Pure pyarrow: no DuckDB runs, so ``memory_limit`` has nothing to bound.
+        """
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)

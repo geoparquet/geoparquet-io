@@ -12,6 +12,7 @@ import tempfile
 import uuid
 from collections.abc import Iterable, Iterator
 from pathlib import Path, PurePath
+from urllib.parse import urlsplit
 
 from geoparquet_io.core.duckdb_utils import get_active_s3_config
 from geoparquet_io.core.exceptions import (
@@ -50,20 +51,29 @@ def has_glob_pattern(path: str) -> bool:
     return is_remote_url(path) or not os.path.isfile(path)
 
 
+def http_url_path(path: str) -> str:
+    """The part of *path* that names the object: an http(s) URL's path, any other *path* whole.
+
+    An http URL's authority (an IPv6 ``[::1]``), query and fragment are neither a
+    glob nor a hive key. For an object store DuckDB reads ``?`` as a glob wildcard,
+    so its URL is scanned as written, as is a malformed http URL (``http://[bad/x``).
+    """
+    if not is_http_url(path):
+        return path
+    try:
+        return urlsplit(path).path
+    except ValueError:
+        return path
+
+
 def is_partition_path(path: str) -> bool:
-    if has_glob_pattern(path):
-        return True
-
-    if not is_remote_url(path) and os.path.isdir(path):
-        return True
-
-    if is_remote_url(path):
-        path_parts = path.split("/")
-        for part in path_parts[3:]:
-            if "=" in part and not part.endswith(".parquet"):
-                return True
-
-    return False
+    if not is_remote_url(path):
+        return has_glob_pattern(path) or os.path.isdir(path)
+    # A scheme or bucket segment never holds '=', so every segment can be scanned.
+    name = http_url_path(path)
+    return _has_glob_characters(name) or any(
+        "=" in part and not part.endswith(".parquet") for part in name.split("/")
+    )
 
 
 def resolve_partition_path(path: str, hive_partitioning: bool | None = None) -> tuple[str, dict]:
@@ -317,8 +327,9 @@ def is_same_file_path(first: str | None, second: str | None) -> bool:
     guard -- reproducing the very failure the in-place path exists to avoid
     (#941, #959).
 
-    Remote URLs are compared verbatim: there is no local filesystem to resolve
-    them against.
+    Remote URLs are compared under their store spelling (``canonical_store_url``,
+    the one ``copy_file`` writes through), so ``s3a://b/k`` is ``s3://b/k``;
+    there is no local filesystem to resolve them against.
     """
     if not first or not second:
         return False
@@ -326,7 +337,7 @@ def is_same_file_path(first: str | None, second: str | None) -> bool:
         return True
 
     if is_remote_url(first) or is_remote_url(second):
-        return False
+        return canonical_store_url(first) == canonical_store_url(second)
     try:
         if os.path.exists(first) and os.path.exists(second):
             # The inode is the truth once both exist: it also catches a
@@ -407,7 +418,7 @@ def handle_output_overwrite(
     guard_output_not_read_as_input(input_path, output_path)
 
     if is_remote_url(output_path):
-        if output_path == input_path and not overwrite:
+        if is_same_file_path(output_path, input_path) and not overwrite:
             raise remote_in_place_error(flag)
         return
     output_file = Path(output_path)

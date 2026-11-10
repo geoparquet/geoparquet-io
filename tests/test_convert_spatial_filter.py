@@ -18,6 +18,8 @@ import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
+import geoparquet_io as gpio
+from geoparquet_io.api import ops
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import format_writers
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
@@ -481,6 +483,109 @@ class TestPythonAPI:
         )
         out = tmp_path / "first.gpkg"
         gpio.read(PLACES).write(out, geometry=collection, use_first_geometry=True)
+        assert len(_gpkg_values(out)) == BBOX_ROWS
+
+
+def _csv_rows(path):
+    return len(Path(path).read_text(encoding="utf-8").strip().splitlines()) - 1
+
+
+#: Every Python API door that hands a caller's ``geometry=`` to the filter
+#: builder: (output suffix, call, row count of the output).
+_API_GEOMETRY_DOORS = {
+    "Table.write": (
+        ".gpkg",
+        lambda out, geom: gpio.read(PLACES).write(out, geometry=geom),
+        lambda out: len(_gpkg_values(out)),
+    ),
+    "convert_to_geopackage": (
+        ".gpkg",
+        lambda out, geom: ops.convert_to_geopackage(pq.read_table(PLACES), str(out), geometry=geom),
+        lambda out: len(_gpkg_values(out)),
+    ),
+    "convert_to_flatgeobuf": (
+        ".fgb",
+        lambda out, geom: ops.convert_to_flatgeobuf(pq.read_table(PLACES), str(out), geometry=geom),
+        _read_layer_count,
+    ),
+    "convert_to_csv": (
+        ".csv",
+        lambda out, geom: ops.convert_to_csv(pq.read_table(PLACES), str(out), geometry=geom),
+        _csv_rows,
+    ),
+}
+
+
+class TestAPIGeometryInputForms:
+    """``geometry=`` on the Python API takes text or ``@path`` only (#1321).
+
+    ``"-"`` (stdin) and a bare existing file path are shell conveniences; a
+    library caller passing an untrusted string must not be made to read stdin
+    or a local file. The CLI keeps every form.
+    """
+
+    @pytest.mark.parametrize("form", ["stdin", "bare_path"])
+    @pytest.mark.parametrize("door", sorted(_API_GEOMETRY_DOORS))
+    def test_cli_only_forms_are_refused(self, door, form, tmp_path, monkeypatch):
+        import io
+
+        suffix, call, _ = _API_GEOMETRY_DOORS[door]
+        wkt_file = tmp_path / "box.wkt"
+        wkt_file.write_text(BBOX_AS_WKT, encoding="utf-8")
+        monkeypatch.setattr("sys.stdin", io.StringIO(BBOX_AS_WKT))
+        geom = "-" if form == "stdin" else str(wkt_file)
+        out = tmp_path / f"out{suffix}"
+        with pytest.raises(InvalidParameterError, match="@path"):
+            call(out, geom)
+        assert not out.exists()
+
+    @pytest.mark.parametrize("door", sorted(_API_GEOMETRY_DOORS))
+    def test_a_bare_path_created_after_the_gate_is_never_read(self, door, tmp_path, monkeypatch):
+        """The refusal is by shape, so a file appearing after the gate cannot be read."""
+        from geoparquet_io.core import extract as core_extract
+
+        suffix, call, _ = _API_GEOMETRY_DOORS[door]
+        late = tmp_path / "late.wkt"
+        parse = core_extract.parse_geometry_input
+
+        def create_then_parse(geometry, *args, **kwargs):
+            late.write_text(BBOX_AS_WKT, encoding="utf-8")  # the race
+            return parse(geometry, *args, **kwargs)
+
+        monkeypatch.setattr(core_extract, "parse_geometry_input", create_then_parse)
+        out = tmp_path / f"out{suffix}"
+        with pytest.raises(InvalidParameterError, match="@path"):
+            call(out, str(late))
+        assert not out.exists()
+
+    @pytest.mark.parametrize("door", sorted(_API_GEOMETRY_DOORS))
+    def test_a_pathlib_path_is_refused_naming_at_path(self, door, tmp_path):
+        suffix, call, _ = _API_GEOMETRY_DOORS[door]
+        wkt_file = tmp_path / "box.wkt"
+        wkt_file.write_text(BBOX_AS_WKT, encoding="utf-8")
+        out = tmp_path / f"out{suffix}"
+        with pytest.raises(InvalidParameterError, match="@path"):
+            call(out, wkt_file)
+        assert not out.exists()
+
+    @pytest.mark.parametrize("door", sorted(_API_GEOMETRY_DOORS))
+    def test_at_path_and_inline_text_are_accepted(self, door, tmp_path):
+        suffix, call, count = _API_GEOMETRY_DOORS[door]
+        wkt_file = tmp_path / "box.wkt"
+        wkt_file.write_text(BBOX_AS_WKT, encoding="utf-8")
+        for name, geom in (("at", f"@{wkt_file}"), ("inline", BBOX_AS_WKT)):
+            out = tmp_path / f"{name}{suffix}"
+            call(out, geom)
+            assert count(out) == BBOX_ROWS
+
+    def test_the_cli_keeps_the_bare_path_form(self, tmp_path):
+        wkt_file = tmp_path / "box.wkt"
+        wkt_file.write_text(BBOX_AS_WKT, encoding="utf-8")
+        out = tmp_path / "cli.gpkg"
+        result = CliRunner().invoke(
+            cli, ["convert", "geopackage", PLACES, str(out), "--geometry", str(wkt_file)]
+        )
+        assert result.exit_code == 0, result.output
         assert len(_gpkg_values(out)) == BBOX_ROWS
 
 

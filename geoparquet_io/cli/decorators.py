@@ -26,6 +26,7 @@ from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
     SPATIAL_BAND_TOP_ROWS,
     WRITER_VECTOR_ROWS,
+    WriteOptions,
 )
 from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
@@ -965,6 +966,42 @@ def _pack_aggregate_options(func):
     def wrapper(*args, **kwargs):
         fields = {name: kwargs.pop(param) for name, param in _AGGREGATE_OPTION_PARAMS.items()}
         return func(*args, aggregate_options=AggregateOptions(**fields), **kwargs)
+
+    return wrapper
+
+
+#: The Click parameters a write command's flags arrive as; the packer takes them.
+WRITE_OPTION_PARAMS = (
+    "compression",
+    "compression_level",
+    "row_group_size",
+    "row_group_size_mb",
+    "write_memory",
+    "geoparquet_version",
+    "write_strategy",
+)
+
+
+def pack_write_options(func):
+    """Hand a write command one ``write`` (a ``WriteOptions``) instead of its write flags.
+
+    Each command took the flags by name and forwarded them by name, and that is
+    how a flag came to be accepted and then dropped (#627, #663). The command
+    now passes ``**write.funnel_kwargs()`` to core, so a flag cannot be lost on
+    the way (#761). Put it directly above the ``def``: a packer listed above it
+    (``grid_aggregate_options``) takes its own flags first. ``--row-group-size``
+    and ``--row-group-size-mb`` are refused together and the size string is
+    converted to MB here.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        params = {name: kwargs.pop(name) for name in WRITE_OPTION_PARAMS if name in kwargs}
+        if "row_group_size_mb" in params:
+            params["row_group_size_mb"] = parse_row_group_options(
+                params.get("row_group_size"), params["row_group_size_mb"]
+            )
+        return func(*args, write=WriteOptions.from_cli(**params), **kwargs)
 
     return wrapper
 

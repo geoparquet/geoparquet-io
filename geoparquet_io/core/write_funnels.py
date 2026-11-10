@@ -81,7 +81,7 @@ from geoparquet_io.core.edges import (
     logical_type_edges,
     requests_planar,
 )
-from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
+from geoparquet_io.core.exceptions import RemoteAccessError
 from geoparquet_io.core.file_utils import atomic_write, get_all_parquet_files, is_partition_path
 from geoparquet_io.core.geo_metadata import (
     DETECT_BBOX_COLUMN,
@@ -139,8 +139,8 @@ from geoparquet_io.core.parquet_writer import (
     resolve_input_crs,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
-    resolve_row_group_rows_for_query,
     resolve_row_group_rows_for_table,
+    resolve_row_group_rows_for_write,
     sized_stream,
     without_geometry_dictionary,
     write_arrow_table,
@@ -1335,50 +1335,6 @@ def _fast_path_geo_decision(
     return carried, False
 
 
-def _memory_limit_for_strategy(
-    memory_limit: str | None,
-    strategy_enum,
-    write_strategy: str,
-    *,
-    auto_routed_strategy: bool,
-    funnel_forced_rewrite: bool,
-) -> str | None:
-    """The memory limit a rewrite strategy may be given, or None.
-
-    Of the rewrite strategies only duckdb-kv honours a memory limit. If *we* put
-    the write here, the user did nothing wrong: warn and drop the limit rather
-    than aborting a command that worked before ``--write-memory`` was plumbed
-    through (#663). Two routings are ours, not theirs -- the 1.1-geoarrow reroute
-    and the rewrite this funnel takes to keep a 2.0 input's own covering, which
-    no flag asked for and which turned a working ``extract --limit N
-    --write-strategy streaming --write-memory 2GB`` into exit 2 (#1172). A
-    strategy the user explicitly asked for is a real error -- raised as a core
-    exception so the CLI shows a clean message instead of a traceback.
-    """
-    if memory_limit is None or strategy_enum == WriteStrategy.DUCKDB_KV:
-        return memory_limit
-    if auto_routed_strategy:
-        warn(
-            "--write-memory is ignored for GeoParquet 1.1-geoarrow output: "
-            "GeoArrow encoding requires the arrow-streaming write strategy, "
-            "which does not support a memory limit."
-        )
-        return None
-    if funnel_forced_rewrite:
-        warn(
-            f"--write-memory is ignored for this write: keeping the input's "
-            f"geo metadata (its covering) needs the metadata rewrite, and the "
-            f"'{write_strategy}' write strategy does not support a memory "
-            f"limit. Use --write-strategy duckdb-kv to apply it."
-        )
-        return None
-    raise InvalidParameterError(
-        "--write-memory",
-        f"a memory limit is only supported with the 'duckdb-kv' "
-        f"write strategy, not '{write_strategy}'",
-    )
-
-
 def _query_geometry_is_already_native(con, query: str, geometry_column: str | None) -> bool:
     """Whether the query's geometry column is already GeoArrow-native.
 
@@ -1435,7 +1391,7 @@ def write_parquet_with_metadata(
     profile=None,
     geoparquet_version=None,
     input_crs=None,
-    write_strategy: str = "duckdb-kv",
+    write_strategy: str | None = "duckdb-kv",
     memory_limit: str | None = None,
     geometry_info: dict | None = None,
     extra_kv_metadata: dict[str, str] | None = None,
@@ -1486,8 +1442,9 @@ def write_parquet_with_metadata(
             - "streaming": Stream Arrow RecordBatches
             - "disk-rewrite": Write with DuckDB, then rewrite with PyArrow
         memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB').
-            Honoured on the plain-COPY fast path and by the duckdb-kv strategy.
-            If None, each picks a default from the system/container memory.
+            Honoured on the plain-COPY fast path and by every strategy, each
+            bounding its own DuckDB work (see its ``write_from_query``). If
+            None, the default drawn from the system/container memory applies.
         geometry_info: Dict containing multi-geometry column info with keys:
             - "primary": primary geometry column name
             - "secondary": list of secondary geometry column names
@@ -1615,8 +1572,8 @@ def write_parquet_with_metadata(
     # An MB target is measured here, once, so the plain-COPY fast path a 2.0
     # input takes honours it too -- it used to reach DuckDB's own 122,880-row
     # default while the strategies measured it each for themselves (#1215).
-    row_group_rows = resolve_row_group_rows_for_query(
-        con, query, row_group_rows, row_group_size_mb, verbose
+    row_group_rows = resolve_row_group_rows_for_write(
+        con, query, row_group_rows, row_group_size_mb, memory_limit, verbose
     )
     geoparquet_version = resolve_output_geoparquet_version(
         geoparquet_version,
@@ -1804,7 +1761,6 @@ def write_parquet_with_metadata(
             # which requires the arrow-streaming strategy (DuckDB COPY TO cannot emit
             # nested GeoArrow types). Already-native inputs keep their preservation
             # path (duckdb-kv passes the native column through unchanged).
-            auto_routed_strategy = False
             if geoparquet_version == "1.1-geoarrow":
                 primary = (geometry_info or {}).get("primary")
                 input_encoding = (
@@ -1822,24 +1778,17 @@ def write_parquet_with_metadata(
                     if verbose:
                         debug("Routing 1.1-geoarrow WKB input through arrow-streaming")
                     write_strategy = "streaming"
-                    auto_routed_strategy = True
 
-            strategy_enum = WriteStrategy(write_strategy)
-            strategy = WriteStrategyFactory.get_strategy(strategy_enum)
-
-            memory_limit = _memory_limit_for_strategy(
-                memory_limit,
-                strategy_enum,
-                write_strategy,
-                auto_routed_strategy=auto_routed_strategy,
-                funnel_forced_rewrite=carried_geo_needs_rewrite,
+            # "auto" (WriteOptions' default) is this funnel's duckdb-kv (#761).
+            strategy_enum = WriteStrategy(
+                "duckdb-kv" if write_strategy in (None, "auto") else write_strategy
             )
+            strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
             if verbose:
                 debug(f"Writing GeoParquet version: {effective_version}")
                 debug(f"Using write strategy: {strategy.name}")
 
-            # Build kwargs - only pass memory_limit for duckdb-kv
             write_kwargs = {
                 "con": con,
                 "query": query,
@@ -1859,9 +1808,9 @@ def write_parquet_with_metadata(
                 "custom_metadata": custom_metadata,
                 "geometry_info": geometry_info,
                 "extra_kv_metadata": extra_kv_metadata,
+                # Every strategy bounds its DuckDB work by it (#761).
+                "memory_limit": memory_limit,
             }
-            if strategy_enum == WriteStrategy.DUCKDB_KV:
-                write_kwargs["memory_limit"] = memory_limit
             # duckdb-kv alone lets DuckDB's COPY have the last word on row-group
             # size, so it alone rounds a sub-vector request up to 2,048 (#986).
             # Measured with --row-group-size 249 on a 10,000-row input:
@@ -2078,9 +2027,9 @@ def write_geoparquet_table(
     """
     Write a PyArrow Table to a GeoParquet file with proper metadata.
 
-    ``memory_limit`` is accepted so a ``WriteOptions`` expands here whole
-    (``**write.funnel_kwargs()``); the table is written by pyarrow, with no
-    DuckDB statement to bound, so it is not used.
+    ``memory_limit`` caps the DuckDB work of a ``write_strategy`` that writes
+    through DuckDB (duckdb-kv, disk-rewrite). Unset, the table is written by
+    pyarrow, with no DuckDB statement to bound, so it is not used.
 
     ``write_strategy`` selects a Table.write strategy through this same door;
     unset uses the ordinary Arrow table writer. Input declarations and layout
@@ -2158,7 +2107,8 @@ def write_geoparquet_table(
         # a 2.0 write would otherwise keep as spherical.
         table = with_planar_edge_types(table, [geometry_column])
 
-    if write_strategy is not None:
+    # "auto" (WriteOptions' default) is this funnel's Arrow writer (#761).
+    if write_strategy not in (None, "auto"):
         strategy = WriteStrategyFactory.get_strategy(WriteStrategy(write_strategy))
         _write_table_with_strategy(
             strategy,
@@ -2175,6 +2125,7 @@ def write_geoparquet_table(
             verbose=verbose,
             input_crs=input_crs,
             custom_metadata=custom_metadata,
+            memory_limit=memory_limit,
         )
         return
 

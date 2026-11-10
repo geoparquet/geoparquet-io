@@ -36,10 +36,9 @@ that those two names must always carry the same value. A key absent from the
 map is a knob one side does not have (the table-centric `add_*_table` functions
 take no compression or row-group options at all -- they do not write).
 
-Known gaps live in `KNOWN_PARITY_GAPS`, keyed by ``(case id, front end,
+Known gaps live in `KNOWN_PARITY_GAPS` (in `tests/parity_registry.py`), keyed by ``(case id, front end,
 canonical name, repr(CLI value), repr(API value))`` with a written
-justification, following `collect_divergences()` in
-`tests/test_cli_api_default_parity.py`. The two reprs are part of the key on
+justification, following `KNOWN_DIVERGENCES` beside it. The two reprs are part of the key on
 purpose: an allowlist recording only "these differ" would stay green if
 `ops.sort_str` changed `tile_size` from 50000 to 40000 -- still a divergence, but a
 different one nobody reviewed.
@@ -59,9 +58,9 @@ introspection cannot see, such as the CLI deriving `iterations` from
 
 The census
 ----------
-Every CLI leaf is either a `ParityCase` or an entry in `NO_CALL_PARITY_CASE`
-with a written reason; `test_every_cli_leaf_has_a_parity_case_or_a_recorded_reason`
-fails on a new command that is neither.
+Every CLI leaf is either a `ParityCase` or carries an `EXEMPT[leaf]["call_case"]`
+reason in `tests/parity_registry.py`; `tests/test_parity_registry.py` fails on a
+new command that is neither.
 
 Patching note (project memory): dotted-string `mock.patch("...cli.main.X")`
 targets fail on Python 3.10. Every patch here is `patch.object(module, name)`,
@@ -85,9 +84,11 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
+import pyarrow as pa
 import pytest
 from click.testing import CliRunner
 
+from geoparquet_io.api import check as check_api
 from geoparquet_io.api import ops
 from geoparquet_io.api import stac as api_stac
 from geoparquet_io.api import table as table_module
@@ -101,14 +102,20 @@ from geoparquet_io.cli.commands import process as cli_process
 from geoparquet_io.cli.commands import publish as cli_publish
 from geoparquet_io.cli.commands import sort as cli_sort
 from geoparquet_io.core import benchmark as core_benchmark
+from geoparquet_io.core import carto as core_carto
 from geoparquet_io.core import check_optimization as core_check_optimization
 from geoparquet_io.core import check_parquet_structure as core_check_structure
 from geoparquet_io.core import check_spatial_order as core_check_spatial
 from geoparquet_io.core import extract as core_extract
+from geoparquet_io.core import extract_bigquery as core_extract_bigquery
 from geoparquet_io.core import format_writers as core_format_writers
+from geoparquet_io.core import geo_metadata as core_geo_metadata
+from geoparquet_io.core import geojson_stream as core_geojson_stream
 from geoparquet_io.core import hilbert_order as core_hilbert
+from geoparquet_io.core import inspect_utils as core_inspect_utils
 from geoparquet_io.core import pmtiles as core_pmtiles
 from geoparquet_io.core import pmtiles_pyramid as core_pmtiles_pyramid
+from geoparquet_io.core import reproject as core_reproject
 from geoparquet_io.core import sort_by_column as core_sort_column
 from geoparquet_io.core import sort_quadkey as core_sort_quadkey
 from geoparquet_io.core import stac as core_stac
@@ -117,21 +124,31 @@ from geoparquet_io.core import upload as core_upload
 from geoparquet_io.core import validate as core_validate
 from geoparquet_io.core import write_funnels as core_write_funnels
 from geoparquet_io.core.add import a5 as core_a5
+from geoparquet_io.core.add import admin_divisions as core_admin_divisions
 from geoparquet_io.core.add import bbox as core_bbox
+from geoparquet_io.core.add import bbox_metadata as core_bbox_metadata
 from geoparquet_io.core.add import h3 as core_h3
 from geoparquet_io.core.add import kdtree as core_kdtree
 from geoparquet_io.core.add import quadkey as core_quadkey
 from geoparquet_io.core.add import s2 as core_s2
 from geoparquet_io.core.add import stac_metadata as core_stac_metadata
 from geoparquet_io.core.convert import convert_to_geoparquet
-from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
+from geoparquet_io.core.partition import admin_hierarchical as core_part_admin
+from geoparquet_io.core.partition import by_a5 as core_part_a5
 from geoparquet_io.core.partition import by_h3 as core_part_h3
+from geoparquet_io.core.partition import by_kdtree as core_part_kdtree
 from geoparquet_io.core.partition import by_quadkey as core_part_quadkey
+from geoparquet_io.core.partition import by_s2 as core_part_s2
+from geoparquet_io.core.partition import by_string as core_part_string
 from geoparquet_io.core.process import overview as core_overview
+from geoparquet_io.core.process import simplify as core_simplify
 from geoparquet_io.core.process.aggregate import by_a5 as core_agg_a5
 from geoparquet_io.core.process.aggregate import by_admin as core_agg_admin
 from geoparquet_io.core.process.aggregate import by_h3 as core_agg_h3
 from geoparquet_io.core.process.aggregate.options import AggregateOptions
+from geoparquet_io.core.process.raster import contour as core_contour
+from geoparquet_io.core.process.raster import polygonize as core_polygonize
+from tests.parity_registry import KNOWN_PARITY_GAPS
 
 # Sentinel: the recorder returns its first positional argument. The table-centric
 # core functions return a table that the API front ends immediately re-wrap, so a
@@ -234,6 +251,7 @@ def _cli(
     args: Callable[[Ctx], list[str]],
     module: Any = cli_main,
     wrap: Callable[[], AbstractContextManager[Any]] = contextlib.nullcontext,
+    result: Any = None,
 ) -> Frontend:
     """A CLI front end; `wrap` holds a context manager open around the invocation."""
 
@@ -241,7 +259,7 @@ def _cli(
         with wrap():
             return ctx.run_cli(args(ctx))
 
-    return Frontend(patch_site=(module, alias), reference=reference, invoke=_invoke)
+    return Frontend(patch_site=(module, alias), reference=reference, invoke=_invoke, result=result)
 
 
 def _with_credentials():
@@ -308,6 +326,41 @@ _STUB_VALIDATION_RESULT = core_validate.ValidationResult(
 )
 
 
+# What `geo_info_from_metadata` hands back for a file with no `geo` block: the
+# recorded doors carry on with it rather than crash on a None.
+_NO_GEO_INFO = {"geo": {}, "version": None, "primary_column": None, "column_meta": None}
+
+
+def _inspect_geo_case(leaf: str, call: Callable[[Ctx], Any], normalize: dict, note: str):
+    """`gpio inspect <leaf>` and its Table twin read the `geo` block through one seam."""
+    reference = core_geo_metadata.geo_info_from_metadata
+    return ParityCase(
+        id=f"inspect {leaf}",
+        cli=_cli(
+            "geo_info_from_metadata",
+            reference,
+            lambda c: ["inspect", leaf, c.input_file],
+            module=core_geo_metadata,
+            result=_NO_GEO_INFO,
+        ),
+        table=_table(core_geo_metadata, "geo_info_from_metadata", reference, call, _NO_GEO_INFO),
+        normalize=normalize,
+        notes=(note,),
+    )
+
+
+# A one-row geometry table for a recorded core function whose caller wraps the
+# result in a `Table` (`Table.polygonize`, `Table.from_bigquery`): the echo of a
+# path or a keyword would not survive the wrap.
+_TINY_GEOMETRY_TABLE = pa.table(
+    {"geometry": pa.array([bytes.fromhex("0101000000000000000000F03F0000000000000040")])}
+)
+PARITY_RASTER = "parity.tif"  # never opened: the core functions that would read it are recorded
+BIGQUERY_TABLE = "project.dataset.table"
+CARTO_URL = "https://example.carto.com/api/v2/sql"
+CARTO_TABLE = "parity_table"
+
+
 def _fail_closed(guard: Callable[[], AbstractContextManager[Any]], call: Callable[[], Any]) -> Any:
     with guard():
         return call()
@@ -333,6 +386,47 @@ def _collection_json(ctx: Ctx) -> str:
     if not path.exists():
         path.write_text(json.dumps({"type": "Collection", "id": "parity"}))
     return str(path)
+
+
+def _cell_partition_case(index: str, core_module: Any, unit: str, value: int) -> ParityCase:
+    """`partition s2` / `partition a5`: the `partition h3` case, one index over.
+
+    The sizing unit (`level` for S2, `resolution` for A5) is supplied on every
+    side for the reason the h3 case gives: no front end accepts a call without it.
+    """
+    reference = getattr(core_module, f"partition_by_{index}")
+    return ParityCase(
+        id=f"partition {index}",
+        cli=_cli(
+            f"partition_by_{index}_impl",
+            reference,
+            lambda c: ["partition", index, c.input_file, c.output_dir, f"--{unit}", str(value)],
+            module=cli_partition,
+        ),
+        ops=_ops_via_table(
+            core_module,
+            f"partition_by_{index}",
+            reference,
+            lambda c: getattr(ops, f"partition_by_{index}")(c.table, c.output_dir, **{unit: value}),
+        ),
+        table=_table(
+            core_module,
+            f"partition_by_{index}",
+            reference,
+            lambda c: getattr(c.gpio_table, f"partition_by_{index}")(c.output_dir, **{unit: value}),
+        ),
+        normalize={
+            "column_name": (f"{index}_column_name", f"{index}_column_name"),
+            unit: (unit, unit),
+            "auto": ("auto", "auto"),
+            "target_rows": ("target_rows", "target_rows"),
+            "max_partitions": ("max_partitions", "max_partitions"),
+            "hive": ("hive", "hive"),
+            "keep_column": (f"keep_{index}_column", f"keep_{index}_column"),
+            "overwrite": ("overwrite", "overwrite"),
+            "compression": ("compression", "compression"),
+        },
+    )
 
 
 CASES: list[ParityCase] = [
@@ -824,7 +918,8 @@ CASES: list[ParityCase] = [
     # WP-7 (#1018): the seven command groups that had no call-parity case.
     #
     # `check`, `benchmark`, `process`, `pmtiles` and `publish` are added here.
-    # `inspect` and `skills` cannot be: see `NO_CALL_PARITY_CASE` below.
+    # `inspect` has its cases below the check group (#1087); `skills` cannot
+    # have one: see `EXEMPT` in tests/parity_registry.py.
     #
     # A recurring shape in this batch: `verbose` and `quiet` are deliberately
     # absent from every `normalize` map. They are rendering knobs, and the API
@@ -845,6 +940,13 @@ CASES: list[ParityCase] = [
             core_check_structure.check_all,
             lambda c: c.gpio_table.check(),
         ),
+        ops=_ops_via_table(
+            core_check_structure,
+            "check_all",
+            core_check_structure.check_all,
+            lambda c: check_api.check_all(c.input_file),
+            result={},
+        ),
         normalize={
             "return_results": ("return_results", "return_results"),
             "profile": ("profile", "profile"),
@@ -853,6 +955,8 @@ CASES: list[ParityCase] = [
             "`Table.check()` takes no `profile` argument at all, so it rides the core "
             "default. That matches `gpio check all` only because the CLI's --profile also "
             "defaults to None; if either default moves, this case fails.",
+            "`gpio.check_all` is the twin (it adds spatial order and spec, as the CLI "
+            "does); `Table.check()` is the structure stage alone, still compared here.",
         ),
     ),
     ParityCase(
@@ -869,11 +973,22 @@ CASES: list[ParityCase] = [
             core_check_spatial.check_spatial_order,
             lambda c: c.gpio_table.check_spatial(),
         ),
+        ops=_ops_via_table(
+            core_check_spatial,
+            "check_spatial_order",
+            core_check_spatial.check_spatial_order,
+            lambda c: check_api.check_spatial(c.input_file),
+            result={},
+        ),
         normalize={
             "sample_size": ("random_sample_size", "random_sample_size"),
             "limit_rows": ("limit_rows", "limit_rows"),
             "return_results": ("return_results", "return_results"),
         },
+        notes=(
+            "`gpio.check_spatial` is the twin (it folds in pushdown readiness, as the CLI "
+            "does); `Table.check_spatial()` is spatial order alone, still compared here.",
+        ),
     ),
     ParityCase(
         id="check compression",
@@ -972,6 +1087,49 @@ CASES: list[ParityCase] = [
             "`--sample-size` (1000) and `--skip-data-validation` (off) are the two knobs "
             "that change which rows are inspected; `Table.validate()` hard-codes both. "
             "A move on either side changes what the API is willing to call valid.",
+        ),
+    ),
+    # ----------------------------------------------------------------------
+    # inspect (#1087): each door makes exactly one call to the shared seam. The
+    # answers are compared in tests/test_api_cli_behaviour_parity.py::
+    # TestInspectGroupAgreesWithTable.
+    # ----------------------------------------------------------------------
+    _inspect_geo_case(
+        "summary",
+        lambda c: c.gpio_table.info(verbose=False),
+        {"column": ("column", "column")},
+        "Both read the block's own primary column (`column=None`); `Table.info` "
+        "reports only the version from it.",
+    ),
+    _inspect_geo_case(
+        "meta",
+        lambda c: c.gpio_table.metadata(),
+        {},
+        "No knob to compare: the CLI shows the whole block, `Table.metadata` names "
+        "its own geometry column for the derived keys. The case pins the one seam.",
+    ),
+    ParityCase(
+        id="inspect stats",
+        cli=_cli(
+            "compute_column_statistics",
+            core_inspect_utils.compute_column_statistics,
+            lambda c: ["inspect", "stats", c.input_file],
+            module=core_inspect_utils,
+            result={},
+        ),
+        table=_table(
+            core_inspect_utils,
+            "compute_column_statistics",
+            core_inspect_utils.compute_column_statistics,
+            lambda c: c.gpio_table.stats(),
+            result={},
+        ),
+        normalize={},
+        notes=(
+            "No knob to compare: `source` is the file on one side and the registered "
+            "Arrow table on the other, and `columns_info` lists the same columns in "
+            "each door's own order. Both outputs are pinned in "
+            "tests/test_column_statistics_snapshot.py; the case pins the one seam.",
         ),
     ),
     ParityCase(
@@ -1172,6 +1330,11 @@ CASES: list[ParityCase] = [
             reference=core_pmtiles.create_pmtiles_from_geoparquet,
             invoke=lambda c: ops.create_pmtiles(c.input_file, c.scratch("api.pmtiles")),
         ),
+        table=Frontend(
+            patch_site=(core_pmtiles, "create_pmtiles_from_geoparquet"),
+            reference=core_pmtiles.create_pmtiles_from_geoparquet,
+            invoke=lambda c: c.gpio_table.create_pmtiles(c.scratch("table.pmtiles")),
+        ),
         normalize={
             "layer": ("layer", "layer"),
             "min_zoom": ("min_zoom", "min_zoom"),
@@ -1194,7 +1357,6 @@ CASES: list[ParityCase] = [
             "drop_densest_as_needed": ("drop_densest_as_needed", "drop_densest_as_needed"),
             "force": ("force", "force"),
         },
-        notes=("A PMTiles archive is not a table, so there is no `Table` door.",),
     ),
     ParityCase(
         id="pmtiles pyramid",
@@ -1208,6 +1370,11 @@ CASES: list[ParityCase] = [
             patch_site=(core_pmtiles_pyramid, "create_pmtiles_pyramid"),
             reference=core_pmtiles_pyramid.create_pmtiles_pyramid,
             invoke=lambda c: ops.create_pmtiles_pyramid(c.input_file, c.scratch("api_pyr.pmtiles")),
+        ),
+        table=Frontend(
+            patch_site=(core_pmtiles_pyramid, "create_pmtiles_pyramid"),
+            reference=core_pmtiles_pyramid.create_pmtiles_pyramid,
+            invoke=lambda c: c.gpio_table.create_pmtiles_pyramid(c.scratch("table_pyr.pmtiles")),
         ),
         normalize={
             "levels": ("levels", "levels"),
@@ -1245,12 +1412,11 @@ CASES: list[ParityCase] = [
             "s3_endpoint": ("s3_endpoint", "s3_endpoint"),
             "s3_region": ("s3_region", "s3_region"),
             "s3_use_ssl": ("s3_use_ssl", "s3_use_ssl"),
+            "dry_run": ("dry_run", "dry_run"),
         },
         notes=(
-            "`dry_run` is not pinned: `Table.upload` has no such keyword (#1063, "
-            "`test_table_upload_cannot_be_rehearsed`). `pattern`, `max_files`, "
-            "`chunk_size` and `fail_fast` describe walking a directory and have no "
-            "analogue on a Table.",
+            "`pattern`, `max_files`, `chunk_size` and `fail_fast` describe walking a "
+            "directory and have no analogue on a Table.",
         ),
     ),
     ParityCase(
@@ -1283,83 +1449,437 @@ CASES: list[ParityCase] = [
         },
         notes=("The twin is `geoparquet_io.generate_stac` in `api/stac.py` (#1065).",),
     ),
+    # ----------------------------------------------------------------------
+    # #1085: the fifteen leaves the census deferred.
+    # ----------------------------------------------------------------------
+    ParityCase(
+        id="partition string",
+        cli=_cli(
+            "partition_by_string_impl",
+            core_part_string.partition_by_string,
+            lambda c: ["partition", "string", c.input_file, c.output_dir, "--column", SORT_COLUMN],
+            module=cli_partition,
+        ),
+        ops=_ops_via_table(
+            core_part_string,
+            "partition_by_string",
+            core_part_string.partition_by_string,
+            lambda c: ops.partition_by_string(c.table, c.output_dir, SORT_COLUMN),
+        ),
+        table=_table(
+            core_part_string,
+            "partition_by_string",
+            core_part_string.partition_by_string,
+            lambda c: c.gpio_table.partition_by_string(c.output_dir, SORT_COLUMN),
+        ),
+        normalize={
+            "column": ("column", "column"),
+            "chars": ("chars", "chars"),
+            "hive": ("hive", "hive"),
+            "overwrite": ("overwrite", "overwrite"),
+            "compression": ("compression", "compression"),
+            "compression_level": ("compression_level", "compression_level"),
+        },
+    ),
+    ParityCase(
+        id="partition kdtree",
+        cli=_cli(
+            "partition_by_kdtree_impl",
+            core_part_kdtree.partition_by_kdtree,
+            lambda c: ["partition", "kdtree", c.input_file, c.output_dir],
+            module=cli_partition,
+        ),
+        ops=_ops_via_table(
+            core_part_kdtree,
+            "partition_by_kdtree",
+            core_part_kdtree.partition_by_kdtree,
+            lambda c: ops.partition_by_kdtree(c.table, c.output_dir, auto=True),
+        ),
+        table=_table(
+            core_part_kdtree,
+            "partition_by_kdtree",
+            core_part_kdtree.partition_by_kdtree,
+            lambda c: c.gpio_table.partition_by_kdtree(c.output_dir, auto=True),
+        ),
+        normalize={
+            "column_name": ("kdtree_column_name", "kdtree_column_name"),
+            "iterations": ("iterations", "iterations"),
+            "auto_target_rows": ("auto_target_rows", "auto_target_rows"),
+            "sample_size": ("sample_size", "sample_size"),
+            "hive": ("hive", "hive"),
+            "keep_column": ("keep_kdtree_column", "keep_kdtree_column"),
+            "overwrite": ("overwrite", "overwrite"),
+            "compression": ("compression", "compression"),
+            "compression_level": ("compression_level", "compression_level"),
+        },
+        notes=(
+            "`auto=True` on the API side is what a bare `gpio partition kdtree` selects; "
+            "see the `add kdtree` case.",
+        ),
+    ),
+    _cell_partition_case("s2", core_part_s2, "level", 10),
+    _cell_partition_case("a5", core_part_a5, "resolution", 10),
+    ParityCase(
+        id="partition admin",
+        cli=_cli(
+            "partition_admin_hierarchical_impl",
+            core_part_admin.partition_by_admin_hierarchical,
+            lambda c: ["partition", "admin", c.input_file, c.output_dir, "--levels", "country"],
+            module=cli_partition,
+        ),
+        ops=_ops_via_table(
+            core_part_admin,
+            "partition_by_admin_hierarchical",
+            core_part_admin.partition_by_admin_hierarchical,
+            lambda c: ops.partition_by_admin(c.table, c.output_dir, levels=["country"]),
+        ),
+        table=_table(
+            core_part_admin,
+            "partition_by_admin_hierarchical",
+            core_part_admin.partition_by_admin_hierarchical,
+            lambda c: c.gpio_table.partition_by_admin(c.output_dir, levels=["country"]),
+        ),
+        normalize={
+            "dataset": ("dataset_name", "dataset_name"),
+            "levels": ("levels", "levels"),
+            "vecorel": ("vecorel", "vecorel"),
+            "hive": ("hive", "hive"),
+            "overwrite": ("overwrite", "overwrite"),
+            "compression": ("compression", "compression"),
+            "compression_level": ("compression_level", "compression_level"),
+        },
+        notes=(
+            "Levels are named on every side: the CLI refuses a call with neither --levels "
+            "nor --vecorel. No network: the boundary download lives in the recorded core.",
+        ),
+    ),
+    ParityCase(
+        id="add admin-divisions",
+        cli=_cli(
+            "add_admin_divisions_multi",
+            core_admin_divisions.add_admin_divisions_multi,
+            lambda c: ["add", "admin-divisions", c.input_file, c.output_file],
+            module=core_admin_divisions,
+        ),
+        ops=Frontend(
+            patch_site=(core_admin_divisions, "add_admin_divisions_multi"),
+            reference=core_admin_divisions.add_admin_divisions_multi,
+            invoke=lambda c: _swallow(lambda: ops.add_admin_divisions(c.table)),
+        ),
+        table=Frontend(
+            patch_site=(core_admin_divisions, "add_admin_divisions_multi"),
+            reference=core_admin_divisions.add_admin_divisions_multi,
+            invoke=lambda c: _swallow(lambda: c.gpio_table.add_admin_divisions()),
+        ),
+        normalize={
+            "dataset": ("dataset_name", "dataset_name"),
+            "levels": ("levels", "levels"),
+            "dataset_source": ("dataset_source", "dataset_source"),
+            "add_bbox": ("add_bbox_flag", "add_bbox_flag"),
+            "prefix": ("prefix", "prefix"),
+            "vecorel": ("vecorel", "vecorel"),
+        },
+        notes=(
+            "Every door imports `add_admin_divisions_multi` inside the call, so all three "
+            "are patched on the core module. Both API doors round-trip the table through "
+            "temp files; the read-back of the never-written output is swallowed, as in "
+            "`process aggregate admin`.",
+        ),
+    ),
+    ParityCase(
+        id="add bbox-metadata",
+        cli=_cli(
+            "add_bbox_metadata_impl",
+            core_bbox_metadata.add_bbox_metadata,
+            lambda c: ["add", "bbox-metadata", c.input_file],
+            module=cli_add,
+        ),
+        ops=_ops(
+            "add_bbox_metadata_table",
+            core_bbox_metadata.add_bbox_metadata_table,
+            lambda c: ops.add_bbox_metadata(c.table),
+        ),
+        table=_table(
+            core_bbox_metadata,
+            "add_bbox_metadata_table",
+            core_bbox_metadata.add_bbox_metadata_table,
+            lambda c: c.gpio_table.add_bbox_metadata(),
+        ),
+        normalize={"bbox_column": ("bbox_column", "bbox_column")},
+    ),
+    ParityCase(
+        id="convert shapefile",
+        cli=_cli(
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: ["convert", "shapefile", c.input_file, c.scratch("parity-cli.shp")],
+            module=core_format_writers,
+        ),
+        ops=_ops_via_table(
+            core_format_writers,
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: ops.convert_to_shapefile(c.table, c.scratch("parity-ops.shp")),
+        ),
+        table=_table(
+            core_format_writers,
+            "write_gdal_format",
+            core_format_writers.write_gdal_format,
+            lambda c: c.gpio_table.write(c.scratch("parity-table.shp")),
+        ),
+        normalize={
+            "format_name": ("format_name", "format_name"),
+            "overwrite": ("overwrite", "overwrite"),
+            "encoding": ("encoding", "encoding"),
+            "layer_name": ("layer_name", "layer_name"),
+            "bbox": ("bbox", "bbox"),
+            "geometry": ("geometry", "geometry"),
+            "where": ("where", "where"),
+        },
+    ),
+    ParityCase(
+        id="convert geojson",
+        cli=_cli(
+            "convert_to_geojson",
+            core_geojson_stream.convert_to_geojson,
+            lambda c: ["convert", "geojson", c.input_file, c.scratch("parity-cli.geojson")],
+            module=core_geojson_stream,
+        ),
+        ops=_ops_via_table(
+            core_geojson_stream,
+            "convert_to_geojson",
+            core_geojson_stream.convert_to_geojson,
+            lambda c: ops.convert_to_geojson(c.table, c.scratch("parity-ops.geojson")),
+        ),
+        table=_table(
+            core_geojson_stream,
+            "convert_to_geojson",
+            core_geojson_stream.convert_to_geojson,
+            lambda c: c.gpio_table.to_geojson(c.scratch("parity-table.geojson")),
+        ),
+        normalize={
+            "rs": ("rs", "rs"),
+            "precision": ("precision", "precision"),
+            "write_bbox": ("write_bbox", "write_bbox"),
+            "id_field": ("id_field", "id_field"),
+            "description": ("description", "description"),
+            "seq": ("seq", "seq"),
+            "pretty": ("pretty", "pretty"),
+            "keep_crs": ("keep_crs", "keep_crs"),
+            "repair_geometry": ("repair_geometry", "repair_geometry"),
+        },
+        notes=(
+            "The CLI's file mode reaches the streaming converter through "
+            "`format_writers.write_geojson`; `ops.convert_to_geojson` (and "
+            "`Table.to_geojson`, which delegates to it) call it directly.",
+        ),
+    ),
+    ParityCase(
+        id="convert reproject",
+        cli=_cli(
+            "reproject_core",
+            core_reproject.reproject,
+            lambda c: ["convert", "reproject", c.input_file, c.output_file],
+            module=cli_convert,
+        ),
+        ops=_ops(
+            "reproject_table",
+            core_reproject.reproject_table,
+            lambda c: ops.reproject(c.table),
+        ),
+        table=_table(
+            core_reproject,
+            "reproject_table",
+            core_reproject.reproject_table,
+            lambda c: c.gpio_table.reproject(),
+        ),
+        normalize={
+            "target_crs": ("target_crs", "target_crs"),
+            "source_crs": ("source_crs", "source_crs"),
+            "assume_crs84": ("assume_crs84", "assume_crs84"),
+        },
+        notes=("Cross-function: the CLI calls the file core, the API the table core.",),
+    ),
+    ParityCase(
+        id="extract bigquery",
+        cli=_cli(
+            "extract_bigquery",
+            core_extract_bigquery.extract_bigquery,
+            lambda c: ["extract", "bigquery", BIGQUERY_TABLE, c.output_file],
+            module=core_extract_bigquery,
+        ),
+        ops=Frontend(
+            patch_site=(core_extract_bigquery, "extract_bigquery"),
+            reference=core_extract_bigquery.extract_bigquery,
+            invoke=lambda c: ops.read_bigquery(BIGQUERY_TABLE),
+            result=_TINY_GEOMETRY_TABLE,
+        ),
+        table=Frontend(
+            patch_site=(core_extract_bigquery, "extract_bigquery"),
+            reference=core_extract_bigquery.extract_bigquery,
+            invoke=lambda c: table_module.Table.from_bigquery(BIGQUERY_TABLE),
+            result=_TINY_GEOMETRY_TABLE,
+        ),
+        normalize={
+            "table_id": ("table_id", "table_id"),
+            "sql": ("sql", "sql"),
+            "project": ("project", "project"),
+            "credentials_file": ("credentials_file", "credentials_file"),
+            "where": ("where", "where"),
+            "bbox": ("bbox", "bbox"),
+            "bbox_mode": ("bbox_mode", "bbox_mode"),
+            "bbox_threshold": ("bbox_threshold", "bbox_threshold"),
+            "limit": ("limit", "limit"),
+            "include_cols": ("include_cols", "include_cols"),
+            "exclude_cols": ("exclude_cols", "exclude_cols"),
+            "geography_column": ("geography_column", "geography_column"),
+            "geometry_format": ("geometry_format", "geometry_format"),
+            "edges": ("edges", "edges"),
+            "repair_geometry": ("repair_geometry", "repair_geometry"),
+        },
+        notes=("No network: the BigQuery client lives in the recorded core function.",),
+    ),
+    ParityCase(
+        id="extract carto",
+        cli=_cli(
+            "convert_carto_to_geoparquet",
+            core_carto.convert_carto_to_geoparquet,
+            lambda c: ["extract", "carto", CARTO_URL, CARTO_TABLE, c.output_file],
+            module=core_carto,
+        ),
+        ops=Frontend(
+            patch_site=(core_carto, "carto_to_table"),
+            reference=core_carto.carto_to_table,
+            invoke=lambda c: ops.from_carto(CARTO_URL, CARTO_TABLE),
+        ),
+        normalize={
+            "url": ("url", "url"),
+            "table_name": ("table_name", "table_name"),
+            "where": ("where", "where"),
+            "bbox": ("bbox", "bbox"),
+            "limit": ("limit", "limit"),
+            "include_cols": ("include_cols", "include_cols"),
+            "exclude_cols": ("exclude_cols", "exclude_cols"),
+            "api_key": ("api_key", "api_key"),
+            "timeout": ("timeout", "timeout"),
+            "geoparquet_version": ("geoparquet_version", "geoparquet_version"),
+            "repair_geometry": ("repair_geometry", "repair_geometry"),
+            "geometry": ("geometry", "geometry"),
+        },
+        notes=(
+            "Cross-function and ops only: the CLI writes through "
+            "`convert_carto_to_geoparquet`, `ops.from_carto` returns `carto_to_table`.",
+        ),
+    ),
+    ParityCase(
+        id="process simplify",
+        cli=_cli(
+            "simplify_file_impl",
+            core_simplify.simplify_file,
+            lambda c: ["process", "simplify", c.input_file, c.output_file, "--tolerance", "1"],
+            module=cli_process,
+        ),
+        ops=_ops_via_table(
+            core_simplify,
+            "simplify_table",
+            core_simplify.simplify_table,
+            lambda c: ops.simplify(c.table, 1.0),
+        ),
+        table=_table(
+            core_simplify,
+            "simplify_table",
+            core_simplify.simplify_table,
+            lambda c: c.gpio_table.simplify(1.0),
+        ),
+        normalize={
+            "tolerance": ("tolerance", "tolerance"),
+            "coverage": ("coverage", "coverage"),
+            "preserve_topology": ("preserve_topology", "preserve_topology"),
+            "simplify_boundary": ("simplify_boundary", "simplify_boundary"),
+            "threads": ("threads", "threads"),
+            "geometry_column": ("geometry_column", "geometry_column"),
+            "drop_empty": ("drop_empty", "drop_empty"),
+            "simplify_crs": ("simplify_crs", "simplify_crs"),
+        },
+        notes=(
+            "Cross-function: `simplify_file` against `simplify_table`. `ops.simplify` "
+            "imports its core inside the call, so it is patched on the core module.",
+        ),
+    ),
+    ParityCase(
+        id="process polygonize",
+        cli=_cli(
+            "polygonize_file",
+            core_polygonize.polygonize_file,
+            lambda c: ["process", "polygonize", PARITY_RASTER, c.output_file],
+            module=core_polygonize,
+        ),
+        ops=_ops_via_table(
+            core_polygonize,
+            "polygonize_raster",
+            core_polygonize.polygonize_raster,
+            lambda c: ops.polygonize(PARITY_RASTER),
+        ),
+        table=_table(
+            core_polygonize,
+            "polygonize_raster",
+            core_polygonize.polygonize_raster,
+            lambda c: table_module.Table.polygonize(PARITY_RASTER),
+            result=_TINY_GEOMETRY_TABLE,
+        ),
+        normalize={
+            "band": ("band", "band"),
+            "values": ("values", "values"),
+            "value_column": ("value_column", "value_column"),
+            "nodata": ("nodata", "nodata"),
+            "use_mask": ("use_mask", "use_mask"),
+            "connectivity": ("connectivity", "connectivity"),
+            "repair_geometry": ("repair_geometry", "repair_geometry"),
+        },
+        notes=(
+            "Cross-function: `polygonize_file` against `polygonize_raster`. Core is "
+            "recorded, so neither the raster extra nor a raster file is needed.",
+        ),
+    ),
+    ParityCase(
+        id="process contour",
+        cli=_cli(
+            "contour_file",
+            core_contour.contour_file,
+            lambda c: ["process", "contour", PARITY_RASTER, c.output_file, "--interval", "10"],
+            module=core_contour,
+        ),
+        ops=_ops_via_table(
+            core_contour,
+            "contour_raster",
+            core_contour.contour_raster,
+            lambda c: ops.contour(PARITY_RASTER, interval=10.0),
+        ),
+        table=_table(
+            core_contour,
+            "contour_raster",
+            core_contour.contour_raster,
+            lambda c: table_module.Table.contour(PARITY_RASTER, interval=10.0),
+            result=_TINY_GEOMETRY_TABLE,
+        ),
+        normalize={
+            "levels": ("levels", "levels"),
+            "interval": ("interval", "interval"),
+            "base": ("base", "base"),
+            "band": ("band", "band"),
+            "nodata": ("nodata", "nodata"),
+            "use_mask": ("use_mask", "use_mask"),
+            "min_column": ("min_column", "min_column"),
+            "max_column": ("max_column", "max_column"),
+        },
+        notes=(
+            "Cross-function: `contour_file` against `contour_raster`. An interval is "
+            "named on every side because the core refuses a call with no breaks.",
+        ),
+    ),
 ]
 
 CASES_BY_ID = {case.id: case for case in CASES}
-
-
-# --------------------------------------------------------------------------
-# Known gaps -- findings, not pinned behaviour. Every entry needs a reason.
-# --------------------------------------------------------------------------
-
-# Keys are (case id, front end, canonical name, repr(CLI value), repr(API value)),
-# following `collect_divergences()` in tests/test_cli_api_default_parity.py. The two
-# reprs are load-bearing: an allowlist that recorded only "these differ" would stay
-# green if `ops.sort_str` changed `tile_size` from 50000 to 40000 -- still a divergence,
-# but a *different* one that nobody reviewed. Pinning the pair means any change to
-# either side has to come back through this table.
-KNOWN_PARITY_GAPS: dict[tuple[str, str, str, str, str], str] = {
-    (
-        "sort hilbert",
-        "table",
-        "geometry_column",
-        "None",
-        "'geometry'",
-    ): (
-        "CLI --geometry-column defaults to None, the file's primary geometry column "
-        "(geometry_detection.primary_geometry_column, #1367 T3c); Table.sort_hilbert passes the "
-        "column the Table already tracks. Same column, resolved where each front end knows it."
-    ),
-    (
-        "sort str",
-        "table",
-        "geometry_column",
-        "None",
-        "'geometry'",
-    ): (
-        "CLI --geometry-column defaults to None, the file's primary geometry column "
-        "(geometry_detection.primary_geometry_column, #1367 T3c); Table.sort_str passes the "
-        "column the Table already tracks. Same column, resolved where each front end knows it."
-    ),
-    (
-        "sort str",
-        "ops",
-        "tile_size",
-        "None",
-        str(DEFAULT_ROW_GROUP_ROWS),
-    ): (
-        f"The file core resolves row_group_rows=None to the sort default of "
-        f"{DEFAULT_ROW_GROUP_ROWS:,} rows (DEFAULT_ROW_GROUP_ROWS); the in-memory API "
-        f"spells that same effective default explicitly as tile_size={DEFAULT_ROW_GROUP_ROWS}."
-    ),
-    (
-        "sort str",
-        "table",
-        "tile_size",
-        "None",
-        str(DEFAULT_ROW_GROUP_ROWS),
-    ): (
-        f"The file core resolves row_group_rows=None to the sort default of "
-        f"{DEFAULT_ROW_GROUP_ROWS:,} rows (DEFAULT_ROW_GROUP_ROWS); the fluent API "
-        f"spells that same effective default explicitly as tile_size={DEFAULT_ROW_GROUP_ROWS}."
-    ),
-    (
-        "convert geoparquet",
-        "table",
-        "row_group_rows",
-        "None",
-        str(DEFAULT_ROW_GROUP_ROWS),
-    ): (
-        f"Measurement depth, not behaviour -- the same gap this case's notes already "
-        f"concede for geoparquet_version. Both front ends resolve row_group_rows through "
-        f"parquet_writer.resolve_row_group_rows and both land on {DEFAULT_ROW_GROUP_ROWS:,}, "
-        f"but the two boundaries this case patches sit on opposite sides of that call: the "
-        f"CLI's is convert_to_geoparquet, which runs *before* write_parquet_with_metadata "
-        f"resolves, and the table's is WriteStrategyFactory.get_strategy, which runs *after* "
-        f"Table.write resolves. tests/test_write_facade_row_groups.py asserts the thing this "
-        f"case cannot see: that the two front ends write the same row-group layout."
-    ),
-}
 
 
 # --------------------------------------------------------------------------
@@ -1550,11 +2070,6 @@ def test_known_parity_gap_still_diverges_the_same_way(gap, parity_ctx):
     )
 
 
-def test_every_known_gap_has_a_justification():
-    for gap, reason in KNOWN_PARITY_GAPS.items():
-        assert reason and reason.strip(), f"No justification recorded for {gap}"
-
-
 def test_every_known_gap_names_a_real_case_and_parameter():
     """A typo in the allowlist would silently disable a comparison."""
     for case_id, side, canonical, _cli_repr, _api_repr in KNOWN_PARITY_GAPS:
@@ -1565,88 +2080,3 @@ def test_every_known_gap_names_a_real_case_and_parameter():
         assert canonical in case.normalize, (
             f"{canonical!r} is not a canonical parameter of {case_id!r}"
         )
-
-
-# --------------------------------------------------------------------------
-# Census -- a new CLI leaf must arrive with a parity case or an excuse
-# --------------------------------------------------------------------------
-
-_NO_SEAM_INSPECT = (
-    "No shared seam: the CLI goes through `core.inspect`, the Table method is inline "
-    "pyarrow/DuckDB and calls no core function. Compared behaviourally in "
-    "tests/test_api_cli_behaviour_parity.py::TestInspectGroupAgreesWithTable."
-)
-_ONE_DOOR = (
-    "The CLI and the API call the same core function with just the path (#1065): one "
-    "door, nothing to diff."
-)
-_NETWORK = "Reaches a live service; the network lane covers it."
-_DEFERRED = "Worth a case; not written yet (#1085)."
-
-NO_CALL_PARITY_CASE: dict[str, str] = {
-    # --- no API twin at all (`NO_API_TWIN` minus the three #1065 mislabels) --
-    "benchmark compare": "No API twin: diffs two benchmark JSON runs for a human.",
-    "benchmark report": "No API twin: renders collected benchmark results for a human.",
-    "benchmark suite": "No API twin: orchestrates a multi-command benchmark run.",
-    "skills": "No API twin: prints the bundled LLM skill documents.",
-    # --- a twin exists, but the two front ends share no call seam ----------
-    **dict.fromkeys(
-        ["inspect summary", "inspect head", "inspect tail", "inspect stats", "inspect meta"],
-        _NO_SEAM_INSPECT,
-    ),
-    "inspect layers": _ONE_DOOR,
-    "check stac": _ONE_DOOR,
-    "add geometry-metrics": (
-        "Compared behaviourally in tests/test_api_cli_behaviour_parity.py::"
-        "TestAddGeometryMetricsParity, on the computed values rather than the call."
-    ),
-    # --- a twin and a seam, but not reachable offline --------------------
-    **dict.fromkeys(["extract arcgis", "extract wfs"], _NETWORK),
-    # --- deferred ---------------------------------------------------------
-    **dict.fromkeys(
-        [
-            "extract carto",
-            "extract bigquery",
-            "add admin-divisions",
-            "partition admin",
-            "convert reproject",
-            "convert geojson",
-            "convert shapefile",
-            "partition string",
-            "partition kdtree",
-            "partition s2",
-            "partition a5",
-            "add bbox-metadata",
-            "process simplify",
-            "process polygonize",
-            "process contour",
-        ],
-        _DEFERRED,
-    ),
-}
-
-
-def _cli_leaves() -> set[str]:
-    from tests.conftest import walk_cli_commands
-
-    return {" ".join(path) for path, _cmd in walk_cli_commands(cli_main.cli)}
-
-
-def test_every_cli_leaf_has_a_parity_case_or_a_recorded_reason():
-    """Left: leaves with neither a case nor an excuse. Right: excuses that are stale
-    (no such command) or dead (the command has a case)."""
-    assert _cli_leaves() - set(CASES_BY_ID) == set(NO_CALL_PARITY_CASE)
-
-
-def test_every_command_group_is_represented():
-    """A group with no case at all is the state WP-7 set out to fix."""
-    groups_without_a_case = {"inspect", "skills"}  # no shared seam / no twin
-
-    covered = {case_id.split()[0] for case_id in CASES_BY_ID}
-    all_groups = {name.split()[0] for name in _cli_leaves()}
-    assert all_groups - covered - groups_without_a_case == set()
-
-
-@pytest.mark.xfail(strict=True, reason="gpio #1063: Table.upload has no dry_run")
-def test_table_upload_cannot_be_rehearsed():
-    assert "dry_run" in inspect.signature(table_module.Table.upload).parameters

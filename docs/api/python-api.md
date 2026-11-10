@@ -502,7 +502,9 @@ print(info_dict['crs'])   # None or CRS dict
 
 #### `head(n=10)` / `tail(n=10)`
 
-Get the first or last N rows.
+Get the first or last N rows. When `n` is at least `num_rows` there is nothing
+to drop, so the same Table is returned (`table.head(table.num_rows) is table`):
+it keeps its `source_path`, and its checks still measure the file.
 
 ```python
 # First 10 rows (default)
@@ -823,6 +825,10 @@ an unknown name raises `InvalidParameterError` naming it, rather than being
 silently ignored. A column may not appear in both lists, except for the
 geometry and bbox columns.
 
+With no filter and `repair_geometry=False`, nothing can change, so `extract()`
+returns the same Table. The default `repair_geometry=True` may rewrite invalid
+geometry, so it always returns a new one.
+
 ```python
 # Select specific columns
 table = gpio.read('input.parquet').extract(columns=['name', 'address'])
@@ -840,9 +846,11 @@ table = gpio.read('input.parquet').extract(bbox=(-122.5, 37.5, -122.0, 38.0))
 table = gpio.read('input.parquet').extract(where="population > 10000")
 ```
 
-#### `write(path, format=None, compression='ZSTD', compression_level=None, row_group_size_mb=None, row_group_rows=None, geoparquet_version=None, write_strategy='duckdb-kv', profile=None, verbose=False, ...)`
+#### `write(path, options=None, *, format=None, compression=None, compression_level=None, row_group_size_mb=None, row_group_rows=None, geoparquet_version=None, write_strategy=None, memory_limit=None, profile=None, verbose=False, ...)`
 
 Write the table to a GeoParquet file. Returns the output `Path` for chaining or confirmation.
+Every argument after `options` is keyword-only, so `table.write('out.dat', 'csv')`
+is a `TypeError` naming `format=`.
 
 ```python
 # Basic write
@@ -855,6 +863,40 @@ table.write('output.parquet', compression='GZIP', compression_level=6)
 # With row group size
 table.write('output.parquet', row_group_size_mb=128)
 ```
+
+**`WriteOptions`**
+
+`gpio.WriteOptions` holds the GeoParquet write settings as one value, the same
+one every CLI write command builds from its flags. Pass it as `options`; a
+write keyword merges into it, and setting one field both ways is a `TypeError`.
+Every field defaults to `None`, "not asked": the write resolves an unset
+`compression` to ZSTD and an unset `write_strategy` to auto (`duckdb-kv` here).
+A field set to anything else, ZSTD included, counts as asked: a non-Parquet
+format refuses it.
+`memory_limit` caps the write's DuckDB work on every strategy.
+
+=== "CLI"
+
+    ```bash
+    gpio sort hilbert input.parquet output.parquet \
+        --compression GZIP --row-group-size 10240 --write-memory 2GB
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    opts = gpio.WriteOptions(compression='GZIP', row_group_rows=10240, memory_limit='2GB')
+    gpio.read('input.parquet').sort_hilbert().write('output.parquet', opts)
+
+    # Keywords merge into the options
+    gpio.read('input.parquet').write('output.parquet', opts, geoparquet_version='2.0')
+    ```
+
+The write settings apply to GeoParquet only. Setting one for another format —
+`table.write('out.csv', compression='GZIP')` — raises `InvalidParameterError`
+instead of being ignored; `profile` still applies to any format's upload.
 
 A geometry column name the table does not carry — `Table(arrow_table,
 geometry_column='geom')` on a table whose column is `geometry` — raises
@@ -945,7 +987,8 @@ table.write('output.parquet', write_strategy='streaming')
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `write_strategy` | str | Write strategy: `duckdb-kv` (default), `streaming`, `disk-rewrite`, or `in-memory` |
+| `write_strategy` | str | Write strategy: `duckdb-kv` (the default, `'auto'`), `streaming`, `disk-rewrite`, or `in-memory` |
+| `memory_limit` | str | DuckDB memory cap for the write, e.g. `'2GB'`. Default: gpio's ceiling-based limit |
 
 Every strategy writes the same file-level keys. The `geo` block is built fresh
 for the output, and other keys such as fiboa, STAC or your own provenance key are
@@ -967,8 +1010,9 @@ If you need a pandas round trip, write the file with geopandas `to_parquet`
 instead.
 
 DuckDB's memory limit is auto-detected and respects container cgroup limits. To
-set it explicitly, use the CLI `gpio extract --write-memory` flag; the Python
-API does not expose a memory-limit argument.
+set it explicitly, pass `memory_limit` to `Table.write` (or set it in a
+`gpio.WriteOptions`), as `--write-memory` does on the CLI:
+`table.write('output.parquet', memory_limit='2GB')`.
 
 See the [Write Strategies Guide](../guide/write-strategies.md) for detailed information on each strategy.
 
@@ -1520,8 +1564,8 @@ ops.add_stac_metadata('items.parquet', 'collection.json')
 
 Run best-practice checks on the table. `check()` runs the structure checks
 (row groups, bbox and covering, compression, bloom filters); `gpio check all`
-also runs spatial order and spec validation, so for its exit code combine
-`check()`, `check_spatial()` and `validate()`.
+also runs spatial order and spec validation; `gpio.check_all(path)` runs all
+three, as the CLI does.
 
 ```python
 # Run the structure checks
@@ -1531,8 +1575,7 @@ if result.verdict() == "failure":
         print(f"Failed: {failure}")
 
 # What `gpio check all` exits 1 on (`!= "pass"` for `--strict`)
-gate = [table.check(), table.check_spatial(), table.validate()]
-check_all_fails = any(r.verdict() == "failure" for r in gate)
+check_all_fails = gpio.check_all('data.parquet').verdict() == "failure"
 
 # Individual checks
 spatial_result = table.check_spatial()
@@ -1565,7 +1608,8 @@ print(report['undersized_rows'], report['undersized_examples'])
 against that file, so `table.check_compression()` and `gpio check compression
 <path>` give the same verdict. A table built in memory, read with `columns=` or
 `filters=`, or derived by an operation such as `sort_hilbert()` has no file
-behind it; its checks measure the bytes `write()` would produce with its
+behind it (a no-op such as `head(n)` with `n >= num_rows` returns the table
+itself, file included); its checks measure the bytes `write()` would produce with its
 defaults and say so with `prospective`. A source file that was replaced or
 removed after `read()`, or a remote URL, is treated the same way.
 
@@ -1576,6 +1620,55 @@ gpio.read('data.parquet').sort_hilbert().check_row_groups().prospective  # True
 result = gpio.Table(arrow_table).check_compression()
 result.source_path  # None
 result.prospective  # True
+```
+
+#### `fix()`
+
+Apply the repairs `gpio check <cmd> --fix` would, into a new Table. It never
+rewrites the file the Table was read from: `output=` writes the repaired file
+to another path and returns `gpio.read(output)`; without it the repair goes
+through a scratch file and the rows come back in memory (`source_path` is
+None). An `output` that names the source is refused, and an existing `output`
+is refused unless `overwrite=True`. `checks=` picks which
+fixes run, from `"bbox"`, `"covering"`, `"compression"`, `"row_groups"` and
+`"spatial"` (default: all); an unknown name is refused. The compression and
+row-group fixes are one rewrite, so picking either applies both when needed.
+
+```python
+fixed = table.fix()                                    # every fix, in memory
+fixed = table.fix(output='fixed.parquet')              # a view of the new file
+sorted_only = table.fix(checks=["spatial"], output='sorted.parquet')
+```
+
+#### Path-level checks
+
+`gpio.check_all`, `check_compression`, `check_row_groups`, `check_bbox`,
+`check_spatial`, `check_spatial_pushdown`, `check_bloom_filters`,
+`check_optimization` and `validate` take a path and the same options as the
+matching CLI subcommand (and `Table` method), and return a `CheckResult`
+with `source_path` set. They check one file: a directory or glob raises
+`InvalidParameterError`, and `gpio check <cmd>` handles a multi-file run. A
+remote URL is read in place. The `Table` methods call these on the file they
+were read from, so for a local file that has not changed since it was read,
+`gpio.check_x(path)` and `gpio.read(path).check_x()` agree. A `Table` read from
+a remote URL (or derived, or whose file changed) is checked on a temporary
+local rewrite of its rows, so its verdict describes that rewrite, not the
+remote file.
+Each gives the verdict and categories `gpio check <cmd>` gives on the same file,
+with the same defaults; a file that is not GeoParquet fails, as there.
+`check_spatial_pushdown` and `check_bloom_filters` have no CLI subcommand: they
+answer as the pushdown block of `gpio check spatial` and the bloom-filter block
+of `gpio check all`. Three `Table` methods run less than their path function:
+`Table.check()` runs the structure checks only (`gpio.check_all` adds spatial
+order and spec), `Table.check_spatial()` runs spatial order only
+(`gpio.check_spatial` adds pushdown readiness), and
+`Table.check_spatial_pushdown()` returns the unjudged measurement, so a single
+row group or a native-geo file without a bbox column does not pass there.
+
+```python
+result = gpio.check_compression('data.parquet')
+result = gpio.check_row_groups('data.parquet', profile='web')
+result = gpio.validate('data.parquet', version='1.1', skip_data_validation=True)
 ```
 
 #### `check_optimization()`
@@ -1662,6 +1755,34 @@ table.upload('gs://bucket/data.parquet')
 
 # Upload as GeoParquet 2.0
 table.upload('s3://bucket/data.parquet', geoparquet_version='2.0')
+
+# Preview the upload (prints source, size, destination, target key)
+table.upload('s3://bucket/dataset/', dry_run=True)
+```
+
+A destination ending in `/` names the object after the file the Table was read
+from; a Table built in memory or derived by an operation needs a full object key.
+
+#### `create_pmtiles(output, layer=None, min_zoom=None, max_zoom=None, bbox=None, where=None, include_cols=None, ...)`
+
+Tile the table into a PMTiles archive with tippecanoe. Takes the options of
+`ops.create_pmtiles` except `profile`. A Table still a view of its source file
+tiles that file; otherwise the rows go through a scratch file that is removed
+afterwards.
+
+```python
+gpio.read('buildings.parquet').create_pmtiles('buildings.pmtiles', max_zoom=14)
+```
+
+#### `create_pmtiles_pyramid(output, levels=None, bands=None, max_tile_kb=500, layer_mode='grouped', ...)`
+
+Build a zoom-banded PMTiles pyramid from an aggregate table (tippecanoe and
+tile-join). Takes the options of `ops.create_pmtiles_pyramid`. Read from the
+aggregate file, it reuses that file's overview siblings; missing levels are
+built in the run's scratch.
+
+```python
+gpio.read('cells.parquet').create_pmtiles_pyramid('cells.pmtiles')
 ```
 
 ## Converting Other Formats

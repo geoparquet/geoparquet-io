@@ -99,6 +99,35 @@ class TestIsPartitionPath:
         url = "s3://bucket/data/file.parquet"
         assert is_partition_path(url) is False
 
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://b.s3.amazonaws.com/d/f.parquet?X-Amz-Signature=abc",
+            "https://example.com/d/f.parquet?a=1&b=2#frag=x",
+        ],
+    )
+    def test_http_query_and_fragment_are_not_partition_markers(self, url):
+        """A signed URL's ``?`` and ``=`` are the query, not a glob or a hive key."""
+        assert is_partition_path(url) is False
+
+    @pytest.mark.parametrize(
+        ("url", "expected"),
+        [
+            ("http://[::1]/data.parquet", False),
+            ("http://[::1]:8080/d/data.parquet?sig=a", False),
+            ("http://[::1]/d/*.parquet", True),
+            ("http://[::1]/d/year=2024/data.parquet", True),
+        ],
+        ids=["ipv6", "ipv6_port_query", "ipv6_glob", "ipv6_hive"],
+    )
+    def test_an_http_authority_is_not_scanned(self, url, expected):
+        """An IPv6 host's ``[`` is the authority, not a glob; only the URL path is scanned."""
+        assert is_partition_path(url) is expected
+
+    def test_a_malformed_http_url_keeps_its_path(self):
+        """``urlsplit`` raises on it; the path is then classified as written."""
+        assert is_partition_path("http://[bad/x.parquet") is True
+
     def test_http_url_not_partition(self):
         """HTTP URLs without hive partitioning are not partition paths."""
         url = "https://example.com/data.parquet"
@@ -402,6 +431,12 @@ class TestIsSameFilePath:
         assert is_same_file_path("s3://bucket/a.parquet", "s3://bucket/a.parquet") is True
         assert is_same_file_path("s3://bucket/a.parquet", "s3://bucket/b.parquet") is False
         assert is_same_file_path("s3://bucket/a.parquet", "/tmp/a.parquet") is False
+
+    def test_a_scheme_alias_names_the_same_object(self):
+        """``s3a://`` is ``s3://`` and ``gcs://`` is ``gs://``, as ``copy_file`` addresses them."""
+        assert is_same_file_path("s3://bucket/a.parquet", "s3a://bucket/a.parquet") is True
+        assert is_same_file_path("gcs://bucket/a.parquet", "gs://bucket/a.parquet") is True
+        assert is_same_file_path("s3a://bucket/a.parquet", "gs://bucket/a.parquet") is False
 
     def test_an_unresolvable_path_is_not_a_match(self, tmp_path, monkeypatch):
         """A resolve() that raises means "cannot tell", which must not read as "same"."""

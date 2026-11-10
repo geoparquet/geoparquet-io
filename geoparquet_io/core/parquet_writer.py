@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Collection, Iterator, Mapping
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, fields
 from typing import TYPE_CHECKING, Any, cast, overload
 
 from geoparquet_io.core.compression import resolve_codec
@@ -86,6 +86,7 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
 from geoparquet_io.core.logging_config import debug, info, success
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.sizing import mb_to_bytes
 
 if TYPE_CHECKING:
@@ -577,6 +578,27 @@ def resolve_row_group_rows_for_query(
     return resolve_row_group_rows_for_table(sample, None, row_group_size_mb, verbose=verbose)
 
 
+def resolve_row_group_rows_for_write(
+    con: duckdb.DuckDBPyConnection,
+    query: str,
+    row_group_rows: int | None,
+    row_group_size_mb: float | None,
+    memory_limit: str | None,
+    verbose: bool = False,
+) -> int:
+    """:func:`resolve_row_group_rows_for_query` for a write, its MB sample under the write's cap.
+
+    The sample runs before any strategy's memory scope, so it takes its own,
+    entered only when there is a sample to take.
+    """
+    if row_group_rows is not None or row_group_size_mb is None:
+        return resolve_row_group_rows_for_query(
+            con, query, row_group_rows, row_group_size_mb, verbose
+        )
+    with scoped_write_memory_limit(con, memory_limit, verbose):
+        return resolve_row_group_rows_for_query(con, query, None, row_group_size_mb, verbose)
+
+
 def resolve_row_group_rows_for_rewrite(num_rows: int, input_row_groups: int) -> int:
     """Rows per group for a rewrite that must not lose the input's row groups.
 
@@ -861,7 +883,16 @@ def _version_of_table(
     """
     metadata = table.schema.metadata
     if metadata and b"geo" in metadata:
-        return carried_geoparquet_version(metadata, preserve_input=preserve_input)
+        carried = carried_geoparquet_version(metadata, preserve_input=preserve_input)
+        if (
+            carried == "1.1"
+            and not preserve_input
+            and geoarrow_primary_encoding(sanitized_carried_geo(metadata))
+        ):
+            # A GeoArrow-native 1.x table keeps its encoding, as a file does in
+            # _version_of_file: plain "1.1" relabelled the struct `WKB` (#1176).
+            return "1.1-geoarrow"
+        return carried
     if any(is_geoarrow_extension_field(field) for field in table.schema):
         if verbose:
             debug("Native geo types with no geo key: native-geo-only data")
@@ -1287,21 +1318,59 @@ def write_arrow_table(
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
+#: The keywords every funnel takes; :meth:`WriteOptions.funnel_kwargs` emits these.
+_FUNNEL_FIELDS = (
+    "compression",
+    "compression_level",
+    "row_group_size_mb",
+    "row_group_rows",
+    "profile",
+    "geoparquet_version",
+    "memory_limit",
+)
+#: CLI parameter -> WriteOptions field, where the two spell it differently.
+_CLI_SPELLINGS = {"row_group_size": "row_group_rows", "write_memory": "memory_limit"}
+#: The fields that decide the written bytes (:meth:`WriteOptions.sets_output_layout`).
+_LAYOUT_FIELDS = (
+    "compression",
+    "compression_level",
+    "row_group_size_mb",
+    "row_group_rows",
+    "geoparquet_version",
+)
+
+
+@dataclass(frozen=True, kw_only=True)
 class WriteOptions:
-    """The write facts a command hands the funnel, as one value.
+    """How a GeoParquet file is written, as one value (``gpio.WriteOptions``, #761).
 
-    Every write path used to forward the same seven keywords from its public
-    entry point through each private driver to ``write_parquet_with_metadata``
-    / ``stream_io.write_output`` / ``stream_io.execute_transform``, and the
-    lists drifted into 18 copies (pylint R0801). A public core entry point keeps
-    its keyword signature (the CLI and the Python API call it) and builds this
-    once with :meth:`pick` from its own parameters; the drivers pass it along,
-    and the funnel call expands it once (:meth:`funnel_kwargs`).
+    ``Table.write(path, options)`` takes it, and every CLI write command builds
+    one from its flags (:meth:`from_cli`). Inside the core, a public entry point
+    keeps its keyword signature and builds one with :meth:`pick` from its own
+    parameters; the drivers pass it along, and the funnel call expands it once
+    (:meth:`funnel_kwargs`).
 
-    Each field means what leaving the funnel's keyword out means when unset:
-    ``None`` everywhere, which the facade resolves (codec ZSTD, the default
-    row-group count, the auto output version, gpio's memory default).
+    Every field defaults to ``None``, which means "not asked": the write step
+    resolves it (codec ZSTD, strategy auto, the default row-group count, the
+    auto output version, gpio's memory default). A field is asked for exactly
+    when it is not None, so an explicit ``compression="ZSTD"`` stays visible:
+    a non-Parquet ``Table.write`` refuses it, and ``Table.write`` refuses it
+    set both here and as a keyword.
+
+    Attributes:
+        compression: Parquet codec (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED);
+            None writes ZSTD.
+        compression_level: Codec level; None takes the codec's default.
+        row_group_size_mb: Target row-group size in MB (exclusive with
+            ``row_group_rows``).
+        row_group_rows: Rows per row group.
+        profile: AWS profile for an ``s3://`` destination.
+        geoparquet_version: Output version; None preserves or auto-detects.
+        memory_limit: DuckDB memory cap for the write's DuckDB work, on every
+            strategy (e.g. ``"2GB"``); None takes gpio's default.
+        write_strategy: ``"duckdb-kv"``, ``"in-memory"``, ``"streaming"``,
+            ``"disk-rewrite"``, or ``"auto"`` (None too) for the entry point's
+            own default.
     """
 
     compression: str | None = None
@@ -1311,27 +1380,44 @@ class WriteOptions:
     profile: str | None = None
     geoparquet_version: str | None = None
     memory_limit: str | None = None
+    write_strategy: str | None = None
 
     @classmethod
     def pick(cls, values: Mapping[str, Any]) -> WriteOptions:
         """The options named in *values*; other keys are ignored, absent fields stay unset."""
         return cls(**{f.name: values[f.name] for f in fields(cls) if f.name in values})
 
+    @classmethod
+    def from_cli(cls, **params: Any) -> WriteOptions:
+        """The one ``WriteOptions`` a CLI write command builds from its Click parameters.
+
+        ``--row-group-size`` is ``row_group_rows`` and ``--write-memory`` is
+        ``memory_limit``; ``--row-group-size-mb`` arrives in MB, parsed by the
+        packer (``cli.decorators.pack_write_options``). A flag left unset is
+        None, "not asked". Every other parameter is ignored -- ``threads``
+        above all: ``process simplify --threads`` is its coarsen workers, not
+        a write setting.
+        """
+        return cls.pick({_CLI_SPELLINGS.get(name, name): value for name, value in params.items()})
+
     def sets_output_layout(self) -> bool:
-        """Whether any option that decides the written bytes was set.
+        """Whether any option that decides the written bytes was asked for.
 
         Codec, level, row-group size and output version shape the file; the
-        AWS profile and the memory limit do not. A writer that could copy its
-        input verbatim (``add bbox`` over a file that already has the column)
-        may do so only when this is False, since a copy reproduces whatever the
-        input was written with.
+        AWS profile, the memory limit and the strategy do not. A writer that
+        could copy its input verbatim (``add bbox`` over a file that already has
+        the column) may do so only when this is False, since a copy reproduces
+        whatever the input was written with. Only ``None`` is "not asked".
         """
-        return replace(self, profile=None, memory_limit=None) != WriteOptions()
+        return any(getattr(self, name) is not None for name in _LAYOUT_FIELDS)
 
     def funnel_kwargs(self) -> dict[str, Any]:
         """The keywords every funnel takes, for ``funnel(..., **options.funnel_kwargs())``.
 
-        Every funnel accepts all seven, including the Arrow-table ones, which
-        accept and ignore the fields that do not apply to them.
+        Unset (``None``) fields are left out, so the funnel's own default
+        applies; ``write_strategy`` is never included -- each funnel call names
+        its strategy itself.
         """
-        return {f.name: getattr(self, f.name) for f in fields(self)}
+        return {
+            name: value for name in _FUNNEL_FIELDS if (value := getattr(self, name)) is not None
+        }

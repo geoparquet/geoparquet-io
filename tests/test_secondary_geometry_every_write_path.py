@@ -600,6 +600,7 @@ def test_describe_reads_a_crs_whose_text_holds_an_apostrophe():
 
 class TestTheEdgesOfTheHelpers:
     def test_the_table_query_converts_only_plain_wkb_secondaries(self):
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, register_arrow
         from geoparquet_io.core.write_strategies.duckdb_kv import (
             _table_query_with_native_geometry,
         )
@@ -617,17 +618,18 @@ class TestTheEdgesOfTheHelpers:
             "metadata": {"centroid": {"crs": {"id": {"authority": "OGC", "code": "CRS84"}}}},
         }
 
-        query = _table_query_with_native_geometry(table, "geometry", info, "2.0")
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            register_arrow(con, "input_table", table)
+            query = _table_query_with_native_geometry(con, table, "geometry", info, "2.0")
+            v1_query = _table_query_with_native_geometry(con, table, "geometry", info, "1.1")
+        finally:
+            con.close()
 
         assert 'ST_GeomFromWKB("centroid") AS "centroid"' in query, "a default CRS is not set"
         assert "label_wkt" not in query, "a WKT string is not ST_GeomFromWKB's to read"
         assert "dropped" not in query
-        assert (
-            _table_query_with_native_geometry(table, "geometry", info, "1.1").count(
-                "ST_GeomFromWKB"
-            )
-            == 1
-        )
+        assert v1_query.count("ST_GeomFromWKB") == 1
 
     def test_a_describe_that_fails_answers_nothing(self):
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection

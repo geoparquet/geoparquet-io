@@ -168,12 +168,30 @@ except RemoteAccessError as e:
 
 ## Dry Run
 
-Preview what would be uploaded without actually uploading:
+Preview what would be uploaded — source, size, destination and target key —
+without uploading anything. The Python form still writes the table to a
+scratch file, so the size it reports is the size of the file you would get.
 
-<!-- doctest: skip="needs cloud credentials" -->
-```bash
-gpio publish upload output/ s3://bucket/dataset/ --dry-run
-```
+=== "CLI"
+
+    <!-- doctest: skip="needs cloud credentials" -->
+    ```bash
+    gpio publish upload output/ s3://bucket/dataset/ --dry-run
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    gpio.read("data.parquet").upload("s3://bucket/dataset/", dry_run=True)
+    ```
+
+A destination ending in `/` is a prefix, and the object is named after the
+local file: `s3://bucket/dataset/data.parquet` above. Only a Table read from a
+single local file has a name to use. For one built in memory, derived by an
+operation, or read from a remote URL, a directory or a glob, `upload()` asks
+for a full object key instead (`s3://bucket/dataset/data.parquet`).
 
 ## CLI Reference
 

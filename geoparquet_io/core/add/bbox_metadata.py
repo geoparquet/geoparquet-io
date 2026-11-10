@@ -18,7 +18,8 @@ are not supported for in-place metadata modification.
 import functools
 from typing import TYPE_CHECKING
 
-from geoparquet_io.core.bbox_structure import check_bbox_structure
+from geoparquet_io.core.arrow_geo_metadata import _detect_bbox_column_from_table
+from geoparquet_io.core.bbox_structure import bbox_covering_column_for, check_bbox_structure
 from geoparquet_io.core.column_selection import find_column
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.exceptions import GeoParquetError
@@ -104,7 +105,7 @@ def _cannot_declare_message(problem: str, source: str | None) -> str:
 
 def add_bbox_metadata_table(
     table: "pa.Table",
-    bbox_column: str = "bbox",
+    bbox_column: str | None = None,
     geometry_column: str | None = None,
 ) -> "pa.Table":
     """Add bbox covering metadata to an in-memory Arrow table.
@@ -115,7 +116,10 @@ def add_bbox_metadata_table(
 
     Args:
         table: Arrow table carrying GeoParquet `geo` schema metadata
-        bbox_column: Name of the existing bbox struct column
+        bbox_column: Name of the existing bbox struct column. None detects it
+            for the selected geometry: its own covering column, and for the
+            primary only, the way the file path does, else a struct called
+            ``bbox``.
         geometry_column: Geometry column name (auto-detected if None)
 
     Returns:
@@ -129,6 +133,23 @@ def add_bbox_metadata_table(
 
     geom_col = resolve_geometry_column(table, geometry_column, where="the table")
 
+    if bbox_column is None:
+        # Only the primary has a conventional ``bbox`` fallback; any other
+        # column is bounded by nothing but its own declared covering.
+        primary = resolve_geometry_column(table, None, where="the table")
+        bbox_column = (
+            _detect_bbox_column_from_table(table)
+            if geom_col == primary
+            else bbox_covering_column_for(
+                sanitized_carried_geo(table.schema.metadata), str(geom_col)
+            )
+        )
+        if bbox_column is None:
+            raise ValueError(
+                "No valid bbox column found. Use add_bbox() first, or name an existing "
+                "struct column with bbox_column=."
+            )
+
     found = find_column(bbox_column, table.column_names, option_name="bbox_column")
     if found is None:
         raise ValueError(f"Bbox column '{bbox_column}' not found. Use add_bbox() first.")
@@ -137,6 +158,23 @@ def add_bbox_metadata_table(
     problem = arrow_bbox_covering_problem(bbox_column, table.schema.field(bbox_column))
     if problem is not None:
         raise ValueError(_cannot_declare_message(problem, None))
+
+    # Another column's covering bounds that column's geometry, not this one (#953).
+    carried = sanitized_carried_geo(table.schema.metadata)
+    owner = next(
+        (
+            name
+            for name in carried.get("columns", {})
+            if name != geom_col and bbox_covering_column_for(carried, name) == bbox_column
+        ),
+        None,
+    )
+    if owner is not None:
+        raise ValueError(
+            f"Cannot add bbox covering metadata: '{bbox_column}' is the covering of "
+            f"'{owner}', so its values bound that column's geometry, not '{geom_col}'. "
+            f"Compute '{geom_col}''s own bbox column first."
+        )
 
     schema_metadata = dict(table.schema.metadata) if table.schema.metadata else {}
 

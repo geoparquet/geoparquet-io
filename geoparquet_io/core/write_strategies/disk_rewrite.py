@@ -43,7 +43,7 @@ from geoparquet_io.core.parquet_writer import (
     output_schema_metadata,
     regroup,
     resolve_output_geoparquet_version,
-    resolve_row_group_rows_for_query,
+    resolve_row_group_rows_for_write,
     write_arrow_table,
 )
 from geoparquet_io.core.remote import remote_write_context, upload_if_remote
@@ -134,8 +134,14 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         custom_metadata: dict | None = None,
         geometry_info: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        memory_limit: str | None = None,
     ) -> None:
-        """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite."""
+        """Write query results to GeoParquet using DuckDB COPY then PyArrow rewrite.
+
+        ``memory_limit`` bounds every DuckDB statement of phase one (the
+        row-group sample, the stats scan, the COPY, the geometry-type scans); the
+        row-group rewrite after it is pyarrow's and runs no DuckDB.
+        """
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
@@ -143,8 +149,10 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # DuckDB COPY TO sizes row groups by row count, so translate any MB target
         # into rows before it can take effect on this strategy (fixes #689 — both
         # sizing options were accepted and then ignored entirely).
-        resolved_row_group_rows = resolve_row_group_rows_for_query(
-            con, query, row_group_rows, row_group_size_mb, verbose
+        # An MB target samples the query, which the plain path below and the geo
+        # path's scope would otherwise leave unbounded.
+        resolved_row_group_rows = resolve_row_group_rows_for_write(
+            con, query, row_group_rows, row_group_size_mb, memory_limit, verbose
         )
 
         # Handle non-geo queries: write plain Parquet without geo metadata
@@ -157,6 +165,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 compression_level,
                 verbose,
                 resolved_row_group_rows,
+                memory_limit=memory_limit,
             )
             return
 
@@ -166,65 +175,65 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             scratch_file(prefix="gpio_disk_rewrite_") as temp_path,
             remote_write_context(output_path, verbose=verbose) as (final_path, is_remote),
         ):
-            if verbose:
-                debug("Computing bbox and geometry types via SQL...")
-            stats = geometry_stats_of(QuerySource(con, query), geometry_column)
-            bbox, geometry_types = stats.bbox, stats.geometry_types
+            # Every DuckDB statement of the write runs under its cap: the stats
+            # scan, the COPY, and the geometry-type scans the composer runs.
+            with scoped_write_memory_limit(con, memory_limit, verbose):
+                if verbose:
+                    debug("Computing bbox and geometry types via SQL...")
+                stats = geometry_stats_of(QuerySource(con, query), geometry_column)
+                bbox, geometry_types = stats.bbox, stats.geometry_types
 
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
+                final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
 
-            copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
-            if resolved_row_group_rows:
-                copy_options.append(f"ROW_GROUP_SIZE {resolved_row_group_rows}")
-            copy_query = f"""
-                COPY ({final_query})
-                TO {sql_path(temp_path)}
-                ({", ".join(copy_options)})
-            """
+                copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
+                if resolved_row_group_rows:
+                    copy_options.append(f"ROW_GROUP_SIZE {resolved_row_group_rows}")
+                copy_query = f"""
+                    COPY ({final_query})
+                    TO {sql_path(temp_path)}
+                    ({", ".join(copy_options)})
+                """
 
-            if verbose:
-                debug(f"Writing via DuckDB COPY TO with {codec.name} compression...")
+                if verbose:
+                    debug(f"Writing via DuckDB COPY TO with {codec.name} compression...")
 
-            # This strategy takes no `--write-memory` (the CLI rejects the
-            # combination), so the scope applies the ceiling-based default:
-            # phase one is a COPY of the whole, possibly sorted query and used
-            # to run at DuckDB's own 80%-of-host default (#1174).
-            with scoped_write_memory_limit(con, None, verbose):
+                # Phase one is a COPY of the whole, possibly sorted query; it used
+                # to run at DuckDB's own 80%-of-host default (#1174).
                 con.execute(copy_query)
 
-            if verbose:
-                # Closed before leaving the block: this file is `os.unlink`ed a
-                # few lines below, and Windows refuses to delete a file with an
-                # open handle -- `--verbose` disk-rewrite writes died there with
-                # `PermissionError: [WinError 32]` while POSIX cleaned up fine.
-                with pq.ParquetFile(temp_path) as pf:
-                    debug(
-                        f"DuckDB wrote {pf.metadata.num_rows:,} rows, "
-                        f"{pf.metadata.num_row_groups} row groups"
-                    )
+                if verbose:
+                    # Closed before leaving the block: this file is `os.unlink`ed a
+                    # few lines below, and Windows refuses to delete a file with an
+                    # open handle -- `--verbose` disk-rewrite writes died there with
+                    # `PermissionError: [WinError 32]` while POSIX cleaned up fine.
+                    with pq.ParquetFile(temp_path) as pf:
+                        debug(
+                            f"DuckDB wrote {pf.metadata.num_rows:,} rows, "
+                            f"{pf.metadata.num_row_groups} row groups"
+                        )
 
-            # The composer declares a conventional bbox column the output
-            # carries (and drops a carried covering over an illegal struct)
-            # before the #954 gate, for every column, as every write path does.
-            measured = {"geometry_types": geometry_types}
-            if bbox is not None:
-                measured["bbox"] = bbox
-            geo_meta = compose_geo_block(
-                QuerySource(con, query, original_metadata),
-                GeoBlockOptions(
-                    geometry_column=geometry_column,
-                    version=geoparquet_version,
-                    custom_metadata=custom_metadata,
-                    encoding=written_block_encoding(geoparquet_version),
-                    crs=input_crs,
-                    stats={geometry_column: measured},
-                    geometry_info=geometry_info,
-                    measure_missing=lambda block: missing_geometry_types(
-                        QuerySource(con, query), block
+                # The composer declares a conventional bbox column the output
+                # carries (and drops a carried covering over an illegal struct)
+                # before the #954 gate, for every column, as every write path does.
+                measured = {"geometry_types": geometry_types}
+                if bbox is not None:
+                    measured["bbox"] = bbox
+                geo_meta = compose_geo_block(
+                    QuerySource(con, query, original_metadata),
+                    GeoBlockOptions(
+                        geometry_column=geometry_column,
+                        version=geoparquet_version,
+                        custom_metadata=custom_metadata,
+                        encoding=written_block_encoding(geoparquet_version),
+                        crs=input_crs,
+                        stats={geometry_column: measured},
+                        geometry_info=geometry_info,
+                        measure_missing=lambda block: missing_geometry_types(
+                            QuerySource(con, query), block
+                        ),
+                        verbose=verbose,
                     ),
-                    verbose=verbose,
-                ),
-            )
+                )
 
             # 2.0 and parquet-geo-only require a native Parquet GEOMETRY logical
             # type; 1.0/1.1 require plain BYTE_ARRAY WKB and forbid it. Every
@@ -271,6 +280,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
         original_metadata: dict | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """Write Arrow table to GeoParquet using temporary file and rewrite."""
 
@@ -348,6 +358,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         compression_level: int | None,
         verbose: bool,
         row_group_rows: int | None = None,
+        memory_limit: str | None = None,
     ) -> None:
         """Write plain Parquet (no geo metadata) from a query.
 
@@ -370,7 +381,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
 
             if verbose:
                 debug(f"Writing plain Parquet with {codec.name} compression...")
-            with scoped_write_memory_limit(con, None, verbose):
+            with scoped_write_memory_limit(con, memory_limit, verbose):
                 con.execute(copy_query)
 
             if is_remote:
