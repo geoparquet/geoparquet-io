@@ -1072,6 +1072,28 @@ class TestPartialStatisticsAreNotJudged:
         assert r["passed"] is True
         assert any(f"{n - 1} of {n} row groups" in w for w in r["warnings"])
 
+    def test_pushdown_scales_missing_statistics_by_bytes(self, monkeypatch):
+        """The unproven groups' byte share caps the skip rate, not their count.
+
+        Eight covered groups holding a tenth of the file's bytes can prove at
+        most that tenth skippable; scaling by group count would claim half.
+        """
+        boxes = tiling(8)
+        weights = {"rows": [1.0] * 8, "bytes": [10.0] * 8, "file_bytes": 800.0, "total_groups": 16}
+        monkeypatch.setattr(mod, "check_bbox_structure", lambda pf, v=False: {})
+        monkeypatch.setattr(mod, "primary_geometry_column", lambda *a, **k: "geometry")
+        monkeypatch.setattr(mod, "get_per_row_group_native_geo_stats", lambda *a, **k: boxes)
+        monkeypatch.setattr(mod, "get_file_metadata", lambda pf: {"num_row_groups": 16})
+        monkeypatch.setattr(mod, "column_is_geographic", lambda pf: False)
+        monkeypatch.setattr(mod, "_row_group_weights", lambda pf, b: weights)
+
+        r = mod.check_spatial_pushdown_readiness("x.parquet")
+
+        unscaled = mod._spatial_locality_metrics(boxes, rows=[1.0] * 8, sizes=[10.0] * 8)
+        assert r["estimated_skip_rate"] == pytest.approx(
+            unscaled["estimated_skip_rate"] * (80.0 / 800.0)
+        )
+
 
 class TestPushdownGoesThroughCore:
     """``check spatial`` and ``Table.check_spatial_pushdown()`` reach the verdict the same way."""

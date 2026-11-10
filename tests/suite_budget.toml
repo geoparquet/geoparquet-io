@@ -41,7 +41,7 @@
 # +3: Table.write/create_pmtiles/create_pmtiles_pyramid forward exactly their signature.
 # +4 (#1087): Table-door call-parity cases for inspect meta, summary and stats (+3),
 # and one malformed block read alike by gpio inspect and Table.metadata (+1).
-max_collected = 14825
+max_collected = 14826
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

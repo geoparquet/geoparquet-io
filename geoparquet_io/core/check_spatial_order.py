@@ -861,8 +861,15 @@ def check_spatial_pushdown_readiness(
             geographic=column_is_geographic(parquet_file),
         )
         if num_rgs > len(row_group_bboxes):
-            # Missing statistics cannot prove a row group is skippable.
-            scale = len(row_group_bboxes) / num_rgs
+            # Missing statistics cannot prove a row group is skippable, so
+            # only the covered groups' byte share may count as skippable;
+            # when the footer gives no sizes the group count stands in.
+            file_bytes = weights["file_bytes"]
+            scale = (
+                sum(weights["bytes"]) / file_bytes
+                if file_bytes
+                else len(row_group_bboxes) / num_rgs
+            )
             metrics = {**metrics, "estimated_skip_rate": metrics["estimated_skip_rate"] * scale}
     return pushdown_readiness_from_locality(len(row_group_bboxes), metrics)
 
