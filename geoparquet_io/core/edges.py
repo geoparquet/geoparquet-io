@@ -26,7 +26,9 @@ This module owns:
   strip a rewrite runs on a block (:func:`strip_edges`; the composer puts the
   data's edges back);
 * the point a planar-only operation (a cell key) takes for non-planar
-  geometry (:func:`representative_point_sql`).
+  geometry (:func:`representative_point_sql`);
+* the refusal a planar-only *export* format owes non-planar geometry
+  (:func:`require_planar_export`).
 
 It is a leaf: it imports nothing from gpio but the exceptions and the logger,
 so every layer can ask it, from ``duckdb_utils`` up. Reading a file or a table
@@ -376,6 +378,41 @@ def agree_across_files(per_file: Mapping[str, Mapping[str, str]]) -> dict[str, s
                 "them to one edges declaration first."
             )
     return dict(answers[0][1])
+
+
+# ---------------------------------------------------------------------------
+# Planar-only export formats
+# ---------------------------------------------------------------------------
+
+
+def require_planar_export(target: str, column: str, edges: object) -> None:
+    """Refuse an export to the planar-only format ``target`` for a non-planar column.
+
+    GeoJSON (RFC 7946 3.1.1), GeoPackage, FlatGeobuf, Shapefile and a WKT CSV
+    all give the segment between two vertices straight Cartesian
+    interpretation, and none of them has a place to say otherwise. Writing one
+    of them therefore drops the declaration and silently changes what the same
+    coordinates mean -- a pole-enclosing ring stops being the polar region and
+    becomes a degenerate collinear one -- so the export is refused instead
+    (#1289; GeoJSON first, in #1297).
+
+    Only a GeoParquet edge algorithm counts (:func:`is_nonplanar`): a typo, a
+    number or an explicit ``planar`` is no declaration gpio can honor and
+    exports as before. The declaration alone decides, including for point-only,
+    null and empty data, and skipping the planar geometry repair (where the
+    format's command has that option) does not make the conversion safe.
+    ``target`` names the format in the message, as a user spells it; ``column``
+    is the geometry column being exported.
+    """
+    if not is_nonplanar(edges):
+        return
+    raise GeoParquetError(
+        f"{target} export does not support non-planar edges. Column {column!r} "
+        f"declares {edges!r} edges, and {target} gives its segments straight "
+        "Cartesian interpretation. Keep the data in GeoParquet, or use a "
+        "geodesic-aware tool to densify and cut the shapes into a planar "
+        "representation before exporting."
+    )
 
 
 # ---------------------------------------------------------------------------

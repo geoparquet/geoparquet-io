@@ -18,7 +18,8 @@ from typing import IO
 from geoparquet_io.core.column_selection import split_column_list
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite
-from geoparquet_io.core.geojson_stream import require_planar_geojson_file
+from geoparquet_io.core.geojson_stream import GEOJSON_EXPORT
+from geoparquet_io.core.geometry_repair import require_planar_export_file
 from geoparquet_io.core.logging_config import debug, success
 from geoparquet_io.core.streaming import is_stdin
 
@@ -703,7 +704,7 @@ def create_pmtiles_from_geoparquet(
 
     # Check the source before an extract/reproject child can lose its edge
     # declaration, and before tippecanoe can create or overwrite an archive.
-    require_planar_geojson_file(input_path, profile=profile)
+    require_planar_export_file(input_path, GEOJSON_EXPORT, profile=profile)
 
     if chunks:
         # Deferred: pmtiles_chunks tiles each chunk through this function.

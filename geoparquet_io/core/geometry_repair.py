@@ -17,6 +17,13 @@ This module provides three injection styles:
 * :func:`repair_arrow_table_geometry` — count, warn, and repair a WKB-encoded
   PyArrow table's geometry column. Used by extractors that assemble a table in
   memory (WFS, ArcGIS, BigQuery, Carto).
+
+It also holds the planar-guard family that rides along with the repair, since
+each one asks the same question of the same carriers: :func:`warn_planar_math`
+and :func:`warn_planar_math_for_file` (planar math still runs, and says so) and
+:func:`require_planar_export_file` (a planar-only export format refuses). The
+policy each one applies belongs to ``core/edges``; gathering a file's or a
+table's declaration is this module's half.
 """
 
 from geoparquet_io.core.duckdb_utils import (
@@ -24,8 +31,9 @@ from geoparquet_io.core.duckdb_utils import (
     fetch_one,
     is_interrupt,
     quote_identifier,
+    uses_aws_profile,
 )
-from geoparquet_io.core.edges import is_geodesic, is_nonplanar
+from geoparquet_io.core.edges import is_geodesic, is_nonplanar, require_planar_export
 from geoparquet_io.core.exceptions import GeometryError
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.geometry_detection import (
@@ -128,6 +136,52 @@ def warn_planar_math_for_file(op: str, input_path: str, geometry_column: str | N
         return
     if column:
         _warn_planar_edges(op, column, edges)
+
+
+def _export_input_files(input_path: str) -> list[str]:
+    """Every footer an export must read, so a planar-first glob cannot hide rows."""
+    from geoparquet_io.core.file_utils import (
+        get_all_parquet_files,
+        glob_matches,
+        has_glob_pattern,
+    )
+
+    if has_glob_pattern(input_path):
+        # Every match, not only `.parquet`: `*.pq` is a GeoParquet glob too.
+        return glob_matches(input_path)
+    return get_all_parquet_files(input_path)
+
+
+@uses_aws_profile
+def require_planar_export_file(
+    input_path: str,
+    target: str,
+    geometry_column: str | None = None,
+    profile: str | None = None,
+) -> None:
+    """Refuse a planar-only export of ``input_path`` before it writes anything.
+
+    The file twin of :func:`~geoparquet_io.core.edges.require_planar_export`,
+    for the export formats that take a path: GeoJSON and PMTiles, and the GDAL
+    and CSV writers (#1289). Every footer of a glob or a directory is read, so
+    a planar first file cannot hide a later non-planar declaration, and the
+    column judged is the caller's or the file's own primary (the owner's
+    answer, the ``geo`` block and the native type both). The footers are read
+    under the same scoped AWS profile as the rest of the command.
+    """
+    from geoparquet_io.core.write_funnels import collect_nonplanar_edges
+
+    edges = {
+        column: algorithm
+        for path in _export_input_files(input_path)
+        for column, algorithm in collect_nonplanar_edges(path).items()
+    }
+    if not edges:
+        return
+    if geometry_column is None:
+        files = _export_input_files(input_path)
+        geometry_column = resolve_geometry_column(files[0] if files else input_path)
+    require_planar_export(target, geometry_column, edges.get(geometry_column))
 
 
 def _warn_planar_edges(op: str, geometry_column: str, edges: str | None) -> None:
