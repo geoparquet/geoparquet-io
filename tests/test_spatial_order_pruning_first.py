@@ -640,12 +640,16 @@ class TestStandalonePrintPath:
         assert messages.count("spatially ordered") <= 1
 
 
-def _write_bbox_file(path, n_rows, n_groups, shuffle_seed=None, bbox_name="bbox", decoy=None):
+def _write_bbox_file(
+    path, n_rows, n_groups, shuffle_seed=None, bbox_name="bbox", decoy=None, null_stats_group=None
+):
     """A 1.1 file with a bbox covering column, ``n_groups`` row groups, points on a grid walk.
 
     ``decoy`` adds a struct column of that name BEFORE the real one, carrying
     the boxes of a perfectly sorted file: what a stale or secondary bbox
-    column looks like to a name-suffix heuristic.
+    column looks like to a name-suffix heuristic. ``null_stats_group`` nulls
+    the bbox cells of that physical row group, so its column chunk carries no
+    statistics.
     """
     import json
     import struct
@@ -683,7 +687,10 @@ def _write_bbox_file(path, n_rows, n_groups, shuffle_seed=None, bbox_name="bbox"
     columns = {"geometry": geoms}
     if decoy:
         columns[decoy] = pa.array(sorted_boxes, type=struct_type)
-    columns[bbox_name] = pa.array(bboxes, type=struct_type)
+    cells = [
+        None if min(k // per, n_groups - 1) == null_stats_group else b for k, b in enumerate(bboxes)
+    ]
+    columns[bbox_name] = pa.array(cells, type=struct_type)
     table = pa.table(columns).replace_schema_metadata({b"geo": json.dumps(geo).encode()})
     pq.write_table(table, path, row_group_size=per, compression="zstd")
     assert pq.ParquetFile(path).metadata.num_row_groups == n_groups
@@ -1042,6 +1049,28 @@ class TestFooterCheckOwnsTheVerdict:
         )
 
         assert out["judged"] and out["passed"], "the native-stats path judged the layout"
+
+
+class TestPartialStatisticsAreNotJudged:
+    """Statistics that miss row groups cannot stand in for the file.
+
+    ``get_per_row_group_bbox_stats`` drops a row group whose chunk carries no
+    bbox statistics, so a judged verdict over what remains would score the
+    boxes it can see and silently ignore the rest (review: partial stats).
+    """
+
+    def test_a_group_without_statistics_withholds_the_verdict(self, tmp_path, monkeypatch):
+        n = FLOOR + 2
+        path = _write_bbox_file(tmp_path / "f.parquet", 400, n, shuffle_seed=3, null_stats_group=0)
+        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
+
+        r = mod.check_spatial_order(path, 10, 100, verbose=False, return_results=True, quiet=True)
+
+        # The same file with full statistics is a judged failure (the footer
+        # check owns the verdict above); one statless group withholds it.
+        assert r["judged"] is False
+        assert r["passed"] is True
+        assert any(f"{n - 1} of {n} row groups" in w for w in r["warnings"])
 
 
 class TestPushdownGoesThroughCore:

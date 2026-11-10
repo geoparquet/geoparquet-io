@@ -359,12 +359,16 @@ def _check_spatial_order_from_row_group_bboxes(
     # row-group count allows -- not the consecutive-pair overlap above, which
     # is ~1.0 for a perfectly ordered file and so cannot decide anything
     # (#755). Row and byte weights come from the footer; a bbox whose stats
-    # are not finite cannot be trusted, so the file falls back to "no
-    # statistics" rather than a silent pass.
+    # are not finite cannot be trusted, and statistics that miss row groups
+    # would judge only the boxes they can see, so either case withholds the
+    # verdict rather than silently passing or failing a subset.
     finite_bboxes = _finite_bboxes(row_group_bboxes)
     weights = _row_group_weights(parquet_file, finite_bboxes)
+    total_groups = weights["total_groups"]
+    covered = bool(finite_bboxes) and len(finite_bboxes) == len(row_group_bboxes)
+    complete = covered and total_groups in (None, len(finite_bboxes))
     metrics: dict = {}
-    if finite_bboxes and len(finite_bboxes) == len(row_group_bboxes):
+    if complete:
         metrics = _spatial_locality_metrics(
             finite_bboxes,
             rows=weights["rows"],
@@ -376,6 +380,11 @@ def _check_spatial_order_from_row_group_bboxes(
     passed, judged, warnings = _spatial_order_verdict(
         len(finite_bboxes) if metrics else 0, efficiency, weights["file_bytes"]
     )
+    if covered and not complete:
+        warnings = [
+            f"Spatial ordering not judged: row-group statistics cover "
+            f"{len(finite_bboxes)} of {total_groups} row groups"
+        ]
 
     avg_area_ratio: float | None = metrics.get("avg_bbox_area_ratio")
     avg_skip_rate: float | None = metrics.get("estimated_skip_rate")
@@ -456,7 +465,7 @@ def _row_group_weights(parquet_file: str, bboxes: list[dict]) -> dict:
         groups = []
     if not groups:
         uniform = [1.0] * len(bboxes)
-        return {"rows": uniform, "bytes": list(uniform), "file_bytes": None}
+        return {"rows": uniform, "bytes": list(uniform), "file_bytes": None, "total_groups": None}
     per_group = {group["row_group_id"]: group for group in groups}
     rows = [
         max(float(per_group.get(b["row_group_id"], {}).get("num_rows", 0)), 1.0) for b in bboxes
@@ -469,6 +478,7 @@ def _row_group_weights(parquet_file: str, bboxes: list[dict]) -> dict:
         "rows": rows,
         "bytes": sizes,
         "file_bytes": float(sum(group["compressed_bytes"] for group in groups)),
+        "total_groups": len(groups),
     }
 
 
