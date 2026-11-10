@@ -16,6 +16,7 @@ from geoparquet_io.core.check_verdict import (
     result_verdict,
     worst,
 )
+from geoparquet_io.core.crs_utils import column_is_geographic
 from geoparquet_io.core.duckdb_metadata import (
     get_file_metadata,
     get_per_row_group_bbox_stats,
@@ -365,7 +366,10 @@ def _check_spatial_order_from_row_group_bboxes(
     metrics: dict = {}
     if finite_bboxes and len(finite_bboxes) == len(row_group_bboxes):
         metrics = _spatial_locality_metrics(
-            finite_bboxes, rows=weights["rows"], sizes=weights["bytes"]
+            finite_bboxes,
+            rows=weights["rows"],
+            sizes=weights["bytes"],
+            geographic=column_is_geographic(parquet_file),
         )
     efficiency: float | None = metrics.get("skip_rate_efficiency")
 
@@ -593,11 +597,12 @@ def _sample_distances(con, raw_url, geometry_column, limit_rows, random_sample_s
     return consecutive_avg, random_avg
 
 
-def _compute_data_extent(row_group_bboxes: list[dict]) -> dict:
+def _compute_data_extent(row_group_bboxes: list[dict], *, geographic: bool = False) -> dict:
     """Compute the total spatial extent across all row group bboxes.
 
     Args:
         row_group_bboxes: List of dicts with xmin, ymin, xmax, ymax keys.
+        geographic: Whether the file's CRS is geographic (how X folds).
 
     Returns:
         Dict with xmin, ymin, xmax, ymax for the full extent.
@@ -605,14 +610,12 @@ def _compute_data_extent(row_group_bboxes: list[dict]) -> dict:
     Raises:
         ValueError: If row_group_bboxes is empty.
     """
+    from geoparquet_io.core.geo_metadata import bbox_xy, row_group_geometry_stats
+
     if not row_group_bboxes:
         raise ValueError("No row group bboxes provided")
-    return {
-        "xmin": min(b["xmin"] for b in row_group_bboxes),
-        "ymin": min(b["ymin"] for b in row_group_bboxes),
-        "xmax": max(b["xmax"] for b in row_group_bboxes),
-        "ymax": max(b["ymax"] for b in row_group_bboxes),
-    }
+    bbox = row_group_geometry_stats(row_group_bboxes, geographic=geographic).bbox
+    return dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox_xy(bbox), strict=True))
 
 
 def _axis_overlap_share(a0: float, a1: float, g0: float, g1: float, half: float) -> float:
@@ -707,6 +710,8 @@ def _spatial_locality_metrics(
     rows: list[float] | None = None,
     sizes: list[float] | None = None,
     query_fraction: float = _DEFAULT_QUERY_FRACTION,
+    *,
+    geographic: bool = False,
 ) -> dict:
     """The pruning-efficiency numbers for a row-group layout, from the footer only.
 
@@ -719,7 +724,7 @@ def _spatial_locality_metrics(
     the extent, so a failure can say whether one outlier or the whole file is
     at fault (PORTO-FMT-060/061).
     """
-    extent = _compute_data_extent(row_group_bboxes)
+    extent = _compute_data_extent(row_group_bboxes, geographic=geographic)
     estimated = _weighted_skip_rate(row_group_bboxes, rows, sizes, query_fraction)
     ideal_boxes = _full_tiling_bboxes(extent, len(row_group_bboxes))
     ideal = _weighted_skip_rate(ideal_boxes, query_fraction=query_fraction)
@@ -843,6 +848,7 @@ def check_spatial_pushdown_readiness(
             rows=weights["rows"],
             sizes=weights["bytes"],
             query_fraction=query_fraction,
+            geographic=column_is_geographic(parquet_file),
         )
         if num_rgs > len(row_group_bboxes):
             # Missing statistics cannot prove a row group is skippable.
