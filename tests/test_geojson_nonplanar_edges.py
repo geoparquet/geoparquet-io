@@ -297,7 +297,10 @@ def test_remote_glob_checks_each_matched_footer(monkeypatch):
     monkeypatch.setattr("geoparquet_io.core.write_funnels.collect_nonplanar_edges", collect)
     with pytest.raises(GeoParquetError, match="spherical"):
         require_planar_export_file(
-            "s3://fake/*.parquet", "GeoJSON", "geometry", profile="test-only"
+            "s3://fake/*.parquet",
+            target="GeoJSON",
+            geometry_column="geometry",
+            profile="test-only",
         )
     assert [path for path, _ in seen] == ["s3://fake/a.parquet", "s3://fake/b.parquet"]
     assert all(config["profile"] == "test-only" for _, config in seen)

@@ -445,7 +445,7 @@ def write_gdal_format(
     # declaration would be dropped and the same coordinates would mean a
     # different shape. Refused before anything is written, as GeoJSON is
     # (#1289).
-    require_planar_export_file(input_path, str(config["description"]), profile=profile)
+    require_planar_export_file(input_path, target=str(config["description"]), profile=profile)
 
     handle_output_overwrite(output_path, overwrite, remove=False)
 
@@ -642,7 +642,7 @@ def write_csv(
     # `--no-wkt` leaves the geometry column out of the SELECT entirely, so that
     # export carries no coordinates and no edge interpretation to lose.
     if include_wkt:
-        require_planar_export_file(input_path, "CSV", profile=profile)
+        require_planar_export_file(input_path, target="CSV", profile=profile)
 
     handle_output_overwrite(output_path, overwrite, remove=False)
 

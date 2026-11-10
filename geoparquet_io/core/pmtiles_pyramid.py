@@ -386,9 +386,9 @@ def create_pmtiles_pyramid(
     if not _check_tile_join():
         raise TileJoinNotFoundError()
 
-    require_planar_export_file(input_path, GEOJSON_EXPORT)
+    require_planar_export_file(input_path, target=GEOJSON_EXPORT)
     if include_features and features_source:
-        require_planar_export_file(features_source, GEOJSON_EXPORT)
+        require_planar_export_file(features_source, target=GEOJSON_EXPORT)
 
     info, plan = _detect_and_plan(
         input_path,

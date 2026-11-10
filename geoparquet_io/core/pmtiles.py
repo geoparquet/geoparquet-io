@@ -704,7 +704,7 @@ def create_pmtiles_from_geoparquet(
 
     # Check the source before an extract/reproject child can lose its edge
     # declaration, and before tippecanoe can create or overwrite an archive.
-    require_planar_export_file(input_path, GEOJSON_EXPORT, profile=profile)
+    require_planar_export_file(input_path, target=GEOJSON_EXPORT, profile=profile)
 
     if chunks:
         # Deferred: pmtiles_chunks tiles each chunk through this function.

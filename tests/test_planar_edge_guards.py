@@ -166,7 +166,7 @@ def test_a_nonplanar_secondary_column_does_not_block_a_planar_export(tmp_path):
     table = table.append_column("secondary", _table(carrier="native").column("geometry"))
     source = tmp_path / "mixed.parquet"
     pq.write_table(table, source)
-    require_planar_export_file(str(source), "FlatGeobuf")
+    require_planar_export_file(str(source), target="FlatGeobuf")
 
 
 def test_csv_without_wkt_exports_a_nonplanar_input(tmp_path):
@@ -243,6 +243,18 @@ def test_a_block_key_spelled_in_another_case_is_still_refused(tmp_path):
     with pytest.raises(GeoParquetError, match="non-planar"):
         write_geopackage(str(source), str(output))
     assert not output.exists()
+
+
+def test_the_file_guard_takes_its_target_by_keyword(tmp_path):
+    """Two positional strings in the sibling's opposite order invited a transpose.
+
+    ``warn_planar_math_for_file(op, input_path)`` against
+    ``require_planar_export_file(input_path, target=...)``: a swapped pair used
+    to be a silent no-op, so the target is keyword-only.
+    """
+    source = _source(tmp_path)
+    with pytest.raises(TypeError):
+        require_planar_export_file(str(source), "FlatGeobuf")
 
 
 def test_a_glob_is_checked_past_its_first_file(tmp_path):

@@ -156,11 +156,17 @@ def _export_input_files(input_path: str) -> list[str]:
 @uses_aws_profile
 def require_planar_export_file(
     input_path: str,
+    *,
     target: str,
     geometry_column: str | None = None,
     profile: str | None = None,
 ) -> None:
     """Refuse a planar-only export of ``input_path`` before it writes anything.
+
+    Everything but the path is keyword-only: the sibling
+    :func:`warn_planar_math_for_file` takes ``(op, input_path)`` and this takes
+    the path first, so two positional strings in the wrong order would have
+    read as a guard that quietly judged nothing.
 
     The file twin of :func:`~geoparquet_io.core.edges.require_planar_export`,
     for the export formats that take a path: GeoJSON and PMTiles, and the GDAL

@@ -753,7 +753,7 @@ def convert_to_geojson_stream(
         # The file's primary, with its `geo` block: a declared `footprint`
         # is the geometry even beside a `geometry` secondary (#1367).
         geometry_column = resolve_geometry_column(input_path, con=con)
-        require_planar_export_file(input_path, GEOJSON_EXPORT, geometry_column)
+        require_planar_export_file(input_path, target=GEOJSON_EXPORT, geometry_column=geometry_column)
         debug(f"Using geometry column: {geometry_column}")
         if not keep_crs and not needs_reproject:
             _refuse_extent_outside_lonlat(input_path, geometry_column)
