@@ -993,7 +993,8 @@ def _partition(
     from geoparquet_io.api.table import Table
 
     wrapper = Table(table, geometry_column=geometry_column)
-    return getattr(wrapper, method)(output_dir, **kwargs)
+    stats: dict = getattr(wrapper, method)(output_dir, **kwargs)
+    return stats
 
 
 def partition_by_h3(
@@ -1458,9 +1459,17 @@ def _parse_min_size(min_size: str | int) -> int:
             raise InvalidParameterError("min_size", f"byte count cannot be negative: {min_size}")
         return min_size
     try:
-        return parse_size_string(min_size)
+        parsed = parse_size_string(min_size)
     except ValueError as exc:
         raise InvalidParameterError("min_size", str(exc)) from None
+    if parsed is None:
+        # parse_size_string answers None for a blank string, which is no more a
+        # size than "one hundred megabytes" is; refuse it the same way rather
+        # than hand a None byte count to the size comparison in core.
+        raise InvalidParameterError(
+            "min_size", f"expected a size string or byte count, got {min_size!r}"
+        )
+    return parsed
 
 
 def _sub_partition(
@@ -1512,7 +1521,7 @@ def _sub_partition(
     offending = core_sub_partition.offending_single_file_only_options(
         partition_type,
         column_name,
-        output_dir,
+        None if output_dir is None else str(output_dir),
         column_label="column_name",
         output_label="output_dir",
     )

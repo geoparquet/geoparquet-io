@@ -34,6 +34,31 @@ group with `from geoparquet_io import cli` must now import it from its owner:
     uv add geoparquet-io
     ```
 
+## Type Checking
+
+The package ships a `py.typed` marker, so mypy and other type checkers read
+gpio's own annotations instead of treating every name as `Any`. `Table`, the
+`ops` functions and the `check_*` functions are type-checked in CI, and the
+types travel into your code. This one has no CLI counterpart — the CLI's
+contract is its `--help` — so there is a single example:
+
+```python
+import geoparquet_io as gpio
+from geoparquet_io import Table, WriteOptions
+
+def tidy(src: str, dst: str) -> str:
+    table: Table = gpio.read(src)
+    rows: int = table.num_rows
+    table.add_bbox().sort_hilbert().write(dst, WriteOptions(compression="zstd"))
+    return f"{rows} rows, {gpio.check_all(dst).verdict()}"
+```
+
+Every path argument accepts `pathlib.Path` as well as `str` — `read()` and
+`write()` declare `str | Path`, the `check_*` functions
+`str | os.PathLike[str]`. The modules under `geoparquet_io.core` are not fully
+annotated yet, so a value that comes back from one of them may still widen to
+`Any`.
+
 ## Quick Start
 
 ```python

@@ -2021,7 +2021,10 @@ def write_geoparquet_table(
     geo_bbox: list[float] | None = None,
     memory_limit: str | None = None,
     write_strategy: str | None = None,
-    input_crs: dict | None = None,
+    # `dict | str | None`, as `parquet_writer.resolve_input_crs` declares it: a
+    # caller whose source CRS is unknown passes the PARQUET_UNKNOWN_CRS marker,
+    # which is a string, and this function assigns that same marker below.
+    input_crs: dict | str | None = None,
     custom_metadata: dict | None = None,
 ) -> None:
     """

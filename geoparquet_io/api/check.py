@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import functools
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from geoparquet_io.core.check_parquet_structure import CheckProfile
 
 
@@ -231,19 +233,24 @@ def _names_one_remote_object(path: str) -> bool:
     return is_remote_url(path) and bool(last) and not hive and not any(c in url for c in "*?[")
 
 
-def _one_file(path, command: str) -> str:
-    """*path* as a string, refused when it names a directory or glob of files."""
+def _one_file(path: str | os.PathLike[str], command: str) -> str:
+    """*path* as a string, refused when it names a directory or glob of files.
+
+    ``os.PathLike[str]`` rather than a bare ``os.PathLike``, so ``os.fspath``
+    is known to hand back a ``str``: the unparameterised form is
+    ``PathLike[Any]`` and loses the type here.
+    """
     from geoparquet_io.core.exceptions import InvalidParameterError
     from geoparquet_io.core.file_utils import is_partition_path
 
-    path = os.fspath(path)
-    if is_partition_path(path) and not _names_one_remote_object(path):
+    text = os.fspath(path)
+    if is_partition_path(text) and not _names_one_remote_object(text):
         raise InvalidParameterError(
             "path",
-            f"{path} is a directory or glob; a path-level check reads one file. "
+            f"{text} is a directory or glob; a path-level check reads one file. "
             f"Check each file, or run `gpio check {command}` for a multi-file run.",
         )
-    return path
+    return text
 
 
 def _not_geoparquet(path: str, check_type: str, categorised: bool) -> CheckResult | None:
@@ -284,13 +291,17 @@ def _one_file_only(command: str, *, gate: bool = True, categorised: bool = False
     return decorate
 
 
-def _structure_check(path, check_type: str, func, **kwargs) -> CheckResult:
-    path = os.fspath(path)
-    results = func(path, verbose=False, return_results=True, quiet=True, **kwargs)
-    return CheckResult(results, check_type=check_type, source_path=path)
+def _structure_check(
+    path: str | os.PathLike[str], check_type: str, func: Callable[..., Any], **kwargs: Any
+) -> CheckResult:
+    text = os.fspath(path)
+    results = func(text, verbose=False, return_results=True, quiet=True, **kwargs)
+    return CheckResult(results, check_type=check_type, source_path=text)
 
 
-def _check_structure(path: str | os.PathLike, profile: CheckProfile | None = None) -> CheckResult:
+def _check_structure(
+    path: str | os.PathLike[str], profile: CheckProfile | None = None
+) -> CheckResult:
     """The structure checks: row groups, bbox, covering, compression, bloom filters.
 
     What :meth:`Table.check` runs.
@@ -300,7 +311,7 @@ def _check_structure(path: str | os.PathLike, profile: CheckProfile | None = Non
     return _structure_check(path, "all", core.check_all, profile=profile)
 
 
-def _stage(check, path, stage: str, **kwargs) -> dict:
+def _stage(check: Callable[..., CheckResult], path: str, stage: str, **kwargs: Any) -> dict:
     """One stage's results, or why it could not run.
 
     One dying check does not take the rest down (#1082).
@@ -319,7 +330,7 @@ def _stage(check, path, stage: str, **kwargs) -> dict:
 
 @_one_file_only("all", categorised=True)
 def check_all(
-    path: str | os.PathLike,
+    path: str | os.PathLike[str],
     profile: CheckProfile | None = None,
     sample_size: int = 100,
     limit_rows: int = 500000,
@@ -345,24 +356,26 @@ def check_all(
     """
     from geoparquet_io.core.check_spatial_order import SPATIAL_ORDER_CHECK
 
+    # The same normalisation `_check_structure` recorded as its `source_path`;
+    # spelled here so the later stages carry a `str`, not `str | None`.
+    source = os.fspath(path)
     structure = _check_structure(path, profile)
-    path = structure.source_path
     results = {
         **structure.to_dict(),
         "spatial": _stage(
             _check_spatial_order,
-            path,
+            source,
             SPATIAL_ORDER_CHECK,
             sample_size=sample_size,
             limit_rows=limit_rows,
         ),
-        "spec": _stage(validate, path, "Spec validation"),
+        "spec": _stage(validate, source, "Spec validation"),
     }
-    return CheckResult(results, check_type="all", source_path=path)
+    return CheckResult(results, check_type="all", source_path=source)
 
 
 @_one_file_only("compression")
-def check_compression(path: str | os.PathLike) -> CheckResult:
+def check_compression(path: str | os.PathLike[str]) -> CheckResult:
     """Check the geometry column's compression; ZSTD is recommended. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
 
@@ -370,7 +383,9 @@ def check_compression(path: str | os.PathLike) -> CheckResult:
 
 
 @_one_file_only("row-group")
-def check_row_groups(path: str | os.PathLike, profile: CheckProfile | None = None) -> CheckResult:
+def check_row_groups(
+    path: str | os.PathLike[str], profile: CheckProfile | None = None
+) -> CheckResult:
     """Check row-group sizes for cloud-native access. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
 
@@ -379,7 +394,9 @@ def check_row_groups(path: str | os.PathLike, profile: CheckProfile | None = Non
 
 @_one_file_only("bbox")
 def check_bbox(
-    path: str | os.PathLike, sample_rows: int = DEFAULT_BBOX_SAMPLE_ROWS, all_rows: bool = False
+    path: str | os.PathLike[str],
+    sample_rows: int = DEFAULT_BBOX_SAMPLE_ROWS,
+    all_rows: bool = False,
 ) -> CheckResult:
     """Check bbox structure, covering metadata, and that each bbox covers its geometry.
 
@@ -397,7 +414,7 @@ def check_bbox(
 
 
 @_one_file_only("all")
-def check_bloom_filters(path: str | os.PathLike) -> CheckResult:
+def check_bloom_filters(path: str | os.PathLike[str]) -> CheckResult:
     """Check which columns carry bloom filters for point lookups. See :func:`check_all`."""
     from geoparquet_io.core import check_parquet_structure as core
 
@@ -405,7 +422,7 @@ def check_bloom_filters(path: str | os.PathLike) -> CheckResult:
 
 
 @_one_file_only("optimization")
-def check_optimization(path: str | os.PathLike) -> CheckResult:
+def check_optimization(path: str | os.PathLike[str]) -> CheckResult:
     """Score a file's spatial-query optimization (geo types, stats, order, row groups, codec)."""
     from geoparquet_io.core import check_optimization as core
 
@@ -413,7 +430,7 @@ def check_optimization(path: str | os.PathLike) -> CheckResult:
 
 
 def _check_spatial_order(
-    path: str | os.PathLike, sample_size: int = 100, limit_rows: int = 500000
+    path: str | os.PathLike[str], sample_size: int = 100, limit_rows: int = 500000
 ) -> CheckResult:
     """Spatial order alone: ``check all``'s spatial stage and :meth:`Table.check_spatial`."""
     from geoparquet_io.core import check_spatial_order as core
@@ -429,7 +446,7 @@ def _check_spatial_order(
 
 @_one_file_only("spatial")
 def check_spatial(
-    path: str | os.PathLike, sample_size: int = 100, limit_rows: int = 500000
+    path: str | os.PathLike[str], sample_size: int = 100, limit_rows: int = 500000
 ) -> CheckResult:
     """Run what ``gpio check spatial`` runs: spatial order, with pushdown readiness folded in.
 
@@ -446,22 +463,24 @@ def check_spatial(
     """
     from geoparquet_io.core.check_spatial_order import with_pushdown
 
-    order = _check_spatial_order(path, sample_size, limit_rows)
-    path = order.source_path
-    return CheckResult(with_pushdown(path, order.to_dict()), check_type="spatial", source_path=path)
+    source = os.fspath(path)
+    order = _check_spatial_order(source, sample_size, limit_rows)
+    return CheckResult(
+        with_pushdown(source, order.to_dict()), check_type="spatial", source_path=source
+    )
 
 
-def _pushdown_readiness(path: str | os.PathLike) -> CheckResult:
+def _pushdown_readiness(path: str | os.PathLike[str]) -> CheckResult:
     """The unjudged pushdown measurement: :meth:`Table.check_spatial_pushdown`."""
     from geoparquet_io.core import check_spatial_order as core
 
-    path = os.fspath(path)
-    results = core.check_spatial_pushdown_readiness(path, verbose=False)
-    return CheckResult(results, check_type="spatial_pushdown", source_path=path)
+    text = os.fspath(path)
+    results = core.check_spatial_pushdown_readiness(text, verbose=False)
+    return CheckResult(results, check_type="spatial_pushdown", source_path=text)
 
 
 @_one_file_only("spatial")
-def check_spatial_pushdown(path: str | os.PathLike) -> CheckResult:
+def check_spatial_pushdown(path: str | os.PathLike[str]) -> CheckResult:
     """Estimate how many row groups a regional query can skip, as ``gpio check spatial`` judges it.
 
     A file with native geo types needs no bbox column, and a single row group
@@ -470,13 +489,13 @@ def check_spatial_pushdown(path: str | os.PathLike) -> CheckResult:
     """
     from geoparquet_io.core.check_spatial_order import judged_pushdown
 
-    path = os.fspath(path)
-    return CheckResult(judged_pushdown(path), check_type="spatial_pushdown", source_path=path)
+    text = os.fspath(path)
+    return CheckResult(judged_pushdown(text), check_type="spatial_pushdown", source_path=text)
 
 
 @_one_file_only("spec", gate=False)
 def validate(
-    path: str | os.PathLike,
+    path: str | os.PathLike[str],
     version: str | None = None,
     sample_size: int = 1000,
     skip_data_validation: bool = False,
@@ -492,9 +511,9 @@ def validate(
     from geoparquet_io.core.check_verdict import SEVERITY_KEY, validation_verdict
     from geoparquet_io.core.validate import validate_geoparquet
 
-    path = os.fspath(path)
+    text = os.fspath(path)
     outcome = validate_geoparquet(
-        path,
+        text,
         target_version=version,
         validate_data=not skip_data_validation,
         sample_size=sample_size,
@@ -516,4 +535,4 @@ def validate(
             f"{c.name}: {c.message}" for c in outcome.checks if c.status.value == "warning"
         ],
     }
-    return CheckResult(results, check_type="validate", source_path=path)
+    return CheckResult(results, check_type="validate", source_path=text)
