@@ -9,11 +9,16 @@ them) died with a DuckDB binder error, while the CLI wrote the same file.
 it), the in-memory and streaming strategies (which labelled a coordinate struct
 ``encoding: WKB``), and an explicit WKB-carrier version, which declared one over
 data it cannot hold. ``geometry_types`` came out ``[]`` on every path.
+
+Each case runs over both carrier shapes a GeoArrow column arrives in (see
+``CARRIERS``): the bare coordinate struct, and the same struct resolved into its
+extension type, which is what gpio's own GeoArrow output reads back as.
 """
 
 from pathlib import Path
 
 import geoarrow.pyarrow as ga
+import geoarrow.types as gt
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -41,6 +46,16 @@ SPEC_TYPE = {
 #: Every ``Table.write`` strategy, by its public name.
 STRATEGIES = ["duckdb-kv", "in-memory", "streaming", "disk-rewrite"]
 
+#: The two shapes a GeoArrow column reaches a write in. ``bare-struct`` is the
+#: coordinate struct alone, as the checked-in fixtures hold it.
+#: ``extension-type`` is the same column carrying ``ARROW:extension:name``,
+#: which pyarrow resolves into a ``pa.ExtensionType`` once ``geoarrow.pyarrow``
+#: is imported -- and gpio imports it, so this is the shape its own
+#: ``--geoparquet-version 1.1-geoarrow`` output reads back as. The witness
+#: judged the extension type, never its ``storage_type``, so every native
+#: encoding read as "not GeoArrow" and the block said ``WKB`` over a struct.
+CARRIERS = ["bare-struct", "extension-type"]
+
 #: The versions whose primary carrier is WKB bytes (or a native Parquet GEOMETRY
 #: type built from them) and whose spec permits nothing else: none of them can
 #: hold a GeoArrow coordinate struct. 1.1 is absent on purpose -- it permits the
@@ -52,6 +67,33 @@ def _fixture(encoding: str) -> Path:
     return DATA / f"data-{encoding}-encoding_native.parquet"
 
 
+@pytest.fixture(params=CARRIERS)
+def carrier(request) -> str:
+    """Which of the two GeoArrow carrier shapes the input under test holds."""
+    return request.param
+
+
+def _native(encoding: str, carrier: str, tmp_path: Path) -> Path:
+    """The ``encoding`` fixture, in the requested carrier shape.
+
+    ``extension-type`` is built by wrapping the fixture's own coordinate struct
+    in its GeoArrow extension type, which is what writing it tags the field
+    with -- the same file ``gpio convert geoparquet ... --geoparquet-version
+    1.1-geoarrow`` produces (#1438).
+    """
+    source = _fixture(encoding)
+    if carrier == "bare-struct":
+        return source
+    table = pq.read_table(source)
+    column = getattr(ga, encoding)().wrap_array(table.column("geometry").combine_chunks())
+    index = table.schema.get_field_index("geometry")
+    wrapped = table.set_column(index, pa.field("geometry", column.type), column)
+    out = tmp_path / f"{encoding}-{carrier}.parquet"
+    pq.write_table(wrapped, out)
+    assert isinstance(pq.read_schema(out).field("geometry").type, pa.ExtensionType)
+    return out
+
+
 def _wkb(path: Path) -> list:
     """The primary geometry as WKB, whatever encoding the file stores it in.
 
@@ -61,7 +103,9 @@ def _wkb(path: Path) -> list:
     table = pq.read_table(path)
     column = table.column("geometry").combine_chunks()
     encoding = sanitized_carried_geo(table.schema.metadata)["columns"]["geometry"]["encoding"]
-    wkb = ga.as_wkb(getattr(ga, encoding.lower())().wrap_array(column))
+    if not isinstance(column.type, pa.ExtensionType):
+        column = getattr(ga, encoding.lower())().wrap_array(column)
+    wkb = ga.as_wkb(column)
     return sorted(wkb.storage.to_pylist(), key=lambda value: value or b"")
 
 
@@ -131,36 +175,37 @@ def _assert_native_output(out: Path, encoding: str) -> None:
 
 
 @pytest.mark.parametrize("strategy", STRATEGIES)
-def test_every_strategy_keeps_a_native_point_column(strategy, tmp_path):
+def test_every_strategy_keeps_a_native_point_column(strategy, carrier, tmp_path):
+    source = _native("point", carrier, tmp_path)
     out = tmp_path / f"{strategy}.parquet"
-    gpio.read(_fixture("point")).write(out, write_strategy=strategy)
-    assert pq.read_metadata(out).num_rows == pq.read_metadata(_fixture("point")).num_rows
+    gpio.read(source).write(out, write_strategy=strategy)
+    assert pq.read_metadata(out).num_rows == pq.read_metadata(source).num_rows
     _assert_native_output(out, "point")
-    assert _wkb(out) == _wkb(_fixture("point"))
+    assert _wkb(out) == _wkb(source)
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize("encoding", ENCODINGS)
 @pytest.mark.parametrize("strategy", STRATEGIES)
-def test_every_strategy_keeps_every_native_encoding(strategy, encoding, tmp_path):
+def test_every_strategy_keeps_every_native_encoding(strategy, encoding, carrier, tmp_path):
+    source = _native(encoding, carrier, tmp_path)
     out = tmp_path / f"{strategy}-{encoding}.parquet"
-    gpio.read(_fixture(encoding)).write(out, write_strategy=strategy)
+    gpio.read(source).write(out, write_strategy=strategy)
     _assert_native_output(out, encoding)
-    assert _wkb(out) == _wkb(_fixture(encoding))
+    assert _wkb(out) == _wkb(source)
 
 
 # -- geometry_types (#1438 item 3) --------------------------------------------
 
 
 @pytest.mark.parametrize("encoding", ENCODINGS)
-def test_measured_geometry_types_survive_a_native_write(encoding, tmp_path):
+def test_measured_geometry_types_survive_a_native_write(encoding, carrier, tmp_path):
     """The encoding names the one type the column holds; ``[]`` lost it."""
+    source = _native(encoding, carrier, tmp_path)
     api_out = tmp_path / "api.parquet"
     cli_out = tmp_path / "cli.parquet"
-    gpio.read(_fixture(encoding)).write(api_out)
-    result = CliRunner().invoke(
-        cli, ["convert", "geoparquet", str(_fixture(encoding)), str(cli_out)]
-    )
+    gpio.read(source).write(api_out)
+    result = CliRunner().invoke(cli, ["convert", "geoparquet", str(source), str(cli_out)])
     assert result.exit_code == 0, result.output
     assert _geo_column(api_out)["geometry_types"] == [SPEC_TYPE[encoding]]
     assert _geo_column(cli_out)["geometry_types"] == [SPEC_TYPE[encoding]]
@@ -170,10 +215,11 @@ def test_measured_geometry_types_survive_a_native_write(encoding, tmp_path):
 
 
 @pytest.mark.parametrize("version", WKB_CARRIER_VERSIONS)
-def test_an_explicit_wkb_version_is_refused_by_the_api(version, tmp_path):
+def test_an_explicit_wkb_version_is_refused_by_the_api(version, carrier, tmp_path):
+    source = _native("polygon", carrier, tmp_path)
     out = tmp_path / "out.parquet"
     with pytest.raises(Exception, match="1.1-geoarrow") as excinfo:
-        gpio.read(_fixture("polygon")).write(out, geoparquet_version=version)
+        gpio.read(source).write(out, geoparquet_version=version)
     assert "polygon" in str(excinfo.value)
     assert not out.exists()
 
@@ -197,21 +243,22 @@ def test_an_explicit_wkb_version_is_refused_by_the_cli(version, tmp_path):
 
 
 @pytest.mark.parametrize("version", ["1.1", "1.1-geoarrow"])
-def test_a_1_1_request_keeps_the_native_encoding(version, tmp_path):
+def test_a_1_1_request_keeps_the_native_encoding(version, carrier, tmp_path):
     """1.1 permits the six GeoArrow encodings, so the request is satisfiable.
 
     It used to be honoured in the block and nowhere else: the struct passed
     through under ``encoding: WKB`` (#1438).
     """
+    source = _native("polygon", carrier, tmp_path)
     api_out = tmp_path / "api.parquet"
     cli_out = tmp_path / "cli.parquet"
-    gpio.read(_fixture("polygon")).write(api_out, geoparquet_version=version)
+    gpio.read(source).write(api_out, geoparquet_version=version)
     result = CliRunner().invoke(
         cli,
         [
             "convert",
             "geoparquet",
-            str(_fixture("polygon")),
+            str(source),
             str(cli_out),
             "--geoparquet-version",
             version,
@@ -317,6 +364,12 @@ def test_check_all_fix_repairs_every_native_encoding(encoding, tmp_path):
             ),
             ["MultiPolygon ZM"],
         ),
+        # The same coordinate struct resolved into its GeoArrow extension type,
+        # which is what pyarrow hands back once geoarrow.pyarrow is imported --
+        # and gpio imports it. Judged without unwrapping `storage_type` it read
+        # as "not a struct", so the block declared WKB over it (#1438).
+        ("polygon", ga.polygon(), ["Polygon"]),
+        ("point", ga.point().with_dimensions(gt.Dimensions.XYZM), ["Point ZM"]),
         # The dimension is why the Arrow type is read at all: "LineString" and
         # "LineString ZM" are distinct geometry_types entries.
         ("WKB", pa.binary(), []),

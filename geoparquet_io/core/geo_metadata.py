@@ -1954,12 +1954,19 @@ def geoarrow_geometry_types(encoding: str, arrow_type) -> list[str]:
     ``[]`` when the encoding is not one of the spec's six, or when
     ``arrow_type`` is not a coordinate struct (so the dimensions, which
     ``LineString`` and ``LineString ZM`` are distinct entries by, cannot be
-    read).
+    read). A GeoArrow extension type is one through its ``storage_type``.
     """
     import pyarrow as pa
 
     if encoding not in GEOARROW_ENCODINGS:
         return []
+    # A GeoArrow column pyarrow has resolved into its extension type -- what the
+    # ``ARROW:extension:name`` carrier gpio's own GeoArrow output holds reads
+    # back as, since gpio imports ``geoarrow.pyarrow`` -- is a coordinate struct
+    # under one more layer. Judged unwrapped it read as "not a struct", so the
+    # witness said "not GeoArrow" and the block declared WKB over it (#1438).
+    if isinstance(arrow_type, pa.ExtensionType):
+        arrow_type = arrow_type.storage_type
     while isinstance(arrow_type, pa.DataType) and (
         pa.types.is_list(arrow_type)
         or pa.types.is_large_list(arrow_type)
