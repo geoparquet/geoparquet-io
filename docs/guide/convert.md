@@ -990,7 +990,7 @@ Available versions:
 A GeoArrow-native input (a GeoParquet 1.1 file whose geometry is a coordinate
 struct rather than WKB) keeps that encoding: auto mode and `1.1` both write
 `1.1-geoarrow`, since GeoParquet 1.1 permits the six GeoArrow encodings beside
-WKB. `1.0`, `2.0` and `parquet-geo-only` are WKB-only, and gpio cannot
+WKB. `1.0`, `2.0` and `parquet-geo-only` are WKB-only, and gpio does not
 re-encode a coordinate struct as WKB, so asking for one of them over such an
 input is refused rather than written as a file whose metadata contradicts its
 schema.

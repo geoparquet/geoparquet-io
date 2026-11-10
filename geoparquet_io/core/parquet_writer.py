@@ -859,9 +859,9 @@ def geoarrow_output_version(
     stamp the requested version's carrier over the struct instead --
     ``encoding: WKB`` beside a ``STRUCT(x, y)`` at 1.1, and at 2.0 a file with
     no geometry identity at all, both of which ``gpio check spec`` fails
-    (#1438). The rest are refused: nothing in gpio re-encodes a coordinate
-    struct as WKB (DuckDB has no function that reads one), so there is no file
-    to write for them, and refusing beats writing one that contradicts itself.
+    (#1438). The rest are refused: by policy no write path here re-encodes a
+    coordinate struct as WKB, so there is no file to write for them, and
+    refusing beats writing one that contradicts itself.
 
     One answer for every write path and for the CLI and Python API alike. Auto
     mode arrives here already resolved to 1.1-geoarrow.
@@ -874,7 +874,7 @@ def geoarrow_output_version(
     raise InvalidParameterError(
         "geoparquet_version",
         f'{requested} stores geometry as WKB, but "{column}" holds GeoArrow-native '
-        f"{encoding} geometry, which gpio cannot re-encode as WKB. Write "
+        f"{encoding} geometry, which gpio does not re-encode as WKB. Write "
         f"--geoparquet-version {GEOARROW_CARRIER_VERSION} (what auto mode picks for "
         "this input) to keep the native encoding.",
     )
