@@ -16,6 +16,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.exceptions import PartitionError
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import partition_by_column
 
 
@@ -262,7 +263,7 @@ class TestMemoryLimitValidation:
                 output_folder=out,
                 column_name="cat",
                 skip_analysis=True,
-                memory_limit="1GB'; ATTACH 'evil.db' AS evil; --",
+                write=WriteOptions(memory_limit="1GB'; ATTACH 'evil.db' AS evil; --"),
             )
 
 

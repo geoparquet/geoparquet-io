@@ -21,7 +21,7 @@ import shapely
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+from geoparquet_io.core.crs_utils import crs_of
 from geoparquet_io.core.duckdb_utils import _escape_sql_string, get_duckdb_connection, sql_path
 
 LON, LAT = 139.9, 35.7
@@ -77,7 +77,7 @@ def _assert_point(geom) -> None:
 def test_the_fixture_carries_the_plain_string(name, native_files):
     with pq.ParquetFile(str(native_files[name])) as reader:
         assert b"geo" not in (reader.metadata.metadata or {})
-    assert extract_crs_from_parquet(str(native_files[name])) == LONLAT_STRINGS[name]
+    assert crs_of(str(native_files[name])) == LONLAT_STRINGS[name]
 
 
 def _h3_cells(native_files, tmp_path, name, *command) -> list:

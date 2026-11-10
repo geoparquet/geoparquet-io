@@ -31,13 +31,14 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from geoparquet_io.core.validate import (
     CheckStatus,
     ValidationCheck,
-    _check_covering_bbox_column_exists,
-    _check_covering_bbox_field_types,
-    _check_covering_bbox_paths,
-    _check_covering_bbox_structure,
+    _check_cover_bbox_column_exists,
+    _check_cover_bbox_field_types,
+    _check_cover_bbox_paths,
+    _check_cover_bbox_structure,
     _check_encoding_matches_data,
     _check_geo_key_unique,
     _check_geometry_types_match_data,
@@ -158,7 +159,7 @@ COLUMN_METADATA_CASES = [
 #: block no longer stops DuckDB reading the file (#1080). A ``geometry_types``
 #: string is still compared to the data as if it were a list, so
 #: geometry_types_match_data FAILs on top of geometry_types_list.
-CASCADING_CASES = {"geometry_types_not_a_list"}
+CASCADING_CASES: set[str] = set()  # #1080 fixed: one defect, one FAILED verdict
 
 
 @pytest.mark.parametrize(
@@ -242,7 +243,8 @@ def test_covering_bbox_missing_a_required_path(tmp_path):
 
 
 def test_covering_bbox_without_xmin_cannot_name_its_column(tmp_path):
-    """All three column-resolving checks must say so rather than guess a column."""
+    """The paths check fails it; the three column-resolving checks skip rather
+    than guess a column (one defect, one FAILED)."""
     paths = {key: value for key, value in BBOX_PATHS.items() if key != "xmin"}
     checks = verdicts(
         write_geoparquet(
@@ -253,22 +255,11 @@ def test_covering_bbox_without_xmin_cannot_name_its_column(tmp_path):
     )
     assert_verdict(
         checks,
-        "covering_bbox_column_exists_geometry",
+        "covering_bbox_paths_geometry",
         CheckStatus.FAILED,
-        "cannot determine bbox column name from covering",
+        "covering bbox missing required paths: ['xmin']",
     )
-    assert_verdict(
-        checks,
-        "covering_bbox_structure_geometry",
-        CheckStatus.FAILED,
-        "cannot determine bbox column name",
-    )
-    assert_verdict(
-        checks,
-        "covering_bbox_field_types_geometry",
-        CheckStatus.FAILED,
-        "cannot determine bbox column name",
-    )
+    assert_skipped_for_malformed_bbox(checks)
 
 
 def test_covering_bbox_fields_must_share_one_type(tmp_path):
@@ -288,10 +279,10 @@ def test_covering_bbox_fields_must_share_one_type(tmp_path):
 @pytest.mark.parametrize(
     ("check", "name"),
     [
-        (_check_covering_bbox_paths, "covering_bbox_paths_geometry"),
-        (_check_covering_bbox_column_exists, "covering_bbox_column_exists_geometry"),
-        (_check_covering_bbox_structure, "covering_bbox_structure_geometry"),
-        (_check_covering_bbox_field_types, "covering_bbox_field_types_geometry"),
+        (_check_cover_bbox_paths, "covering_bbox_paths_geometry"),
+        (_check_cover_bbox_column_exists, "covering_bbox_column_exists_geometry"),
+        (_check_cover_bbox_structure, "covering_bbox_structure_geometry"),
+        (_check_cover_bbox_field_types, "covering_bbox_field_types_geometry"),
     ],
     ids=["paths", "column_exists", "structure", "field_types"],
 )
@@ -299,7 +290,8 @@ def test_covering_bbox_checks_skip_a_column_with_no_covering(check, name):
     """``_run_geoparquet_checks`` gates on the same condition, so these SKIPPED arms
     are only reachable by calling the check directly -- but a caller that stops
     gating must still get a skip rather than a crash."""
-    args = ({}, "geometry") if check is _check_covering_bbox_paths else ({}, "geometry", [])
+    meta = parse_column_meta("geometry", {})
+    args = (meta, "geometry") if check is _check_cover_bbox_paths else (meta, "geometry", [])
     result = check(*args)
     assert result.name == name
     assert result.status == CheckStatus.SKIPPED
@@ -684,10 +676,9 @@ FAILED_ARMS = {
     "_check_encoding_matches_data": HERE,
     "_wkb_encoding_verdict": "tests/test_validate_malformed_wkb.py",
     "_check_geometry_types_match_data": HERE,
-    "_check_covering_bbox_paths": HERE,
-    "_covering_bbox_column": HERE,
-    "_check_covering_bbox_structure": HERE,
-    "_check_covering_bbox_field_types": HERE,
+    "_check_cover_bbox_paths": HERE,
+    "_check_cover_bbox_structure": HERE,
+    "_check_cover_bbox_field_types": HERE,
     "_check_native_geo_type_present": HERE,
     "_check_geography_coordinate_bounds": HERE,
     "_check_v2_uses_native_types": HERE,
@@ -715,14 +706,15 @@ FAILED_ARMS = {
     "_bbox_column_missing": ELSEWHERE,
     "_check_native_columns_in_metadata": ELSEWHERE,
     "_check_native_geo_stats_contains_data": ELSEWHERE,
+    "_projected_wrap_failure": "tests/test_validate_bbox_dimensions.py",
     "_check_geometry_types_match_stats": ELSEWHERE,
     "_check_v2_crs_consistency": ELSEWHERE,
     "_check_v2_edges_consistency": ELSEWHERE,
     "_check_coordinates_valid_for_crs": ELSEWHERE,
     "validate_geoparquet": ELSEWHERE,
     "_run_parquet_geo_only_checks": ELSEWHERE,
-    "_check_covering_is_object": HERE,
-    "_check_covering_has_bbox": "tests/test_check_covering_requires_bbox.py",
+    "_check_cover_is_object": HERE,
+    "_check_cover_has_bbox": "tests/test_check_covering_requires_bbox.py",
     "_check_native_geo_types_match": (
         "FAILS when the data holds a type the Parquet GeospatialStatistics do not "
         "declare. pyarrow computes those statistics from the data, so no writer in "
@@ -803,6 +795,12 @@ COVERING_BBOX_CHECKS = (
 )
 
 
+def assert_skipped_for_malformed_bbox(checks: dict) -> None:
+    """A malformed ``covering.bbox`` is covering_bbox_paths' one FAILED; its dependents skip."""
+    for name in COVERING_BBOX_CHECKS[1:]:
+        assert_verdict(checks, name, CheckStatus.SKIPPED, "see covering_bbox_paths_geometry")
+
+
 @pytest.mark.parametrize(
     "covering",
     [
@@ -838,21 +836,23 @@ def test_covering_that_is_not_an_object(tmp_path, covering):
     ],
 )
 def test_covering_bbox_that_is_not_an_object(tmp_path, bbox_covering):
-    """All four checks reject the value and quote it, none reads keys off it."""
-    checks = verdicts(
-        write_geoparquet(
-            tmp_path / "f.parquet",
-            base_geo(covering={"bbox": bbox_covering}),
-            {"bbox": bbox_struct()},
-        )
+    """The paths check rejects the value and quotes it; the other three skip,
+    none reads keys off it, and the file is still invalid."""
+    path = write_geoparquet(
+        tmp_path / "f.parquet",
+        base_geo(covering={"bbox": bbox_covering}),
+        {"bbox": bbox_struct()},
     )
-    for name in COVERING_BBOX_CHECKS:
-        assert_verdict(
-            checks,
-            name,
-            CheckStatus.FAILED,
-            f"covering bbox must be an object of [column, field] paths (found: {bbox_covering!r})",
-        )
+    result = validate_geoparquet(str(path))
+    checks = {check.name: check for check in result.checks}
+    assert_verdict(
+        checks,
+        "covering_bbox_paths_geometry",
+        CheckStatus.FAILED,
+        f"covering bbox must be an object of [column, field] paths (found: {bbox_covering!r})",
+    )
+    assert_skipped_for_malformed_bbox(checks)
+    assert not result.is_valid
 
 
 @pytest.mark.parametrize(
@@ -881,14 +881,7 @@ def test_covering_bbox_path_that_is_not_a_path_array(tmp_path, path_value):
         CheckStatus.FAILED,
         f"covering bbox xmin must be a path array [column, field] (found: {path_value!r})",
     )
-    for name in COVERING_BBOX_CHECKS[1:]:
-        assert_verdict(
-            checks,
-            name,
-            CheckStatus.FAILED,
-            "cannot determine bbox column name from covering: its xmin must be a path array "
-            f"[column, field] (found: {path_value!r})",
-        )
+    assert_skipped_for_malformed_bbox(checks)
 
 
 @pytest.mark.parametrize(
@@ -956,5 +949,7 @@ def test_a_covering_path_naming_a_missing_column_is_reported_by_name(tmp_path):
             base_geo(covering={"bbox": {k: [name, k] for k in ("xmin", "ymin", "xmax", "ymax")}}),
         )
     )
+    # Well-formed paths naming a missing column: still a FAILED here, not a SKIP.
+    assert checks["covering_bbox_column_exists_geometry"].status == CheckStatus.FAILED
     message = checks["covering_bbox_column_exists_geometry"].message
     assert "\x1b" not in message and len(message) < 400

@@ -13,19 +13,20 @@ from geoparquet_io.core.check_verdict import (
     severity,
 )
 from geoparquet_io.core.duckdb_metadata import get_compression_info as duckdb_get_compression_info
-from geoparquet_io.core.duckdb_metadata import get_geo_metadata, get_row_group_stats_summary
+from geoparquet_io.core.duckdb_metadata import get_row_group_stats_summary
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.geo_metadata import (
     BBOX_REWRITE_HINT,
     bboxless_covering_columns,
-    carried_version,
     covering_supported,
+    declared_version,
+    raw_geo_of_file,
 )
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
+from geoparquet_io.core.geometry_detection import primary_geometry_column
 from geoparquet_io.core.logging_config import debug, error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
-from geoparquet_io.core.sizing import format_size
+from geoparquet_io.core.sizing import bytes_to_mb, format_size
 
 #: What a file with no row groups can be told about its compression: nothing.
 #: Shared with ``check_optimization`` so both checks word it the same way (#823).
@@ -81,7 +82,7 @@ GENERAL_ROW_COUNT_RANGE = (10_000, 200_000)
 SPATIAL_ROW_COUNT_RANGE = (10_000, 50_000)
 
 
-class CheckProfile(str, Enum):
+class CheckProfile(str, Enum):  # noqa: UP042 - Preserve str(member) in public messages.
     """
     Profiles for checking parquet file structure
     based on specific use cases
@@ -121,8 +122,8 @@ def assess_row_group_size(
             - "suboptimal"
             - "poor"
     """
-    avg_group_size_mb = avg_group_size_bytes / (1024 * 1024)
-    total_size_mb = total_size_bytes / (1024 * 1024)
+    avg_group_size_mb = bytes_to_mb(avg_group_size_bytes)
+    total_size_mb = bytes_to_mb(total_size_bytes)
 
     if total_size_mb < 64:
         return "optimal", "Row group size is appropriate for small file", "green"
@@ -178,7 +179,7 @@ def _is_small_single_group(total_size_bytes=None, num_groups=None) -> bool:
     """
     if total_size_bytes is None or num_groups is None:
         return False
-    return total_size_bytes / (1024 * 1024) < 64 and num_groups == 1
+    return bytes_to_mb(total_size_bytes) < 64 and num_groups == 1
 
 
 def row_count_fix_available(avg_rows, total_size_bytes=None, num_groups=None) -> bool:
@@ -561,7 +562,7 @@ def _geo_block(parquet_file, geo_meta):
     ``geo`` key reads as None either way, which is why None can double as "not
     supplied" without changing any verdict.
     """
-    return get_geo_metadata(parquet_file) if geo_meta is None else geo_meta
+    return raw_geo_of_file(parquet_file).block if geo_meta is None else geo_meta
 
 
 def _check_geoparquet_v1(
@@ -570,23 +571,18 @@ def _check_geoparquet_v1(
     """Check GeoParquet 1.x file (existing logic, bbox IS recommended)."""
 
     geo_meta = _geo_block(parquet_file, geo_meta)
-    # `get_geo_metadata` is a read-only reader: it hands the block back exactly
-    # as the file holds it, so a block that is not a JSON object arrives here
-    # verbatim and used to crash with `'list' object has no attribute 'get'`
-    # (#968). A validation reader guards and reports the truth rather than
-    # sanitizing: a block that declares no version has none, which is what
-    # "0.0.0" says and what the outdated-version issue below reports.
+    # The raw reader's `.block` is the object or None: a block that is not a
+    # JSON object used to arrive here verbatim and crash with `'list' object has
+    # no attribute 'get'` (#968). A validation reader guards and reports the
+    # truth rather than sanitizing: a block that declares no version has none,
+    # which is what "0.0.0" says and what the outdated-version issue below reports.
     #
     # A version that is not a *string* is the same answer, and has to be: the
     # comparison two lines down is `version < "1.1.0"`, which a number cannot
     # make (#979). That crash sat behind the `detect_geoparquet_file_type` one
     # `check bbox` hit a frame earlier, so it only becomes reachable once that
     # is guarded -- fix one without the other and the traceback just moves.
-    version = carried_version(
-        geo_meta.get("version") if isinstance(geo_meta, dict) else None,
-        source=str(parquet_file),
-    )
-    version = version or "0.0.0"
+    version = declared_version(geo_meta, default="0.0.0", source=str(parquet_file))
     bbox_info = check_bbox_structure(parquet_file, verbose)
 
     # Build results
@@ -784,7 +780,7 @@ def check_metadata_and_bbox(
         }
 
 
-def check_covering_encoding(
+def check_cover_encoding(
     parquet_file, verbose=False, return_results=False, quiet=False, geo_meta=None
 ):
     """A declared ``covering`` must carry the ``bbox`` encoding, the only one defined.
@@ -794,7 +790,7 @@ def check_covering_encoding(
     earlier) carry a ``covering`` whose only members are gpio's own index
     entries, and most of them have no bbox column at all. ``check bbox --fix``
     adds or removes a column; the repair here is the metadata-only
-    :func:`geoparquet_io.core.check_fixes.fix_bboxless_covering`, so the two
+    :func:`geoparquet_io.core.check_fixes.fix_bboxless_cover`, so the two
     verdicts stay separate rather than one answering for the other.
 
     Version-agnostic, like the write gate it mirrors: ``covering`` is a 1.1 key,
@@ -848,7 +844,7 @@ def check_bbox(
 ):
     """``gpio check bbox``: the bbox column and metadata, a usable covering, and the values.
 
-    :func:`check_metadata_and_bbox`, :func:`check_covering_encoding` and -- when
+    :func:`check_metadata_and_bbox`, :func:`check_cover_encoding` and -- when
     ``verify_rows`` or ``all_rows`` asks for it -- the row-by-row comparison of
     each bbox with its geometry (:mod:`~geoparquet_io.core.check_bbox_values`),
     judged together, each issue keeping its own check's severity: a covering
@@ -867,11 +863,11 @@ def check_bbox(
         verify_rows: Rows whose bbox is compared with their geometry; 0 skips it
         all_rows: Compare every row rather than ``verify_rows`` of them
     """
-    geo_meta = get_geo_metadata(parquet_file)
+    geo_meta = raw_geo_of_file(parquet_file).block
     bbox = check_metadata_and_bbox(
         parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
     )
-    covering = check_covering_encoding(
+    covering = check_cover_encoding(
         parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
     )
     values = None
@@ -930,7 +926,7 @@ def check_compression(parquet_file, verbose=False, return_results=False, quiet=F
             - issues: list of issue descriptions
             - recommendations: list of recommendations
     """
-    primary_col = find_primary_geometry_column(parquet_file, verbose)
+    primary_col = primary_geometry_column(parquet_file, verbose=verbose)
     if not primary_col:
         if not quiet:
             error("\n✗ No geometry column found")
@@ -1090,14 +1086,14 @@ def check_all(
         parquet_file, verbose, return_results=True, quiet=quiet, profile=profile
     )
     # Read once, judge twice: both checks below ask the same file for the same
-    # `geo` block. Not cached on `get_geo_metadata` itself -- `check all --fix`
+    # `geo` block. Not cached on `raw_geo_of_file` itself -- `check all --fix`
     # rewrites files in place, so a path-keyed cache would answer from the
     # version before the repair.
-    geo_meta = get_geo_metadata(parquet_file)
+    geo_meta = raw_geo_of_file(parquet_file).block
     bbox_result = check_metadata_and_bbox(
         parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
     )
-    covering_result = check_covering_encoding(
+    covering_result = check_cover_encoding(
         parquet_file, verbose, return_results=True, quiet=quiet, geo_meta=geo_meta
     )
     compression_result = check_compression(parquet_file, verbose, return_results=True, quiet=quiet)

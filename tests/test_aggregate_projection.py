@@ -34,6 +34,8 @@ from geoparquet_io.core.process.aggregate.grid_common import (
     needed_source_columns,
     read_grid_source_sql,
 )
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
+from tests.conftest import skip_if_grid_unavailable
 
 SCHEMES = {"a5": A5_SCHEME, "h3": H3_SCHEME}
 CELL_COLUMN = {"a5": "a5_cell", "h3": "h3_cell"}
@@ -120,7 +122,7 @@ def _grid_result(
         out_geometry,
         breakdown_spec=parse_breakdown_metric(breakdown_metric),
     )
-    table = con.execute(sql).arrow().read_all()
+    table = con.sql(sql).arrow().read_all()
     con.execute("DROP TABLE IF EXISTS __agg_keyed")
     return table
 
@@ -197,7 +199,7 @@ class TestTheNarrowedSource:
                 str(points_parquet),
                 str(tmp_path / "out.parquet"),
                 resolution=4,
-                metric="sum:nosuch",
+                options=AggregateOptions(metric="sum:nosuch"),
             )
 
     def test_the_missing_column_error_still_lists_the_whole_input(self, points_parquet, tmp_path):
@@ -209,7 +211,7 @@ class TestTheNarrowedSource:
                 str(points_parquet),
                 str(tmp_path / "out.parquet"),
                 resolution=4,
-                metric="sum:nosuch",
+                options=AggregateOptions(metric="sum:nosuch"),
             )
         assert "note" in str(excinfo.value) and "crop" in str(excinfo.value)
 
@@ -269,6 +271,7 @@ class TestWhatIsRead:
         Parity alone cannot see this -- the two paths agree by construction --
         so the generated SQL is read back from ``--show-sql``.
         """
+        skip_if_grid_unavailable("a5")
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import cli
@@ -340,9 +343,9 @@ def test_the_command_itself_produces_the_wide_answer(
         str(points_parquet),
         str(out),
         resolution=4,
-        metric="sum:height,avg:height",
-        breakdown="crop",
-        where="height > 1",
+        options=AggregateOptions(
+            metric="sum:height,avg:height", breakdown="crop", where="height > 1"
+        ),
     )
     wide = _grid_result(
         con,
@@ -375,7 +378,8 @@ def _write_admin(path: str) -> None:
     con.execute("INSTALL spatial; LOAD spatial; SET geometry_always_xy = true")
     con.execute(
         f"""COPY (
-            SELECT code, ST_MakeEnvelope(xmin, ymin, xmax, ymax) AS geometry
+            SELECT row_number() OVER () AS __bnd, code,
+                   ST_MakeEnvelope(xmin, ymin, xmax, ymax) AS geometry
             FROM (VALUES ('AA', -25.0, -25.0, 5.0, 5.0), ('BB', 5.0, -25.0, 40.0, 30.0))
                  AS t(code, xmin, ymin, xmax, ymax)
         ) TO '{path}' (FORMAT PARQUET)"""
@@ -430,13 +434,21 @@ def _admin_result(con, src, admin_path, *, narrow: bool, breakdown=None, where=N
             joined,
             breakdown,
             20,
+            aggregate_sql=_build_agg_sql(joined, metrics),
+            key_expression="COALESCE(__admin_code, 'unassigned')",
+            key_column="admin_code",
             metrics=metrics,
             spec=None,
             nodata_values=None,
             column_types=None,
         )
-    sql = _wrap_admin_geometry(_build_agg_sql(joined, metrics, breakdown_select), "polygon")
-    table = con.execute(sql).arrow().read_all()
+    sql = _wrap_admin_geometry(
+        breakdown_select or _build_agg_sql(joined, metrics),
+        "polygon",
+        f"read_parquet({sql_path(str(admin_path))})",
+        "geometry",
+    )
+    table = con.sql(sql).arrow().read_all()
     con.execute("DROP TABLE IF EXISTS __agg_joined")
     return table
 
@@ -493,7 +505,7 @@ def test_admin_join_materialization_holds_only_the_aggregated_columns(
         columns = sorted(r[0] for r in con.execute("DESCRIBE __agg_joined").fetchall())
     finally:
         con.execute("DROP TABLE IF EXISTS __agg_joined")
-    assert columns == ["__admin_code", "__admin_geom", "__admin_name", "crop", "height"]
+    assert columns == ["__admin_code", "__admin_name", "__bnd", "crop", "height"]
 
 
 # ---------------------------------------------------------------------------
@@ -533,7 +545,10 @@ def test_a_metric_named_like_an_internal_alias_reports_cleanly(tmp_path, engine)
     with pytest.raises(InvalidParameterError, match="__key"):
         if engine == "grid":
             aggregate_by_a5(
-                str(src), str(tmp_path / "out.parquet"), resolution=4, metric="sum:__key"
+                str(src),
+                str(tmp_path / "out.parquet"),
+                resolution=4,
+                options=AggregateOptions(metric="sum:__key"),
             )
         else:
             from geoparquet_io.core.process.aggregate.by_admin import aggregate_by_admin

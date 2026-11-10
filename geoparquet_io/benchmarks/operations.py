@@ -8,6 +8,10 @@ from typing import Any, TypedDict
 
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.file_utils import get_all_parquet_files
+from geoparquet_io.core.sizing import bytes_to_mb
+
 
 # Type-safe operation definition
 class OperationInfo(TypedDict):
@@ -28,9 +32,11 @@ def _run_write(input_path: Path, output_dir: Path) -> dict[str, Any]:
     """Benchmark write operation."""
     table = pq.read_table(input_path)
     output_path = output_dir / "output.parquet"
-    # Use ZSTD level 15 for optimal compression (per PyArrow best practices)
-    pq.write_table(table, output_path, compression="zstd", compression_level=15)
-    return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+    # gpio's own default codec and level, from the one owner.
+    pq.write_table(
+        table, output_path, **resolve_codec(None, None, context="write").pyarrow_kwargs()
+    )
+    return {"output_size_mb": bytes_to_mb(output_path.stat().st_size)}
 
 
 def _run_convert_geojson(input_path: Path, output_dir: Path) -> dict[str, Any]:
@@ -41,7 +47,7 @@ def _run_convert_geojson(input_path: Path, output_dir: Path) -> dict[str, Any]:
     geojson_path = input_path.with_suffix(".geojson")
     if geojson_path.exists():
         convert_to_geoparquet(str(geojson_path), str(output_path))
-        return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+        return {"output_size_mb": bytes_to_mb(output_path.stat().st_size)}
     return {"skipped": True, "reason": "No GeoJSON version available"}
 
 
@@ -53,7 +59,7 @@ def _run_convert_gpkg(input_path: Path, output_dir: Path) -> dict[str, Any]:
     gpkg_path = input_path.with_suffix(".gpkg")
     if gpkg_path.exists():
         convert_to_geoparquet(str(gpkg_path), str(output_path))
-        return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+        return {"output_size_mb": bytes_to_mb(output_path.stat().st_size)}
     return {"skipped": True, "reason": "No GeoPackage version available"}
 
 
@@ -120,7 +126,7 @@ def _run_partition_quadkey(input_path: Path, output_dir: Path) -> dict[str, Any]
 
     output_path = output_dir / "partitioned"
     partition_by_quadkey(str(input_path), str(output_path), partition_resolution=4)
-    output_files = list(Path(output_path).glob("**/*.parquet"))
+    output_files = get_all_parquet_files(str(output_path))
     return {"partitions": len(output_files)}
 
 
@@ -164,7 +170,7 @@ def _run_chain_extract_bbox_sort(input_path: Path, output_dir: Path) -> dict[str
     return {
         "columns_selected": len(columns),
         "final_rows": result_table.num_rows,
-        "final_size_mb": final_output.stat().st_size / (1024 * 1024),
+        "final_size_mb": bytes_to_mb(final_output.stat().st_size),
         "steps_completed": 3,
     }
 
@@ -213,7 +219,7 @@ def _run_chain_convert_optimize(input_path: Path, output_dir: Path) -> dict[str,
     return {
         "source_format": source_format,
         "final_rows": result_table.num_rows,
-        "final_size_mb": final_output.stat().st_size / (1024 * 1024),
+        "final_size_mb": bytes_to_mb(final_output.stat().st_size),
         "steps_completed": 3,
     }
 
@@ -260,7 +266,7 @@ def _run_chain_filter_reproject_partition(input_path: Path, output_dir: Path) ->
     partition_by_quadkey(
         str(step2b_output), str(partition_output), resolution=4, partition_resolution=4
     )
-    output_files = list(Path(partition_output).glob("**/*.parquet"))
+    output_files = get_all_parquet_files(str(partition_output))
 
     return {
         "filtered_rows": step1_table.num_rows,
@@ -277,7 +283,7 @@ def _run_convert_shapefile(input_path: Path, output_dir: Path) -> dict[str, Any]
     shp_path = input_path.with_suffix(".shp")
     if shp_path.exists():
         convert_to_geoparquet(str(shp_path), str(output_path))
-        return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+        return {"output_size_mb": bytes_to_mb(output_path.stat().st_size)}
     return {"skipped": True, "reason": "No Shapefile version available"}
 
 
@@ -289,7 +295,7 @@ def _run_convert_fgb(input_path: Path, output_dir: Path) -> dict[str, Any]:
     fgb_path = input_path.with_suffix(".fgb")
     if fgb_path.exists():
         convert_to_geoparquet(str(fgb_path), str(output_path))
-        return {"output_size_mb": output_path.stat().st_size / (1024 * 1024)}
+        return {"output_size_mb": bytes_to_mb(output_path.stat().st_size)}
     return {"skipped": True, "reason": "No FlatGeobuf version available"}
 
 
@@ -321,22 +327,19 @@ def _run_add_quadkey(input_path: Path, output_dir: Path) -> dict[str, Any]:
 
 
 def _run_add_country(input_path: Path, output_dir: Path) -> dict[str, Any]:
-    """Benchmark adding country codes.
+    """Benchmark adding country codes (``gpio add admin-divisions --levels country``).
 
     Note: This operation uses the default Overture Maps admin boundaries,
     which requires network access and can be slow for the first run.
     """
-    from geoparquet_io.core.add.country_codes import add_country_codes
+    from geoparquet_io.core.add.admin_divisions import add_admin_divisions_multi
 
     output_path = output_dir / "output.parquet"
-    # Use default Overture countries (countries_parquet=None)
-    add_country_codes(
+    add_admin_divisions_multi(
         input_parquet=str(input_path),
-        countries_parquet=None,  # Use default Overture data
         output_parquet=str(output_path),
-        add_bbox_flag=False,
-        dry_run=False,
-        verbose=False,
+        dataset_name="overture",
+        levels=["country"],
     )
     result_table = pq.read_table(output_path)
     return {"rows_with_country": result_table.num_rows}
@@ -353,7 +356,7 @@ def _run_partition_h3(input_path: Path, output_dir: Path) -> dict[str, Any]:
         resolution=4,  # Lower resolution for fewer partitions
         verbose=False,
     )
-    output_files = list(Path(output_path).glob("**/*.parquet"))
+    output_files = get_all_parquet_files(str(output_path))
     return {"partitions": len(output_files)}
 
 

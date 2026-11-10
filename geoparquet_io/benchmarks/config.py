@@ -2,22 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
-
-@dataclass(frozen=True, slots=True)
-class RegressionThresholds:
-    """Thresholds for regression detection.
-
-    All values are decimals (e.g., 0.10 = 10%).
-    """
-
-    time_warning: float = 0.10  # >10% slower = warning
-    time_failure: float = 0.25  # >25% slower = failure
-    memory_warning: float = 0.20  # >20% more memory = warning
-    memory_failure: float = 0.50  # >50% more memory = failure
-
-
 # Core operations (~10) - run by default
 CORE_OPERATIONS: list[str] = [
     "read",
@@ -54,9 +38,6 @@ FULL_OPERATIONS: list[str] = (
     ]
     + CHAIN_OPERATIONS
 )
-
-# Default regression thresholds
-DEFAULT_THRESHOLDS = RegressionThresholds()
 
 # Base URL for benchmark data on source.coop
 BENCHMARK_DATA_URL = "https://data.source.coop/cholmes/gpio-test/benchmark"

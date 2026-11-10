@@ -14,6 +14,17 @@ if TYPE_CHECKING:
     from geoparquet_io.api.check import CheckResult
 
 
+def _refuse_existing_output(path: Path, overwrite: bool) -> None:
+    """The one overwrite check, raised as the ``ValueError`` this API documents."""
+    from geoparquet_io.core.exceptions import GeoParquetError
+    from geoparquet_io.core.file_utils import handle_output_overwrite
+
+    try:
+        handle_output_overwrite(str(path), overwrite, flag="overwrite=True", remove=False)
+    except GeoParquetError as exc:
+        raise ValueError(str(exc)) from None
+
+
 def generate_stac(
     input_path: str | Path,
     output_path: str | Path | None = None,
@@ -68,11 +79,7 @@ def generate_stac(
     else:
         output_path = Path(output_path)
 
-    # Check for existing file
-    if output_path.exists() and not overwrite:
-        raise ValueError(
-            f"STAC file already exists: {output_path}\nUse overwrite=True to replace it."
-        )
+    _refuse_existing_output(output_path, overwrite)
 
     # Generate STAC
     if input_path.is_file():
@@ -110,11 +117,7 @@ def generate_stac(
             item_id_str = item.get("id", "unknown")
             item_path = output_path.parent / f"{item_id_str}.json"
 
-            # Enforce overwrite check for each item file
-            if item_path.exists() and not overwrite:
-                raise ValueError(
-                    f"STAC item file already exists: {item_path}\nUse overwrite=True to replace it."
-                )
+            _refuse_existing_output(item_path, overwrite)
 
             with open(item_path, "w", encoding="utf-8") as f:
                 json.dump(item, f, indent=2, default=str)

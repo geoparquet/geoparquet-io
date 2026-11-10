@@ -72,18 +72,21 @@ from __future__ import annotations
 
 import math
 import struct
-from collections.abc import Iterable, Mapping
+from collections.abc import Mapping
 from typing import Any, NamedTuple
 
-from geoparquet_io.core.crs_utils import merge_longitude_ranges
+from geoparquet_io.core.edges import (
+    ANDOYER,
+    COUNTERCLOCKWISE,
+    THOMAS,
+    is_ellipsoidal,
+    is_nonplanar,
+)
 from geoparquet_io.core.optional_deps import load_module
 
 Box = tuple[float, float, float, float]
 
-SPHERICAL = "spherical"
-ELLIPSOIDAL_ALGORITHMS = frozenset({"vincenty", "thomas", "andoyer", "karney"})
-_APPROXIMATE_ALGORITHMS = frozenset({"thomas", "andoyer"})
-COUNTERCLOCKWISE = "counterclockwise"
+_APPROXIMATE_ALGORITHMS = frozenset({THOMAS, ANDOYER})
 
 #: Outward margin on a geodesic vertex latitude (~0.1 m). The floating-point
 #: error of the vertex computation is below 1e-8 degrees for every edge not
@@ -148,9 +151,10 @@ def ellipsoid_for_crs(crs: Any) -> tuple[float, float]:
     if crs is None:
         return WGS84_ELLIPSOID
     try:
-        from pyproj import CRS
+        from geoparquet_io.core.crs_utils import load_crs
 
-        ellipsoid = CRS.from_user_input(crs).ellipsoid
+        loaded = load_crs(crs)
+        ellipsoid = loaded.ellipsoid if loaded is not None else None
         if ellipsoid is None:
             return WGS84_ELLIPSOID
         inverse = ellipsoid.inverse_flattening
@@ -660,7 +664,7 @@ def _pole_flags(
         return bool(north.any()), bool(south.any())
     # The smaller side. Only the half-sphere tie is ambiguous, and it covers
     # both sides.
-    slack = err + (_ELLIPSOIDAL_HALF_TOLERANCE if ctx.algorithm != SPHERICAL else 1e-12)
+    slack = err + (_ELLIPSOIDAL_HALF_TOLERANCE if is_ellipsoidal(ctx.algorithm) else 1e-12)
     left = area <= 2.0 * math.pi + slack
     right = area >= 2.0 * math.pi - slack
     north = touch_n | (left & n_in_left) | (right & ~n_in_left)
@@ -669,7 +673,7 @@ def _pole_flags(
 
 
 def _is_long_ellipsoidal(np: Any, geom: _Geometry, ctx: _Context) -> bool:
-    if ctx.algorithm == SPHERICAL:
+    if not is_ellipsoidal(ctx.algorithm):
         return False
     angle = np.degrees(np.arctan2(geom.sine, geom.dot))
     return bool((geom.normal & (angle > ELLIPSOIDAL_MAX_ARC_DEG)).any())
@@ -696,7 +700,7 @@ def _bound_vertices(
     if len(edges.a) == 0:
         return
 
-    if ctx.algorithm == SPHERICAL:
+    if not is_ellipsoidal(ctx.algorithm):
         hi, lo = _spherical_vertices(np, geom)
     else:
         hi, lo = _ellipsoidal_vertices(np, lon, lat, edges, geom, ctx)
@@ -767,50 +771,10 @@ def _bound_array(array: Any, acc: _Bound, ctx: _Context) -> None:
 
 
 def _context(edges: str, orientation: str | None, ellipsoid: tuple | None) -> _Context:
-    if edges != SPHERICAL and edges not in ELLIPSOIDAL_ALGORITHMS:
+    if not is_nonplanar(edges):
         raise ValueError(f"edges must be spherical or an ellipsoidal algorithm, not {edges!r}")
     semi_major, flattening = ellipsoid if ellipsoid else WGS84_ELLIPSOID
     return _Context(edges, orientation, (float(semi_major), float(flattening)))
-
-
-def geodesic_bbox_of_wkb(
-    values: Iterable[Any],
-    edges: str = SPHERICAL,
-    *,
-    orientation: str | None = None,
-    ellipsoid: tuple[float, float] | None = None,
-) -> Box | None:
-    """The geodesic bound of some WKB values, or None.
-
-    Args:
-        values: WKB geometries (bytes-like); ``None`` entries are skipped.
-        edges: The edge algorithm, a non-planar GeoParquet ``edges`` name.
-        orientation: The column's ``orientation``; ``"counterclockwise"``
-            puts each ring's interior on its left, anything else reads a ring
-            as the smaller of the two regions it bounds.
-        ellipsoid: ``(semi-major axis, flattening)`` for the ellipsoidal
-            algorithms; WGS84 when omitted.
-
-    Returns:
-        ``(xmin, ymin, xmax, ymax)`` with ``xmin > xmax`` for an antimeridian
-        wrap, or ``None`` when there is nothing to bound -- no non-empty
-        geometry -- or a value cannot be bounded (unparsable WKB, a non-finite
-        coordinate, a latitude outside [-90, 90]). Never raises for bad data.
-    """
-    import pyarrow as pa
-
-    ctx = _context(edges, orientation, ellipsoid)
-    items = [bytes(v) if isinstance(v, (bytearray, memoryview)) else v for v in values]
-    try:
-        array = pa.array(items, type=pa.binary())
-    except (TypeError, ValueError, pa.ArrowException):
-        return None
-    acc = _Bound()
-    try:
-        _bound_array(array, acc, ctx)
-    except _WkbError:
-        return None
-    return acc.result()
 
 
 def row_group_geography_bboxes(
@@ -852,9 +816,14 @@ def row_group_geography_bboxes(
                 boxes.append(box)
     if unreadable or not boxes:
         return ColumnBounds(per_group, None, unreadable)
-    xmin, xmax = merge_longitude_ranges([(box[0], box[2]) for box in boxes])
-    whole = (xmin, min(b[1] for b in boxes), xmax, max(b[3] for b in boxes))
-    return ColumnBounds(per_group, whole, unreadable)
+    from geoparquet_io.core.geo_metadata import GeometryStats, merged_geometry_stats
+
+    # GEOGRAPHY coordinates are longitude/latitude by definition.
+    parts = (GeometryStats(list(b), []) for b in boxes)
+    merged = merged_geometry_stats(parts, geographic=True).bbox
+    assert merged is not None  # boxes is non-empty, so the fold has an extent
+    xmin, ymin, xmax, ymax = merged
+    return ColumnBounds(per_group, (xmin, ymin, xmax, ymax), unreadable)
 
 
 def geography_statistics(

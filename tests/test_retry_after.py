@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from geoparquet_io.core.http_retry import MAX_RETRY_AFTER, parse_retry_after
 
-NOW = datetime(2026, 10, 21, 7, 28, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 10, 21, 7, 28, 0, tzinfo=UTC)
 
 
 @pytest.mark.parametrize(
@@ -68,7 +68,7 @@ def test_an_http_date_without_a_zone_is_read_as_utc():
 
 
 def test_an_http_date_defaults_to_the_current_clock():
-    soon = datetime.now(timezone.utc) + timedelta(seconds=30)
+    soon = datetime.now(UTC) + timedelta(seconds=30)
     delay = parse_retry_after(soon.strftime("%a, %d %b %Y %H:%M:%S GMT"))
 
     assert delay is not None

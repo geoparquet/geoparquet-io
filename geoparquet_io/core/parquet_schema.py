@@ -91,6 +91,22 @@ def root_schema_columns(schema_info: list) -> list[dict]:
     return columns
 
 
+def schema_name_indexes(schema_info: list) -> tuple[dict, dict]:
+    """First root and nested indices by name, for repeated lookups within one file."""
+    roots: dict = {}
+    root_indices = set()
+    index = schema_root_offset(schema_info)
+    while index < len(schema_info):
+        roots.setdefault(schema_info[index].get("name"), index)
+        root_indices.add(index)
+        index = schema_subtree_end(schema_info, index)
+    nested: dict = {}
+    for index, entry in enumerate(schema_info):
+        if index not in root_indices:
+            nested.setdefault(entry.get("name"), index)
+    return roots, nested
+
+
 def root_schema_index(schema_info: list, name: str) -> int | None:
     """Index of the root-level schema entry called ``name``, else ``None``.
 
@@ -105,6 +121,23 @@ def root_schema_index(schema_info: list, name: str) -> int | None:
             return index
         index = schema_subtree_end(schema_info, index)
     return None
+
+
+def nested_schema_index(schema_info: list, name: str) -> int | None:
+    """Index of the first *non-root* schema entry called ``name``, else ``None``.
+
+    The other half of :func:`root_schema_index`: the answer to "the file has a
+    field of that name, but only inside a struct".
+    """
+    roots = set()
+    index = schema_root_offset(schema_info)
+    while index < len(schema_info):
+        roots.add(index)
+        index = schema_subtree_end(schema_info, index)
+    return next(
+        (i for i, col in enumerate(schema_info) if i not in roots and col.get("name") == name),
+        None,
+    )
 
 
 def schema_direct_children(schema_info: list, index: int) -> list[dict]:

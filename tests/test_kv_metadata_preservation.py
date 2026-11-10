@@ -227,7 +227,7 @@ class TestConvertPreservesKv:
           fast path wrote — otherwise preservation would silently trade one kind
           of metadata for another.
         - ``austria_bbox_covering_file`` carries a bbox column and a ``covering``
-          block, so the rewrite path runs ``_add_bbox_covering_if_present``. That
+          block, so the rewrite path runs the composer's bbox-covering step. That
           is the assignment #694 is about; this pins that carrying sidecar keys
           does not cost the output its covering.
         """

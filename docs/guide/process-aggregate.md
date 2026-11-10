@@ -165,6 +165,7 @@ Each pivot holds a count by default. `--breakdown-metric` makes it hold a magnit
 ## A5 Grid Aggregation
 
 Aggregate into A5 equal-area hexagonal grid cells. A5 cells at lower resolutions cover large areas (useful for global overviews) while higher resolutions approach parcel level.
+The `a5` DuckDB extension is installed on first use — from the community repository on DuckDB 1.5, from the [Query.Farm repository](https://duckdb-extensions.query.farm) on DuckDB 2.0+ — with its load-time telemetry opted out (see [gpio add a5](add.md#a5-cells)). Cell IDs are not stable across a5 builds — the DuckDB 2.0 build numbers cells differently from the 1.5-era community build — so aggregates keyed under one DuckDB major will not join against cell IDs computed under the other.
 
 ### Resolution
 
@@ -693,7 +694,21 @@ wide file with one metric costs about what a narrow one does — and
 DuckDB runs inside a memory limit of half the process's memory ceiling: physical
 RAM, or the container or Slurm job cap when that is lower. The cap is what
 matters on a shared node — without it DuckDB sizes itself for the whole machine
-and the job's cgroup kills it first. `--write-memory` overrides the default:
+and the job's cgroup kills it first.
+
+The limit is a working bound, not a size requirement: an aggregation whose
+grouped state outgrows it spills that state to a scratch directory and
+completes, on DuckDB 1.5 and 2.0 alike (verified at a 1GB limit against
+several GB of aggregate state on both versions —
+[#1354](https://github.com/geoparquet/geoparquet-io/issues/1354) has the
+measurements). What the limit does not cover is the result once it leaves
+DuckDB: the cells are materialized in Arrow and written from there, so peak
+*process* memory also scales with the number of output cells. A very
+fine-grained aggregate — millions of cells — can run well past
+`--write-memory` for that reason alone; `--out-geometry none` keeps the
+output, and that overshoot, as small as it gets.
+
+`--write-memory` overrides the default:
 
 === "CLI"
 

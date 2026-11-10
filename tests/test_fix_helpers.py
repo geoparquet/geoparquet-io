@@ -5,7 +5,6 @@ import shutil
 from unittest.mock import MagicMock
 
 import pytest
-from click import BadParameter
 
 from geoparquet_io.cli.fix_helpers import (
     create_backup_if_needed,
@@ -13,6 +12,7 @@ from geoparquet_io.cli.fix_helpers import (
     validate_remote_file_modification,
     verify_fixes,
 )
+from geoparquet_io.core.exceptions import GeoParquetError
 
 
 class TestValidateRemoteFileModification:
@@ -31,8 +31,8 @@ class TestValidateRemoteFileModification:
         assert result is True
 
     def test_remote_file_without_overwrite_raises_error(self):
-        """Test remote file without overwrite flag raises BadParameter."""
-        with pytest.raises(BadParameter) as exc_info:
+        """A remote in-place fix without --overwrite gets the owner's refusal."""
+        with pytest.raises(GeoParquetError) as exc_info:
             validate_remote_file_modification("s3://bucket/file.parquet", None, False)
         assert "Cannot modify remote file" in str(exc_info.value)
 

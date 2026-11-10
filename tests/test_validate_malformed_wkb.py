@@ -286,9 +286,13 @@ def test_a_failed_reopen_does_not_hide_the_statement_error(tmp_path, monkeypatch
 
     monkeypatch.setattr(validate, "_open_validation_connection", open_once_then_fail)
     con = validate._ReopeningConnection(path)
+    con._sampled_facts[(path, "geometry", "")] = (None, 0)
+    con._descriptions[path] = {"geometry": "BLOB"}
     try:
         with pytest.raises(duckdb.InternalException, match="Buffer overflow"):
             con.execute("SELECT 1 /*poison*/")
+        assert not con._sampled_facts
+        assert not con._descriptions
     finally:
         con.close()
     assert len(opens) == 2

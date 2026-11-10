@@ -35,7 +35,9 @@ arrow_table = ops.add_bbox(arrow_table)
 arrow_table = ops.sort_hilbert(arrow_table)
 ```
 
-When a new CLI command is added, a corresponding method must be added to `Table` and a corresponding function to `ops.py`. This is enforced through code review and documented in the contributor checklist.
+When a new CLI command is added, a corresponding method must be added to `Table` and a corresponding function to `ops.py`. The functional leg may instead be a path-level function exported at the package root (`gpio.list_layers`, `gpio.validate_stac`, `gpio.generate_stac`) where the unit of work is a file rather than a table.
+
+This is enforced by the parity registry, `tests/parity_registry.py`: `tests/test_parity_registry.py` requires every CLI command to have an API twin, a functional twin (an `ops.*` or root `gpio.*` function) and a call-parity case, or a written reason in `EXEMPT`; and every parameter that only one side takes to fall in a derived class or carry a reason in `ONE_SIDED` (#903). Each check is a set equality, so an exemption made stale by a fix fails too.
 
 ## Consequences
 
@@ -73,4 +75,5 @@ Providing only the method-based `Table` API. Rejected because some operations (b
 - `geoparquet_io/api/check.py` -- Validation API
 - `geoparquet_io/api/pipeline.py` -- Pipeline operations
 - `geoparquet_io/api/stac.py` -- STAC metadata API
+- `tests/parity_registry.py` -- the registry that enforces this decision
 - ADR-0001 -- CLI/Core separation that enables this pattern

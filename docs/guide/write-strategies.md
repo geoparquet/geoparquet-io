@@ -215,10 +215,29 @@ the buffers they build from it.
 `--write-memory` overrides the default on the commands that have the option, including the
 admin joins; `gpio pmtiles create`, `gpio add bbox-metadata` and the format exports do not
 have it, so they always use the default.
+Writes that pyarrow does rather than DuckDB accept a memory limit without effect: the
+ArcGIS, WFS and Carto extracts, `process contour`, `process polygonize`, `process simplify`
+and the BigQuery write. (`extract bigquery --write-memory` still bounds the BigQuery scan.)
+
+Sizes read the same way in every gpio option that takes one (`--write-memory`,
+`--row-group-size-mb`, `--min-size`): `KB`, `MB`, `GB` and `TB` are powers of 1000 and
+`KiB`, `MiB`, `GiB` and `TiB` powers of 1024, as DuckDB reads them; case and spaces do not
+matter, and a bare number means MB. So `--write-memory 1GB` is 1,000,000,000 bytes and
+`--write-memory 1GiB` is 1,073,741,824. `--row-group-size-mb 128MB` targets 128,000,000
+bytes per row group, and the sizes gpio prints (`inspect`, `check`, `--min-size` reports)
+use the same 1000-based units.
+
+`--row-group-size-mb` becomes a row count the same way on every write path and strategy:
+gpio measures the rows' in-memory size once (a 20,000-row sample of the query, or the
+whole table for `Table.write`), snaps the count to whole 2,048-row writer vectors, never
+below one, and writes that. The plain `COPY` a GeoParquet 2.0 input takes and the
+`streaming` strategy used to ignore the target and write 122,880 and 100,000 rows per
+group ([#1215](https://github.com/geoparquet/geoparquet-io/issues/1215)).
 
 The precedence, highest first:
 
-1. **An explicit `--write-memory`** (or `memory_limit=`, where the Python API takes one).
+1. **An explicit `--write-memory`** (or `memory_limit=`, which `Table.write` and
+   `gpio.WriteOptions` take).
 2. **A stricter limit you set on your own DuckDB connection** — gpio will not raise it, and
    restores it after the write.
 3. **gpio's ceiling-aware default**, 50% of the cgroup cap or physical RAM, whichever is
@@ -268,16 +287,14 @@ Override auto-detection when needed:
     gpio extract input.parquet output.parquet --write-memory 512MB
     ```
 
-    !!! warning "On file-writing commands, `--write-memory` requires `duckdb-kv`"
-        On commands that write through a DuckDB write engine, only `duckdb-kv`
-        (the default) has one to configure.
-        Combining `--write-memory` with an explicitly chosen `--write-strategy`
-        of `streaming`, `in-memory`, or `disk-rewrite` is rejected as a
-        parameter error. `--geoparquet-version 1.1-geoarrow` internally reroutes
-        WKB input to the arrow-streaming strategy; there gpio warns and ignores
-        `--write-memory` rather than failing. Streaming Arrow IPC to stdout
-        (`-`) also has no write engine to configure, so the limit is ignored
-        with a warning — `--write-memory` only applies to file outputs.
+    !!! note "`--write-memory` applies to every write strategy"
+        Each strategy bounds its own DuckDB work by the limit: the COPY of
+        `duckdb-kv`, every scan of `disk-rewrite`'s first phase, the query `streaming`
+        reads in batches, and the query `in-memory` materializes. What a
+        strategy then does in pyarrow is outside DuckDB's accounting. Streaming
+        Arrow IPC to stdout (`-`) has no write engine to configure, so the limit
+        is ignored there with a warning — `--write-memory` only applies to file
+        outputs.
 
     !!! note "On `gpio extract bigquery`, `--write-memory` governs the scan"
         That command writes through PyArrow and has no `--write-strategy` flag,
@@ -298,16 +315,25 @@ Override auto-detection when needed:
 
 === "Python"
 
-    The fluent API auto-detects DuckDB's memory limit (respecting container
-    cgroup limits). Explicit override is currently CLI-only via
-    `--write-memory`; from Python you select the write strategy:
+    `Table.write` takes the same limit as `memory_limit`, on its own or in a
+    `gpio.WriteOptions` with the other write settings:
 
     ```python
     import geoparquet_io as gpio
 
-    # Streaming strategy for constant memory usage
-    gpio.read('input.parquet').write('output.parquet', write_strategy='streaming')
+    table = gpio.read('input.parquet')
+
+    # Limit DuckDB to 2GB for this write
+    table.write('output.parquet', memory_limit='2GB')
+
+    # The same, with the strategy, as one value to reuse
+    opts = gpio.WriteOptions(memory_limit='512MB', write_strategy='disk-rewrite')
+    table.write('output.parquet', opts)
     ```
+
+    `duckdb-kv` and `disk-rewrite` write a table through DuckDB, so the limit
+    bounds that write; `in-memory` and `streaming` write a table with pyarrow
+    alone and run no DuckDB for it to bound.
 
 ### Memory Sizing Guidelines
 

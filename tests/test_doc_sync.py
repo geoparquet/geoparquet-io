@@ -4,14 +4,10 @@ import importlib
 import importlib.util
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:  # pragma: no cover
-    import tomli as tomllib  # type: ignore[no-redef]
 
 # Repo tooling checks: these exercise the doc_sync script that the CI lint job
 # already runs via pre-commit, several of them through subprocesses, so they

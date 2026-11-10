@@ -3,15 +3,10 @@
 from __future__ import annotations
 
 import subprocess
-import sys
+import tomllib
 from pathlib import Path
 
 import pytest
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 # Repo tooling checks: these shell out to codespell and duplicate what the CI
 # lint job already runs via pre-commit, so they live in the meta lane instead

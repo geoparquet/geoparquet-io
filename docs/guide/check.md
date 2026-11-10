@@ -95,15 +95,14 @@ subcommand; `ℹ️` marks information that does not count either way.
 
     <!-- doctest: prelude="import geoparquet_io as gpio; table = gpio.read('myfile.parquet')" -->
     ```python
-    # table.check() runs the structure checks only; `gpio check all` adds
-    # spatial order and spec validation, so a CI gate combines all three.
-    results = [table.check(), table.check_spatial(), table.validate()]
-    verdicts = {r.verdict() for r in results}  # "pass", "warning" or "failure"
+    # gpio.check_all runs what `gpio check all` runs: the structure checks,
+    # spatial order and spec validation. table.check() is the structure checks only.
+    result = gpio.check_all('myfile.parquet')
+    verdict = result.verdict()  # "pass", "warning" or "failure"
 
-    failed = "failure" in verdicts  # what `gpio check all` exits 1 on
-    strict_failed = verdicts != {"pass"}  # the --strict equivalent
-    for result in results:
-        print(*result.failures(), *result.warnings(), sep="\n")
+    failed = verdict == "failure"  # what `gpio check all` exits 1 on
+    strict_failed = verdict != "pass"  # the --strict equivalent
+    print(*result.failures(), *result.warnings(), sep="\n")
     ```
 
     `failures()` and `warnings()` bucket each issue by the same severity
@@ -115,6 +114,69 @@ declines because it cannot repair the problem, exits 1 (and says
 `✗ No automatic fix available`). With `--fix-output`, a file that needed no
 repair is copied there, so a pipeline always gets the file it named; a failing
 file that `--fix` cannot repair is not.
+
+### Check a file by path
+
+Each check also takes a path directly, with the same options as the CLI
+subcommand, and no Table to read first. It checks one file: a directory or glob
+is refused, and `gpio check <cmd>` handles a multi-file run. A remote URL is
+read in place.
+
+=== "CLI"
+
+    ```bash
+    gpio check compression myfile.parquet
+    gpio check spec myfile.parquet --skip-data-validation
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    result = gpio.check_compression('myfile.parquet')
+    print(result.verdict(), result.source_path)
+
+    spec = gpio.validate('myfile.parquet', skip_data_validation=True)
+    ```
+
+    `gpio.check_all`, `check_bbox`, `check_row_groups`, `check_spatial`,
+    `check_spatial_pushdown`, `check_bloom_filters` and `check_optimization`
+    work the same way, each with the verdict and defaults of its `gpio check`
+    command (`check_spatial` includes the pushdown block). `gpio.read(path).check_*()`
+    calls them on the file it read, so for a local file that has not changed both
+    give the same answer, except that `Table.check()` and `Table.check_spatial()`
+    run less: see the Python API reference.
+    A Table read from a remote URL is checked on a temporary local rewrite of
+    its rows instead, so its answer describes that rewrite.
+
+### Fix from Python
+
+`Table.fix()` applies the repairs `--fix` would, but into a new Table: the file
+it was read from is never rewritten. Pass `output=` to write the repaired file
+there (it must not be the source, and an existing file needs `overwrite=True`),
+or leave it unset to get the rows in memory.
+`checks=` picks which checks' fixes run, from `"bbox"`, `"covering"`,
+`"compression"`, `"row_groups"` and `"spatial"`. The compression and row-group
+fixes are one rewrite, so picking either applies both when it is needed.
+
+=== "CLI"
+
+    ```bash
+    gpio check all myfile.parquet --fix --fix-output fixed.parquet
+    gpio check spatial myfile.parquet --fix --fix-output sorted.parquet
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    table = gpio.read('myfile.parquet')
+    fixed = table.fix(output='fixed.parquet')
+    sorted_only = table.fix(checks=["spatial"], output='sorted.parquet')
+    in_memory = table.fix()  # no file written
+    ```
 
 An input that resolves to no parquet files — a glob that matches nothing, or an
 empty directory — exits 1 with `No parquet files found` on stderr, with or
@@ -170,8 +232,9 @@ Checks if data is spatially ordered. Spatially ordered data improves:
   of each dimension of that group's box), and each group weighs its compressed
   bytes. The definition and its thresholds are the
   [Portolan spec's](https://github.com/portolan-sdi/portolan-spec/pull/188):
-  pass at efficiency 0.70 or more, judged from eight row groups up; below
-  eight, only a clear failure (efficiency under 0.25) is reported as one. A
+  pass at efficiency 0.65 or more, judged from eight row groups up; below
+  eight, only a clear failure (efficiency under 0.25, at three or more row
+  groups) is reported as one. A
   file whose row groups hold under 5 MB of compressed bytes is not judged at
   all — at that size, skipping parts of the file saves a reader almost
   nothing — and the check says so instead of printing a pass. Nothing on the
@@ -179,6 +242,12 @@ Checks if data is spatially ordered. Spatially ordered data improves:
   whose verdict was withheld — not judged is not known-ordered — and only a
   judged pass skips the sort.
 - **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5. This measures feature adjacency, not row-group pruning, and the output names the method.
+
+`--fix` Hilbert-sorts the file and keeps at least as many row groups as it
+had: it writes 49,152 rows per group when that already keeps the count, and
+otherwise the largest whole 2,048-row vector that does, so a file the check
+could judge is not rewritten into one too coarse to judge
+([#1098](https://github.com/geoparquet/geoparquet-io/issues/1098)).
 
 The sampling method reads WKB, native Parquet GEOMETRY and GeoArrow coordinate
 struct columns. NULL, zero-length and unparsable values are skipped, and the
@@ -673,7 +742,12 @@ Validates file structure and metadata against the GeoParquet specification:
   *both* places, so the output passes this check over coordinates that were
   never transformed. gpio warns when it does this, naming both CRSs and which
   one it used, but the warning is the only trace: fix whichever half is wrong
-  on the **input**, before the rewrite.
+  on the **input**, before the rewrite. An explicit `EPSG:4326` or `OGC:CRS84`
+  in the block is a CRS the block named, so it wins over a different logical
+  type like any other. The warning is deliberately conservative: it fires when
+  both sides resolve to an authority id and the ids differ, so a one-sided
+  `id` disagreement (a full PROJJSON of one CRS next to an id-less one of
+  another) is resolved to the block's answer without a warning.
 - **Datum-aware epoch validation** — a coordinate `epoch` on a datum ensemble
   (e.g. EPSG:4326, or the OGC:CRS84 default when `crs` is omitted) fails; on a
   specific static frame (e.g. GDA2020) it warns; on a dynamic frame (e.g. ITRF)
@@ -711,6 +785,11 @@ Validates file structure and metadata against the GeoParquet specification:
   scans read GeoArrow coordinates directly. GeoParquet 1.0 and 2.0 are
   WKB-only per their spec text, so a file claiming a GeoArrow encoding under
   either version fails.
+- **Edges values** — `edges_valid_<column>` accepts `planar` and `spherical`
+  in a 1.x block and adds the four ellipsoidal algorithms (`vincenty`,
+  `thomas`, `andoyer`, `karney`) at 2.0. A block whose `version` is missing or
+  is not a version string is not 1.x, so all five values pass: the same answer
+  the writers give when they map a block's edges to its version.
 - **Spherical edges on a projected CRS** — a column declaring `edges` other
   than `planar` while its CRS is projected **warns**
   (`edges_spherical_on_projected_crs_<column>`). Great-circle edges are only
@@ -855,8 +934,11 @@ gpio check all partitions/ --sample-files 3
     ```
 
     Each rewritten file gets a `.bak` alongside it (unless you pass
-    `--no-backup`, which asks for confirmation once for the whole run), and the
-    run ends with a `Fixed N files:` list naming every one of them. There is no
+    `--no-backup`, which asks for confirmation once for the whole run). A
+    backup never overwrites an earlier one: a second in-place fix of the same
+    file writes `<file>.bak.1`, the next `<file>.bak.2`, so the first `.bak`
+    stays the original. The run ends with a `Fixed N files:` list naming every
+    one of them. There is no
     confirmation prompt otherwise: run the command without `--fix` first and
     read the file count in the `📁 Checking first file (of N total)` notice.
 

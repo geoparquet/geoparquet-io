@@ -81,6 +81,7 @@ class TestCliErrorFor:
     def test_a_duckdb_error_becomes_a_click_exception(self):
         error = cli_error_for(duckdb.InvalidInputException("Invalid Input Error: no columns"))
         assert isinstance(error, click.ClickException)
+        assert "no columns" in error.format_message()
 
     def test_duckdbs_own_message_is_kept_verbatim(self):
         message = "Invalid Input Error: Geoparquet metadata does not have a columns object"

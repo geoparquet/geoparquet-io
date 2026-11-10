@@ -2,7 +2,7 @@
 
 import logging
 
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.geometry_repair import (
     repair_arrow_table_geometry,
     repair_geometry_sql,
@@ -22,7 +22,7 @@ def _con():
 def test_repair_geometry_sql_fixes_invalid_polygon():
     con = _con()
     expr = repair_geometry_sql(f"ST_GeomFromText('{BOWTIE_WKT}')")
-    valid = con.execute(f"SELECT ST_IsValid({expr})").fetchone()[0]
+    valid = fetch_one(con.execute(f"SELECT ST_IsValid({expr})"))[0]
     assert valid is True
 
 
@@ -30,16 +30,16 @@ def test_repair_geometry_sql_leaves_valid_geometry_unchanged():
     con = _con()
     # A valid geometry should pass through ST_IsValid -> identity branch byte-for-byte.
     expr = repair_geometry_sql(f"ST_GeomFromText('{SQUARE_WKT}')")
-    same = con.execute(
-        f"SELECT ST_AsWKB({expr}) = ST_AsWKB(ST_GeomFromText('{SQUARE_WKT}'))"
-    ).fetchone()[0]
+    same = fetch_one(
+        con.execute(f"SELECT ST_AsWKB({expr}) = ST_AsWKB(ST_GeomFromText('{SQUARE_WKT}'))")
+    )[0]
     assert same is True
 
 
 def test_repair_geometry_sql_preserves_null():
     con = _con()
     expr = repair_geometry_sql("NULL::GEOMETRY")
-    result = con.execute(f"SELECT {expr}").fetchone()[0]
+    result = fetch_one(con.execute(f"SELECT {expr}"))[0]
     assert result is None
 
 
@@ -49,7 +49,7 @@ def _wkb_table(con, *wkts, geom_col="geometry", metadata=None):
         f"SELECT {i} AS id, ST_AsWKB(ST_GeomFromText('{w}')) AS \"{geom_col}\""
         for i, w in enumerate(wkts)
     )
-    table = con.execute(rows).arrow().read_all()
+    table = con.sql(rows).arrow().read_all()
     if metadata:
         table = table.replace_schema_metadata(metadata)
     return table
@@ -64,9 +64,9 @@ def test_repair_arrow_table_geometry_repairs_and_counts(caplog):
     assert "Repaired 2 invalid geometries" in caplog.text
     assert repaired.schema.field("geometry").type == table.schema.field("geometry").type
     con.register("r", repaired)
-    invalid = con.execute(
-        "SELECT COUNT(*) FROM r WHERE NOT ST_IsValid(ST_GeomFromWKB(geometry))"
-    ).fetchone()[0]
+    invalid = fetch_one(
+        con.execute("SELECT COUNT(*) FROM r WHERE NOT ST_IsValid(ST_GeomFromWKB(geometry))")
+    )[0]
     assert invalid == 0
     assert repaired.num_rows == 3
 
@@ -103,9 +103,7 @@ def test_repair_arrow_table_geometry_noop_when_all_valid():
 def test_repair_arrow_table_geometry_empty_table_is_safe():
     con = _con()
     table = (
-        con.execute(
-            f"SELECT 1 AS id, ST_AsWKB(ST_GeomFromText('{SQUARE_WKT}')) AS geometry WHERE 1=0"
-        )
+        con.sql(f"SELECT 1 AS id, ST_AsWKB(ST_GeomFromText('{SQUARE_WKT}')) AS geometry WHERE 1=0")
         .arrow()
         .read_all()
     )
@@ -123,9 +121,9 @@ def test_repair_query_geometry_native_geometry_column(caplog):
     with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
         wrapped = repair_query_geometry(con, base, "geom", repair=True)
     assert "Repaired 1 invalid geometry" in caplog.text
-    invalid = con.execute(
-        f"SELECT COUNT(*) FROM ({wrapped}) WHERE NOT ST_IsValid(geom)"
-    ).fetchone()[0]
+    invalid = fetch_one(
+        con.execute(f"SELECT COUNT(*) FROM ({wrapped}) WHERE NOT ST_IsValid(geom)")
+    )[0]
     assert invalid == 0
 
 
@@ -137,9 +135,9 @@ def test_repair_query_geometry_wkb_column():
     )
     wrapped = repair_query_geometry(con, base, "geom", repair=True)
     # Output stays WKB-encoded; decode for the validity check.
-    invalid = con.execute(
-        f"SELECT COUNT(*) FROM ({wrapped}) WHERE NOT ST_IsValid(ST_GeomFromWKB(geom))"
-    ).fetchone()[0]
+    invalid = fetch_one(
+        con.execute(f"SELECT COUNT(*) FROM ({wrapped}) WHERE NOT ST_IsValid(ST_GeomFromWKB(geom))")
+    )[0]
     assert invalid == 0
 
 
@@ -180,7 +178,7 @@ def _wkb_table_with_nulls(con, *wkts, geom_col="geometry"):
         )
         for i, w in enumerate(wkts)
     )
-    return con.execute(rows).arrow().read_all()
+    return con.sql(rows).arrow().read_all()
 
 
 def test_repair_arrow_table_geometry_with_null_rows(caplog):
@@ -218,10 +216,12 @@ def test_repair_query_geometry_with_null_rows():
         f"SELECT id, geometry IS NULL FROM ({repaired_query}) ORDER BY id"
     ).fetchall()
     assert [r[1] for r in rows] == [False, True, False]
-    valid = con.execute(
-        f"SELECT bool_and(ST_IsValid(TRY(ST_GeomFromWKB(geometry)))) "
-        f"FROM ({repaired_query}) WHERE geometry IS NOT NULL"
-    ).fetchone()[0]
+    valid = fetch_one(
+        con.execute(
+            f"SELECT bool_and(ST_IsValid(TRY(ST_GeomFromWKB(geometry)))) "
+            f"FROM ({repaired_query}) WHERE geometry IS NOT NULL"
+        )
+    )[0]
     assert valid is True
 
 
@@ -239,7 +239,7 @@ def test_repair_arrow_table_geometry_null_rows_at_scale():
     con = _con()
     n = 10_000
     table = (
-        con.execute(
+        con.sql(
             f"""
             SELECT i AS id, CASE
                 WHEN i % 997 = 0 THEN NULL

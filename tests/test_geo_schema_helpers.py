@@ -56,8 +56,7 @@ class TestParseGeometryTypeFromSchema:
         schema_str = f"required group geometry (Geometry(Polygon, XY, crs={crs_json}))"
         result = parse_geometry_type_from_schema("geometry", schema_str)
         assert result is not None
-        # CRS parsing may return dict or string depending on format
-        assert result.get("crs") is not None
+        assert result["crs"] == {"type": "PROJCRS", "name": "NAD83"}
 
     def test_parses_geometry_collection(self):
         """Test parsing GeometryCollection type."""

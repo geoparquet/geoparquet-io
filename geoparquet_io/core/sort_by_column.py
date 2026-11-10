@@ -5,9 +5,11 @@ from __future__ import annotations
 import duckdb
 import pyarrow as pa
 
+from geoparquet_io.core.column_selection import resolve_columns_against_schema
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.duckdb_metadata import get_usable_columns
+from geoparquet_io.core.duckdb_metadata import get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
     get_duckdb_connection,
     quote_identifier,
     register_arrow,
@@ -16,7 +18,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
 from geoparquet_io.core.file_utils import handle_output_overwrite, is_partition_path
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
-from geoparquet_io.core.parquet_writer import resolve_row_group_rows
+from geoparquet_io.core.parquet_writer import WriteOptions, resolve_row_group_rows
 from geoparquet_io.core.partition.reader import build_read_parquet_expr, raise_for_schema_mismatch
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
@@ -58,12 +60,7 @@ def sort_by_column_table(
         raise ValueError("At least one column name must be specified")
 
     # Validate columns exist
-    for col in column_list:
-        if col not in table.column_names:
-            raise ValueError(
-                f"Column '{col}' not found in table. "
-                f"Available columns: {', '.join(table.column_names)}"
-            )
+    column_list = resolve_columns_against_schema(column_list, table.column_names, "columns")
 
     # Register table and execute query
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
@@ -75,7 +72,7 @@ def sort_by_column_table(
         order_clause = ", ".join(f"{quote_identifier(col)}{direction}" for col in column_list)
 
         query = f"SELECT * FROM __input_table ORDER BY {order_clause}"
-        result = con.execute(query).arrow().read_all()
+        result = con.sql(query).arrow().read_all()
 
         # Preserve metadata
         if table.schema.metadata:
@@ -87,26 +84,6 @@ def sort_by_column_table(
         con.close()
 
 
-def _sortable_columns(input_parquet: str, read_expr: str, allow_schema_diff: bool) -> list[str]:
-    """The column names the sort may be asked for.
-
-    ``get_usable_columns`` describes the FIRST file of a multi-file input, which
-    is the right answer for a strict read -- that first file's schema is exactly
-    what DuckDB will return. Under ``--allow-schema-diff`` it is the wrong one:
-    the read returns the union, and validating against the first file would
-    reject the very column the flag was turned on to keep (#867). So describe
-    the read expression itself instead.
-    """
-    if not allow_schema_diff:
-        return [c["name"] for c in get_usable_columns(input_parquet)]
-
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_parquet))
-    try:
-        return [row[0] for row in con.execute(f"DESCRIBE SELECT * FROM {read_expr}").fetchall()]
-    finally:
-        con.close()
-
-
 @uses_aws_profile
 def sort_by_column(
     input_parquet: str,
@@ -114,7 +91,7 @@ def sort_by_column(
     columns: str | list[str] = "",
     descending: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -168,6 +145,7 @@ def sort_by_column(
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming:
         _sort_by_column_streaming(
             input_parquet,
@@ -175,19 +153,13 @@ def sort_by_column(
             column_list,
             descending,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit=memory_limit,
+            write,
         )
         return
 
     # File-based mode
     # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
 
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_parquet, output_parquet)
@@ -204,15 +176,12 @@ def sort_by_column(
     # Get metadata from original file
     metadata, schema = get_parquet_metadata(input_parquet, verbose)
 
-    # Validate that specified columns exist - use get_usable_columns for actual DuckDB column names
-    existing_columns = _sortable_columns(input_parquet, read_expr, allow_schema_diff)
-    for col in column_list:
-        if col not in existing_columns:
-            raise InvalidParameterError(
-                "columns",
-                f"column '{col}' not found in input file. "
-                f"Available columns: {', '.join(existing_columns)}",
-            )
+    # Validate that specified columns exist - use the names a query can name (get_usable_column_names)
+    column_list = resolve_columns_against_schema(
+        column_list,
+        get_usable_column_names(input_parquet, read_expr=read_expr if allow_schema_diff else None),
+        "columns",
+    )
 
     if verbose:
         debug(f"Sorting by column(s): {', '.join(column_list)}")
@@ -244,27 +213,21 @@ def sort_by_column(
             order_query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             input_file=input_parquet,
-            memory_limit=memory_limit,
             # `metadata` is the FIRST file's footer. Over a merged multi-file
             # input its bbox/geometry_types under-cover the output, and a
             # conformant reader would skip the rows they leave out, so the
             # write recomputes them instead of carrying them (#793).
             invalidate_derived_stats=is_partition_path(input_parquet),
+            **write.funnel_kwargs(),
         )
 
         success(f"Sorted by {', '.join(column_list)} to: {output_parquet}")
 
     except duckdb.IOException as e:
         if is_remote_url(input_parquet):
-            hints = get_remote_error_hint(str(e), input_parquet)
+            hints = get_remote_error_hint(e, input_parquet)
             raise RemoteAccessError(input_parquet, f"{hints}\n\nOriginal error: {str(e)}") from e
         raise
     except duckdb.InvalidInputException as e:
@@ -282,13 +245,7 @@ def _sort_by_column_streaming(
     column_list: list[str],
     descending: bool,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
-    memory_limit: str | None,
+    write: WriteOptions,
 ) -> None:
     """Handle streaming input/output for sort_by_column."""
     # Suppress verbose when streaming to stdout
@@ -298,23 +255,17 @@ def _sort_by_column_streaming(
     def make_query(source: str, con) -> str:
         """Build the sort query for streaming source."""
         # Get column names from query result
-        sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        col_names = [col[0] for col in sample]
+        col_names = [name for name, _ in describe_query(con, f"SELECT * FROM {source}")]
 
         # Validate columns exist
-        for col in column_list:
-            if col not in col_names:
-                raise InvalidParameterError(
-                    "columns",
-                    f"column '{col}' not found in input. Available columns: {', '.join(col_names)}",
-                )
+        resolved = resolve_columns_against_schema(column_list, col_names, "columns")
 
         # Build ORDER BY clause
         direction = " DESC" if descending else ""
-        order_clause = ", ".join(f"{quote_identifier(col)}{direction}" for col in column_list)
+        order_clause = ", ".join(f"{quote_identifier(col)}{direction}" for col in resolved)
 
         if verbose:
-            debug(f"Sorting by column(s): {', '.join(column_list)}")
+            debug(f"Sorting by column(s): {', '.join(resolved)}")
 
         return f"SELECT * FROM {source} ORDER BY {order_clause}"
 
@@ -323,13 +274,7 @@ def _sort_by_column_streaming(
         output_path,
         make_query,
         verbose=verbose,
-        compression=compression,
-        compression_level=compression_level,
-        row_group_size_mb=row_group_size_mb,
-        row_group_rows=row_group_rows,
-        profile=profile,
-        geoparquet_version=geoparquet_version,
-        memory_limit=memory_limit,
+        **write.funnel_kwargs(),
     )
 
     if not should_stream_output(output_path):

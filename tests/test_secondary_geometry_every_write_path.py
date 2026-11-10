@@ -11,9 +11,9 @@ The five paths, one class each:
 * **remote, glob and directory inputs** -- the derivation read the input with
   ``pq.ParquetFile``, so ``https://``, ``s3://``, ``dir/*.parquet`` and hive
   directories derived nothing. It now reads through ``get_schema_info`` /
-  ``get_geo_metadata``, the pair ``collect_nonplanar_edges`` already asks the
+  ``sanitized_carried_geo_of_file``, the pair ``collect_nonplanar_edges`` already asks the
   same question of, which resolve all four spellings.
-* **the 2.0 fast path** -- ``_geo_block_to_carry_on_fast_path`` writes the
+* **the 2.0 fast path** -- ``_fast_path_geo_decision`` writes the
   input's own block verbatim, so a 2.0 input whose block omits a native
   secondary kept it undescribed through ``sort``/``extract``.
 * **``gpio convert``** -- it passes a ``geometry_info`` built from the ``geo``
@@ -27,7 +27,7 @@ The five paths, one class each:
   derive nothing; the secondaries now come off the table's own schema.
 
 Remote spellings: ``https://`` and ``s3://`` are covered *by construction* --
-they go through the same ``get_schema_info``/``get_geo_metadata`` pair as the
+they go through the same ``get_schema_info``/``sanitized_carried_geo_of_file`` pair as the
 glob and directory cases, which these tests do exercise -- not by a test, since
 the suite does not reach the network.
 """
@@ -305,7 +305,7 @@ def _v2_block_omitting_the_secondary(source, path):
     """A 2.0 file whose ``geo`` block describes ``geometry`` only, plus an ``epoch``.
 
     The ``epoch`` is what makes the block worth carrying at all: without a key
-    DuckDB would not generate itself, ``_geo_block_to_carry_on_fast_path`` hands
+    DuckDB would not generate itself, ``_fast_path_geo_decision`` hands
     the write back to DuckDB's own (complete) block and there is nothing to fix.
     """
     table = pq.read_table(str(source))
@@ -600,6 +600,7 @@ def test_describe_reads_a_crs_whose_text_holds_an_apostrophe():
 
 class TestTheEdgesOfTheHelpers:
     def test_the_table_query_converts_only_plain_wkb_secondaries(self):
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, register_arrow
         from geoparquet_io.core.write_strategies.duckdb_kv import (
             _table_query_with_native_geometry,
         )
@@ -617,17 +618,18 @@ class TestTheEdgesOfTheHelpers:
             "metadata": {"centroid": {"crs": {"id": {"authority": "OGC", "code": "CRS84"}}}},
         }
 
-        query = _table_query_with_native_geometry(table, "geometry", info, "2.0")
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            register_arrow(con, "input_table", table)
+            query = _table_query_with_native_geometry(con, table, "geometry", info, "2.0")
+            v1_query = _table_query_with_native_geometry(con, table, "geometry", info, "1.1")
+        finally:
+            con.close()
 
         assert 'ST_GeomFromWKB("centroid") AS "centroid"' in query, "a default CRS is not set"
         assert "label_wkt" not in query, "a WKT string is not ST_GeomFromWKB's to read"
         assert "dropped" not in query
-        assert (
-            _table_query_with_native_geometry(table, "geometry", info, "1.1").count(
-                "ST_GeomFromWKB"
-            )
-            == 1
-        )
+        assert v1_query.count("ST_GeomFromWKB") == 1
 
     def test_a_describe_that_fails_answers_nothing(self):
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection

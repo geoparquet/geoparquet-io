@@ -73,7 +73,7 @@ class TestToJsonable:
             (dt.date(2024, 1, 2), "2024-01-02"),
             (dt.datetime(2024, 1, 2, 3, 4, 5), "2024-01-02T03:04:05"),
             (
-                dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc),
+                dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.UTC),
                 "2024-01-02T03:04:05+00:00",
             ),
             (dt.time(1, 2, 3), "01:02:03"),
@@ -327,4 +327,4 @@ class TestPreviewJsonFormat:
         assert "T" in text
         parsed = dt.datetime.fromisoformat(text)
         assert parsed.tzinfo is not None
-        assert parsed == dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.timezone.utc)
+        assert parsed == dt.datetime(2024, 1, 2, 3, 4, 5, tzinfo=dt.UTC)

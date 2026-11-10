@@ -5,42 +5,6 @@ from unittest.mock import patch
 
 import pytest
 
-from geoparquet_io.core.hilbert_order import _cleanup_temp_file
-
-
-class TestCleanupTempFile:
-    """Tests for _cleanup_temp_file function."""
-
-    def test_cleanup_nonexistent_file(self, tmp_path):
-        """Test cleanup with non-existent file."""
-        nonexistent = str(tmp_path / "nonexistent.parquet")
-        # Should not raise
-        _cleanup_temp_file(nonexistent, verbose=False)
-
-    def test_cleanup_none_file(self):
-        """Test cleanup with None file."""
-        # Should not raise
-        _cleanup_temp_file(None, verbose=False)
-
-    def test_cleanup_existing_file(self, tmp_path):
-        """Test cleanup with existing file."""
-        temp_file = tmp_path / "temp.parquet"
-        temp_file.write_text("test content")
-        assert temp_file.exists()
-
-        _cleanup_temp_file(str(temp_file), verbose=False)
-
-        assert not temp_file.exists()
-
-    def test_cleanup_with_verbose(self, tmp_path, capsys):
-        """Test cleanup with verbose output."""
-        temp_file = tmp_path / "temp.parquet"
-        temp_file.write_text("test content")
-
-        _cleanup_temp_file(str(temp_file), verbose=True)
-
-        assert not temp_file.exists()
-
 
 class TestHilbertV11Warning:
     """Tests for v1.1 Hilbert sorting warning."""
@@ -189,7 +153,7 @@ class TestHilbertOrderTableEmptyGeometries:
         con.load_extension("spatial")
 
         arrow_table = (
-            con.execute("""
+            con.sql("""
             SELECT * FROM (VALUES
                 (1, ST_AsWKB(ST_GeomFromText('POINT(10 20)'))),
                 (2, ST_AsWKB(ST_GeomFromText('POINT EMPTY'))),
@@ -231,7 +195,7 @@ class TestHilbertOrderTableEmptyGeometries:
         con.load_extension("spatial")
 
         arrow_table = (
-            con.execute("""
+            con.sql("""
             SELECT * FROM (VALUES
                 (1, ST_AsWKB(ST_GeomFromText('POINT EMPTY'))),
                 (2, ST_AsWKB(ST_GeomFromText('LINESTRING EMPTY'))),
@@ -265,7 +229,7 @@ class TestHilbertOrderTableEmptyGeometries:
         con.load_extension("spatial")
 
         arrow_table = (
-            con.execute("""
+            con.sql("""
             SELECT * FROM (VALUES
                 (1, ST_AsWKB(ST_GeomFromText('POINT(10 20)'))),
                 (2, NULL),
@@ -298,7 +262,7 @@ class TestHilbertOrderTableEmptyGeometries:
         con.load_extension("spatial")
 
         arrow_table = (
-            con.execute("""
+            con.sql("""
             SELECT * FROM (VALUES
                 (1, ST_AsWKB(ST_GeomFromText('POINT(10 20)'))),
                 (2, ST_AsWKB(ST_GeomFromText('POINT EMPTY')))
@@ -340,7 +304,7 @@ class TestHilbertOrderCLIEmptyGeometries:
 
         # Create table with WKB geometries
         arrow_table = (
-            con.execute("""
+            con.sql("""
                 SELECT * FROM (VALUES
                     (1, ST_AsWKB(ST_GeomFromText('POINT(10 20)'))),
                     (2, ST_AsWKB(ST_GeomFromText('POINT EMPTY'))),
@@ -371,7 +335,7 @@ class TestHilbertOrderCLIEmptyGeometries:
 
         # Create table with empty/null WKB geometries
         arrow_table = (
-            con.execute("""
+            con.sql("""
                 SELECT * FROM (VALUES
                     (1, ST_AsWKB(ST_GeomFromText('POINT EMPTY'))),
                     (2, ST_AsWKB(ST_GeomFromText('LINESTRING EMPTY'))),

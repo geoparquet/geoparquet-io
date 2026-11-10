@@ -17,12 +17,13 @@ from geoparquet_io.cli.decorators import (
     geoparquet_version_option,
     output_format_options,
     overwrite_option,
-    parse_row_group_options,
+    pack_write_options,
     show_sql_option,
     verbose_option,
 )
 from geoparquet_io.core.file_utils import validate_parquet_extension
 from geoparquet_io.core.hilbert_order import hilbert_order as hilbert_impl
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.sort_by_column import sort_by_column as sort_by_column_impl
 from geoparquet_io.core.sort_quadkey import sort_by_quadkey as sort_by_quadkey_impl
 from geoparquet_io.core.str_order import str_order as str_impl
@@ -41,8 +42,8 @@ def sort(ctx):
 @column_name_option(
     "--geometry-column",
     "-g",
-    default="geometry",
-    help="Name of the geometry column (default: geometry)",
+    default=None,
+    help="Name of the geometry column (default: the file's primary geometry column)",
 )
 @bbox_option
 @output_format_options
@@ -52,18 +53,14 @@ def sort(ctx):
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def hilbert_order(
     ctx,
     input_parquet,
     output_parquet,
     geometry_column,
     add_bbox,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     verbose,
     any_extension,
@@ -84,9 +81,7 @@ def hilbert_order(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        row_group_mb = prepare_output(
-            output_parquet, any_extension, row_group_size, row_group_size_mb
-        )
+        prepare_output(output_parquet, any_extension)
 
         hilbert_impl(
             input_parquet,
@@ -94,14 +89,8 @@ def hilbert_order(
             geometry_column,
             add_bbox,
             verbose,
-            compression.upper(),
-            compression_level,
-            row_group_mb,
-            row_group_size,
-            None,
-            geoparquet_version,
-            overwrite,
-            memory_limit=write_memory,
+            overwrite=overwrite,
+            **write.funnel_kwargs(),
         )
 
 
@@ -111,8 +100,8 @@ def hilbert_order(
 @column_name_option(
     "--geometry-column",
     "-g",
-    default="geometry",
-    help="Name of the geometry column (default: geometry)",
+    default=None,
+    help="Name of the geometry column (default: the file's primary geometry column)",
 )
 @bbox_option
 @output_format_options
@@ -122,18 +111,14 @@ def hilbert_order(
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def str_order_command(
     ctx,
     input_parquet,
     output_parquet,
     geometry_column,
     add_bbox,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     verbose,
     any_extension,
@@ -154,23 +139,15 @@ def str_order_command(
     pass.
     """
     with _activate_s3(ctx):
-        row_group_mb = prepare_output(
-            output_parquet, any_extension, row_group_size, row_group_size_mb
-        )
+        prepare_output(output_parquet, any_extension)
         str_impl(
             input_parquet,
             output_parquet,
             geometry_column=geometry_column,
             add_bbox_flag=add_bbox,
             verbose=verbose,
-            compression=compression.upper(),
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            profile=None,
-            geoparquet_version=geoparquet_version,
             overwrite=overwrite,
-            memory_limit=write_memory,
+            **write.funnel_kwargs(),
         )
 
 
@@ -191,6 +168,7 @@ def str_order_command(
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def sort_column(
     ctx,
     input_parquet,
@@ -198,12 +176,7 @@ def sort_column(
     columns,
     descending,
     allow_schema_diff,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     verbose,
     any_extension,
@@ -226,23 +199,15 @@ def sort_column(
         # Validate .parquet extension
         validate_parquet_extension(output_parquet, any_extension)
 
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
         sort_by_column_impl(
             input_parquet,
             output_parquet,
             columns=columns,
             descending=descending,
             verbose=verbose,
-            compression=compression.upper(),
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            geoparquet_version=geoparquet_version,
             overwrite=overwrite,
-            memory_limit=write_memory,
             allow_schema_diff=allow_schema_diff,
+            **write.funnel_kwargs(),
         )
 
 
@@ -256,9 +221,11 @@ def sort_column(
 )
 @click.option(
     "--resolution",
-    default=13,
-    type=click.IntRange(0, 23),
-    help="Resolution when auto-adding quadkey column (0-23). Default: 13",
+    default=get_index_spec("quadkey").default_resolution,
+    type=click.IntRange(
+        get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
+    ),
+    help=f"Resolution when auto-adding quadkey column ({get_index_spec('quadkey').bounds_text}). Default: {get_index_spec('quadkey').default_resolution}",
 )
 @click.option(
     "--use-centroid",
@@ -278,6 +245,7 @@ def sort_column(
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def sort_quadkey(
     ctx,
     input_parquet,
@@ -287,12 +255,7 @@ def sort_quadkey(
     use_centroid,
     remove_quadkey_column,
     allow_schema_diff,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     verbose,
     any_extension,
@@ -314,9 +277,6 @@ def sort_quadkey(
         # Validate .parquet extension
         validate_parquet_extension(output_parquet, any_extension)
 
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
         sort_by_quadkey_impl(
             input_parquet,
             output_parquet,
@@ -325,12 +285,7 @@ def sort_quadkey(
             use_centroid=use_centroid,
             remove_quadkey_column=remove_quadkey_column,
             verbose=verbose,
-            compression=compression.upper(),
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
-            geoparquet_version=geoparquet_version,
             overwrite=overwrite,
-            memory_limit=write_memory,
             allow_schema_diff=allow_schema_diff,
+            **write.funnel_kwargs(),
         )

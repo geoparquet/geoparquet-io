@@ -5,7 +5,7 @@ green. This file pins the three things review found *around* them, each a case
 where something other than the facade answered the facade's own question, or
 where the facade's answer reached an output the input never described.
 
-* **A stale second owner.** ``hilbert_order._resolve_output_version`` decides
+* **A stale second owner.** ``hilbert_order._advised_output_version`` decides
   which version ``gpio sort hilbert`` and ``gpio sort str`` *say* they are
   writing, and it made that decision with its own copy of the pre-facade rule.
   On a native-geo-only input it said 1.1 and advised ``--geoparquet-version
@@ -138,16 +138,16 @@ def test_the_fixture_really_declares_a_projected_crs():
 
 
 def test_the_sort_advisory_resolves_the_version_the_write_will_use(native_geo_only):
-    """``_resolve_output_version`` must answer what the facade answers.
+    """``_advised_output_version`` must answer what the facade answers.
 
     Its docstring claimed it "mirrors ``write_parquet_with_metadata``". After
     the facade it did not: it read the carried ``geo`` key, which a
     native-geo-only input does not have, and fell back to the 1.1 default while
     the write resolved 2.0 from the file itself.
     """
-    from geoparquet_io.core.hilbert_order import _resolve_output_version
+    from geoparquet_io.core.hilbert_order import _advised_output_version
 
-    assert _resolve_output_version(str(native_geo_only), None, verbose=False) == "2.0"
+    assert _advised_output_version(str(native_geo_only), None, verbose=False) == "2.0"
 
 
 @pytest.mark.parametrize("command", ["hilbert", "str"])

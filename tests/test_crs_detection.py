@@ -14,8 +14,9 @@ import pytest
 from geoparquet_io.core.crs_utils import (
     _crs_from_geoarrow_field,
     _detect_crs_from_filegdb,
-    crs_string_from_table,
+    crs_of,
     detect_crs_from_spatial_file,
+    transform_source_crs,
 )
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
 
@@ -110,11 +111,11 @@ class TestCrsFromGeoarrowField:
 class TestCrsStringFromTable:
     def test_geoarrow_crs_becomes_transform_string(self):
         table = _table_with_geoarrow_crs({"id": {"authority": "EPSG", "code": 6933}})
-        assert crs_string_from_table(table, "geometry") == "EPSG:6933"
+        assert transform_source_crs(crs_of(table, geometry_column="geometry")) == "EPSG:6933"
 
     def test_crs_less_table_returns_none(self):
         table = pa.table({"geometry": [b"\x00"]})
-        assert crs_string_from_table(table, "geometry") is None
+        assert transform_source_crs(crs_of(table, geometry_column="geometry")) is None
 
     def test_geo_metadata_crs_wins(self):
         geo = {
@@ -126,4 +127,4 @@ class TestCrsStringFromTable:
         }
         table = pa.table({"geometry": [b"\x00"]})
         table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
-        assert crs_string_from_table(table, "geometry") == "EPSG:3857"
+        assert transform_source_crs(crs_of(table, geometry_column="geometry")) == "EPSG:3857"

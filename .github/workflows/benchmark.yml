@@ -10,15 +10,16 @@ on:
         required: false
         default: '3'
         type: string
-      files:
-        description: 'File sizes to benchmark (quick, standard, full, or comma-separated)'
+      size:
+        description: 'Seeded workload size'
         required: false
         default: 'full'
-        type: string
-      ops:
-        description: 'Operations to benchmark (quick, standard, full, or comma-separated)'
+        type: choice
+        options: [small, full]
+      command:
+        description: 'Matrix command ID (must exist on both versions)'
         required: false
-        default: 'full'
+        default: 'sort-hilbert'
         type: string
       compare_version:
         description: 'Version to compare against (e.g., v0.9.0, main)'
@@ -67,13 +68,15 @@ jobs:
     env:
       # Use environment variables to safely pass user inputs to shell commands
       ITERATIONS: ${{ inputs.iterations || '3' }}
-      FILES: ${{ inputs.files || 'full' }}
-      OPS: ${{ inputs.ops || 'full' }}
+      SIZE: ${{ inputs.size || 'full' }}
+      COMMAND: ${{ inputs.command || 'sort-hilbert' }}
+      CURRENT_SHA: ${{ github.sha }}
       COMPARE_VERSION: ${{ inputs.compare_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0
 
       - name: Validate inputs
         run: |
@@ -82,23 +85,22 @@ jobs:
             echo "Error: iterations must be a positive integer"
             exit 1
           fi
-          # Validate files and ops are alphanumeric with allowed chars
-          if ! [[ "$FILES" =~ ^[a-zA-Z0-9,_-]+$ ]]; then
-            echo "Error: files must be alphanumeric with commas, underscores, or hyphens"
+          if ! [[ "$SIZE" =~ ^(small|full)$ ]]; then
+            echo "Error: size must be small or full"
             exit 1
           fi
-          if ! [[ "$OPS" =~ ^[a-zA-Z0-9,_-]+$ ]]; then
-            echo "Error: ops must be alphanumeric with commas, underscores, or hyphens"
+          if ! [[ "$COMMAND" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]]; then
+            echo "Error: command must be one matrix command ID"
             exit 1
           fi
           # Validate compare_version if provided (git ref format)
-          if [[ -n "$COMPARE_VERSION" ]] && ! [[ "$COMPARE_VERSION" =~ ^[a-zA-Z0-9._/-]+$ ]]; then
+          if [[ -n "$COMPARE_VERSION" ]] && ! [[ "$COMPARE_VERSION" =~ ^[a-zA-Z0-9][a-zA-Z0-9._/-]*$ ]]; then
             echo "Error: compare_version must be a valid git ref"
             exit 1
           fi
 
       - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           enable-cache: true
 
@@ -117,48 +119,31 @@ jobs:
         run: |
           uv run python -c "import duckdb; con = duckdb.connect(); con.execute('INSTALL spatial'); con.execute('INSTALL httpfs')"
 
+      - name: Save profiling harness for historical checkouts
+        run: |
+          bash scripts/run_matrix.sh save
+
       - name: Run benchmarks (current)
         run: |
-          uv run python scripts/version_benchmark.py \
-            --version-label "${{ github.sha }}" \
-            -o results_current.json \
-            -n "$ITERATIONS" \
-            --files "$FILES" \
-            --ops "$OPS"
+          bash scripts/run_matrix.sh run "$COMMAND" "$SIZE" "$ITERATIONS" "$CURRENT_SHA" current results_current.json
 
       - name: Checkout and benchmark comparison version
         if: inputs.compare_version != ''
         run: |
-          # Save current results
-          cp results_current.json /tmp/results_current.json
+          bash scripts/run_matrix.sh checkout "$COMPARE_VERSION"
 
-          # Checkout comparison version (already validated above)
-          git fetch --tags --depth=1 origin
-          git checkout "$COMPARE_VERSION"
+          # An unsupported historical command fails visibly; partial measurements
+          # and logs are retained rather than treated as successful comparisons.
+          bash scripts/run_matrix.sh run "$COMMAND" "$SIZE" "$ITERATIONS" "$COMPARE_VERSION" baseline results_baseline.json
 
-          # Reinstall at that version
-          uv sync --all-extras
-
-          # Run benchmarks
-          uv run python scripts/version_benchmark.py \
-            --version-label "$COMPARE_VERSION" \
-            -o results_baseline.json \
-            -n "$ITERATIONS" \
-            --files "$FILES" \
-            --ops "$OPS"
-
-          # Restore current and compare
-          cp /tmp/results_current.json results_current.json
-          git checkout ${{ github.sha }}
-          uv sync --all-extras
-
+          bash scripts/run_matrix.sh checkout "$CURRENT_SHA"
           {
             echo "## Benchmark Comparison"
             echo ""
-            echo "\`\`\`"
-            uv run python scripts/version_benchmark.py \
+            echo '```'
+            uv run python -m scripts.benchmark_history \
               --compare results_baseline.json results_current.json
-            echo "\`\`\`"
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate summary (no comparison)
@@ -178,8 +163,8 @@ jobs:
         if: inputs.compare_version != ''
         run: |
           # Parse comparison output to detect regressions > 10%
-          COMPARISON_OUTPUT=$(uv run python scripts/version_benchmark.py \
-            --compare results_baseline.json results_current.json 2>&1 || true)
+          COMPARISON_OUTPUT=$(uv run python -m scripts.benchmark_history \
+            --compare results_baseline.json results_current.json 2>&1)
 
           echo "$COMPARISON_OUTPUT"
 
@@ -190,13 +175,13 @@ jobs:
           MAX_REGRESSION=$(echo "$COMPARISON_OUTPUT" \
             | grep -oE '\+[0-9]+\.[0-9]+% slower' \
             | grep -oE '[0-9]+\.[0-9]+' \
-            | sort -rn | head -1)
+            | sort -rn | head -1 || true)
 
           if [ -n "$MAX_REGRESSION" ] && awk "BEGIN { exit !($MAX_REGRESSION >= 10) }"; then
             echo "::error::Performance regression detected: ${MAX_REGRESSION}% slower (threshold: 10%)"
             echo ""
             echo "To diagnose, run profiling locally:"
-            echo "  gpio benchmark suite --files <file> --profile --profile-dir ./profiles"
+            echo "  python -m scripts.profile_costs current/matrix.json"
             exit 1
           fi
 
@@ -207,7 +192,10 @@ jobs:
           name: benchmark-results-${{ github.sha }}
           path: |
             results_*.json
-            profiles/*.prof
+            current/**/*.json
+            current/**/*.log
+            baseline/**/*.json
+            baseline/**/*.log
           retention-days: 30
 
       - name: Comment on PR
@@ -244,7 +232,7 @@ jobs:
             body += '\n\n---\n';
             body += '💡 **Profiling available**: To diagnose performance bottlenecks, run:\n';
             body += '```bash\n';
-            body += 'gpio benchmark suite --files <file> --profile --profile-dir ./profiles\n';
+            body += 'python -m scripts.profile_costs current/matrix.json\n';
             body += '```\n';
 
             github.rest.issues.createComment({

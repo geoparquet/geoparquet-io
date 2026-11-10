@@ -19,6 +19,9 @@ import pytest
 
 from tests.conftest import safe_rmtree, safe_unlink
 
+# Whole-pipeline subprocess checks belong in the slow lane (#1402).
+pytestmark = pytest.mark.slow
+
 TEST_DATA_DIR = Path(__file__).parent / "data"
 PLACES_PARQUET = TEST_DATA_DIR / "places_test.parquet"
 

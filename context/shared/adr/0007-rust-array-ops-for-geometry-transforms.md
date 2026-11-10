@@ -21,8 +21,8 @@ I/O still flows through gpio's Arrow machinery and the write funnels
 
 Install constraints shaped the dependency decision:
 
-- contourrs publishes wheels only for CPython 3.12–3.14; gpio supports ≥3.10, so a
-  hard dependency would break installs on 3.10/3.11.
+- contourrs publishes wheels only for CPython 3.12–3.14; gpio supports ≥3.11, so a
+  hard dependency would break installs on 3.11.
 - coarsen is LGPL-2.1-or-later (gpio is Apache-2.0) and is a young project.
 - The raster commands additionally need rasterio to read GeoTIFFs — a large wheel
   most gpio users don't need.
@@ -49,7 +49,7 @@ dependencies**:
 ## Consequences
 
 ### Positive
-- `pip install geoparquet-io` stays lean and keeps working on Python 3.10/3.11 and
+- `pip install geoparquet-io` stays lean and keeps working on Python 3.11 and
   platforms the Rust wheels don't cover.
 - Users get GEOS-quality simplification at Rust speed and gpio's first raster→vector
   path with one extra: `pip install 'geoparquet-io[simplify]'` / `'geoparquet-io[raster]'`.
@@ -61,7 +61,7 @@ dependencies**:
   arrays in memory (coverage simplification needs the whole column at once).
 - The diff-cover CI leg runs Python 3.11, where contourrs cannot install, so the
   contourrs-touching code needs a dependency-free unit-test layer to stay covered.
-- `pip install 'geoparquet-io[raster]'` on 3.10/3.11 silently skips contourrs (the
+- `pip install 'geoparquet-io[raster]'` on 3.11 silently skips contourrs (the
   marker); the runtime error message must explain the 3.12+ floor.
 
 ### Neutral
@@ -72,7 +72,7 @@ dependencies**:
 
 ### Hard dependencies
 Smallest install story for users who have them, but contourrs would break
-`pip install geoparquet-io` on Python 3.10/3.11 outright, and LGPL coarsen would ship
+`pip install geoparquet-io` on Python 3.11 outright, and LGPL coarsen would ship
 to every user. Rejected.
 
 ### Separate plugin packages (`gpio-coarsen`, `gpio-contourrs`)

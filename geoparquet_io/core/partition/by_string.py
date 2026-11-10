@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
-from geoparquet_io.core.duckdb_metadata import get_column_names, get_schema_info
+from geoparquet_io.core.column_selection import find_column
+from geoparquet_io.core.duckdb_metadata import get_schema_info, get_usable_column_names
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.file_utils import unlink_released_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
+from geoparquet_io.core.parquet_schema import root_schema_index
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import (
     partition_by_column,
     preview_partition,
     raise_if_no_rows,
+    readable_geoparquet,
 )
 from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
 
@@ -26,9 +31,13 @@ def validate_column_exists(parquet_file: str, column_name: str, verbose: bool = 
         InvalidParameterError: If the column doesn't exist
     """
 
-    column_names = get_column_names(parquet_file)
+    # The reader's own view of the file, so a non-conformant one is refused the
+    # way every other partition read refuses it (#722).
+    with readable_geoparquet(parquet_file):
+        column_names = get_usable_column_names(parquet_file)
 
-    if column_name not in column_names:
+    resolved = find_column(column_name, column_names, option_name="column")
+    if resolved is None:
         available_columns = ", ".join(column_names)
         raise InvalidParameterError(
             "column",
@@ -37,11 +46,10 @@ def validate_column_exists(parquet_file: str, column_name: str, verbose: bool = 
 
     if verbose:
         schema_info = get_schema_info(parquet_file)
-        for col in schema_info:
-            if col.get("name") == column_name:
-                column_type = col.get("type", "unknown")
-                debug(f"Found column '{column_name}' with type: {column_type}")
-                break
+        index = root_schema_index(schema_info, resolved)
+        if index is not None:
+            column_type = schema_info[index].get("type", "unknown")
+            debug(f"Found column '{resolved}' with type: {column_type}")
 
 
 def partition_by_string(
@@ -59,8 +67,8 @@ def partition_by_string(
     filename_prefix: str | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
-    compression: str = "ZSTD",
-    compression_level: int = 15,
+    compression: str | None = None,
+    compression_level: int | None = None,
     row_group_size_mb: int | None = None,
     row_group_rows: int | None = None,
     memory_limit: str | None = None,
@@ -86,13 +94,12 @@ def partition_by_string(
         filename_prefix: Optional prefix for partition filenames
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write
-        compression: Compression codec (default: ZSTD)
+        compression: Compression codec (default: the compression owner's)
         compression_level: Compression level (default: 15)
         row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
         row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
         memory_limit: DuckDB memory limit for write operations (e.g., "2GB")
     """
-    import os
 
     # Configure logging verbosity
     configure_verbose(verbose)
@@ -103,6 +110,7 @@ def partition_by_string(
         temp_file_path = read_stdin_to_temp_file(verbose)
         input_parquet = temp_file_path
 
+    write = WriteOptions.pick(locals())
     try:
         # Validate column exists
         if verbose:
@@ -169,22 +177,15 @@ def partition_by_string(
             force=force,
             skip_analysis=skip_analysis,
             filename_prefix=filename_prefix,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
-            memory_limit=memory_limit,
+            write=write,
         )
 
         success(f"Successfully created {num_partitions} partition file(s)")
     finally:
         # Clean up temporary file if created
-        if temp_file_path and os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-            if verbose:
-                debug(f"Cleaned up temporary file: {temp_file_path}")
+        if temp_file_path and verbose:
+            debug(f"Cleaning up temporary file: {temp_file_path}")
+        unlink_released_file(temp_file_path)
 
 
 if __name__ == "__main__":

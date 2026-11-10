@@ -43,7 +43,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core import check_fixes
+from geoparquet_io.core import write_funnels
 from geoparquet_io.core.exceptions import RemoteAccessError
 from geoparquet_io.core.file_utils import is_same_file_path
 from tests.fix_output_oracle import CRS84, NO_GEO_BLOCK, assert_fix_output_is_sound
@@ -305,7 +305,7 @@ def test_an_in_place_fix_still_repairs_the_file_and_leaves_a_backup(
     assert target.read_bytes() != before, "the fix left the file untouched"
     backup = target.with_name(target.name + ".bak")
     assert backup.exists() and backup.read_bytes() == before
-    assert list(target.parent.glob(".gpio-fix-*")) == [], "a staging file was left behind"
+    assert list(target.parent.glob(".gpio-stage-*")) == [], "a staging file was left behind"
     # ...and what was renamed into place is a file gpio itself accepts (#1018).
     assert_fix_output_is_sound(target, expected_crs=CRS84, **IN_PLACE_FIX_OUTPUTS[fixture_name])
 
@@ -332,15 +332,15 @@ def test_a_failed_rewrite_keeps_the_original_and_removes_the_staging_file(tmp_pa
         Path(kwargs["output_file"]).write_bytes(b"half a parquet file")
         raise duckdb.IOException("disk went away")
 
-    monkeypatch.setattr(check_fixes, "write_parquet_with_metadata", explode)
+    monkeypatch.setattr(write_funnels, "write_parquet_with_metadata", explode)
 
     with pytest.raises(duckdb.IOException):
-        check_fixes._rewrite_through_staging(
+        write_funnels.rewrite_file_through_funnel(
             str(target), str(target), "SELECT 1", verbose=False, profile=None
         )
 
     assert target.read_bytes() == b"the original bytes"
-    assert list(tmp_path.glob(".gpio-fix-*")) == [], "a staging file was left behind"
+    assert list(tmp_path.glob(".gpio-stage-*")) == [], "a staging file was left behind"
 
 
 def test_a_failed_move_keeps_the_original_and_discards_the_rewrite(tmp_path, monkeypatch):
@@ -359,17 +359,17 @@ def test_a_failed_move_keeps_the_original_and_discards_the_rewrite(tmp_path, mon
     def no_space(*_args, **_kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(check_fixes, "write_parquet_with_metadata", write_something)
-    monkeypatch.setattr(check_fixes, "get_duckdb_connection", lambda **kwargs: duckdb.connect())
+    monkeypatch.setattr(write_funnels, "write_parquet_with_metadata", write_something)
+    monkeypatch.setattr(write_funnels, "get_duckdb_connection", lambda **kwargs: duckdb.connect())
     monkeypatch.setattr(os, "replace", no_space)
 
     with pytest.raises(OSError, match="No space left on device"):
-        check_fixes._rewrite_through_staging(
+        write_funnels.rewrite_file_through_funnel(
             str(target), str(target), "SELECT 1", verbose=False, profile=None
         )
 
     assert target.read_bytes() == b"the original bytes"
-    assert list(tmp_path.glob(".gpio-fix-*")) == [], "a staging file was left behind"
+    assert list(tmp_path.glob(".gpio-stage-*")) == [], "a staging file was left behind"
 
 
 def test_a_remote_in_place_fix_is_handed_to_the_facade_unstaged(monkeypatch):
@@ -382,13 +382,13 @@ def test_a_remote_in_place_fix_is_handed_to_the_facade_unstaged(monkeypatch):
     """
     seen: list[str] = []
     monkeypatch.setattr(
-        check_fixes,
+        write_funnels,
         "write_parquet_with_metadata",
         lambda con, query, output_file, **kwargs: seen.append(output_file),
     )
-    monkeypatch.setattr(check_fixes, "get_duckdb_connection", lambda **kwargs: duckdb.connect())
+    monkeypatch.setattr(write_funnels, "get_duckdb_connection", lambda **kwargs: duckdb.connect())
 
-    check_fixes._rewrite_through_staging(
+    write_funnels.rewrite_file_through_funnel(
         "s3://bucket/key.parquet",
         "s3://bucket/key.parquet",
         "SELECT 1",
@@ -405,11 +405,11 @@ def test_a_remote_rewrite_that_cannot_read_its_input_says_so(monkeypatch):
     def explode(**kwargs):
         raise duckdb.IOException("HTTP 403")
 
-    monkeypatch.setattr(check_fixes, "write_parquet_with_metadata", explode)
-    monkeypatch.setattr(check_fixes, "get_duckdb_connection", lambda **kwargs: duckdb.connect())
+    monkeypatch.setattr(write_funnels, "write_parquet_with_metadata", explode)
+    monkeypatch.setattr(write_funnels, "get_duckdb_connection", lambda **kwargs: duckdb.connect())
 
     with pytest.raises(RemoteAccessError):
-        check_fixes._rewrite_through_staging(
+        write_funnels.rewrite_file_through_funnel(
             "s3://bucket/in.parquet",
             "s3://bucket/out.parquet",
             "SELECT 1",

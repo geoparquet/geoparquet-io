@@ -19,6 +19,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.convert import read_spatial_to_arrow
+from geoparquet_io.core.duckdb_utils import fetch_one
 
 # Two self-intersecting "bowtie" polygons (invalid) and one valid square --
 # the fixture shape tests/test_geometry_repair_integration.py uses.
@@ -71,9 +72,11 @@ def _invalid_count(table, geometry_column):
     con.execute("INSTALL spatial; LOAD spatial;")
     try:
         con.register("_src", table)
-        return con.execute(
-            f'SELECT COUNT(*) FROM _src WHERE NOT ST_IsValid(ST_GeomFromWKB("{geometry_column}"))'
-        ).fetchone()[0]
+        return fetch_one(
+            con.execute(
+                f'SELECT COUNT(*) FROM _src WHERE NOT ST_IsValid(ST_GeomFromWKB("{geometry_column}"))'
+            )
+        )[0]
     finally:
         con.close()
 

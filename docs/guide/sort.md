@@ -83,6 +83,10 @@ gpio sort hilbert input.parquet output.parquet --verbose
 gpio sort hilbert input.parquet output.parquet -g geom
 ```
 
+Without `-g`, the sort runs on the file's primary geometry column. A column you
+name with `-g` that the input does not have is an error, on files and streams
+alike; it is never swapped for another column.
+
 ## Compression Options
 
 --8<-- "_includes/compression-options.md"

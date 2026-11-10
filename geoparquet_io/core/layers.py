@@ -35,7 +35,7 @@ import sqlite3
 from pathlib import Path
 from urllib.parse import quote as url_quote
 
-from geoparquet_io.core.duckdb_utils import sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, sql_path
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.remote import is_remote_url
 
@@ -243,7 +243,7 @@ def _list_filegdb_layers_fallback(path: str, con) -> list[str]:
     for table_file in gdbtable_files:
         table_path = os.path.join(path, table_file)
         try:
-            result = con.execute(f"SELECT * FROM ST_Read_Meta({sql_path(table_path)})").fetchone()
+            result = fetch_one(con.execute(f"SELECT * FROM ST_Read_Meta({sql_path(table_path)})"))
 
             if result and result[0]:  # layer_name is first column
                 layer_name = result[0]

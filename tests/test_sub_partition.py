@@ -183,10 +183,8 @@ class TestSubPartitionExecution:
         def mock_partition_fail(*args, **kwargs):
             raise ValueError("Simulated partition failure")
 
-        # Patch the h3 partition function to fail - patch where it's imported
-        monkeypatch.setattr(
-            "geoparquet_io.core.partition.by_h3.partition_by_h3", mock_partition_fail
-        )
+        # Patch the shared partition driver where directory mode calls it.
+        monkeypatch.setattr("geoparquet_io.core.sub_partition.partition_index", mock_partition_fail)
 
         result = sub_partition_directory(
             directory=temp_partition_dir,
@@ -430,10 +428,10 @@ class TestQuadkeyDirectoryResolutions:
         _test_file, threshold = self._seed(temp_partition_dir)
         calls = []
 
-        def _record(**kwargs):
+        def _record(spec, **kwargs):
             calls.append(kwargs)
 
-        monkeypatch.setattr("geoparquet_io.core.partition.by_quadkey.partition_by_quadkey", _record)
+        monkeypatch.setattr("geoparquet_io.core.sub_partition.partition_index", _record)
 
         core_sub_partition.sub_partition_directory(
             directory=temp_partition_dir,
@@ -469,11 +467,11 @@ class TestSubPartitionFailuresAreReported:
         said success -- so a run that partitioned nothing looked like a clean one."""
         size = self._seed(temp_partition_dir)
 
-        def _boom(**kwargs):
+        def _boom(spec, **kwargs):
             raise RuntimeError("simulated partition failure")
 
-        # sub_partition_directory imports it inside the function, so patch the source.
-        monkeypatch.setattr("geoparquet_io.core.partition.by_quadkey.partition_by_quadkey", _boom)
+        # Patch the shared partition driver at the directory call site.
+        monkeypatch.setattr("geoparquet_io.core.sub_partition.partition_index", _boom)
 
         result = cli_runner.invoke(
             partition,
@@ -1053,7 +1051,7 @@ class TestApiDirectorySubPartition:
         from pathlib import Path
 
         from geoparquet_io.api import ops
-        from geoparquet_io.core.exceptions import PartitionError
+        from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
 
         large, small = self._seed(temp_partition_dir)
         originals = {path: Path(path).read_bytes() for path in (large, small)}
@@ -1076,7 +1074,7 @@ class TestApiDirectorySubPartition:
             result = cli_runner.invoke(partition, args)
             assert result.exit_code != 0
         else:
-            with pytest.raises(PartitionError):
+            with pytest.raises(InvalidParameterError if auto else PartitionError):
                 ops.sub_partition_by_quadkey(
                     temp_partition_dir,
                     min_size=threshold,
@@ -1334,6 +1332,29 @@ class TestApiDirectorySubPartition:
         assert os.path.exists(large)
 
 
+def _front_door_invocations(index_args, index_kwargs):
+    """The (CLI args, API kwargs) pairs one index's front-door case runs.
+
+    Every knob `partition <idx>` shares with `ops.sub_partition_by_<idx>` travels
+    to core through `**run`, which no signature shows, so each one is set by some
+    invocation; tests/test_parity_registry.py fails when a shared knob is left out.
+    A resolution (or --auto) is required on every run.
+    """
+    run_args = ["--in-place", "--hive", "--overwrite", "--force", "--skip-analysis"]
+    run_kwargs = {"in_place": True, "hive": True, "overwrite": True, "force": True}
+    # The CLI upper-cases the codec; core accepts either case.
+    run_args += ["--compression", "gzip", "--compression-level", "6"]
+    run_kwargs |= {"skip_analysis": True, "compression": "GZIP", "compression_level": 6}
+    return [
+        (index_args, index_kwargs),
+        ([*index_args, *run_args], {**index_kwargs, **run_kwargs}),
+        (
+            ["--auto", "--target-rows", "5000", "--max-partitions", "50"],
+            {"auto": True, "target_rows": 5000, "max_partitions": 50},
+        ),
+    ]
+
+
 class TestSubPartitionFrontDoorParity:
     """`gpio partition <index> <dir> --min-size` and its `ops` twin are one operation.
 
@@ -1343,25 +1364,23 @@ class TestSubPartitionFrontDoorParity:
     """
 
     CASES = [
-        ("a5", "sub_partition_by_a5", ["--resolution", "12"], {"resolution": 12}),
-        ("h3", "sub_partition_by_h3", ["--resolution", "4"], {"resolution": 4}),
-        ("s2", "sub_partition_by_s2", ["--level", "10"], {"level": 10}),
+        ("a5", _front_door_invocations(["--resolution", "12"], {"resolution": 12})),
+        ("h3", _front_door_invocations(["--resolution", "4"], {"resolution": 4})),
+        ("s2", _front_door_invocations(["--level", "10"], {"level": 10})),
         (
             "quadkey",
-            "sub_partition_by_quadkey",
-            ["--resolution", "6", "--partition-resolution", "3", "--use-centroid"],
-            {"resolution": 6, "partition_resolution": 3, "use_centroid": True},
+            _front_door_invocations(
+                ["--resolution", "6", "--partition-resolution", "3", "--use-centroid"],
+                {"resolution": 6, "partition_resolution": 3, "use_centroid": True},
+            ),
         ),
     ]
 
-    @pytest.mark.parametrize(
-        ("index", "function", "cli_args", "api_kwargs"),
-        CASES,
-        ids=[case[0] for case in CASES],
-    )
+    @pytest.mark.parametrize(("index", "invocations"), CASES, ids=[case[0] for case in CASES])
     def test_both_front_doors_hand_core_the_same_call(
-        self, cli_runner, temp_partition_dir, index, function, cli_args, api_kwargs
+        self, cli_runner, temp_partition_dir, index, invocations
     ):
+        import inspect
         from pathlib import Path
         from unittest.mock import patch
 
@@ -1372,23 +1391,60 @@ class TestSubPartitionFrontDoorParity:
         test_file = os.path.join(temp_partition_dir, "test.parquet")
         shutil.copy(buildings, test_file)
         threshold = f"{os.path.getsize(test_file) - 100}B"
-
         clean = {"processed": 1, "skipped": 0, "errors": []}
+        # The two doors may spell a defaulted argument or leave it out; compare
+        # what core receives once its defaults are applied.
+        signature = inspect.signature(core_sub_partition.sub_partition_directory)
 
-        with patch.object(
-            core_sub_partition, "sub_partition_directory", return_value=clean
-        ) as fake:
-            result = cli_runner.invoke(
-                partition,
-                [index, temp_partition_dir, "--min-size", threshold, *cli_args],
-            )
-            assert result.exit_code == 0, f"CLI failed: {result.output}"
-            cli_call = fake.call_args.kwargs
+        def received(call):
+            bound = signature.bind(**call)
+            bound.apply_defaults()
+            return bound.arguments
 
-        with patch.object(
-            core_sub_partition, "sub_partition_directory", return_value=clean
-        ) as fake:
-            getattr(ops, function)(temp_partition_dir, min_size=threshold, **api_kwargs)
-            api_call = fake.call_args.kwargs
+        for cli_args, api_kwargs in invocations:
+            with patch.object(
+                core_sub_partition, "sub_partition_directory", return_value=clean
+            ) as fake:
+                result = cli_runner.invoke(
+                    partition,
+                    [index, temp_partition_dir, "--min-size", threshold, *cli_args],
+                )
+                assert result.exit_code == 0, f"CLI failed: {result.output}"
+                cli_call = fake.call_args.kwargs
 
-        assert api_call == cli_call
+            with patch.object(
+                core_sub_partition, "sub_partition_directory", return_value=clean
+            ) as fake:
+                getattr(ops, f"sub_partition_by_{index}")(
+                    temp_partition_dir, min_size=threshold, **api_kwargs
+                )
+                api_call = fake.call_args.kwargs
+
+            assert received(api_call) == received(cli_call), cli_args
+
+
+@pytest.mark.parametrize("option", ["resolution", "partition_resolution"])
+def test_quadkey_auto_rejects_explicit_resolution_at_both_front_doors(tmp_path, option):
+    """Reject contradictory arguments before planning or touching directory inputs."""
+    from click.testing import CliRunner
+
+    from geoparquet_io.api import ops
+    from geoparquet_io.core.exceptions import InvalidParameterError
+
+    with pytest.raises(InvalidParameterError, match="cannot specify"):
+        ops.sub_partition_by_quadkey(tmp_path, min_size="1B", auto=True, **{option: 6})
+    result = CliRunner().invoke(
+        partition,
+        [
+            "quadkey",
+            str(tmp_path),
+            "--min-size",
+            "1B",
+            "--auto",
+            "--" + option.replace("_", "-"),
+            "6",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "cannot specify" in result.output
+    assert list(tmp_path.iterdir()) == []

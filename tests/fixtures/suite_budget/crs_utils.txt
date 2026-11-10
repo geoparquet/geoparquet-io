@@ -1,0 +1,15 @@
+# Exact test excerpts from d8015ba8:tests/test_crs_utils.py (pre-hygiene).
+class TestExtractCrsIdentifier:
+    def test_projjson_dict_with_id(self):
+        """Extracts identifier from PROJJSON dict with 'id' key."""
+        crs = {"id": {"authority": "EPSG", "code": 4326}}
+        result = _extract_crs_identifier(crs)
+
+        assert result == ("EPSG", 4326)
+
+    def test_dict_without_id_returns_none(self):
+        """Dict without 'id' key returns None."""
+        crs = {"name": "WGS 84", "type": "GeographicCRS"}
+        result = _extract_crs_identifier(crs)
+
+        assert result is None

@@ -13,25 +13,29 @@ from geoparquet_io.cli.decorators import (
     aggregate_memory_option,
     breakdown_metric_option,
     bucket_point_options,
+    column_name_option,
     geoparquet_version_option,
     grid_aggregate_options,
-    handle_geoparquet_errors,
     metric_nodata_option,
+    overwrite_option,
+    pack_write_options,
     process_compression_options,
+    refuse_together,
     repair_geometry_option,
     row_group_options,
     show_sql_option,
     verbose_option,
     where_option,
 )
-from geoparquet_io.core.crs_utils import UnresolvableCRSError
-from geoparquet_io.core.exceptions import InvalidParameterError, ValidationError
+from geoparquet_io.cli.exception_handler import click_error_for
+from geoparquet_io.core.index_ops import get_index_spec
 from geoparquet_io.core.process.aggregate.by_a5 import aggregate_by_a5 as aggregate_by_a5_impl
 from geoparquet_io.core.process.aggregate.by_admin import (
     aggregate_by_admin as aggregate_by_admin_impl,
 )
 from geoparquet_io.core.process.aggregate.by_h3 import aggregate_by_h3 as aggregate_by_h3_impl
 from geoparquet_io.core.process.overview import create_overviews as create_overviews_impl
+from geoparquet_io.core.process.overview.detect import VALID_SCHEMES
 from geoparquet_io.core.process.overview.run import create_overview_file
 from geoparquet_io.core.process.simplify import simplify_file as simplify_file_impl
 
@@ -40,23 +44,13 @@ from geoparquet_io.core.process.simplify import simplify_file as simplify_file_i
 # =============================================================================
 
 
-def _aggregate_error(exc: Exception, where: str | None) -> click.ClickException:
-    """Turn an aggregation failure into a message a user can act on.
-
-    A bad ``--where`` clause surfaces as a raw DuckDB binder/parser error that
-    echoes the whole generated SQL, which buries the actual cause. Drop the SQL
-    echo and name ``--where`` as the likely culprit (gpio #612). Non-DuckDB
-    errors (validation, bad parameters) already read well and pass through.
-    """
-    if not isinstance(exc, duckdb.Error):
-        return click.ClickException(str(exc))
-    message = str(exc).split("\nLINE ")[0].strip()
-    if where:
-        message += (
-            f'\n\nThis is most likely caused by --where "{where}" '
-            "-- check the column names and SQL syntax."
-        )
-    return click.ClickException(message)
+def _where_hint(where: str | None) -> str | None:
+    """Name ``--where`` as the likely culprit of a DuckDB binder/parser error (gpio #612)."""
+    if not where:
+        return None
+    return (
+        f'This is most likely caused by --where "{where}" -- check the column names and SQL syntax.'
+    )
 
 
 @click.group()
@@ -96,7 +90,7 @@ def process(ctx):
 )
 @click.option(
     "--scheme",
-    type=click.Choice(["a5", "h3", "admin"]),
+    type=click.Choice(list(VALID_SCHEMES)),
     default=None,
     help=(
         "Bucketing scheme of the cell column when inference is ambiguous "
@@ -109,11 +103,10 @@ def process(ctx):
     default=None,
     help="Directory for overview files (default: alongside the input).",
 )
-@click.option(
-    "--force",
-    "-f",
-    is_flag=True,
-    help="Overwrite existing overview output files.",
+@overwrite_option(
+    flag="--force",
+    short="-f",
+    help_text="Overwrite existing overview output files.",
 )
 @click.option(
     "--overview-out",
@@ -145,6 +138,7 @@ def process(ctx):
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def process_overview(
     ctx,
     input_parquet,
@@ -155,15 +149,12 @@ def process_overview(
     scheme,
     output_dir,
     force,
-    compression,
-    compression_level,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
     overview_out,
     cell_detail,
     explicit_gsd,
-    write_memory,
 ):
     """Build coarser overview levels from an aggregate output.
 
@@ -196,9 +187,7 @@ def process_overview(
             "cell_column": cell_column,
             "scheme": scheme,
             "output_dir": output_dir,
-            "compression": compression.upper(),
-            "compression_level": compression_level,
-            "geoparquet_version": geoparquet_version,
+            **write.funnel_kwargs(),
             "force": force,
             "verbose": verbose,
             "show_sql": show_sql,
@@ -210,13 +199,12 @@ def process_overview(
                     overview_out,
                     cell_detail=cell_detail,
                     explicit_gsd=explicit_gsd,
-                    memory_limit=write_memory,
                     **kwargs,
                 )
             else:
-                create_overviews_impl(input_parquet, memory_limit=write_memory, **kwargs)
-        except (InvalidParameterError, ValueError, duckdb.Error) as exc:
-            raise click.ClickException(str(exc)) from exc
+                create_overviews_impl(input_parquet, **kwargs)
+        except (ValueError, duckdb.Error) as exc:
+            raise click_error_for(exc) from exc
 
 
 @process.group(name="aggregate")
@@ -236,9 +224,9 @@ def process_aggregate(ctx):
 @click.argument("output_parquet")
 @click.option(
     "--resolution",
-    type=click.IntRange(0, 30),
+    type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
     default=None,
-    help="A5 resolution (0-30). Required unless --auto.",
+    help=f"A5 resolution ({get_index_spec('a5').bounds_text}). Required unless --auto.",
 )
 @grid_aggregate_options
 @process_compression_options
@@ -246,6 +234,7 @@ def process_aggregate(ctx):
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def process_aggregate_a5(
     ctx,
     input_parquet,
@@ -254,20 +243,9 @@ def process_aggregate_a5(
     auto,
     target_per_cell,
     max_cells,
-    metric,
-    metric_nodata,
-    breakdown,
-    breakdown_limit,
-    breakdown_metric,
-    out_geometry,
-    where,
-    bucket_point,
-    bbox_column,
-    write_memory,
-    compression,
-    compression_level,
+    aggregate_options,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Aggregate features into A5 grid cells.
@@ -295,30 +273,13 @@ def process_aggregate_a5(
                 auto=auto,
                 target_per_cell=target_per_cell,
                 max_cells=max_cells,
-                metric=metric,
-                breakdown=breakdown,
-                breakdown_limit=breakdown_limit,
-                breakdown_metric=breakdown_metric,
-                out_geometry=out_geometry,
-                compression=compression.upper(),
-                compression_level=compression_level,
-                geoparquet_version=geoparquet_version,
+                options=aggregate_options,
+                **write.funnel_kwargs(),
                 verbose=verbose,
                 show_sql=show_sql,
-                where=where,
-                metric_nodata=metric_nodata,
-                bucket_point=bucket_point,
-                bbox_column=bbox_column,
-                memory_limit=write_memory,
             )
-        except (
-            InvalidParameterError,
-            ValidationError,
-            UnresolvableCRSError,
-            ValueError,
-            duckdb.Error,
-        ) as exc:
-            raise _aggregate_error(exc, where) from exc
+        except (ValueError, duckdb.Error) as exc:
+            raise click_error_for(exc, hint=_where_hint(aggregate_options.where)) from exc
 
 
 @process_aggregate.command(name="h3")
@@ -326,9 +287,9 @@ def process_aggregate_a5(
 @click.argument("output_parquet")
 @click.option(
     "--resolution",
-    type=click.IntRange(0, 15),
+    type=click.IntRange(get_index_spec("h3").min_resolution, get_index_spec("h3").max_resolution),
     default=None,
-    help="H3 resolution (0-15). Required unless --auto.",
+    help=f"H3 resolution ({get_index_spec('h3').bounds_text}). Required unless --auto.",
 )
 @grid_aggregate_options
 @process_compression_options
@@ -336,6 +297,7 @@ def process_aggregate_a5(
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def process_aggregate_h3(
     ctx,
     input_parquet,
@@ -344,20 +306,9 @@ def process_aggregate_h3(
     auto,
     target_per_cell,
     max_cells,
-    metric,
-    metric_nodata,
-    breakdown,
-    breakdown_limit,
-    breakdown_metric,
-    out_geometry,
-    where,
-    bucket_point,
-    bbox_column,
-    write_memory,
-    compression,
-    compression_level,
+    aggregate_options,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Aggregate features into H3 grid cells.
@@ -385,30 +336,13 @@ def process_aggregate_h3(
                 auto=auto,
                 target_per_cell=target_per_cell,
                 max_cells=max_cells,
-                metric=metric,
-                breakdown=breakdown,
-                breakdown_limit=breakdown_limit,
-                breakdown_metric=breakdown_metric,
-                out_geometry=out_geometry,
-                compression=compression.upper(),
-                compression_level=compression_level,
-                geoparquet_version=geoparquet_version,
+                options=aggregate_options,
+                **write.funnel_kwargs(),
                 verbose=verbose,
                 show_sql=show_sql,
-                where=where,
-                metric_nodata=metric_nodata,
-                bucket_point=bucket_point,
-                bbox_column=bbox_column,
-                memory_limit=write_memory,
             )
-        except (
-            InvalidParameterError,
-            ValidationError,
-            UnresolvableCRSError,
-            ValueError,
-            duckdb.Error,
-        ) as exc:
-            raise _aggregate_error(exc, where) from exc
+        except (ValueError, duckdb.Error) as exc:
+            raise click_error_for(exc, hint=_where_hint(aggregate_options.where)) from exc
 
 
 @process_aggregate.command(name="admin")
@@ -452,6 +386,7 @@ def process_aggregate_h3(
 @geoparquet_version_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def process_aggregate_admin(
     ctx,
     input_parquet,
@@ -466,11 +401,8 @@ def process_aggregate_admin(
     where,
     bucket_point,
     bbox_column,
-    write_memory,
-    compression,
-    compression_level,
+    write,
     verbose,
-    geoparquet_version,
     show_sql,
 ):
     """Aggregate features into administrative regions.
@@ -498,25 +430,16 @@ def process_aggregate_admin(
                 breakdown_limit=breakdown_limit,
                 breakdown_metric=breakdown_metric,
                 out_geometry=out_geometry,
-                compression=compression.upper(),
-                compression_level=compression_level,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
                 verbose=verbose,
                 show_sql=show_sql,
                 where=where,
                 metric_nodata=metric_nodata,
                 bucket_point=bucket_point,
                 bbox_column=bbox_column,
-                memory_limit=write_memory,
             )
-        except (
-            InvalidParameterError,
-            ValidationError,
-            UnresolvableCRSError,
-            ValueError,
-            duckdb.Error,
-        ) as exc:
-            raise _aggregate_error(exc, where) from exc
+        except (ValueError, duckdb.Error) as exc:
+            raise click_error_for(exc, hint=_where_hint(where)) from exc
 
 
 @process.command(name="simplify")
@@ -554,7 +477,7 @@ def process_aggregate_admin(
     default=None,
     help="Worker threads for coarsen (default: let the library decide).",
 )
-@click.option(
+@column_name_option(
     "--geometry-column",
     default=None,
     help="Geometry column to simplify (default: the file's primary geometry column).",
@@ -585,8 +508,8 @@ def process_aggregate_admin(
 @process_compression_options
 @geoparquet_version_option
 @verbose_option
-@handle_geoparquet_errors
 @click.pass_context
+@pack_write_options
 def process_simplify(
     ctx,
     input_parquet,
@@ -600,11 +523,7 @@ def process_simplify(
     drop_empty,
     simplify_crs,
     refresh_metrics,
-    row_group_size,
-    row_group_size_mb,
-    compression,
-    compression_level,
-    geoparquet_version,
+    write,
     verbose,
 ):
     """Simplify geometries with coarsen (GEOS-identical, multithreaded Rust).
@@ -616,16 +535,16 @@ def process_simplify(
         gpio process simplify admin.parquet simplified.parquet \\
             --tolerance 0.001 --coverage
     """
-    if coverage and preserve_topology is not None:
-        raise click.UsageError(
-            "--preserve-topology/--no-preserve-topology applies to plain mode "
-            "and cannot be combined with --coverage (coverage simplification "
-            "always preserves the coverage's topology)."
-        )
+    refuse_together(
+        ("--coverage", coverage),
+        ("--preserve-topology/--no-preserve-topology", preserve_topology is not None),
+        end=": coverage simplification always preserves the coverage's topology.",
+    )
     if not coverage and simplify_boundary is not None:
         raise click.UsageError(
             "--simplify-boundary/--no-simplify-boundary only applies with --coverage."
         )
+    # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
     with _activate_s3(ctx):
         try:
             simplify_file_impl(
@@ -640,15 +559,11 @@ def process_simplify(
                 drop_empty=drop_empty,
                 simplify_crs=simplify_crs,
                 refresh_metrics=refresh_metrics,
-                compression=compression.upper(),
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_size,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
                 verbose=verbose,
             )
         except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
+            raise click_error_for(exc) from exc
 
 
 def _parse_float_csv(value: str | None, option_name: str) -> list[float] | None:
@@ -694,8 +609,8 @@ def _parse_float_csv(value: str | None, option_name: str) -> list[float] | None:
 @process_compression_options
 @geoparquet_version_option
 @verbose_option
-@handle_geoparquet_errors
 @click.pass_context
+@pack_write_options
 def process_polygonize(
     ctx,
     input_raster,
@@ -706,11 +621,7 @@ def process_polygonize(
     nodata,
     no_mask,
     repair_geometry,
-    row_group_size,
-    row_group_size_mb,
-    compression,
-    compression_level,
-    geoparquet_version,
+    write,
     verbose,
 ):
     """Polygonize a categorical raster into GeoParquet (contourrs).
@@ -727,6 +638,7 @@ def process_polygonize(
     from geoparquet_io.core.process.raster.polygonize import polygonize_file
 
     value_list = _parse_float_csv(values, "--values")
+    # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
     with _activate_s3(ctx):
         try:
             polygonize_file(
@@ -738,15 +650,11 @@ def process_polygonize(
                 nodata=nodata,
                 use_mask=not no_mask,
                 repair_geometry=repair_geometry,
-                compression=compression.upper(),
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_size,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
                 verbose=verbose,
             )
         except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
+            raise click_error_for(exc) from exc
 
 
 @process.command(name="contour")
@@ -798,8 +706,8 @@ def process_polygonize(
 @process_compression_options
 @geoparquet_version_option
 @verbose_option
-@handle_geoparquet_errors
 @click.pass_context
+@pack_write_options
 def process_contour(
     ctx,
     input_raster,
@@ -812,11 +720,7 @@ def process_contour(
     no_mask,
     min_column,
     max_column,
-    row_group_size,
-    row_group_size_mb,
-    compression,
-    compression_level,
-    geoparquet_version,
+    write,
     verbose,
 ):
     """Extract filled contour bands from an elevation raster (contourrs).
@@ -832,11 +736,8 @@ def process_contour(
     """
     from geoparquet_io.core.process.raster.contour import contour_file
 
-    if levels is not None and interval is not None:
-        raise click.UsageError("--levels and --interval are mutually exclusive.")
-    if levels is None and interval is None:
-        raise click.UsageError("one of --levels or --interval is required.")
     level_list = _parse_float_csv(levels, "--levels")
+    # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
     with _activate_s3(ctx):
         try:
             contour_file(
@@ -850,12 +751,8 @@ def process_contour(
                 use_mask=not no_mask,
                 min_column=min_column,
                 max_column=max_column,
-                compression=compression.upper(),
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_size,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
                 verbose=verbose,
             )
         except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
+            raise click_error_for(exc) from exc

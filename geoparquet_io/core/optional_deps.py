@@ -34,7 +34,7 @@ def load_module(name: str) -> ModuleType:
 
     Exists for numpy (and shapely, which imports it): numpy >= 2.3 ships
     stubs using PEP 695 ``type`` statements, which mypy's
-    ``python_version = "3.10"`` target refuses to parse — a literal
+    ``python_version = "3.11"`` target refuses to parse — a literal
     ``import numpy`` anywhere in the package fails the whole mypy run on
     numpy's own files. The dynamic import keeps those stubs out of mypy's
     reach and types the module as ``Any``, like any unstubbed dependency.

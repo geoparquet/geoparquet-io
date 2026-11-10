@@ -5,6 +5,8 @@ import json
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.core.duckdb_utils import fetch_one
+
 
 def create_multi_geometry_geoparquet(output_path: str) -> str:
     """Create a GeoParquet file with two geometry columns.
@@ -26,14 +28,14 @@ def create_multi_geometry_geoparquet(output_path: str) -> str:
     # Generate WKB for points
     point_wkbs = []
     for x, y in [(0, 0), (1, 1), (2, 2)]:
-        result = con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))").fetchone()
+        result = fetch_one(con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))"))
         point_wkbs.append(result[0])
 
     # Generate WKB for polygons (1x1 boxes around each point)
     polygon_wkbs = []
     for x, y in [(0, 0), (1, 1), (2, 2)]:
         wkt = f"POLYGON(({x - 0.5} {y - 0.5}, {x + 0.5} {y - 0.5}, {x + 0.5} {y + 0.5}, {x - 0.5} {y + 0.5}, {x - 0.5} {y - 0.5}))"
-        result = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
+        result = fetch_one(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))"))
         polygon_wkbs.append(result[0])
 
     con.close()
@@ -103,14 +105,14 @@ def create_multi_geometry_geoparquet_different_crs(output_path: str) -> str:
     # Points in WGS84
     point_wkbs = []
     for x, y in [(0, 0), (1, 1), (2, 2)]:
-        result = con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))").fetchone()
+        result = fetch_one(con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))"))
         point_wkbs.append(result[0])
 
     # Polygons in Web Mercator coordinates (rough equivalent)
     polygon_wkbs = []
     for x, y in [(0, 0), (111319, 111325), (222638, 222684)]:
         wkt = f"POLYGON(({x - 50000} {y - 50000}, {x + 50000} {y - 50000}, {x + 50000} {y + 50000}, {x - 50000} {y + 50000}, {x - 50000} {y - 50000}))"
-        result = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
+        result = fetch_one(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))"))
         polygon_wkbs.append(result[0])
 
     con.close()
@@ -181,7 +183,7 @@ def create_geoparquet_with_custom_column_name(
     # Generate WKB for points
     point_wkbs = []
     for x, y in [(0, 0), (1, 1), (2, 2)]:
-        result = con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))").fetchone()
+        result = fetch_one(con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))"))
         point_wkbs.append(result[0])
 
     con.close()
@@ -245,14 +247,14 @@ def create_multi_geometry_with_custom_primary_name(
     # Generate WKB for points (primary)
     point_wkbs = []
     for x, y in [(0, 0), (1, 1), (2, 2)]:
-        result = con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))").fetchone()
+        result = fetch_one(con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))"))
         point_wkbs.append(result[0])
 
     # Generate WKB for polygons (secondary)
     polygon_wkbs = []
     for x, y in [(0, 0), (1, 1), (2, 2)]:
         wkt = f"POLYGON(({x - 0.5} {y - 0.5}, {x + 0.5} {y - 0.5}, {x + 0.5} {y + 0.5}, {x - 0.5} {y + 0.5}, {x - 0.5} {y - 0.5}))"
-        result = con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()
+        result = fetch_one(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))"))
         polygon_wkbs.append(result[0])
 
     con.close()
@@ -336,9 +338,9 @@ def create_multi_geometry_with_secondary_bbox(
     polygon_wkbs = []
     bbox_structs = []
     for x, y in [(0, 0), (1, 1), (2, 2)]:
-        point_wkbs.append(con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))").fetchone()[0])
+        point_wkbs.append(fetch_one(con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))"))[0])
         wkt = f"POLYGON(({x - 0.5} {y - 0.5}, {x + 0.5} {y - 0.5}, {x + 0.5} {y + 0.5}, {x - 0.5} {y + 0.5}, {x - 0.5} {y - 0.5}))"
-        polygon_wkbs.append(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()[0])
+        polygon_wkbs.append(fetch_one(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))"))[0])
         bbox_structs.append({"xmin": x - 0.5, "ymin": y - 0.5, "xmax": x + 0.5, "ymax": y + 0.5})
 
     con.close()

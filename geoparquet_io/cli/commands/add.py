@@ -6,7 +6,6 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 """
 
 import click
-from click.core import ParameterSource
 
 from geoparquet_io.cli._shared import _activate_s3, init_group_context, prepare_output
 from geoparquet_io.cli.decorators import (
@@ -20,11 +19,12 @@ from geoparquet_io.cli.decorators import (
     geoparquet_version_option,
     output_format_options,
     overwrite_option,
-    parse_row_group_options,
+    pack_write_options,
     resolve_kdtree_options,
     show_sql_option,
     verbose_option,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.add.a5 import add_a5_column as add_a5_column_impl
 from geoparquet_io.core.add.bbox import add_bbox_column as add_bbox_column_impl
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata as add_bbox_metadata_impl
@@ -38,9 +38,11 @@ from geoparquet_io.core.add.stac_metadata import (
 )
 from geoparquet_io.core.add.stac_metadata import add_stac_metadata as add_stac_metadata_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
+from geoparquet_io.core.index_ops import get_index_spec
+from geoparquet_io.core.sizing import BYTES_PER_MB
 from geoparquet_io.core.streaming import StreamingError
 
-ONE_MB = 1024 * 1024
+ONE_MB = BYTES_PER_MB
 
 
 def _clear_admin_cache_interactively(cache_dir, clear_admin_cache):
@@ -146,7 +148,8 @@ def add(ctx):
 @verbose_option
 @any_extension_option
 @show_sql_option
-def add_country_codes(
+@pack_write_options
+def add_admin_divisions(
     input_parquet,
     output_parquet,
     dataset,
@@ -156,12 +159,7 @@ def add_country_codes(
     prefix,
     no_cache,
     clear_cache,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     dry_run,
     verbose,
@@ -267,9 +265,6 @@ def add_country_codes(
     # Validate .parquet extension
     validate_parquet_extension(output_parquet, any_extension)
 
-    # Parse row group options
-    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
     # Use new multi-dataset implementation
     from geoparquet_io.core.add.admin_divisions import add_admin_divisions_multi
 
@@ -300,16 +295,11 @@ def add_country_codes(
         add_bbox_flag=add_bbox,
         dry_run=dry_run,
         verbose=verbose,
-        compression=compression.upper(),
-        compression_level=compression_level,
-        row_group_size_mb=row_group_mb,
-        row_group_rows=row_group_size,
-        geoparquet_version=geoparquet_version,
+        **write.funnel_kwargs(),
         overwrite=overwrite,
         prefix=prefix,
         no_cache=no_cache,
         vecorel=vecorel,
-        memory_limit=write_memory,
     )
 
 
@@ -328,16 +318,12 @@ def add_country_codes(
 @verbose_option
 @any_extension_option
 @show_sql_option
+@pack_write_options
 def add_geometry_metrics_cmd(
     input_parquet,
     output_parquet,
     no_vecorel,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     dry_run,
     verbose,
@@ -379,8 +365,6 @@ def add_geometry_metrics_cmd(
             raise click.UsageError("Missing argument 'OUTPUT_PARQUET'.")
         validate_parquet_extension(output_parquet, any_extension)
 
-    row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
     from geoparquet_io.core.add.geometry_metrics import add_geometry_metrics
 
     add_geometry_metrics(
@@ -389,15 +373,10 @@ def add_geometry_metrics_cmd(
         vecorel=not no_vecorel,
         dry_run=dry_run,
         verbose=verbose,
-        compression=compression.upper(),
-        compression_level=compression_level,
-        row_group_size_mb=row_group_mb,
-        row_group_rows=row_group_size,
+        **write.funnel_kwargs(),
         profile=None,
-        geoparquet_version=geoparquet_version,
         overwrite=overwrite,
         show_sql=show_sql,
-        memory_limit=write_memory,
     )
 
 
@@ -418,18 +397,14 @@ def add_geometry_metrics_cmd(
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def add_bbox(
     ctx,
     input_parquet,
     output_parquet,
     bbox_name,
     force,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     dry_run,
     verbose,
@@ -473,16 +448,7 @@ def add_bbox(
         gpio add bbox input.parquet output.parquet --force
     """
     with _activate_s3(ctx):
-        row_group_mb = prepare_output(
-            output_parquet, any_extension, row_group_size, row_group_size_mb
-        )
-
-        # An input that already has a bbox column is answered with a verbatim copy,
-        # which cannot honour a --compression the user actually typed. Pass None
-        # when they did not, so the copy branch can tell the two apart.
-        compression_requested = (
-            ctx.get_parameter_source("compression") is not ParameterSource.DEFAULT
-        )
+        prepare_output(output_parquet, any_extension)
 
         try:
             add_bbox_column_impl(
@@ -491,18 +457,17 @@ def add_bbox(
                 bbox_column_name=bbox_name,
                 dry_run=dry_run,
                 verbose=verbose,
-                compression=compression.upper() if compression_requested else None,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_mb,
-                row_group_rows=row_group_size,
+                # An input that already has a bbox column is answered with a
+                # verbatim copy, which cannot honour a flag the user typed;
+                # --compression is None unless typed, so the copy branch can
+                # tell the two apart (WriteOptions.sets_output_layout).
+                **write.funnel_kwargs(),
                 profile=None,
                 force=force,
-                geoparquet_version=geoparquet_version,
                 overwrite=overwrite,
-                memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="bbox-metadata", cls=SingleFileCommand)
@@ -578,7 +543,9 @@ def add_stac_metadata_cmd(
 
     With no OUTPUT the file is modified in place. Either way only the footer is
     rewritten: every page below it is copied verbatim, so the compression level,
-    the encodings, the bloom filters and the row order are all preserved.
+    the encodings, the bloom filters and the row order are all preserved. A
+    footer that cannot be patched falls back, with a warning, to a rewrite at
+    gpio's default codec and row groups.
     """
     with _activate_s3(ctx):
         add_stac_metadata_impl(
@@ -599,9 +566,9 @@ def add_stac_metadata_cmd(
 )
 @click.option(
     "--resolution",
-    default=9,
-    type=click.IntRange(0, 15),
-    help="H3 resolution level (0-15). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: 9",
+    default=get_index_spec("h3").default_resolution,
+    type=click.IntRange(get_index_spec("h3").min_resolution, get_index_spec("h3").max_resolution),
+    help=f"H3 resolution level ({get_index_spec('h3').bounds_text}). Res 7: ~5km², Res 9: ~105m², Res 11: ~2m², Res 13: ~0.04m². Default: {get_index_spec('h3').default_resolution}",
 )
 @output_format_options
 @geoparquet_version_option
@@ -611,18 +578,14 @@ def add_stac_metadata_cmd(
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def add_h3(
     ctx,
     input_parquet,
     output_parquet,
     h3_name,
     resolution,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     dry_run,
     verbose,
@@ -641,9 +604,7 @@ def add_h3(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        row_group_mb = prepare_output(
-            output_parquet, any_extension, row_group_size, row_group_size_mb
-        )
+        prepare_output(output_parquet, any_extension)
 
         try:
             add_h3_column_impl(
@@ -653,17 +614,12 @@ def add_h3(
                 h3_resolution=resolution,
                 dry_run=dry_run,
                 verbose=verbose,
-                compression=compression.upper(),
-                compression_level=compression_level,
-                row_group_size_mb=row_group_mb,
-                row_group_rows=row_group_size,
+                **write.funnel_kwargs(),
                 profile=None,
-                geoparquet_version=geoparquet_version,
                 overwrite=overwrite,
-                memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="a5", cls=SingleFileCommand)
@@ -674,9 +630,9 @@ def add_h3(
 )
 @click.option(
     "--resolution",
-    default=15,
-    type=click.IntRange(0, 30),
-    help="A5 resolution level (0-30). Res 10: ~41km², Res 15: ~39m², Res 20: ~39mm², Res 25: ~38μm². Default: 15",
+    default=get_index_spec("a5").default_resolution,
+    type=click.IntRange(get_index_spec("a5").min_resolution, get_index_spec("a5").max_resolution),
+    help=f"A5 resolution level ({get_index_spec('a5').bounds_text}). Res 10: ~41km², Res 15: ~39m², Res 20: ~39mm², Res 25: ~38μm². Default: {get_index_spec('a5').default_resolution}",
 )
 @output_format_options
 @geoparquet_version_option
@@ -686,18 +642,14 @@ def add_h3(
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def add_a5(
     ctx,
     input_parquet,
     output_parquet,
     a5_name,
     resolution,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     dry_run,
     verbose,
@@ -716,9 +668,7 @@ def add_a5(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        row_group_mb = prepare_output(
-            output_parquet, any_extension, row_group_size, row_group_size_mb
-        )
+        prepare_output(output_parquet, any_extension)
 
         try:
             add_a5_column_impl(
@@ -728,17 +678,12 @@ def add_a5(
                 a5_resolution=resolution,
                 dry_run=dry_run,
                 verbose=verbose,
-                compression=compression.upper(),
-                compression_level=compression_level,
-                row_group_size_mb=row_group_mb,
-                row_group_rows=row_group_size,
+                **write.funnel_kwargs(),
                 profile=None,
-                geoparquet_version=geoparquet_version,
                 overwrite=overwrite,
-                memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="s2", cls=SingleFileCommand)
@@ -749,9 +694,9 @@ def add_a5(
 )
 @click.option(
     "--level",
-    default=13,
-    type=click.IntRange(0, 30),
-    help="S2 level (0-30). Level 8: ~1,250km², Level 13: ~1.2km², Level 18: ~1,200m². Default: 13",
+    default=get_index_spec("s2").default_resolution,
+    type=click.IntRange(get_index_spec("s2").min_resolution, get_index_spec("s2").max_resolution),
+    help=f"S2 level ({get_index_spec('s2').bounds_text}). Level 8: ~1,250km², Level 13: ~1.2km², Level 18: ~1,200m². Default: {get_index_spec('s2').default_resolution}",
 )
 @output_format_options
 @geoparquet_version_option
@@ -761,18 +706,14 @@ def add_a5(
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def add_s2(
     ctx,
     input_parquet,
     output_parquet,
     s2_name,
     level,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     dry_run,
     verbose,
@@ -791,9 +732,7 @@ def add_s2(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        row_group_mb = prepare_output(
-            output_parquet, any_extension, row_group_size, row_group_size_mb
-        )
+        prepare_output(output_parquet, any_extension)
 
         try:
             add_s2_column_impl(
@@ -803,17 +742,12 @@ def add_s2(
                 s2_level=level,
                 dry_run=dry_run,
                 verbose=verbose,
-                compression=compression.upper(),
-                compression_level=compression_level,
-                row_group_size_mb=row_group_mb,
-                row_group_rows=row_group_size,
+                **write.funnel_kwargs(),
                 profile=None,
-                geoparquet_version=geoparquet_version,
                 overwrite=overwrite,
-                memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None
 
 
 @add.command(name="kdtree", cls=SingleFileCommand)
@@ -860,6 +794,7 @@ def add_s2(
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def add_kdtree(
     ctx,
     input_parquet,
@@ -869,12 +804,7 @@ def add_kdtree(
     auto,
     approx,
     exact,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     dry_run,
     force,
@@ -905,9 +835,6 @@ def add_kdtree(
             partitions, auto, approx, exact, ctx.get_parameter_source("approx")
         )
 
-        # Parse row group options
-        row_group_mb = parse_row_group_options(row_group_size, row_group_size_mb)
-
         add_kdtree_column_impl(
             input_parquet,
             output_parquet,
@@ -915,17 +842,12 @@ def add_kdtree(
             iterations=iterations,
             dry_run=dry_run,
             verbose=verbose,
-            compression=compression.upper(),
-            compression_level=compression_level,
-            row_group_size_mb=row_group_mb,
-            row_group_rows=row_group_size,
+            **write.funnel_kwargs(),
             force=force,
             sample_size=sample_size,
             auto_target_rows=auto_target,
             profile=None,
-            geoparquet_version=geoparquet_version,
             overwrite=overwrite,
-            memory_limit=write_memory,
         )
 
 
@@ -939,9 +861,11 @@ def add_kdtree(
 )
 @click.option(
     "--resolution",
-    default=13,
-    type=click.IntRange(0, 23),
-    help="Quadkey zoom level (0-23). Higher = more precision. Default: 13",
+    default=get_index_spec("quadkey").default_resolution,
+    type=click.IntRange(
+        get_index_spec("quadkey").min_resolution, get_index_spec("quadkey").max_resolution
+    ),
+    help=f"Quadkey zoom level ({get_index_spec('quadkey').bounds_text}). Higher = more precision. Default: {get_index_spec('quadkey').default_resolution}",
 )
 @click.option(
     "--use-centroid",
@@ -956,6 +880,7 @@ def add_kdtree(
 @any_extension_option
 @show_sql_option
 @click.pass_context
+@pack_write_options
 def add_quadkey(
     ctx,
     input_parquet,
@@ -963,12 +888,7 @@ def add_quadkey(
     quadkey_name,
     resolution,
     use_centroid,
-    compression,
-    compression_level,
-    row_group_size,
-    row_group_size_mb,
-    write_memory,
-    geoparquet_version,
+    write,
     overwrite,
     dry_run,
     verbose,
@@ -987,9 +907,7 @@ def add_quadkey(
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
     with _activate_s3(ctx):
-        row_group_mb = prepare_output(
-            output_parquet, any_extension, row_group_size, row_group_size_mb
-        )
+        prepare_output(output_parquet, any_extension)
 
         try:
             add_quadkey_column_impl(
@@ -1000,13 +918,8 @@ def add_quadkey(
                 use_centroid=use_centroid,
                 dry_run=dry_run,
                 verbose=verbose,
-                compression=compression.upper(),
-                compression_level=compression_level,
-                row_group_size_mb=row_group_mb,
-                row_group_rows=row_group_size,
-                geoparquet_version=geoparquet_version,
+                **write.funnel_kwargs(),
                 overwrite=overwrite,
-                memory_limit=write_memory,
             )
         except StreamingError as e:
-            raise click.ClickException(str(e)) from None
+            raise click_error_for(e) from None

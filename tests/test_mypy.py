@@ -4,14 +4,10 @@ import importlib
 import importlib.util
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
-
-try:
-    import tomllib
-except ModuleNotFoundError:
-    import tomli as tomllib  # type: ignore[no-redef]
 
 # Repo tooling checks: these shell out to mypy and duplicate the CI lint job,
 # so they run in the meta lane instead of the fast suite. The full package
@@ -67,7 +63,7 @@ class TestMypyConfiguration:
         """Verify mypy config has the expected base settings."""
         config = _load_pyproject()
         mypy_config = config["tool"]["mypy"]
-        assert mypy_config.get("python_version") == "3.10"
+        assert mypy_config.get("python_version") == "3.11"
         assert mypy_config.get("ignore_missing_imports") is True
 
     def test_mypy_overrides_reference_existing_modules(self):
@@ -100,11 +96,5 @@ class TestMypyConfiguration:
         assert not missing, f"mypy overrides reference non-existent modules: {missing}"
 
     def test_tomllib_import_compatible(self):
-        """Verify tomllib (or tomli fallback) is importable on this Python."""
-        if sys.version_info >= (3, 11):
-            assert importlib.util.find_spec("tomllib") is not None
-        else:
-            # On Python 3.10, tomli must be installed as backport
-            assert importlib.util.find_spec("tomli") is not None, (
-                "tomli backport is required for Python <3.11"
-            )
+        """Python 3.11+ supplies TOML parsing in the standard library."""
+        assert importlib.util.find_spec("tomllib") is not None

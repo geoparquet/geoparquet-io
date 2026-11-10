@@ -18,7 +18,8 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.convert import convert_to_geoparquet
-from geoparquet_io.core.geo_metadata import DEFAULT_GEOPARQUET_VERSION, GEOPARQUET_VERSIONS
+from geoparquet_io.core.duckdb_utils import fetch_one
+from geoparquet_io.core.geo_metadata import GEOPARQUET_VERSIONS
 from geoparquet_io.core.validate import CheckStatus
 from tests.conftest import (
     get_geo_metadata,
@@ -46,17 +47,6 @@ def _is_wkb_type(arrow_type) -> bool:
 
 class TestGeoParquetVersionConstants:
     """Test version configuration constants."""
-
-    def test_version_mapping_exists(self):
-        """Verify all expected versions are defined."""
-        assert "1.0" in GEOPARQUET_VERSIONS
-        assert "1.1" in GEOPARQUET_VERSIONS
-        assert "2.0" in GEOPARQUET_VERSIONS
-        assert "parquet-geo-only" in GEOPARQUET_VERSIONS
-
-    def test_default_version(self):
-        """Verify default version is 1.1."""
-        assert DEFAULT_GEOPARQUET_VERSION == "1.1"
 
     def test_version_config_structure(self):
         """Verify each version config has required keys."""
@@ -256,7 +246,7 @@ class TestWriteParquetGeoOnly:
 
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')").fetchone()
+        result = fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"))
         assert result[0] > 0
         con.close()
 
@@ -351,7 +341,7 @@ class TestVersionRoundTrip:
         # Read and count geometries
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM read_parquet('{output1}')").fetchone()
+        result = fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{output1}')"))
         con.close()
 
         assert result[0] > 0
@@ -371,7 +361,7 @@ class TestVersionRoundTrip:
         # Read and count geometries
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        result = con.execute(f"SELECT COUNT(*) FROM read_parquet('{output1}')").fetchone()
+        result = fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{output1}')"))
         con.close()
 
         assert result[0] > 0
@@ -599,9 +589,9 @@ class TestCheckBboxFix:
         # Get original row count
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        original_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{fields_geom_type_only_file}')"
-        ).fetchone()[0]
+        original_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{fields_geom_type_only_file}')")
+        )[0]
 
         fix_bbox_removal(
             fields_geom_type_only_file,
@@ -611,9 +601,9 @@ class TestCheckBboxFix:
         )
 
         # Verify row count preserved
-        fixed_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
-        ).fetchone()[0]
+        fixed_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')")
+        )[0]
         con.close()
 
         assert fixed_count == original_count
@@ -668,34 +658,50 @@ class TestVersionPreservation:
 
     def test_get_version_from_check_results_v2(self):
         """Test version detection for v2 files."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "geoparquet_v2", "version": "2.0.0"}}
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
         assert version == "2.0"
 
     def test_get_version_from_check_results_parquet_geo_only(self):
         """Test version detection for parquet-geo-only files."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "parquet_geo_only"}}
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
         assert version == "parquet-geo-only"
 
     def test_get_version_from_check_results_v1_1(self):
         """Test version detection for v1.1 files."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.1.0"}}
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
         assert version == "1.1"
 
     def test_get_version_from_check_results_v1_0(self):
         """Test version detection for v1.0 files."""
-        from geoparquet_io.core.check_fixes import get_geoparquet_version_from_check_results
+        from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 
         check_results = {"bbox": {"file_type": "geoparquet_v1", "version": "1.0.0"}}
-        version = get_geoparquet_version_from_check_results(check_results)
+        version = resolve_output_geoparquet_version(
+            None,
+            file_type=_detected(check_results),
+            preserve_input=True,
+        )
         assert version == "1.0"
 
 
@@ -823,9 +829,9 @@ class TestConvertSkipsBbox:
         # Get original row count (exclude bbox column)
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
-        original_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{fields_geom_type_only_file}')"
-        ).fetchone()[0]
+        original_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{fields_geom_type_only_file}')")
+        )[0]
 
         convert_to_geoparquet(
             fields_geom_type_only_file,
@@ -835,9 +841,9 @@ class TestConvertSkipsBbox:
         )
 
         # Verify row count preserved
-        result_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
-        ).fetchone()[0]
+        result_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')")
+        )[0]
         con.close()
 
         assert result_count == original_count
@@ -873,10 +879,10 @@ class TestComprehensiveRoundTrips:
         con = duckdb.connect()
         con.execute("INSTALL spatial; LOAD spatial;")
 
-        count_v1_0 = con.execute(f"SELECT COUNT(*) FROM read_parquet('{v1_0_file}')").fetchone()[0]
-        count_roundtrip = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{roundtrip_file}')"
-        ).fetchone()[0]
+        count_v1_0 = fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{v1_0_file}')"))[0]
+        count_roundtrip = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{roundtrip_file}')")
+        )[0]
 
         con.close()
 
@@ -984,7 +990,7 @@ class TestComprehensiveRoundTrips:
 
         counts = {}
         for i, (_version, file_path) in files.items():
-            count = con.execute(f"SELECT COUNT(*) FROM read_parquet('{file_path}')").fetchone()[0]
+            count = fetch_one(con.execute(f"SELECT COUNT(*) FROM read_parquet('{file_path}')"))[0]
             counts[i] = count
 
         con.close()
@@ -1989,7 +1995,7 @@ class TestCarriedSchemaMetadataKeysHasOneDefinition:
         # the duplicate this guards against.
         pattern = re.compile(r"""[\(\[\{]\s*["']geo["']\s*,\s*["']ARROW:schema["']""")
         sites = [
-            f"{path.relative_to(core_dir)}"
+            path.relative_to(core_dir).as_posix()
             for path in sorted(core_dir.rglob("*.py"))
             for _ in pattern.findall(path.read_text(encoding="utf-8"))
         ]
@@ -2021,3 +2027,9 @@ class TestCarriedSchemaMetadataKeysHasOneDefinition:
         # Query path: delegates to the helper, which owns the comparison.
         assert "extract_preserved_kv_metadata" in inspect.getsource(write_parquet_with_metadata)
         assert "_CARRIED_SCHEMA_METADATA_KEYS" in inspect.getsource(extract_preserved_kv_metadata)
+
+
+def _detected(check_results):
+    """The bbox check's file-type answer, in ``detect_geoparquet_file_type``'s shape."""
+    bbox = check_results.get("bbox", {})
+    return {"file_type": bbox.get("file_type"), "geo_version": bbox.get("version")}

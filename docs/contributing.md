@@ -50,7 +50,7 @@ Before you ask for a merge, check that your PR clears this bar:
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - [uv](https://docs.astral.sh/uv/)
 
 ## Setup
@@ -63,6 +63,13 @@ uv run pre-commit install
 ```
 
 ## Tests
+
+The collected-count ratchet in `tests/test_suite_budget.py` limits the fast suite using
+`tests/suite_budget.toml`; its numbers only go down, and raising one needs a reason in the PR.
+The per-test time cap is `timeout = 60` in `pyproject.toml`, with explicit timeout marks
+ratcheted by `max_timeout_marks` in `tests/suite_budget.toml`.
+The duplicate-body gate in `tests/test_duplicate_tests.py` checks test bodies and their
+execution context to prevent identical tests from growing back.
 
 ```bash
 uv run pytest                                              # Full suite
@@ -97,12 +104,11 @@ CI runs four test tiers:
 - **Slow tests** (`(slow or meta) and not network`) — run after merge to main
   and nightly; opt in on a PR by adding the `run-slow-tests` label. This tier
   also carries the `meta` lane: repo-tooling checks (codespell, commitizen,
-  doc-sync, mutmut, mypy, validate-claude-md, security tool availability) that
-  shell out to subprocesses. Most re-check something the lint job already runs
-  via pre-commit, so `uv run pytest -m meta` is mainly for when you skip
+  doc-sync, mypy, validate-claude-md, security tool availability) that shell
+  out to subprocesses. Most re-check something the lint job already runs via
+  pre-commit, so `uv run pytest -m meta` is mainly for when you skip
   pre-commit — except commitizen (a `commit-msg`-stage hook, which
-  `pre-commit run --all-files` never runs) and mutmut (no hook at all), where
-  it is the only local check.
+  `pre-commit run --all-files` never runs), where it is the only local check.
 - **Network tests** (`network`) — hit live third-party services (ArcGIS, WFS,
   Carto, ...). They are **non-blocking**: failures open/update a tracking issue
   instead of failing CI, because a remote server's behavior is not something a
@@ -121,6 +127,7 @@ Coverage gates (both enforced in CI):
 
 | Marker | Description |
 |--------|-------------|
+| `@pytest.mark.fresh_duckdb` | requires an independent database to inspect connection initialization or extension state |
 | `@pytest.mark.slow` | marks tests as slow (deselect with '-m "not slow"') |
 | `@pytest.mark.network` | marks tests requiring network access (deselect with '-m "not network"') |
 | `@pytest.mark.integration` | marks end-to-end integration tests; runs in the fast suite unless also marked slow/network (see tests/e2e/test_integration_lane.py) |
@@ -152,6 +159,29 @@ marked `network`, each of which downloads hundreds of megabytes of
 administrative boundaries from a live service; they belong to the network CI
 lane, and locally they mostly just time out.
 
+### Proving a refactor is byte-identical
+
+A change that moves write-path code without meaning to change output proves it
+with `scripts/byte_identity.py`. It runs one command matrix (every `convert`,
+`sort`, `extract`, `add`, `check bbox --fix`, `process` and `partition` write
+path, plus `Table.write` with each strategy, over the fixtures in `tests/data/`)
+in two checkouts, each through its own `.venv`, and compares the outputs byte
+for byte. Check out the base in a second worktree with its own environment, then:
+
+```bash
+uv run python scripts/byte_identity.py --base ../base --branch . --out report.md
+uv run python scripts/byte_identity.py --base ../base --branch . --out report.md --only sort_hilbert,extract_where
+uv run python scripts/byte_identity.py --list   # the case names
+```
+
+The report has a summary table (identical, differs, same-error or skipped per
+case) and, for every Parquet output that differs, a footer-level diff: codec and
+compressed size per column, row groups, the KV key set, the `geo` block as a
+JSON diff, the schema, and whether the data tables are equal. An intended
+change should be the only line in that diff. The script exits 1 when any case
+differs. Run a checkout against itself (`--base . --branch .`) to confirm a
+clean run is all-identical on your machine before reading a difference as real.
+
 ## Code Quality
 
 `.pre-commit-config.yaml` is the **single source of truth** for every quality
@@ -164,34 +194,41 @@ failure to CI.
 uv run pre-commit run --all-files                        # commit-stage hooks
 uv run pre-commit run --all-files --hook-stage pre-push  # deptry, vulture,
                                                          # xenon, mypy,
-                                                         # import-linter, menard
+                                                         # import-linter
 ```
 
-Two ratchet/ignore files gate quality over time:
+One ignore file gates quality over time:
 
 - `.pip-audit-ignores` — self-expiring CVE ignore list shared by the CI
   security job and the daily security audit. Each entry needs an expiry date
   and a reason; expired entries automatically re-fail CI.
-- `.mutation-baseline` — minimum mutation kill rate enforced by the nightly
-  mutation-testing run. Ratchet it up as test quality improves.
 
 ## How the CI is set up (and why)
 
-Merging to `main` requires these status checks to pass: `lint`, `security`,
-`notebooks`, and the `test` matrix (Ubuntu on Python 3.10–3.13, macOS and
-Windows on 3.11–3.13). That list lives in code —
-`scripts/apply_branch_protection.sh` declares the required checks and review
-rules as GitHub rulesets, and an admin re-runs it whenever the list changes.
-If your PR is blocked on a check, that's the system working as intended:
-fix the check.
+Merging to `main` requires two status checks to pass:
 
-Two heavier gates exist but don't run on every PR, so they won't slow down
+- `all-checks` — the last job in `.github/workflows/tests.yml`. It waits for
+  every other job in that workflow (`lint`, `security`, `embeddable-import`,
+  the `test` matrix, `test-duckdb-2`, `notebooks`, `docs-examples`,
+  `slow-tests`, `network-tests`) and fails if any of them failed, was
+  cancelled, or was skipped. Only `slow-tests` and `network-tests` may be
+  skipped, because they do not run on every pull request. A job added to
+  `tests.yml` must be added to its `needs:` list, and
+  `tests/test_ci_wiring.py` fails until it is.
+- `pr-title` — `.github/workflows/pr-title.yml` checks that the pull-request
+  title follows the commit convention. It is its own workflow so that editing
+  the title reruns it without rerunning the suite.
+
+That list lives in code — `scripts/apply_branch_protection.sh` declares the
+required checks and review rules as GitHub rulesets, and an admin re-runs it
+whenever the list changes. If your PR is blocked on a check, that's the system
+working as intended: fix the check.
+
+One heavier gate exists but doesn't run on every PR, so it won't slow down
 day-to-day contributions:
 
 - **Benchmark regression** — label-triggered; fails if performance drops
   10% or more against the baseline.
-- **Mutation testing** — nightly; enforces the kill-rate floor in
-  `.mutation-baseline`.
 
 The repository also maintains itself where it can:
 
@@ -228,12 +265,87 @@ New CLI commands need corresponding Python API:
 
 See `CLAUDE.md` for full architecture details.
 
+### Owner guards
+
+Each concept (writing a file, the memory ceiling, the `geo` block, CRS checks, HTTP
+retries, ...) has one owner module, and these checks fail a new copy of it:
+
+- **G1, banned calls** — ruff `TID251` bans `pyarrow.parquet.write_table`/`ParquetWriter`,
+  `psutil`, `os.sysconf`, `requests`, `httpx` and `urllib.request` outside their owners
+  (the message names the owner); `tests/test_owner_guards.py` walks the AST, through
+  import aliases and simple constants, for a `json.loads` of the `geo` key (also when the
+  key was fetched an assignment or two earlier), `SET`/`PRAGMA memory_limit` or a
+  `memory_limit` connection config, hand-rolled SQL escapes, `/sys/fs/cgroup`, reading
+  DuckDB's version, private HTTP retry policy (a request plus a wait in a loop, also via a
+  helper the loop calls, or in a recursive call; retry, tries, backoff and attempt
+  constants at any level, or a `*_TIMEOUT` restating the owner's default; retry-named
+  parameter defaults that are not `None` or an owner constant; retryable statuses as
+  literals, names, `HTTPStatus` members, `range()` or comparisons; `Retry-After` reads;
+  short wrappers, lambdas, `functools.partial` or policy literals around an owner
+  function) and `json.dumps`/`json.dump` in `cli/` and `core/` (modules that only
+  serialize metadata are allowed per file).
+- **G2, owner-only definitions** — `scripts/check_owner_defs.py` (the
+  `owner-only-defs` hook): a `def` named like `is_geographic*`, `resolve_*version*`,
+  `parse_size*`, `atomic_write`, ... (a leading underscore does not matter, and
+  `[G2.known_copies]` names renamed copies) lives only in its owner, per the
+  `[G2.owners]` table.
+- **G3, near-duplicate functions** — `scripts/check_duplicates.py` (the `check-duplicates`
+  hook) renames identifiers by first occurrence in the body (the signature does not
+  count) and fails a new pair of functions with 8 or
+  more statements at 0.90 similarity or above; the pairs that exist are in
+  `scripts/duplicate_pairs_baseline.txt`, which only falls (`--update` drops a gone pair).
+  pylint `R0801` (8 similar lines) runs at both hook stages through
+  `scripts/check_pylint_duplicates.py`, held to the blocks pinned under `[G3.pylint]` (the
+  module and function on each side, so swapping one copy for another still fails).
+- **G6, public-API snapshot** — `tests/data/snapshots/public_api.json` pins the public names
+  of `api`, `api.ops`, `api.table` and every owner module. A rename, move or deletion is a
+  diff to it: re-record with `GPIO_UPDATE_SNAPSHOT=1 uv run pytest tests/test_api.py -k
+  public_api_matches` and review the diff.
+- **G13, shared options** — `tests/test_cli_shared_options.py` walks the Click tree: an
+  option name on several commands has one type, default, callback and `multiple`/`is_flag`.
+  Declare a shared option once in `cli/decorators.py`; the differences that exist are
+  pinned under `[G13]`. It also fails a `cli/` function that parses a bbox itself
+  (`float()` over `.split(",")`) instead of calling `parse_bbox`.
+- **G4, dead code** — vulture at `min_confidence = 60`, the package on its own (a test
+  calling a name is not a use; baseline `scripts/vulture_whitelist.py`) and the tests on
+  their own (the `vulture-tests` hook; `scripts/vulture_whitelist_tests.py`). Each
+  whitelist line is tagged `dynamic: <how>`; no dead-code allowances remain.
+- **G5, `core/common.py`** — `tests/test_common_split_guards.py` pins its public and
+  private names and its size, both ways: shrinking it fails until the pin is lowered.
+
+Every exemption lives in `scripts/owner_exemptions.toml` with a reason, and
+`tests/test_owner_guards.py` pins how many each check has and fails on an entry whose
+`count` no longer matches the tree. A failure means: call the owner. When you delete a
+copy, delete its entry and lower the count in the same commit. Never add an entry to make
+new code pass.
+
+A G1 failure prints `path:line`, the enclosing function, the offending expression
+and the arm (for example `geo_parse` or `staging`). Read that arm's docstring in
+`tests/test_owner_guards.py` to find the owner and the forbidden shape, then route
+the caller to the owner. A `TID251` import diagnostic names the owner directly.
+A stale-exemption failure means the recorded copy disappeared: remove the entry
+and lower `EXPECTED_COUNTS` in the same change.
+
+All guards block: G1/G2/G4/G5/G12 run in the fast suite; `owner-only-defs`,
+`check-duplicates`, `pylint-duplicates`, `vulture` and `vulture-tests` return failure
+at both hook stages. G6–G10 and G13 assert their contracts in pytest/CI. The AST
+duplicate baseline is empty. A disappeared historical duplicate may be removed
+with `--update`; this never admits a new pair.
+
+An exemption is justified only for a reviewed semantic false positive, such as a
+benchmark measuring pyarrow itself, a scratch spool rather than a final write,
+or dynamic Click dispatch. Record the exact site, count and enduring reason in
+`scripts/owner_exemptions.toml`; dynamic vulture entries explain their dispatch
+beside the whitelist name. Review the source before keeping an allowance. An issue
+name or a promise to fix a copy later is not a permanent justification. Counts
+only go down; never raise a baseline or add an exemption to make a new copy pass.
+
 ### External extractors
 
 Extractors that page through a remote service (`wfs`, `arcgis`, `carto`, `bigquery`) keep
 re-discovering the same edge cases. Reuse the shared schema helpers in `core/arrow_types.py`
 (`_compute_unified_schema`, `_cast_table_to_schema`, `_promote_numeric_type`) rather than
-hand-rolling schema reconciliation — the `forbid-bespoke-schema-reconciliation` pre-commit hook
+hand-rolling schema reconciliation — the `owner-only-defs` pre-commit hook
 enforces this. Known edge cases to handle:
 
 - **Pagination**: detect server `startIndex`/page-size limits; supply a stable sort

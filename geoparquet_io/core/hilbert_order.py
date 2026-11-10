@@ -2,32 +2,39 @@
 
 from __future__ import annotations
 
-import os
 from itertools import pairwise
 
 import duckdb
 import pyarrow as pa
 
-from geoparquet_io.core.bbox_structure import get_bbox_advice
-from geoparquet_io.core.common import add_bbox, get_dataset_bounds, get_parquet_metadata
+from geoparquet_io.core.bbox_structure import dataset_bounds, get_bbox_advice
+from geoparquet_io.core.column_selection import unique_name
+from geoparquet_io.core.common import add_bbox, get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
+    describe_query,
+    fetch_one,
     get_duckdb_connection,
     quote_identifier,
     sql_path,
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import RemoteAccessError
-from geoparquet_io.core.file_utils import handle_output_overwrite, resolve_file_url
-from geoparquet_io.core.geo_metadata import DEFAULT_GEOPARQUET_VERSION
+from geoparquet_io.core.file_utils import (
+    handle_output_overwrite,
+    resolve_file_url,
+    scratch_path,
+    unlink_released_file,
+)
+from geoparquet_io.core.geo_metadata import QuerySource, bounds_of, sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
-    STANDARD_GEOMETRY_NAMES,
-    find_primary_geometry_column,
     register_geometry_column,
+    resolve_geometry_column,
 )
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.optional_deps import load_module
 from geoparquet_io.core.parquet_writer import (
     DEFAULT_ROW_GROUP_ROWS,
+    WriteOptions,
     resolve_output_geoparquet_version,
     resolve_row_group_rows,
 )
@@ -39,9 +46,9 @@ from geoparquet_io.core.remote import (
     show_remote_read_message,
     validate_profile_for_urls,
 )
+from geoparquet_io.core.sizing import BYTES_PER_MIB
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import (
-    find_geometry_column_from_table,
     is_stdin,
     should_stream_output,
 )
@@ -49,7 +56,7 @@ from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
 @uses_aws_profile
-def _resolve_output_version(
+def _advised_output_version(
     input_parquet: str,
     geoparquet_version: str | None,
     verbose: bool,
@@ -61,9 +68,8 @@ def _resolve_output_version(
     ``--geoparquet-version 2.0``, and whether they offer their row-group
     guidance at all, both hang off this answer -- so it has to be the *write's*
     answer. It asks the write facade the same question the write asks it, with
-    the same two witnesses (the input file, then its carried metadata) and the
-    same ``or DEFAULT_GEOPARQUET_VERSION`` fallback that
-    ``write_parquet_with_metadata`` applies.
+    the same two witnesses (the input file, then its carried metadata), and the
+    facade's answer includes the default the write would fall back to.
 
     It used to re-implement that decision instead, reading only the carried
     ``geo`` key. Once the facade started consulting the file, the two answers
@@ -78,8 +84,8 @@ def _resolve_output_version(
     Callers use None to stay silent. Defaulting instead is what produced the
     original wrong warning -- a failed read is not evidence of a 1.1 input.
     The facade cannot make that distinction on its own: it swallows a failed
-    read and returns None, which the ``or`` below would turn straight back into
-    the guess. So the read stays here, as the gate on saying anything at all.
+    read and answers with the default, which is the guess. So the read stays
+    here, as the gate on saying anything at all.
     """
     if geoparquet_version:
         return geoparquet_version
@@ -91,14 +97,11 @@ def _resolve_output_version(
     except Exception as e:  # noqa: BLE001 - any read failure means "stay quiet"
         debug(f"Could not read {input_parquet} to resolve output version: {e}")
         return None
-    return (
-        resolve_output_geoparquet_version(
-            None,
-            input_file=input_parquet,
-            original_metadata=metadata,
-            verbose=verbose,
-        )
-        or DEFAULT_GEOPARQUET_VERSION
+    return resolve_output_geoparquet_version(
+        None,
+        input_file=input_parquet,
+        original_metadata=metadata,
+        verbose=verbose,
     )
 
 
@@ -106,7 +109,7 @@ def _resolve_output_version(
 # most about twice this beyond the output, against a whole column for a
 # concatenate-then-take, and each output chunk stays far below the 2 GiB a
 # 32-bit offset addresses.
-_GATHER_BATCH_BYTES = 16 * 1024 * 1024
+_GATHER_BATCH_BYTES = 16 * BYTES_PER_MIB
 _GATHER_THREADS = 4
 
 
@@ -121,10 +124,7 @@ def _view_twin(typ: pa.DataType) -> pa.DataType | None:
 
 def _row_index_name(geom_col: str) -> str:
     """An index column name DuckDB cannot confuse with ``geom_col`` (identifiers fold case)."""
-    idx_col = "__gpio_row_idx"
-    while idx_col.lower() == geom_col.lower():
-        idx_col += "_"
-    return idx_col
+    return unique_name("__gpio_row_idx", [geom_col])
 
 
 def _row_bytes(column: pa.ChunkedArray):
@@ -242,9 +242,7 @@ def hilbert_order_table(
     Returns:
         New table with rows reordered by Hilbert curve
     """
-    geom_col = geometry_column or find_geometry_column_from_table(table)
-    if not geom_col:
-        geom_col = "geometry"
+    geom_col = resolve_geometry_column(table, geometry_column, where="the table")
     idx_col = _row_index_name(geom_col)
     quoted_idx = quote_identifier(idx_col)
 
@@ -254,26 +252,21 @@ def hilbert_order_table(
         # One projection of the parsed geometry, shared by both queries below.
         source_ref = f"(SELECT {quoted_idx}, {read.shape_expr} AS __g FROM __input_table)"
 
-        # One scan for the empty/NULL count and the bounds of everything else
-        # (ST_IsEmpty is NULL for a NULL geometry, so FILTER drops those too).
-        empty_count, xmin, ymin, xmax, ymax = con.execute(f"""
-            SELECT
-                COUNT(*) FILTER (WHERE __g IS NULL OR ST_IsEmpty(__g)),
-                MIN(ST_XMin(__g)) FILTER (WHERE NOT ST_IsEmpty(__g)),
-                MIN(ST_YMin(__g)) FILTER (WHERE NOT ST_IsEmpty(__g)),
-                MAX(ST_XMax(__g)) FILTER (WHERE NOT ST_IsEmpty(__g)),
-                MAX(ST_YMax(__g)) FILTER (WHERE NOT ST_IsEmpty(__g))
-            FROM {source_ref}
-        """).fetchone()
+        # The empty/NULL count, then the owner's bounds of everything else.
+        (empty_count,) = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM {source_ref} WHERE __g IS NULL OR ST_IsEmpty(__g)")
+        )
+        bbox = bounds_of(QuerySource(con, f"SELECT __g FROM {source_ref}"), "__g")
 
         if empty_count > 0:
             warn(
                 f"Found {empty_count} empty/null geometries. "
                 "These will be placed at the end of the sorted output."
             )
-        if any(v is None for v in (xmin, ymin, xmax, ymax)):
+        if bbox is None:
             warn("All geometries are empty or null. Returning table without Hilbert ordering.")
             return table
+        xmin, ymin, xmax, ymax = bbox
 
         # Sorted row indices: non-empty geometries in Hilbert order, then the
         # empty/NULL rows (a NULL key, sorted last); the index breaks every tie.
@@ -299,14 +292,12 @@ def _prepare_working_file(input_parquet, add_bbox_flag, verbose):
         tuple: (working_parquet, temp_file_created, temp_file_path_or_none)
     """
     import shutil
-    import tempfile
 
     bbox_advice = get_bbox_advice(input_parquet, "bounds_calculation", verbose)
 
     if add_bbox_flag and not bbox_advice["has_bbox_column"]:
         info("\nAdding bbox column to enable fast bounds calculation...")
-        temp_fd, temp_file = tempfile.mkstemp(suffix=".parquet")
-        os.close(temp_fd)
+        temp_file = scratch_path()
         shutil.copy2(input_parquet, temp_file)
         add_bbox(temp_file, "bbox", verbose)
         success("Added bbox column for optimized processing")
@@ -321,25 +312,13 @@ def _prepare_working_file(input_parquet, add_bbox_flag, verbose):
     return input_parquet, False, None
 
 
-def _cleanup_temp_file(temp_file, verbose):
-    """Clean up temporary file if it exists."""
-    if temp_file and os.path.exists(temp_file):
-        try:
-            os.remove(temp_file)
-            if verbose:
-                debug("Cleaned up temporary file")
-        except OSError as e:
-            if verbose:
-                warn(f"Warning: Could not remove temporary file: {e}")
-
-
 def hilbert_order(
     input_parquet: str,
     output_parquet: str | None = None,
-    geometry_column: str = "geometry",
+    geometry_column: str | None = None,
     add_bbox_flag: bool = False,
     verbose: bool = False,
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     row_group_size_mb: float | None = None,
     row_group_rows: int | None = None,
@@ -358,7 +337,7 @@ def hilbert_order(
     Args:
         input_parquet: Path to input GeoParquet file (local, remote URL, or "-" for stdin)
         output_parquet: Path to output file, "-" for stdout, or None for auto-detect
-        geometry_column: Name of geometry column (default: 'geometry')
+        geometry_column: Name of geometry column (default: the primary geometry column)
         add_bbox_flag: Add bbox column before sorting if not present
         verbose: Print verbose output
         compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
@@ -372,7 +351,7 @@ def hilbert_order(
         memory_limit: DuckDB memory limit for streaming writes (e.g., '2GB', '512MB')
     """
     row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
-    effective_version = _resolve_output_version(input_parquet, geoparquet_version, verbose, profile)
+    effective_version = _advised_output_version(input_parquet, geoparquet_version, verbose, profile)
     if effective_version == "1.1":
         warn(
             "Hilbert sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
@@ -393,19 +372,14 @@ def hilbert_order(
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
+    write = WriteOptions.pick(locals())
     if is_streaming:
         _hilbert_order_streaming(
             input_parquet,
             output_parquet,
             geometry_column,
             verbose,
-            compression,
-            compression_level,
-            row_group_size_mb,
-            row_group_rows,
-            profile,
-            geoparquet_version,
-            memory_limit,
+            write,
         )
         return
 
@@ -416,14 +390,8 @@ def hilbert_order(
         geometry_column,
         add_bbox_flag,
         verbose,
-        compression,
-        compression_level,
-        row_group_size_mb,
-        row_group_rows,
-        profile,
-        geoparquet_version,
+        write,
         overwrite,
-        memory_limit,
     )
 
 
@@ -432,13 +400,7 @@ def _hilbert_order_streaming(
     output_path: str | None,
     geometry_column: str,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
-    memory_limit: str | None = None,
+    write: WriteOptions,
 ) -> None:
     """Handle streaming input/output for hilbert_order."""
     # Suppress verbose when streaming to stdout
@@ -447,16 +409,13 @@ def _hilbert_order_streaming(
 
     with open_input(input_path, verbose=verbose) as (source, metadata, is_stream, con):
         # Get column names from query result (works with both table names and read_parquet)
-        sample = con.execute(f"SELECT * FROM {source} LIMIT 0").description
-        col_names = [col[0] for col in sample]
+        described = describe_query(con, f"SELECT * FROM {source}")
 
-        # Find geometry column
-        geom_col = geometry_column
-        if geom_col == "geometry" or geom_col not in col_names:
-            for name in STANDARD_GEOMETRY_NAMES:
-                if name in col_names:
-                    geom_col = name
-                    break
+        # Find geometry column: the owner over the typed columns and the
+        # stream's own `geo` block, as the file path asks it.
+        geom_col = resolve_geometry_column(
+            described, geometry_column, geo=sanitized_carried_geo(metadata), where=input_path
+        )
         quoted_geom = quote_identifier(geom_col)
 
         if verbose:
@@ -464,10 +423,12 @@ def _hilbert_order_streaming(
             debug("Calculating dataset bounds for Hilbert ordering...")
 
         # Count empty/null geometries
-        empty_count_result = con.execute(f"""
+        empty_count_result = fetch_one(
+            con.execute(f"""
             SELECT COUNT(*) FROM {source}
             WHERE {quoted_geom} IS NULL OR ST_IsEmpty({quoted_geom})
-        """).fetchone()
+        """)
+        )
         empty_count = empty_count_result[0] if empty_count_result else 0
 
         if empty_count > 0:
@@ -476,19 +437,11 @@ def _hilbert_order_streaming(
                 "These will be placed at the end of the sorted output."
             )
 
-        # Calculate dataset bounds from non-empty geometries only
-        bounds_result = con.execute(f"""
-            SELECT
-                MIN(ST_XMin({quoted_geom})) as xmin,
-                MIN(ST_YMin({quoted_geom})) as ymin,
-                MAX(ST_XMax({quoted_geom})) as xmax,
-                MAX(ST_YMax({quoted_geom})) as ymax
-            FROM {source}
-            WHERE {quoted_geom} IS NOT NULL AND NOT ST_IsEmpty({quoted_geom})
-        """).fetchone()
+        # Dataset bounds of the located geometries (the owner skips NULL/EMPTY)
+        bounds_result = bounds_of(QuerySource(con, f"SELECT * FROM {source}"), geom_col)
 
         # If all geometries are empty/null, pass through unchanged
-        if not bounds_result or any(v is None for v in bounds_result):
+        if bounds_result is None:
             warn("All geometries are empty or null. Writing file without Hilbert ordering.")
             # Pass through data unchanged
             passthrough_query = f"SELECT * FROM {source}"
@@ -498,14 +451,8 @@ def _hilbert_order_streaming(
                 output_path,
                 original_metadata=metadata,
                 geometry_column=geom_col,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
                 verbose=verbose,
-                profile=profile,
-                geoparquet_version=geoparquet_version,
-                memory_limit=memory_limit,
+                **write.funnel_kwargs(),
             )
             if not should_stream_output(output_path):
                 success(f"Wrote data without Hilbert ordering to: {output_path}")
@@ -544,14 +491,8 @@ def _hilbert_order_streaming(
             output_path,
             original_metadata=metadata,
             geometry_column=geom_col,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
 
         if not should_stream_output(output_path):
@@ -565,18 +506,12 @@ def _hilbert_order_file_based(
     geometry_column: str,
     add_bbox_flag: bool,
     verbose: bool,
-    compression: str,
-    compression_level: int | None,
-    row_group_size_mb: float | None,
-    row_group_rows: int | None,
-    profile: str | None,
-    geoparquet_version: str | None,
+    write: WriteOptions,
     overwrite: bool = False,
-    memory_limit: str | None = None,
 ) -> None:
     """Handle file-based hilbert_order operation."""
     # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
 
     # Check for partition input (not supported)
     require_single_file(input_parquet, "sort hilbert")
@@ -585,7 +520,7 @@ def _hilbert_order_file_based(
         input_parquet, add_bbox_flag, verbose
     )
 
-    validate_profile_for_urls(profile, input_parquet, output_parquet)
+    validate_profile_for_urls(write.profile, input_parquet, output_parquet)
     show_remote_read_message(working_parquet, verbose)
 
     working_url = resolve_file_url(working_parquet, verbose)
@@ -596,8 +531,7 @@ def _hilbert_order_file_based(
     # the output shipped a bbox column nothing declared (#738).
     metadata, _ = get_parquet_metadata(working_parquet, verbose)
 
-    if geometry_column == "geometry":
-        geometry_column = find_primary_geometry_column(working_parquet, verbose)
+    geometry_column = resolve_geometry_column(working_parquet, geometry_column, verbose=verbose)
     if verbose:
         debug(f"Using geometry column: {geometry_column}")
 
@@ -607,10 +541,12 @@ def _hilbert_order_file_based(
         debug("Calculating dataset bounds for Hilbert ordering...")
 
     # Count empty/null geometries
-    empty_count_result = con.execute(f"""
+    empty_count_result = fetch_one(
+        con.execute(f"""
         SELECT COUNT(*) FROM {sql_path(working_url)}
         WHERE {quote_identifier(geometry_column)} IS NULL OR ST_IsEmpty({quote_identifier(geometry_column)})
-    """).fetchone()
+    """)
+    )
     empty_count = empty_count_result[0] if empty_count_result else 0
 
     if empty_count > 0:
@@ -620,7 +556,7 @@ def _hilbert_order_file_based(
         )
 
     # Get bounds (empty geometries naturally excluded since ST_XMin returns NULL for them)
-    bounds = get_dataset_bounds(working_parquet, geometry_column, verbose=verbose)
+    bounds = dataset_bounds(working_parquet, geometry_column, verbose=verbose)
 
     # If all geometries are empty/null, copy file unchanged
     if not bounds:
@@ -631,19 +567,13 @@ def _hilbert_order_file_based(
             passthrough_query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             input_file=input_parquet,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
         con.close()
-        if temp_file_created and temp_file:
-            _cleanup_temp_file(temp_file, verbose)
+        if temp_file_created:
+            unlink_released_file(temp_file)
         success(f"Wrote data without Hilbert ordering to: {output_parquet}")
         return
 
@@ -676,15 +606,9 @@ def _hilbert_order_file_based(
             order_query,
             output_parquet,
             original_metadata=metadata,
-            compression=compression,
-            compression_level=compression_level,
-            row_group_size_mb=row_group_size_mb,
-            row_group_rows=row_group_rows,
             verbose=verbose,
-            profile=profile,
-            geoparquet_version=geoparquet_version,
             input_file=input_parquet,
-            memory_limit=memory_limit,
+            **write.funnel_kwargs(),
         )
         if verbose:
             debug("Hilbert ordering completed successfully")
@@ -695,11 +619,11 @@ def _hilbert_order_file_based(
     except duckdb.IOException as e:
         con.close()
         if is_remote_url(input_parquet):
-            hints = get_remote_error_hint(str(e), input_parquet)
+            hints = get_remote_error_hint(e, input_parquet)
             raise RemoteAccessError(input_parquet, f"{hints}\n\nOriginal error: {str(e)}") from e
         raise
     finally:
-        _cleanup_temp_file(temp_file, verbose)
+        unlink_released_file(temp_file)
 
 
 if __name__ == "__main__":

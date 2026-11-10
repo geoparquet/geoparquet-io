@@ -17,20 +17,38 @@ cell nowhere near the seam is handed through untouched.
 
 import pytest
 
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, load_community_extension
+from geoparquet_io.core.duckdb_utils import (
+    fetch_one,
+    get_duckdb_connection,
+    load_community_extension,
+)
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME, aggregate_by_a5
 from geoparquet_io.core.process.aggregate.common import geometry_to_geom_expr
 from geoparquet_io.core.process.aggregate.grid_common import wrap_grid_geometry
+from geoparquet_io.core.process.aggregate.options import AggregateOptions
 
-# a5 r7 cell over Fiji. `a5_cell_to_boundary` reports it spanning
+# a5 cell *ids* are not stable across a5 extension builds: the Query.Farm
+# build installed on DuckDB 2.0 (#1347) numbers cells differently from the
+# 1.5-era community build, while `a5_cell_to_boundary` draws the same ground
+# cell identically on both (verified: identical lon spans and repaired WKT).
+# So the pins here are places, and `_cell_at` derives the running build's id.
+#
+# The r7 cell over Fiji. `a5_cell_to_boundary` reports it spanning
 # -180.2016 .. -179.6540, i.e. with vertices west of -180.
-FIJI_CELL_R7 = 10914438512560308224
-# a5 r7 cell over the Chukotka side, reported spanning 179.0883 .. 180.1986.
-CHUKOTKA_CELL_R7 = 130780311054188544
+FIJI_LONLAT = (179.95, -16.20)
+# The r7 cell on the Chukotka side, reported spanning 179.0883 .. 180.1986.
+CHUKOTKA_LONLAT = (179.99, 66.00)
 # ... and one nowhere near the seam, which the repair must not touch.
-NULL_ISLAND_CELL_R7 = 5694203594484482048
+NULL_ISLAND_LONLAT = (0.10, 0.10)
 
-# The cut shape for FIJI_CELL_R7, at 1e-6 degrees. Pinned so a change to the
+
+def _cell_at(con, lonlat: tuple[float, float], resolution: int = 7) -> int:
+    """The running a5 build's cell id over ``lonlat``."""
+    lon, lat = lonlat
+    return fetch_one(con.execute(f"SELECT a5_lonlat_to_cell({lon}, {lat}, {resolution})"))[0]
+
+
+# The cut shape for the Fiji cell, at 1e-6 degrees. Pinned so a change to the
 # seam repair has to state what it did to a real dateline cell.
 FIJI_CELL_R7_WKT = (
     "MULTIPOLYGON ((("
@@ -83,15 +101,17 @@ def _vertex_report(parquet_file):
         relation = f"read_parquet('{parquet_file}')"
         geom = geometry_to_geom_expr(con, relation, "geometry")
         cells = f"SELECT {geom} AS g FROM {relation} WHERE geometry IS NOT NULL"
-        return con.execute(
-            f"""
+        return fetch_one(
+            con.execute(
+                f"""
             SELECT count(*),
                    count(*) FILTER (WHERE NOT ST_IsValid(g)),
                    count(*) FILTER (WHERE ST_XMin(g) < -180.0 OR ST_XMax(g) > 180.0),
                    count(*) FILTER (WHERE ST_GeometryType(g) = 'MULTIPOLYGON')
             FROM ({cells})
             """
-        ).fetchone()
+            )
+        )
     finally:
         con.close()
 
@@ -104,17 +124,22 @@ def _vertex_report(parquet_file):
 @pytest.mark.slow
 @pytest.mark.network
 @pytest.mark.parametrize(
-    "cell,side", [(FIJI_CELL_R7, "west of -180"), (CHUKOTKA_CELL_R7, "east of 180")]
+    "lonlat,side",
+    [(FIJI_LONLAT, "west of -180"), (CHUKOTKA_LONLAT, "east of 180")],
+    ids=["fiji", "chukotka"],
 )
-def test_the_raw_a5_boundary_leaves_the_valid_range(cell, side):
+def test_the_raw_a5_boundary_leaves_the_valid_range(lonlat, side):
     """The defect these cells are pinned for: without the repair the polygon
     written for them carries vertices outside [-180, 180]."""
     con = _a5_connection()
     try:
-        lo, hi = con.execute(
-            f"SELECT list_min(list_transform(a5_cell_to_boundary({cell}::UBIGINT), p -> p[1])), "
-            f"list_max(list_transform(a5_cell_to_boundary({cell}::UBIGINT), p -> p[1]))"
-        ).fetchone()
+        cell = _cell_at(con, lonlat)
+        lo, hi = fetch_one(
+            con.execute(
+                f"SELECT list_min(list_transform(a5_cell_to_boundary({cell}::UBIGINT), lambda p: p[1])), "
+                f"list_max(list_transform(a5_cell_to_boundary({cell}::UBIGINT), lambda p: p[1]))"
+            )
+        )
     finally:
         con.close()
     assert lo < -180.0 or hi > 180.0, f"cell {cell} was expected to run {side}"
@@ -129,7 +154,9 @@ def test_the_raw_a5_boundary_leaves_the_valid_range(cell, side):
 @pytest.mark.network
 def test_a5_r7_dateline_cells_stay_inside_the_world(dateline_parquet, tmp_path):
     out = tmp_path / "a5_r7.parquet"
-    aggregate_by_a5(dateline_parquet, str(out), resolution=7, metric="sum:area")
+    aggregate_by_a5(
+        dateline_parquet, str(out), resolution=7, options=AggregateOptions(metric="sum:area")
+    )
     total, invalid, out_of_range, multi = _vertex_report(out)
     assert total > 0
     assert invalid == 0, f"{invalid} of {total} cell polygons are invalid"
@@ -142,17 +169,19 @@ def test_a5_r7_dateline_cells_stay_inside_the_world(dateline_parquet, tmp_path):
 def test_the_fiji_cell_keeps_its_pinned_multipolygon():
     """One known dateline cell, pinned shape. Built straight through
     ``wrap_grid_geometry`` so the pin covers aggregate and overview alike."""
-    sql = wrap_grid_geometry(
-        f"SELECT {FIJI_CELL_R7}::UBIGINT AS a5_cell, 1 AS count",
-        A5_SCHEME,
-        "a5_cell",
-        "polygon",
-    )
     con = _a5_connection()
     try:
-        (wkt,) = con.execute(
-            f"SELECT ST_AsText(ST_ReducePrecision(ST_GeomFromWKB(geometry), 0.000001)) FROM ({sql})"
-        ).fetchone()
+        sql = wrap_grid_geometry(
+            f"SELECT {_cell_at(con, FIJI_LONLAT)}::UBIGINT AS a5_cell, 1 AS count",
+            A5_SCHEME,
+            "a5_cell",
+            "polygon",
+        )
+        (wkt,) = fetch_one(
+            con.execute(
+                f"SELECT ST_AsText(ST_ReducePrecision(ST_GeomFromWKB(geometry), 0.000001)) FROM ({sql})"
+            )
+        )
     finally:
         con.close()
     assert wkt == FIJI_CELL_R7_WKT
@@ -163,18 +192,19 @@ def test_the_fiji_cell_keeps_its_pinned_multipolygon():
 def test_a_cell_away_from_the_seam_is_handed_through_untouched():
     """A ring that is already contiguous and in range must reach the output as
     the grid library drew it -- same WKB, still a Polygon, not rebuilt."""
-    sql = wrap_grid_geometry(
-        f"SELECT {NULL_ISLAND_CELL_R7}::UBIGINT AS a5_cell, 1 AS count",
-        A5_SCHEME,
-        "a5_cell",
-        "polygon",
-    )
-    raw = A5_SCHEME.boundary_template.format(cell=f"{NULL_ISLAND_CELL_R7}::UBIGINT")
     con = _a5_connection()
     try:
-        written, untouched = con.execute(
-            f"SELECT (SELECT geometry FROM ({sql})), ST_AsWKB({raw})"
-        ).fetchone()
+        cell = _cell_at(con, NULL_ISLAND_LONLAT)
+        sql = wrap_grid_geometry(
+            f"SELECT {cell}::UBIGINT AS a5_cell, 1 AS count",
+            A5_SCHEME,
+            "a5_cell",
+            "polygon",
+        )
+        raw = A5_SCHEME.boundary_template.format(cell=f"{cell}::UBIGINT")
+        written, untouched = fetch_one(
+            con.execute(f"SELECT (SELECT geometry FROM ({sql})), ST_AsWKB({raw})")
+        )
     finally:
         con.close()
     assert bytes(written) == bytes(untouched)
@@ -187,9 +217,14 @@ def test_the_seam_repair_leaves_counts_and_metrics_alone(dateline_parquet, tmp_p
     must produce the same cells, the same counts and the same metric."""
     with_geom = tmp_path / "with_geom.parquet"
     without = tmp_path / "without.parquet"
-    aggregate_by_a5(dateline_parquet, str(with_geom), resolution=7, metric="sum:area")
     aggregate_by_a5(
-        dateline_parquet, str(without), resolution=7, metric="sum:area", out_geometry="none"
+        dateline_parquet, str(with_geom), resolution=7, options=AggregateOptions(metric="sum:area")
+    )
+    aggregate_by_a5(
+        dateline_parquet,
+        str(without),
+        resolution=7,
+        options=AggregateOptions(metric="sum:area", out_geometry="none"),
     )
     con = _a5_connection()
     try:
@@ -224,7 +259,9 @@ def test_a5_overview_parents_are_dateline_safe(dateline_parquet, tmp_path):
     from geoparquet_io.core.process.overview.run import create_overviews
 
     base = tmp_path / "a5_base.parquet"
-    aggregate_by_a5(dateline_parquet, str(base), resolution=7, metric="sum:area")
+    aggregate_by_a5(
+        dateline_parquet, str(base), resolution=7, options=AggregateOptions(metric="sum:area")
+    )
     written = create_overviews(str(base), levels=[5])
     assert len(written) == 1
     _level, parent_path = written[0]
@@ -237,9 +274,9 @@ def test_a5_overview_parents_are_dateline_safe(dateline_parquet, tmp_path):
 
     con = _a5_connection()
     try:
-        rolled_count, rolled_area = con.execute(
-            f"SELECT SUM(count), SUM(sum_area) FROM read_parquet('{parent_path}')"
-        ).fetchone()
+        rolled_count, rolled_area = fetch_one(
+            con.execute(f"SELECT SUM(count), SUM(sum_area) FROM read_parquet('{parent_path}')")
+        )
     finally:
         con.close()
     assert rolled_count == len(DATELINE_POINTS)

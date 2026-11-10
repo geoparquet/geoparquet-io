@@ -12,7 +12,6 @@ from geoparquet_io.cli.main import cli
 from geoparquet_io.core.inspect_utils import (
     _columns_that_fit,
     _create_preview_table,
-    extract_columns_info,
     extract_file_info,
     extract_geo_info,
     format_bbox_display,
@@ -175,6 +174,7 @@ def test_inspect_nonexistent_file(runner):
     result = runner.invoke(cli, ["inspect", "nonexistent.parquet"])
 
     assert result.exit_code != 0
+    assert "nonexistent.parquet" in result.output
 
 
 def test_inspect_non_parquet_file(runner, tmp_path):
@@ -270,30 +270,6 @@ def test_extract_geo_info(test_file):
     assert "bbox" in info
     assert "primary_column" in info
 
-
-def test_extract_columns_info(test_file):
-    """Test extract_columns_info function."""
-    import fsspec
-    import pyarrow.parquet as pq
-
-    from geoparquet_io.core.file_utils import safe_file_url
-
-    safe_url = safe_file_url(test_file, verbose=False)
-    with fsspec.open(safe_url, "rb") as f:
-        pf = pq.ParquetFile(f)
-        schema = pf.schema_arrow
-
-    columns = extract_columns_info(schema, "geometry")
-
-    assert len(columns) > 0
-
-    for col in columns:
-        assert "name" in col
-        assert "type" in col
-        assert "is_geometry" in col
-
-    # At least one column should be marked as geometry
-    [c for c in columns if c["is_geometry"]]
     # May or may not have geometry columns depending on test file
     # Just verify structure is correct
 
@@ -727,9 +703,9 @@ class TestCRSComparison:
         assert _extract_crs_identifier("invalid") is None
         assert _extract_crs_identifier({"no_id": "here"}) is None
 
-    def test_crs_are_equivalent_projjson_vs_epsg_string(self):
+    def test_crs_equal_projjson_vs_epsg_string(self):
         """Test that PROJJSON and EPSG string for same CRS are equivalent."""
-        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+        from geoparquet_io.core.crs_utils import crs_equal
 
         projjson = {
             "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
@@ -737,29 +713,29 @@ class TestCRSComparison:
             "name": "MGI / Austria Lambert",
             "id": {"authority": "EPSG", "code": 31287},
         }
-        assert _crs_are_equivalent(projjson, "EPSG:31287") is True
-        assert _crs_are_equivalent("EPSG:31287", projjson) is True
+        assert crs_equal(projjson, "EPSG:31287") is True
+        assert crs_equal("EPSG:31287", projjson) is True
 
-    def test_crs_are_equivalent_same_strings(self):
+    def test_crs_equal_same_strings(self):
         """Test that identical CRS strings are equivalent."""
-        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+        from geoparquet_io.core.crs_utils import crs_equal
 
-        assert _crs_are_equivalent("EPSG:4326", "EPSG:4326") is True
-        assert _crs_are_equivalent("epsg:4326", "EPSG:4326") is True
+        assert crs_equal("EPSG:4326", "EPSG:4326") is True
+        assert crs_equal("epsg:4326", "EPSG:4326") is True
 
     def test_crs_are_not_equivalent_different_codes(self):
         """Test that different CRS codes are not equivalent."""
-        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+        from geoparquet_io.core.crs_utils import crs_equal
 
-        assert _crs_are_equivalent("EPSG:4326", "EPSG:31287") is False
+        assert crs_equal("EPSG:4326", "EPSG:31287") is False
 
     def test_crs_are_not_equivalent_when_unextractable(self):
         """Test that unextractable CRS values are not equivalent."""
-        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+        from geoparquet_io.core.crs_utils import crs_equal
 
-        assert _crs_are_equivalent(None, "EPSG:4326") is False
-        assert _crs_are_equivalent("invalid", "EPSG:4326") is False
-        assert _crs_are_equivalent({}, "EPSG:4326") is False
+        assert crs_equal(None, "EPSG:4326") is False
+        assert crs_equal("invalid", "EPSG:4326") is False
+        assert crs_equal({}, "EPSG:4326") is False
 
     def test_detect_mismatches_no_false_positive_for_same_crs(self):
         """Test that identical PROJJSON CRS dicts don't trigger mismatch."""
@@ -887,9 +863,9 @@ class TestCRSComparison:
         assert len(warnings) == 1
         assert "missing in GeoParquet metadata" in warnings[0]
 
-    def test_crs_are_equivalent_projjson_without_id(self):
+    def test_crs_equal_projjson_without_id(self):
         """PROJJSON dicts without id fields should use pyproj semantic comparison."""
-        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+        from geoparquet_io.core.crs_utils import crs_equal
 
         crs1 = {
             "$schema": "https://proj.org/schemas/v0.7/projjson.schema.json",
@@ -924,11 +900,11 @@ class TestCRSComparison:
         }
         crs2 = dict(crs1)
 
-        assert _crs_are_equivalent(crs1, crs2) is True
+        assert crs_equal(crs1, crs2) is True
 
-    def test_crs_are_equivalent_projjson_without_id_different(self):
+    def test_crs_equal_projjson_without_id_different(self):
         """Different PROJJSON dicts without id fields should not be equivalent."""
-        from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+        from geoparquet_io.core.crs_utils import crs_equal
 
         crs1 = {
             "type": "GeographicCRS",
@@ -974,7 +950,7 @@ class TestCRSComparison:
             },
         }
 
-        assert _crs_are_equivalent(crs1, crs2) is False
+        assert crs_equal(crs1, crs2) is False
 
 
 @pytest.fixture(scope="module")
@@ -1114,6 +1090,7 @@ class TestInspectSubcommands:
         result = runner.invoke(cli, ["inspect", "meta", test_file, "--geo"])
 
         assert result.exit_code == 0
+        assert "Primary Column: geometry" in result.output
 
     def test_inspect_meta_geo_stats_flag(self, runner, test_file):
         """Test meta subcommand with --geo-stats flag shows per-RG bbox table."""

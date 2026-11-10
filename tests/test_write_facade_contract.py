@@ -189,7 +189,7 @@ def _geo_version(path) -> str | None:
 def _assert_native_geo_preserved(path) -> None:
     """The #600 contract: auto mode upgrades native-geo-only to native 2.0.
 
-    This is what ``resolve_geoparquet_version_from_file`` already gives
+    This is what the file witness of ``resolve_output_geoparquet_version`` gives
     ``convert`` and ``reproject`` (PR #594). Both halves matter: a 2.0 version
     string over a WKB column would be a spec violation, and a native column
     under a 1.1 declaration would be one too.
@@ -214,7 +214,7 @@ def _downgrade_param(command: str, *args):
 
 #: Was: every entry point but ``convert`` passed ``geoparquet_version=None``
 #: straight to ``write_parquet_with_metadata``, whose
-#: ``extract_version_from_metadata`` returns None for a native-geo-only input,
+#: The carried-metadata witness returns None for a native-geo-only input,
 #: so the write defaulted to 1.1.0 WKB and stripped the native GEOMETRY logical
 #: type. ``write_parquet_with_metadata`` now resolves auto mode through
 #: ``parquet_writer.resolve_output_geoparquet_version``, which consults the

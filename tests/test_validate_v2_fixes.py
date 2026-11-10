@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.geo_metadata import ColumnMeta, parse_column_meta
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_edges_valid,
@@ -42,8 +43,8 @@ EPSG_3857_PROJJSON = {
 SCHEMA_NO_CRS = [{"name": "geometry", "logical_type": "GeometryType()", "type": "binary"}]
 
 
-def _geo_meta(crs):
-    return {"columns": {"geometry": {"encoding": "WKB", "crs": crs}}}
+def _column_meta(crs) -> ColumnMeta:
+    return parse_column_meta("geometry", {"encoding": "WKB", "crs": crs})
 
 
 class TestV2CrsDefaultEquivalence:
@@ -51,23 +52,25 @@ class TestV2CrsDefaultEquivalence:
 
     @pytest.mark.parametrize("crs", [CRS84_PROJJSON, EPSG_4326_PROJJSON])
     def test_crs_in_parquet_type_passes_for_default_equivalent(self, crs):
-        check = _check_v2_crs_in_parquet_type(_geo_meta(crs), SCHEMA_NO_CRS, "geometry")
+        check = _check_v2_crs_in_parquet_type(_column_meta(crs), SCHEMA_NO_CRS, "geometry")
         assert check.status == CheckStatus.PASSED, check.message
 
     def test_crs_in_parquet_type_fails_for_non_default(self):
         check = _check_v2_crs_in_parquet_type(
-            _geo_meta(EPSG_3857_PROJJSON), SCHEMA_NO_CRS, "geometry"
+            _column_meta(EPSG_3857_PROJJSON), SCHEMA_NO_CRS, "geometry"
         )
         assert check.status == CheckStatus.FAILED
 
     @pytest.mark.parametrize("crs", [CRS84_PROJJSON, EPSG_4326_PROJJSON])
     def test_consistency_passes_for_default_equivalent(self, crs):
-        check = _check_v2_crs_consistency(_geo_meta(crs), SCHEMA_NO_CRS, "geometry")
+        check = _check_v2_crs_consistency(_column_meta(crs), SCHEMA_NO_CRS, "geometry", "")
         assert check.status == CheckStatus.PASSED, check.message
 
     def test_consistency_fails_for_genuine_mismatch(self):
         """Metadata 3857 vs absent native CRS (=CRS84) is a real inconsistency."""
-        check = _check_v2_crs_consistency(_geo_meta(EPSG_3857_PROJJSON), SCHEMA_NO_CRS, "geometry")
+        check = _check_v2_crs_consistency(
+            _column_meta(EPSG_3857_PROJJSON), SCHEMA_NO_CRS, "geometry", ""
+        )
         assert check.status == CheckStatus.FAILED
 
     def test_consistency_passes_when_both_declare_same_crs(self):
@@ -78,7 +81,7 @@ class TestV2CrsDefaultEquivalence:
                 "type": "binary",
             }
         ]
-        check = _check_v2_crs_consistency(_geo_meta(EPSG_3857_PROJJSON), schema, "geometry")
+        check = _check_v2_crs_consistency(_column_meta(EPSG_3857_PROJJSON), schema, "geometry", "")
         assert check.status == CheckStatus.PASSED, check.message
 
 
@@ -87,23 +90,31 @@ class TestEdgesVocabulary:
 
     @pytest.mark.parametrize("edges", ["vincenty", "thomas", "andoyer", "karney"])
     def test_ellipsoidal_edges_valid_for_v2(self, edges):
-        check = _check_edges_valid({"edges": edges}, "geometry", geo_version="2.0.0")
+        check = _check_edges_valid(
+            parse_column_meta("geometry", {"edges": edges}), "geometry", geo_version="2.0.0"
+        )
         assert check.status == CheckStatus.PASSED, check.message
 
     @pytest.mark.parametrize("edges", ["vincenty", "karney"])
     def test_ellipsoidal_edges_invalid_for_v1_1(self, edges):
-        check = _check_edges_valid({"edges": edges}, "geometry", geo_version="1.1.0")
+        check = _check_edges_valid(
+            parse_column_meta("geometry", {"edges": edges}), "geometry", geo_version="1.1.0"
+        )
         assert check.status == CheckStatus.FAILED
 
     @pytest.mark.parametrize("version", ["1.1.0", "2.0.0"])
     def test_planar_and_spherical_valid_everywhere(self, version):
         for edges in ("planar", "spherical"):
-            check = _check_edges_valid({"edges": edges}, "geometry", geo_version=version)
+            check = _check_edges_valid(
+                parse_column_meta("geometry", {"edges": edges}), "geometry", geo_version=version
+            )
             assert check.status == CheckStatus.PASSED
 
     @pytest.mark.parametrize("version", ["1.1.0", "2.0.0"])
     def test_bogus_edges_always_invalid(self, version):
-        check = _check_edges_valid({"edges": "geodesic"}, "geometry", geo_version=version)
+        check = _check_edges_valid(
+            parse_column_meta("geometry", {"edges": "geodesic"}), "geometry", geo_version=version
+        )
         assert check.status == CheckStatus.FAILED
 
 

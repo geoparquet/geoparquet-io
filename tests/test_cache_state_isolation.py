@@ -93,14 +93,14 @@ def test_the_walk_sees_the_classmethod_cache_and_the_re_export_once():
     """The two shapes a naive ``vars(module)`` walk gets wrong.
 
     ``WriteStrategyFactory.get_strategy`` is ``classmethod(lru_cache(...))``, a
-    class member. ``detect_geoparquet_file_type`` is re-exported by
-    ``core/common.py`` and must be counted once, under its defining module.
+    class member. ``detect_geoparquet_file_type`` is imported by
+    ``core/parquet_writer.py`` and must be counted once, under its defining module.
     """
-    from geoparquet_io.core import common
+    from geoparquet_io.core import parquet_writer
 
     found = _walk_package_caches()
     assert "geoparquet_io.core.write_strategies.WriteStrategyFactory.get_strategy" in found
-    assert common.detect_geoparquet_file_type is detect_geoparquet_file_type
+    assert parquet_writer.detect_geoparquet_file_type is detect_geoparquet_file_type
     assert [n for n in found if n.endswith(".detect_geoparquet_file_type")] == [
         "geoparquet_io.core.file_type.detect_geoparquet_file_type"
     ]

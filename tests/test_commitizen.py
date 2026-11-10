@@ -2,14 +2,10 @@
 
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 # Repo tooling checks: these spawn `uv run cz` subprocesses, the fast suite's
 # main source of contention flakes, so they run in the meta lane instead.
@@ -102,14 +98,6 @@ class TestCommitizenConfig:
         dev_deps = config.get("project", {}).get("optional-dependencies", {}).get("dev", [])
         assert any("commitizen" in dep for dep in dev_deps), (
             "commitizen not found in [project.optional-dependencies] dev"
-        )
-
-    def test_tomli_backport_in_dev_dependencies(self):
-        """Verify tomli backport is listed for Python <3.11."""
-        config = _load_pyproject()
-        dev_deps = config.get("project", {}).get("optional-dependencies", {}).get("dev", [])
-        assert any("tomli" in dep for dep in dev_deps), (
-            "tomli backport not found in [project.optional-dependencies] dev"
         )
 
 

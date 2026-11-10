@@ -39,7 +39,7 @@ def _write_wkb_with_orientation(path, wkts, orientation="counterclockwise"):
     """
     con = get_duckdb_connection(load_spatial=True)
     values = ", ".join(f"(ST_AsWKB(ST_GeomFromText('{w}')))" for w in wkts)
-    table = con.execute(f"SELECT * FROM (VALUES {values}) t(geometry)").arrow().read_all()
+    table = con.sql(f"SELECT * FROM (VALUES {values}) t(geometry)").arrow().read_all()
     con.close()
     geo = {
         "version": "1.1.0",
@@ -169,7 +169,7 @@ class TestEdges:
 class TestPathEscapedExactlyOnce:
     """#937: the check escaped its own path twice.
 
-    ``_describe_geom_type(con, raw_url, ...)`` escapes its argument itself (it
+    ``resolve_geometry_read(con, raw_url, ...)`` escapes its argument itself (it
     builds ``read_parquet({sql_path(raw_url)})``), so passing the already
     escaped ``safe_file_url()`` result turned ``o'brien`` into ``o''''brien``
     inside the literal. The read then failed, the broad ``except`` caught it,

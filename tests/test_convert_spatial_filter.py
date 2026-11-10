@@ -18,9 +18,11 @@ import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
+import geoparquet_io as gpio
+from geoparquet_io.api import ops
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import format_writers
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.exceptions import InvalidParameterError, ValidationError
 from geoparquet_io.core.format_writers import write_csv, write_flatgeobuf, write_geopackage
 
@@ -39,7 +41,7 @@ BBOX_AS_WKT = "POLYGON((-0.5 10.0, 0.5 10.0, 0.5 11.0, -0.5 11.0, -0.5 10.0))"
 
 def _gpkg_table(db):
     """The one layer's table name (DuckDB's GDAL writer names it after the file)."""
-    return db.execute("SELECT table_name FROM gpkg_contents").fetchone()[0]
+    return fetch_one(db.execute("SELECT table_name FROM gpkg_contents"))[0]
 
 
 def _gpkg_values(path, column="fsq_place_id"):
@@ -57,7 +59,7 @@ def _gpkg_columns(path):
 def _read_layer_count(path):
     con = get_duckdb_connection(load_spatial=True)
     try:
-        return con.execute(f"SELECT count(*) FROM ST_Read('{path}')").fetchone()[0]
+        return fetch_one(con.execute(f"SELECT count(*) FROM ST_Read('{path}')"))[0]
     finally:
         con.close()
 
@@ -163,9 +165,9 @@ class TestGoldenSQL:
         out = tmp_path / "out.gpkg"
         write_geopackage(PLACES, str(out))
 
-        staged = [s for s in recorded_statements if "CREATE OR REPLACE TEMP TABLE" in s]
-        assert len(staged) == 1
-        assert "WHERE" not in staged[0].upper().replace("WKB_GEOMETRY", "")
+        copies = [s for s in recorded_statements if "FORMAT GDAL" in s]
+        assert len(copies) == 1
+        assert "WHERE" not in copies[0].upper().replace("WKB_GEOMETRY", "")
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +238,7 @@ class TestFilterSemantics:
 
     def test_reversed_bbox_is_rejected(self, tmp_path):
         with pytest.raises(InvalidParameterError, match="reversed"):
-            write_geopackage(PLACES, str(tmp_path / "out.gpkg"), bbox="0.5,10.0,-0.5,11.0")
+            write_geopackage(PLACES, str(tmp_path / "out.gpkg"), bbox="500000,10.0,400000,11.0")
 
     def test_non_numeric_bbox_sequence_is_rejected(self, tmp_path):
         with pytest.raises(InvalidParameterError, match="numeric"):
@@ -312,8 +314,8 @@ class TestDonorRegressions:
         out = tmp_path / "table.gpkg"
         write_geopackage(plain_parquet, str(out))
         with closing(sqlite3.connect(out)) as db:
-            data_type = db.execute("SELECT data_type FROM gpkg_contents").fetchone()[0]
-            geometry_rows = db.execute("SELECT count(*) FROM gpkg_geometry_columns").fetchone()[0]
+            data_type = fetch_one(db.execute("SELECT data_type FROM gpkg_contents"))[0]
+            geometry_rows = fetch_one(db.execute("SELECT count(*) FROM gpkg_geometry_columns"))[0]
         assert data_type == "attributes"
         assert geometry_rows == 0
         assert "geom" not in _gpkg_columns(out)
@@ -330,7 +332,7 @@ class TestDonorRegressions:
         out = tmp_path / "tags.gpkg"
         write_geopackage(str(source), str(out), bbox=BBOX)
         columns = _gpkg_columns(out)
-        assert "tags" not in columns  # GDAL cannot hold it; dropped as before
+        assert "tags" in columns  # GDAL cannot hold it natively; JSON text since #1333
         assert "name" in columns  # the columns after it still arrive
         assert len(_gpkg_values(out)) == BBOX_ROWS
 
@@ -484,6 +486,109 @@ class TestPythonAPI:
         assert len(_gpkg_values(out)) == BBOX_ROWS
 
 
+def _csv_rows(path):
+    return len(Path(path).read_text(encoding="utf-8").strip().splitlines()) - 1
+
+
+#: Every Python API door that hands a caller's ``geometry=`` to the filter
+#: builder: (output suffix, call, row count of the output).
+_API_GEOMETRY_DOORS = {
+    "Table.write": (
+        ".gpkg",
+        lambda out, geom: gpio.read(PLACES).write(out, geometry=geom),
+        lambda out: len(_gpkg_values(out)),
+    ),
+    "convert_to_geopackage": (
+        ".gpkg",
+        lambda out, geom: ops.convert_to_geopackage(pq.read_table(PLACES), str(out), geometry=geom),
+        lambda out: len(_gpkg_values(out)),
+    ),
+    "convert_to_flatgeobuf": (
+        ".fgb",
+        lambda out, geom: ops.convert_to_flatgeobuf(pq.read_table(PLACES), str(out), geometry=geom),
+        _read_layer_count,
+    ),
+    "convert_to_csv": (
+        ".csv",
+        lambda out, geom: ops.convert_to_csv(pq.read_table(PLACES), str(out), geometry=geom),
+        _csv_rows,
+    ),
+}
+
+
+class TestAPIGeometryInputForms:
+    """``geometry=`` on the Python API takes text or ``@path`` only (#1321).
+
+    ``"-"`` (stdin) and a bare existing file path are shell conveniences; a
+    library caller passing an untrusted string must not be made to read stdin
+    or a local file. The CLI keeps every form.
+    """
+
+    @pytest.mark.parametrize("form", ["stdin", "bare_path"])
+    @pytest.mark.parametrize("door", sorted(_API_GEOMETRY_DOORS))
+    def test_cli_only_forms_are_refused(self, door, form, tmp_path, monkeypatch):
+        import io
+
+        suffix, call, _ = _API_GEOMETRY_DOORS[door]
+        wkt_file = tmp_path / "box.wkt"
+        wkt_file.write_text(BBOX_AS_WKT, encoding="utf-8")
+        monkeypatch.setattr("sys.stdin", io.StringIO(BBOX_AS_WKT))
+        geom = "-" if form == "stdin" else str(wkt_file)
+        out = tmp_path / f"out{suffix}"
+        with pytest.raises(InvalidParameterError, match="@path"):
+            call(out, geom)
+        assert not out.exists()
+
+    @pytest.mark.parametrize("door", sorted(_API_GEOMETRY_DOORS))
+    def test_a_bare_path_created_after_the_gate_is_never_read(self, door, tmp_path, monkeypatch):
+        """The refusal is by shape, so a file appearing after the gate cannot be read."""
+        from geoparquet_io.core import extract as core_extract
+
+        suffix, call, _ = _API_GEOMETRY_DOORS[door]
+        late = tmp_path / "late.wkt"
+        parse = core_extract.parse_geometry_input
+
+        def create_then_parse(geometry, *args, **kwargs):
+            late.write_text(BBOX_AS_WKT, encoding="utf-8")  # the race
+            return parse(geometry, *args, **kwargs)
+
+        monkeypatch.setattr(core_extract, "parse_geometry_input", create_then_parse)
+        out = tmp_path / f"out{suffix}"
+        with pytest.raises(InvalidParameterError, match="@path"):
+            call(out, str(late))
+        assert not out.exists()
+
+    @pytest.mark.parametrize("door", sorted(_API_GEOMETRY_DOORS))
+    def test_a_pathlib_path_is_refused_naming_at_path(self, door, tmp_path):
+        suffix, call, _ = _API_GEOMETRY_DOORS[door]
+        wkt_file = tmp_path / "box.wkt"
+        wkt_file.write_text(BBOX_AS_WKT, encoding="utf-8")
+        out = tmp_path / f"out{suffix}"
+        with pytest.raises(InvalidParameterError, match="@path"):
+            call(out, wkt_file)
+        assert not out.exists()
+
+    @pytest.mark.parametrize("door", sorted(_API_GEOMETRY_DOORS))
+    def test_at_path_and_inline_text_are_accepted(self, door, tmp_path):
+        suffix, call, count = _API_GEOMETRY_DOORS[door]
+        wkt_file = tmp_path / "box.wkt"
+        wkt_file.write_text(BBOX_AS_WKT, encoding="utf-8")
+        for name, geom in (("at", f"@{wkt_file}"), ("inline", BBOX_AS_WKT)):
+            out = tmp_path / f"{name}{suffix}"
+            call(out, geom)
+            assert count(out) == BBOX_ROWS
+
+    def test_the_cli_keeps_the_bare_path_form(self, tmp_path):
+        wkt_file = tmp_path / "box.wkt"
+        wkt_file.write_text(BBOX_AS_WKT, encoding="utf-8")
+        out = tmp_path / "cli.gpkg"
+        result = CliRunner().invoke(
+            cli, ["convert", "geopackage", PLACES, str(out), "--geometry", str(wkt_file)]
+        )
+        assert result.exit_code == 0, result.output
+        assert len(_gpkg_values(out)) == BBOX_ROWS
+
+
 class TestFiltersOnUnsupportedFormats:
     """A filter the writer cannot honor must refuse, not silently write everything.
 
@@ -521,7 +626,7 @@ class TestFiltersOnUnsupportedFormats:
 class TestWriteFormatRouter:
     def test_the_csv_branch_forwards_the_filters(self, tmp_path):
         out = tmp_path / "routed.csv"
-        format_writers.write_format(PLACES, str(out), "csv", bbox=BBOX)
+        format_writers.write_csv(PLACES, str(out), bbox=BBOX)
         assert len(Path(out).read_text(encoding="utf-8").strip().splitlines()) == BBOX_ROWS + 1
 
 

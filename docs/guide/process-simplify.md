@@ -22,7 +22,7 @@ pip install 'geoparquet-io[simplify]'
 uv tool install geoparquet-io --with coarsen
 ```
 
-coarsen ships prebuilt wheels for Python 3.10+ on Linux, macOS and Windows.
+coarsen ships prebuilt wheels for Python 3.11+ on Linux, macOS and Windows.
 It is LGPL-2.1 licensed and used as an unmodified dependency; without it,
 `gpio process simplify` explains exactly this install step and everything
 else in gpio works as before.

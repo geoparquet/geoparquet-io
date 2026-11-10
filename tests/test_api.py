@@ -4,8 +4,12 @@ Tests for the Python API (fluent Table class and ops module).
 
 from __future__ import annotations
 
+import dataclasses
 import functools
 import inspect
+import json
+import os
+import re
 import struct
 import tempfile
 import uuid
@@ -62,6 +66,7 @@ class TestRead:
 
         table = read(PLACES_PARQUET)
         assert isinstance(table, Table)
+        assert table.num_rows == pq.ParquetFile(PLACES_PARQUET).metadata.num_rows
 
     def test_read_preserves_rows(self):
         """Test that read() preserves row count."""
@@ -319,7 +324,16 @@ class _CallRecorder:
     def __call__(self, *args, **kwargs):
         bound = self._signature.bind(*args, **kwargs)
         bound.apply_defaults()
-        self.delivered = {k: v for k, v in bound.arguments.items() if k != "table"}
+        delivered = {k: v for k, v in bound.arguments.items() if k != "table"}
+        options = delivered.get("options")
+        if dataclasses.is_dataclass(options):
+            # An options object stands for the keywords it holds: the doors are
+            # compared on the values core receives, not on how it is packed.
+            delivered = {
+                **{k: v for k, v in delivered.items() if k != "options"},
+                **dataclasses.asdict(options),
+            }
+        self.delivered = delivered
         return args[0]
 
 
@@ -739,6 +753,11 @@ NOT_TABLE_IN_TABLE_OUT: dict[str, str] = {
     "partition_by_quadkey": "writes a partition tree; covered by TestOpsPartition",
     "partition_by_s2": "writes a partition tree; covered by TestOpsPartition",
     "partition_by_string": "writes a partition tree; covered by TestOpsPartition",
+    # Table/file in, PMTiles out: no table comes back to compare. The Table door
+    # hands ops the source file or a scratch copy; both doors are pinned against
+    # the CLI by the call-parity scaffold's `pmtiles create`/`pmtiles pyramid`.
+    "create_pmtiles": "PMTiles out through tippecanoe; call parity in the scaffold",
+    "create_pmtiles_pyramid": "banded PMTiles out; call parity in the scaffold",
 }
 
 
@@ -822,8 +841,6 @@ OPS_ONLY_SURFACE: dict[str, str] = {
     "handed back in memory cannot carry",
     "create_overviews": "`Table.overview` <-> `ops.create_overviews`, differently spelled "
     "twin: the method rolls one level in memory, the function writes a whole pyramid",
-    "create_pmtiles": "file in, PMTiles out through tippecanoe: no table on either end",
-    "create_pmtiles_pyramid": "file in, banded PMTiles out: no table on either end",
     "from_arcgis": "reader: fetches a service over the network, no input table",
     "from_carto": "reader: fetches a service over the network, no input table",
     "from_wfs_layers": "reader: writes many layers to a directory, so there is no single "
@@ -853,6 +870,8 @@ TABLE_ONLY_SURFACE: dict[str, str] = {
     "check_row_groups": "returns a CheckResult, not a table",
     "check_spatial": "returns a CheckResult, not a table",
     "check_spatial_pushdown": "returns a CheckResult, not a table",
+    "fix": "repairs the file the Table measures: the checks it acts on are file facts, "
+    "and the file-level repair is `gpio check <cmd> --fix`",
     "from_bigquery": "`Table.from_bigquery` <-> `ops.read_bigquery`, differently spelled twin",
     "head": "row preview off the wrapped table; `ops` callers can slice the pa.Table",
     "info": "prints a summary of the wrapped table",
@@ -1096,6 +1115,176 @@ class TestFrontDoorDelegation:
         )
 
 
+# ---------------------------------------------------------------------------
+# G6 of #1367: the public-API snapshot
+# ---------------------------------------------------------------------------
+
+#: The front doors and every owner module of the #1367 concept table. A change
+#: to any of their public names is a diff to tests/data/snapshots/public_api.json,
+#: so nothing moves silently.
+PUBLIC_API_MODULES = (
+    "geoparquet_io.benchmarks",
+    "geoparquet_io.api",
+    "geoparquet_io.api.ops",
+    "geoparquet_io.api.table",
+    "geoparquet_io.core.parquet_writer",
+    "geoparquet_io.core.write_funnels",
+    "geoparquet_io.core.compression",
+    "geoparquet_io.core.parquet_footer",
+    "geoparquet_io.core.geo_metadata",
+    "geoparquet_io.core.geometry_detection",
+    "geoparquet_io.core.crs_utils",
+    "geoparquet_io.core.memory_limits",
+    "geoparquet_io.core.sizing",
+    "geoparquet_io.core.duckdb_utils",
+    "geoparquet_io.core.duckdb_metadata",
+    "geoparquet_io.core.remote",
+    "geoparquet_io.core.file_utils",
+    "geoparquet_io.core.column_selection",
+    "geoparquet_io.core.http_retry",
+    "geoparquet_io.core.exceptions",
+    "geoparquet_io.core.json_output",
+    "geoparquet_io.core.format_writers",
+    "geoparquet_io.cli.decorators",
+    "geoparquet_io.cli.exception_handler",
+    # Concept 15 (shared CLI behaviour): the owner of parse_bbox / BBox, and
+    # the check runner's module.
+    "geoparquet_io.core.bbox_parse",
+    "geoparquet_io.cli.commands.check",
+    "geoparquet_io.core.extract",
+    "geoparquet_io.core.edges",
+    "geoparquet_io.core.index_ops",
+    "geoparquet_io.core.process.aggregate.options",
+)
+PUBLIC_API_SNAPSHOT = Path(__file__).parent / "data" / "snapshots" / "public_api.json"
+
+
+def _module_level_assignments(module) -> set[str]:
+    """Names the module's own source assigns at module level (constants),
+    through module-level ``try``/``if`` blocks."""
+    import ast
+
+    source = inspect.getsource(module)
+    names: set[str] = set()
+
+    def visit(body):
+        for node in body:
+            if isinstance(node, ast.Assign):
+                names.update(
+                    n.id for t in node.targets for n in ast.walk(t) if isinstance(n, ast.Name)
+                )
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                names.add(node.target.id)
+            elif isinstance(node, (ast.If, ast.Try)):
+                visit(node.body + node.orelse + getattr(node, "finalbody", []))
+                for handler in getattr(node, "handlers", []):
+                    visit(handler.body)
+
+    visit(ast.parse(source).body)
+    return names
+
+
+def public_names(module) -> list[str]:
+    """A module's public surface: ``__all__`` for a package that declares it;
+    otherwise every public function and class the module defines (by
+    ``__module__``, so an import is not counted) and every public constant its
+    own source assigns."""
+    if hasattr(module, "__path__") and hasattr(module, "__all__"):
+        return sorted(module.__all__)
+    constants = _module_level_assignments(module)
+    found = set()
+    for name, value in vars(module).items():
+        if name.startswith("_") or inspect.ismodule(value):
+            continue
+        if callable(value):  # functions, classes, lru_cache/click wrappers
+            if getattr(value, "__module__", None) == module.__name__:
+                found.add(name)
+        elif name in constants:
+            found.add(name)
+    return sorted(found)
+
+
+def public_api_surface() -> dict[str, list[str]]:
+    import importlib
+
+    surface = {}
+    for name in PUBLIC_API_MODULES:
+        try:
+            module = importlib.import_module(name)
+        except ModuleNotFoundError as exc:
+            if exc.name != name:
+                raise
+            continue  # a pending owner (see PUBLIC_API_MODULES)
+        surface[name] = public_names(module)
+    return surface
+
+
+def _public_api_diff(expected: dict, live: dict) -> list[str]:
+    lines = []
+    for module in sorted(set(expected) | set(live)):
+        have, want = set(live.get(module, [])), set(expected.get(module, []))
+        lines += [f"{module}: + {n}" for n in sorted(have - want)]
+        lines += [f"{module}: - {n}" for n in sorted(want - have)]
+    return lines
+
+
+def _check_public_api(snapshot: Path = PUBLIC_API_SNAPSHOT) -> list[str]:
+    expected = json.loads(snapshot.read_text(encoding="utf-8")) if snapshot.exists() else {}
+    return _public_api_diff(expected, public_api_surface())
+
+
+def test_public_api_matches_the_snapshot():
+    """G6: the public names of the front doors and the owner modules match the
+    committed snapshot. A rename, move or deletion during #1367 shows up here as a
+    diff to review, never silently. To accept an intentional change::
+
+        GPIO_UPDATE_SNAPSHOT=1 uv run pytest tests/test_api.py -k public_api_matches
+
+    (refused when ``CI`` is set, as in tests/test_cli_surface.py)."""
+    from tests.test_cli_surface import UPDATE_ENV_VAR, _env_flag
+
+    if _env_flag(UPDATE_ENV_VAR):
+        assert not os.environ.get("CI"), f"{UPDATE_ENV_VAR} must not be set in CI"
+        PUBLIC_API_SNAPSHOT.parent.mkdir(parents=True, exist_ok=True)
+        PUBLIC_API_SNAPSHOT.write_text(
+            json.dumps(public_api_surface(), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        pytest.skip(f"GPIO_UPDATE_SNAPSHOT set: refreshed {PUBLIC_API_SNAPSHOT.name}")
+    assert PUBLIC_API_SNAPSHOT.exists(), "create it with GPIO_UPDATE_SNAPSHOT=1"
+    diff = _check_public_api()
+    assert not diff, (
+        "the public API drifted from tests/data/snapshots/public_api.json:\n  "
+        + "\n  ".join(diff)
+        + "\nIf intentional, re-record with GPIO_UPDATE_SNAPSHOT=1 and review the diff."
+    )
+
+
+def test_g12_the_public_api_snapshot_fails_on_a_new_public_name(monkeypatch):
+    from geoparquet_io.core import sizing
+
+    def brand_new_helper():
+        return 1
+
+    brand_new_helper.__module__ = sizing.__name__
+    monkeypatch.setattr(sizing, "brand_new_helper", brand_new_helper, raising=False)
+    assert "geoparquet_io.core.sizing: + brand_new_helper" in _check_public_api()
+
+
+def test_g12_the_public_api_snapshot_fails_on_a_removed_name(monkeypatch):
+    from geoparquet_io.core import sizing
+
+    monkeypatch.delattr(sizing, "nudged_size")
+    assert "geoparquet_io.core.sizing: - nudged_size" in _check_public_api()
+
+
+def test_g12_an_empty_snapshot_fails(tmp_path):
+    empty = tmp_path / "public_api.json"
+    empty.write_text("{}", encoding="utf-8")
+    assert _check_public_api(empty)
+
+
 class TestOpsEndToEnd:
     """One real run per `ops` family, so the wrappers are covered unmocked.
 
@@ -1306,6 +1495,118 @@ class TestTableUpload:
             assert len(captured_paths) == 1
             temp_path = captured_paths[0]
             assert not Path(temp_path).exists(), "Temp file should be deleted after error"
+
+    def test_upload_forwards_dry_run(self, sample_table):
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            sample_table.upload("s3://test-bucket/test.parquet", dry_run=True)
+        assert mock_upload.call_args.kwargs["dry_run"] is True
+
+    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry_run", "real"])
+    def test_upload_to_a_prefix_names_the_object_after_the_source(
+        self, sample_table, dry_run, capsys
+    ):
+        from geoparquet_io.core import upload as core_upload
+
+        with (
+            patch.object(core_upload, "_setup_store_and_kwargs", return_value=(None, {})),
+            patch.object(core_upload, "_upload_file_sync") as put,
+        ):
+            sample_table.upload("s3://test-bucket/prefix/", dry_run=dry_run)
+
+        key = f"prefix/{PLACES_PARQUET.name}"
+        if dry_run:
+            assert f"Target key:  {key}" in capsys.readouterr().out
+            put.assert_not_called()
+        else:
+            assert put.call_args.args[2] == key
+
+    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry_run", "real"])
+    def test_upload_to_a_prefix_without_a_source_name_is_refused(self, sample_table, dry_run):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with patch("geoparquet_io.core.upload.upload") as mock_upload:
+            with pytest.raises(InvalidParameterError, match="full object key"):
+                sample_table.head(5).upload("s3://test-bucket/prefix/", dry_run=dry_run)
+        mock_upload.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "s3://b/d/data.parquet",
+            "https://h.example/d/data.parquet",
+            "https://h.example/d/a%20b.parquet?X-Amz-Signature=x#f",
+            "s3://b/d/year=2024/data.parquet",
+            "http://[::1]/data.parquet",
+            "s3://test-bucket/data/*.parquet",
+        ],
+        ids=["s3", "https", "signed", "hive_s3", "ipv6", "glob"],
+    )
+    def test_upload_to_a_prefix_from_a_non_local_source_is_refused(self, sample_table, source):
+        """Only a local single file names the object; anything else needs a full key."""
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with (
+            patch.object(sample_table, "_source_path", source),
+            patch("geoparquet_io.core.upload.upload") as mock_upload,
+        ):
+            with pytest.raises(
+                InvalidParameterError,
+                match=re.escape("full object key, e.g. 's3://test-bucket/prefix/data.parquet'"),
+            ):
+                sample_table.upload("s3://test-bucket/prefix/", dry_run=True)
+        mock_upload.assert_not_called()
+
+    def test_upload_to_a_prefix_from_a_directory_source_is_refused(self, sample_table, tmp_path):
+        from geoparquet_io.core.exceptions import InvalidParameterError
+
+        with (
+            patch.object(sample_table, "_source_path", str(tmp_path)),
+            patch("geoparquet_io.core.upload.upload") as mock_upload,
+        ):
+            with pytest.raises(InvalidParameterError, match="full object key"):
+                sample_table.upload("s3://test-bucket/prefix/", dry_run=True)
+        mock_upload.assert_not_called()
+
+    def test_upload_scratch_name_is_generated_and_key_takes_the_local_basename(self, sample_table):
+        """The scratch file never carries the source's name (':' is unsafe on Windows)."""
+        with (
+            patch.object(sample_table, "_source_path", "/data/d/w:e:i.rd.parquet"),
+            patch("geoparquet_io.core.upload.upload") as mock_upload,
+        ):
+            sample_table.upload("s3://test-bucket/prefix/")
+
+        kwargs = mock_upload.call_args.kwargs
+        assert kwargs["destination"] == "s3://test-bucket/prefix/w:e:i.rd.parquet"
+        assert Path(kwargs["source"]).name == "upload.parquet"
+
+
+class TestTablePmtilesScratch:
+    """A derived Table's intermediate file honours ``temporary_directory``."""
+
+    @pytest.mark.parametrize("method", ["create_pmtiles", "create_pmtiles_pyramid"])
+    @pytest.mark.parametrize("fails", [False, True], ids=["ok", "error"])
+    def test_intermediate_file_lives_in_temporary_directory(self, tmp_path, method, fails):
+        seen = []
+
+        def fake(path, output, **kwargs):
+            seen.append(Path(path))
+            assert Path(path).exists()
+            if fails:
+                raise RuntimeError("tippecanoe died")
+
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        derived = read(PLACES_PARQUET).head(5)
+        with patch(f"geoparquet_io.api.ops.{method}", fake):
+            try:
+                getattr(derived, method)(
+                    str(tmp_path / "o.pmtiles"), temporary_directory=str(scratch)
+                )
+            except RuntimeError:
+                assert fails
+
+        assert seen and scratch in seen[0].parents
+        assert list(scratch.iterdir()) == []
 
 
 class TestTableMetadataProperties:
@@ -2141,7 +2442,7 @@ class TestTableStats:
     def test_stats_returns_dict(self, sample_table):
         """Test stats() returns a dictionary."""
         result = sample_table.stats()
-        assert isinstance(result, dict)
+        assert set(result) == set(sample_table.column_names)
 
     def test_stats_has_all_columns(self, sample_table):
         """Test stats() includes all columns."""
@@ -2176,11 +2477,6 @@ class TestTableMetadata:
         if not PLACES_PARQUET.exists():
             pytest.skip("Test data not available")
         return read(PLACES_PARQUET)
-
-    def test_metadata_returns_dict(self, sample_table):
-        """Test metadata() returns a dictionary."""
-        result = sample_table.metadata()
-        assert isinstance(result, dict)
 
     def test_metadata_has_basic_fields(self, sample_table):
         """Test metadata() includes basic fields."""
@@ -2492,7 +2788,7 @@ class TestTableCheck:
         """Test check() returns results dict."""
         result = sample_table.check()
         results_dict = result.to_dict()
-        assert isinstance(results_dict, dict)
+        assert "compression" in results_dict
 
     def test_check_compression_returns_check_result(self, sample_table):
         """Test check_compression() returns a CheckResult."""
@@ -2543,6 +2839,69 @@ class TestTableCheck:
 
 class TestTableAddBboxMetadata:
     """Tests for add_bbox_metadata() method."""
+
+    @staticmethod
+    def _covering_column(arrow_table) -> str:
+        geo = json.loads(arrow_table.schema.metadata[b"geo"])
+        return geo["columns"][geo["primary_column"]]["covering"]["bbox"]["xmin"][0]
+
+    @pytest.mark.parametrize(
+        "call",
+        [lambda t: ops.add_bbox_metadata(t.to_arrow()), lambda t: t.add_bbox_metadata().to_arrow()],
+        ids=["ops", "table"],
+    )
+    def test_default_detects_the_bbox_column_like_the_cli(self, austria_bbox_covering_file, call):
+        """No name means detect, as `gpio add bbox-metadata` does: the covering's column."""
+        assert self._covering_column(call(read(austria_bbox_covering_file))) == "geometry_bbox"
+
+    @staticmethod
+    def _two_geometries(path, boundary_covering: bool):
+        """``geometry`` covered by ``geometry_bbox``; a secondary ``boundary`` with its own."""
+        arrow = read(path).to_arrow()
+        arrow = arrow.append_column("boundary", arrow.column("geometry"))
+        arrow = arrow.append_column("boundary_bbox", arrow.column("geometry_bbox"))
+        arrow = arrow.append_column("bbox", arrow.column("geometry_bbox"))
+        geo = json.loads(arrow.schema.metadata[b"geo"])
+        entry = {k: v for k, v in geo["columns"]["geometry"].items() if k != "covering"}
+        if boundary_covering:
+            entry["covering"] = {
+                "bbox": {axis: ["boundary_bbox", axis] for axis in ("xmin", "ymin", "xmax", "ymax")}
+            }
+        geo["columns"]["boundary"] = entry
+        return arrow.replace_schema_metadata({**arrow.schema.metadata, b"geo": json.dumps(geo)})
+
+    def test_secondary_geometry_keeps_its_own_covering(self, austria_bbox_covering_file):
+        """Detection resolves the SELECTED column's covering, not the primary's."""
+        arrow = self._two_geometries(austria_bbox_covering_file, boundary_covering=True)
+
+        out = ops.add_bbox_metadata(arrow, geometry_column="boundary")
+
+        columns = json.loads(out.schema.metadata[b"geo"])["columns"]
+        assert columns["boundary"]["covering"]["bbox"]["xmin"] == ["boundary_bbox", "xmin"]
+        assert columns["geometry"]["covering"]["bbox"]["xmin"] == ["geometry_bbox", "xmin"]
+
+    def test_secondary_geometry_without_a_covering_is_refused(self, austria_bbox_covering_file):
+        """Neither the primary's covering nor a ``bbox`` column bounds a secondary geometry."""
+        arrow = self._two_geometries(austria_bbox_covering_file, boundary_covering=False)
+
+        with pytest.raises(ValueError, match="No valid bbox column found"):
+            ops.add_bbox_metadata(arrow, geometry_column="boundary")
+
+    def test_explicit_bbox_column_is_honoured(self, austria_bbox_covering_file):
+        """A named column wins over the one detection would pick."""
+        arrow = read(austria_bbox_covering_file).to_arrow()
+        arrow = arrow.append_column("my_box", arrow.column("geometry_bbox"))
+        assert self._covering_column(ops.add_bbox_metadata(arrow, bbox_column="my_box")) == "my_box"
+
+    def test_explicit_bbox_column_of_another_geometry_is_refused(self, austria_bbox_covering_file):
+        """`geometry_bbox` bounds the primary; declaring it on `boundary` would lie (#953)."""
+        arrow = self._two_geometries(austria_bbox_covering_file, boundary_covering=False)
+        with pytest.raises(ValueError, match="covering of 'geometry'"):
+            ops.add_bbox_metadata(arrow, bbox_column="geometry_bbox", geometry_column="boundary")
+        # A struct that is nobody's covering yet is still the caller's to name.
+        out = ops.add_bbox_metadata(arrow, bbox_column="bbox", geometry_column="boundary")
+        geo = json.loads(out.schema.metadata[b"geo"])
+        assert geo["columns"]["boundary"]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
 
     @pytest.fixture
     def sample_table(self):
@@ -2870,26 +3229,9 @@ class TestOpsPartition:
         return sorted(f.name for f in files)
 
     # -- each function writes partitions from a bare pa.Table ---------------
-
-    def test_partition_by_h3(self, arrow_table, tmp_path):
-        stats = ops.partition_by_h3(arrow_table, tmp_path / "out", resolution=2)
-
-        assert stats["file_count"] > 0
-        assert self._partition_names(tmp_path / "out")
-
-    def test_partition_by_a5(self, arrow_table, tmp_path):
-        stats = ops.partition_by_a5(arrow_table, tmp_path / "out", resolution=4)
-
-        assert stats["file_count"] > 0
-        assert self._partition_names(tmp_path / "out")
-
-    def test_partition_by_quadkey(self, arrow_table, tmp_path):
-        stats = ops.partition_by_quadkey(
-            arrow_table, tmp_path / "out", resolution=13, partition_resolution=3
-        )
-
-        assert stats["file_count"] > 0
-        assert self._partition_names(tmp_path / "out")
+    # h3, a5 and quadkey writing partitions from a bare table (with the same
+    # arguments) are ``test_every_partitioner_returns_the_same_stats_dict``'s
+    # cells, which also hold the ``Table`` method to the same count.
 
     def test_partition_by_kdtree(self, arrow_table, tmp_path):
         result = ops.partition_by_kdtree(arrow_table, tmp_path / "out", iterations=2)
@@ -3008,7 +3350,7 @@ class TestOpsPartition:
             return CurrentAdminDataset(source_path=admin, verbose=verbose)
 
         monkeypatch.setattr(
-            "geoparquet_io.core.partition.admin_hierarchical.AdminDatasetFactory.create",
+            "geoparquet_io.core.admin_datasets.AdminDatasetFactory.create",
             staticmethod(fake_create),
         )
 

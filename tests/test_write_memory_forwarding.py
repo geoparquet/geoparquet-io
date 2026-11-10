@@ -5,10 +5,7 @@ decorator attaches `--write-memory` to many commands, but several of them
 captured `write_memory` in their signature and never forwarded it to the core
 function / DuckDB write engine.
 
-Layers tested here:
-  * Introspection: EVERY command that exposes --write-memory forwards it. This
-    is the test that cannot go stale — a new command (or a new decorator use)
-    that declares the flag and drops it fails immediately.
+Layers tested here (the every-command guard is in tests/test_write_options.py):
   * CLI -> core function: the CLI passes ``write_memory`` through as the
     keyword argument ``memory_limit`` (not positionally, not dropped).
   * Core function (file-based path) -> DuckDB write engine: a full, unmocked
@@ -16,13 +13,11 @@ Layers tested here:
   * Core function (streaming path) -> execute_transform/write_output.
   * Validation: bad values are rejected as Click parameter errors, and a value
     crafted to break out of ``SET memory_limit = '…'`` is refused.
-  * 1.1-geoarrow: the auto-routed write strategy warns and ignores
-    --write-memory instead of aborting with a raw traceback.
+  * Every strategy, the 1.1-geoarrow reroute included, honours it (#761).
 """
 
 from __future__ import annotations
 
-import inspect
 import os
 from unittest import mock
 
@@ -46,6 +41,7 @@ from geoparquet_io.cli.commands import add as cli_add
 from geoparquet_io.cli.commands import process as cli_process
 from geoparquet_io.cli.commands import sort as cli_sort
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.parquet_writer import WriteOptions
 from tests.conftest import skip_if_geography_unavailable
 
 
@@ -61,50 +57,10 @@ def _find_non_geometry_column(parquet_file: str) -> str:
     raise AssertionError("No non-geometry columns found in test fixture")
 
 
-def _iter_commands(command, path=None):
-    """Yield ``(dotted name, Command)`` for every leaf command in the CLI tree."""
-    path = path or []
-    if isinstance(command, click.Group):
-        for name, sub in command.commands.items():
-            yield from _iter_commands(sub, [*path, name])
-    else:
-        yield " ".join(path), command
-
-
-def _commands_with_write_memory():
-    return [
-        (name, cmd)
-        for name, cmd in _iter_commands(cli)
-        if any(param.name == "write_memory" for param in cmd.params)
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Layer 0: no command may declare --write-memory without forwarding it
-# ---------------------------------------------------------------------------
-
-
-class TestEveryCommandForwardsWriteMemory:
-    """The offender list must stay empty.
-
-    A hand-written per-command list goes stale the moment someone adds a new
-    command; walking the Click tree cannot.
-    """
-
-    def test_no_command_declares_write_memory_without_forwarding_it(self):
-        commands = _commands_with_write_memory()
-        assert commands, "Expected at least one command to expose --write-memory"
-
-        offenders = []
-        for name, cmd in commands:
-            source = inspect.getsource(inspect.unwrap(cmd.callback))
-            if "memory_limit=write_memory" not in source:
-                offenders.append(name)
-
-        assert not offenders, (
-            "These commands accept --write-memory but never forward it as "
-            f"memory_limit=write_memory: {offenders}"
-        )
+# Layer 0 -- no command may declare --write-memory without forwarding it -- is
+# the structural and behavioural guard in tests/test_write_options.py: every
+# write command's body takes one `write` (a WriteOptions built by
+# `pack_write_options`), and each write flag is shown to reach core (#761).
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +186,8 @@ class TestCliForwardsWriteMemoryByKeyword:
         assert result.exit_code == 0, result.output
         mocked_impl.assert_called_once()
         _call_args, call_kwargs = mocked_impl.call_args
+        if "options" in call_kwargs:  # a grid aggregate: the limit rides in AggregateOptions
+            call_kwargs = {"memory_limit": call_kwargs["options"].memory_limit}
         assert "memory_limit" in call_kwargs, (
             f"{impl_name} was not called with memory_limit as a keyword argument "
             f"(kwargs were: {sorted(call_kwargs)})"
@@ -505,61 +463,42 @@ class TestWriteMemoryValidation:
 
 
 # ---------------------------------------------------------------------------
-# Layer 4: --write-memory + --geoparquet-version 1.1-geoarrow must not crash
+# Layer 4: --write-memory reaches the strategy the write lands on (#761)
 # ---------------------------------------------------------------------------
 
 
-class TestGeoarrowVersionIgnoresWriteMemory:
-    """1.1-geoarrow auto-routes to the arrow-streaming strategy, which cannot
-    honour a memory limit. Warn and continue — never abort with a traceback."""
+class TestWriteMemoryOnEveryStrategy:
+    """1.1-geoarrow auto-routes to the streaming strategy, and a user may name
+    any strategy; the limit used to be warned away or refused on both."""
 
-    def test_add_h3_geoarrow_with_write_memory_succeeds(self, places_test_file, temp_output_file):
-        runner = CliRunner()
-        result = runner.invoke(
+    @pytest.mark.parametrize(
+        "args",
+        [
+            pytest.param(["add", "h3"], id="add-h3-geoarrow"),
+            pytest.param(["sort", "hilbert"], id="sort-hilbert-geoarrow"),
+        ],
+    )
+    def test_geoarrow_reroute_honours_write_memory(self, places_test_file, temp_output_file, args):
+        result = CliRunner().invoke(
             cli,
             [
-                "add",
-                "h3",
+                *args,
                 places_test_file,
                 temp_output_file,
                 "--geoparquet-version",
                 "1.1-geoarrow",
                 "--write-memory",
                 "512MB",
+                "--verbose",
             ],
         )
         assert result.exit_code == 0, result.output
-        assert os.path.exists(temp_output_file)
-        assert "--write-memory" in result.output
+        assert "DuckDB memory limit: 512MB" in result.output
 
-    def test_sort_hilbert_geoarrow_with_write_memory_succeeds(
+    def test_explicit_non_duckdb_kv_strategy_honours_write_memory(
         self, places_test_file, temp_output_file
     ):
-        runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "sort",
-                "hilbert",
-                places_test_file,
-                temp_output_file,
-                "--geoparquet-version",
-                "1.1-geoarrow",
-                "--write-memory",
-                "512MB",
-            ],
-        )
-        assert result.exit_code == 0, result.output
-        assert os.path.exists(temp_output_file)
-        assert "--write-memory" in result.output
-
-    def test_explicit_non_duckdb_kv_strategy_still_errors_cleanly(
-        self, places_test_file, temp_output_file
-    ):
-        """A user-chosen strategy that cannot honour the limit is a real error,
-        but it must surface as a clean message, not a bare ValueError."""
-        runner = CliRunner()
-        result = runner.invoke(
+        result = CliRunner().invoke(
             cli,
             [
                 "extract",
@@ -570,11 +509,11 @@ class TestGeoarrowVersionIgnoresWriteMemory:
                 "streaming",
                 "--write-memory",
                 "512MB",
+                "--verbose",
             ],
         )
-        assert result.exit_code != 0
-        assert "--write-memory" in result.output
-        assert not isinstance(result.exception, ValueError)
+        assert result.exit_code == 0, result.output
+        assert "DuckDB memory limit: 512MB" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -584,69 +523,85 @@ class TestGeoarrowVersionIgnoresWriteMemory:
 # ---------------------------------------------------------------------------
 
 
-class TestPrivateHelpersForwardMemoryLimit:
-    def test_add_h3_streaming_forwards_memory_limit(self):
-        from geoparquet_io.core.add.h3 import _add_h3_streaming
+class TestIndexStreamingForwardMemoryLimit:
+    def test_h3_cli_stream_preserves_memory_limit(self, places_test_file, tmp_path):
+        import subprocess
+        import sys
 
-        with mock.patch("geoparquet_io.core.add.h3.execute_transform") as mocked:
-            _add_h3_streaming(
-                input_path="in.parquet",
-                output_path="out.parquet",
-                h3_column_name="h3_cell",
-                resolution=9,
-                verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                profile=None,
-                geoparquet_version=None,
-                memory_limit="601MB",
-            )
-        mocked.assert_called_once()
-        assert mocked.call_args.kwargs.get("memory_limit") == "601MB"
+        import pyarrow as pa
 
-    def test_add_a5_streaming_forwards_memory_limit(self):
-        from geoparquet_io.core.add.a5 import _add_a5_streaming
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "geoparquet_io.cli.main",
+                "add",
+                "h3",
+                places_test_file,
+                "-",
+                "--write-memory",
+                "606MB",
+            ],
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr.decode()
+        table = pa.ipc.open_stream(result.stdout).read_all()
+        assert table.num_rows == 766
+        assert "h3_cell" in table.column_names
 
-        with mock.patch("geoparquet_io.core.add.a5.execute_transform") as mocked:
-            _add_a5_streaming(
-                input_path="in.parquet",
-                output_path="out.parquet",
-                a5_column_name="a5_cell",
-                resolution=15,
-                verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                profile=None,
-                geoparquet_version=None,
-                memory_limit="602MB",
-            )
-        mocked.assert_called_once()
-        assert mocked.call_args.kwargs.get("memory_limit") == "602MB"
+    @pytest.mark.network
+    def test_a5_cli_stream_preserves_memory_limit(self, places_test_file, tmp_path):
+        import subprocess
+        import sys
 
-    def test_add_s2_streaming_forwards_memory_limit(self):
-        from geoparquet_io.core.add.s2 import _add_s2_streaming
+        import pyarrow as pa
 
-        with mock.patch("geoparquet_io.core.add.s2.execute_transform") as mocked:
-            _add_s2_streaming(
-                input_path="in.parquet",
-                output_path="out.parquet",
-                s2_column_name="s2_cell",
-                level=13,
-                verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                profile=None,
-                geoparquet_version=None,
-                memory_limit="603MB",
-            )
-        mocked.assert_called_once()
-        assert mocked.call_args.kwargs.get("memory_limit") == "603MB"
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "geoparquet_io.cli.main",
+                "add",
+                "a5",
+                places_test_file,
+                "-",
+                "--write-memory",
+                "606MB",
+            ],
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr.decode()
+        table = pa.ipc.open_stream(result.stdout).read_all()
+        assert table.num_rows == 766
+        assert "a5_cell" in table.column_names
+
+    def test_s2_cli_stream_preserves_memory_limit(self, places_test_file, tmp_path):
+        from tests.conftest import skip_if_geography_unavailable
+
+        skip_if_geography_unavailable()
+        import subprocess
+        import sys
+
+        import pyarrow as pa
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "geoparquet_io.cli.main",
+                "add",
+                "s2",
+                places_test_file,
+                "-",
+                "--write-memory",
+                "606MB",
+            ],
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr.decode()
+        table = pa.ipc.open_stream(result.stdout).read_all()
+        assert table.num_rows == 766
+        assert "s2_cell" in table.column_names
 
     def test_sort_by_column_streaming_forwards_memory_limit(self):
         from geoparquet_io.core.sort_by_column import _sort_by_column_streaming
@@ -658,13 +613,7 @@ class TestPrivateHelpersForwardMemoryLimit:
                 column_list=["name"],
                 descending=False,
                 verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                profile=None,
-                geoparquet_version=None,
-                memory_limit="604MB",
+                write=WriteOptions(compression="ZSTD", memory_limit="604MB"),
             )
         mocked.assert_called_once()
         assert mocked.call_args.kwargs.get("memory_limit") == "604MB"
@@ -679,39 +628,36 @@ class TestPrivateHelpersForwardMemoryLimit:
                 kdtree_column_name="kdtree_cell",
                 iterations=1,
                 verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
+                write=WriteOptions(compression="ZSTD", memory_limit="605MB"),
                 sample_size=100,
-                profile=None,
-                geoparquet_version=None,
-                memory_limit="605MB",
             )
         mocked.assert_called_once()
         assert mocked.call_args.kwargs.get("memory_limit") == "605MB"
 
-    def test_add_quadkey_streaming_forwards_memory_limit(self, places_test_file):
-        from geoparquet_io.core.add.quadkey import _add_quadkey_streaming
+    def test_quadkey_cli_stream_preserves_memory_limit(self, places_test_file, tmp_path):
+        import subprocess
+        import sys
 
-        with mock.patch("geoparquet_io.core.add.quadkey.write_output") as mocked:
-            _add_quadkey_streaming(
-                input_path=places_test_file,
-                output_path="unused_output.parquet",
-                quadkey_column_name="quadkey",
-                resolution=13,
-                use_centroid=False,
-                verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                profile=None,
-                geoparquet_version=None,
-                memory_limit="606MB",
-            )
-        mocked.assert_called_once()
-        assert mocked.call_args.kwargs.get("memory_limit") == "606MB"
+        import pyarrow as pa
+
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "geoparquet_io.cli.main",
+                "add",
+                "quadkey",
+                places_test_file,
+                "-",
+                "--write-memory",
+                "606MB",
+            ],
+            capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr.decode()
+        table = pa.ipc.open_stream(result.stdout).read_all()
+        assert table.num_rows == 766
+        assert "quadkey" in table.column_names
 
     def test_sort_by_quadkey_streaming_forwards_memory_limit(self, places_test_file):
         from geoparquet_io.core.sort_quadkey import _sort_by_quadkey_streaming
@@ -725,13 +671,7 @@ class TestPrivateHelpersForwardMemoryLimit:
                 use_centroid=False,
                 remove_quadkey_column=False,
                 verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                profile=None,
-                geoparquet_version=None,
-                memory_limit="607MB",
+                write=WriteOptions(compression="ZSTD", memory_limit="607MB"),
             )
         mocked.assert_called_once()
         assert mocked.call_args.kwargs.get("memory_limit") == "607MB"
@@ -745,20 +685,14 @@ class TestPrivateHelpersForwardMemoryLimit:
                 output_path="out.parquet",
                 bbox_column_name="bbox",
                 verbose=False,
-                compression="ZSTD",
-                compression_level=None,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                profile=None,
+                write=WriteOptions(compression="ZSTD", memory_limit="609MB"),
                 force=False,
-                geoparquet_version=None,
-                memory_limit="609MB",
             )
         mocked.assert_called_once()
         assert mocked.call_args.kwargs.get("memory_limit") == "609MB"
 
     def test_execute_transform_forwards_memory_limit(self, places_test_file, temp_output_file):
-        """execute_transform itself (used by h3/a5/s2/sort column streaming) must
+        """execute_transform itself (used by all index and sort column streaming) must
         forward memory_limit into write_output -> write_parquet_with_metadata."""
         from geoparquet_io.core.stream_io import execute_transform
 

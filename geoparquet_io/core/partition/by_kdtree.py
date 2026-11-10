@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import tempfile
-import uuid
 
 from geoparquet_io.core.add.kdtree import (
     ITERATIONS_CONFLICT,
@@ -12,6 +10,7 @@ from geoparquet_io.core.add.kdtree import (
     require_iterations_or_auto,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, PartitionError
+from geoparquet_io.core.file_utils import scratch_path, unlink_released_file
 from geoparquet_io.core.logging_config import (
     configure_verbose,
     debug,
@@ -20,20 +19,13 @@ from geoparquet_io.core.logging_config import (
     success,
     warn,
 )
+from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import (
     partition_by_column,
     preview_partition,
     raise_if_no_rows,
 )
 from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
-
-
-def _cleanup_temp_file(temp_file: str | None, verbose: bool = False) -> None:
-    """Clean up a temporary file if it exists."""
-    if temp_file and os.path.exists(temp_file):
-        if verbose:
-            debug("Cleaning up temporary file...")
-        os.remove(temp_file)
 
 
 def _add_kdtree_column_to_temp(
@@ -56,10 +48,7 @@ def _add_kdtree_column_to_temp(
     if verbose and iterations is not None:
         debug(f"Adding KD-tree column '{kdtree_column_name}' with {2**iterations} partitions...")
 
-    temp_dir = tempfile.gettempdir()
-    temp_file = os.path.join(
-        temp_dir, f"kdtree_enriched_{uuid.uuid4()}_{os.path.basename(input_file)}"
-    )
+    temp_file = scratch_path(f"_{os.path.basename(input_file)}", prefix="kdtree_enriched_")
 
     try:
         add_kdtree_column(
@@ -69,8 +58,8 @@ def _add_kdtree_column_to_temp(
             iterations=iterations,
             dry_run=False,
             verbose=verbose,
-            compression="ZSTD",
-            compression_level=15,
+            compression=None,
+            compression_level=None,
             row_group_size_mb=None,
             row_group_rows=None,
             force=force,
@@ -81,10 +70,10 @@ def _add_kdtree_column_to_temp(
     except InvalidParameterError:
         # A parameter fault is the caller's to fix, not a partition failure:
         # let it surface under its own type, as it does through `add kdtree`.
-        _cleanup_temp_file(temp_file)
+        unlink_released_file(temp_file)
         raise
     except Exception as e:
-        _cleanup_temp_file(temp_file)
+        unlink_released_file(temp_file)
         raise PartitionError(f"Failed to add KD-tree column: {str(e)}") from e
 
 
@@ -140,8 +129,8 @@ def partition_by_kdtree(
     filename_prefix: str | None = None,
     profile: str | None = None,
     geoparquet_version: str | None = None,
-    compression: str = "ZSTD",
-    compression_level: int = 15,
+    compression: str | None = None,
+    compression_level: int | None = None,
     row_group_size_mb: int | None = None,
     row_group_rows: int | None = None,
     memory_limit: str | None = None,
@@ -177,7 +166,7 @@ def partition_by_kdtree(
         filename_prefix: Prefix for output filenames
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write
-        compression: Compression codec (default: ZSTD)
+        compression: Compression codec (default: the compression owner's)
         compression_level: Compression level (default: 15)
         row_group_size_mb: Row group size in MB (mutually exclusive with row_group_rows)
         row_group_rows: Row group size in number of rows (mutually exclusive with row_group_size_mb)
@@ -208,12 +197,13 @@ def partition_by_kdtree(
         raise_if_no_rows(actual_input)
 
         # Check if KD-tree column exists and get row count for dataset size validation
-        from geoparquet_io.core.duckdb_metadata import get_column_names, get_row_count
+        from geoparquet_io.core.column_selection import has_column
+        from geoparquet_io.core.duckdb_metadata import get_row_count, get_usable_column_names
 
-        column_names = get_column_names(actual_input)
+        column_names = get_usable_column_names(actual_input)
         total_rows = get_row_count(actual_input)
 
-        column_exists = kdtree_column_name in column_names
+        column_exists = has_column(column_names, kdtree_column_name)
 
         # Auto mode leaves `iterations` None on purpose: `add_kdtree_column` sizes
         # the tree from the row count below. Defaulting it to 9 here (as this did
@@ -256,7 +246,7 @@ def partition_by_kdtree(
             try:
                 _show_partition_preview(working_input, kdtree_column_name, preview_limit, verbose)
             finally:
-                _cleanup_temp_file(temp_file)
+                unlink_released_file(temp_file)
             return
 
         # Build description for user feedback. In auto mode the count is not known
@@ -277,20 +267,14 @@ def partition_by_kdtree(
                 force=force,
                 skip_analysis=skip_analysis,
                 filename_prefix=filename_prefix,
-                profile=profile,
-                geoparquet_version=geoparquet_version,
-                compression=compression,
-                compression_level=compression_level,
-                row_group_size_mb=row_group_size_mb,
-                row_group_rows=row_group_rows,
-                memory_limit=memory_limit,
+                write=WriteOptions.pick(locals()),
             )
 
             if verbose:
                 success(f"\nCreated {num_partitions} partition(s) in {output_folder}")
 
         finally:
-            _cleanup_temp_file(temp_file, verbose)
+            unlink_released_file(temp_file)
     finally:
         # Clean up stdin temp file
-        _cleanup_temp_file(stdin_temp_file)
+        unlink_released_file(stdin_temp_file)

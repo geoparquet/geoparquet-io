@@ -16,6 +16,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import partition
+from geoparquet_io.core.duckdb_utils import fetch_one
 
 
 def get_geo_metadata_bounds(file_path):
@@ -38,14 +39,16 @@ def get_actual_data_bounds(file_path):
     con.execute("INSTALL spatial; LOAD spatial;")
     # Use MIN/MAX instead of ST_Extent because ST_Extent in DuckDB
     # doesn't aggregate properly across rows
-    result = con.execute(f"""
+    result = fetch_one(
+        con.execute(f"""
         SELECT
             MIN(ST_XMin(geometry)) AS xmin,
             MIN(ST_YMin(geometry)) AS ymin,
             MAX(ST_XMax(geometry)) AS xmax,
             MAX(ST_YMax(geometry)) AS ymax
         FROM read_parquet('{file_path}')
-    """).fetchone()
+    """)
+    )
     con.close()
     return result
 

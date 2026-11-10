@@ -43,8 +43,8 @@ _GEO_V11 = {
 }
 
 
-def _write_wkb_file(path, geoms, geo) -> str:
-    table = pa.table({"id": pa.array(range(len(geoms))), "geometry": pa.array(geoms, pa.binary())})
+def _write_wkb_file(path, geoms, geo, column: str = "geometry") -> str:
+    table = pa.table({"id": pa.array(range(len(geoms))), column: pa.array(geoms, pa.binary())})
     if geo is not None:
         raw = geo if isinstance(geo, bytes) else json.dumps(geo).encode()
         table = table.replace_schema_metadata({b"geo": raw})
@@ -75,10 +75,23 @@ def geoarrow_point_file(tmp_path) -> str:
 
 @pytest.fixture
 def missing_column_file(tmp_path) -> str:
+    """The block names ``nope``; the bytes live in ``pts``, which no rule finds."""
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "nope",
+        "columns": {"nope": {"encoding": "WKB", "geometry_types": ["Point"]}},
+    }
+    points = [_wkb_point(i, i) for i in range(3)]
+    return _write_wkb_file(tmp_path / "missing_col.parquet", points, geo, column="pts")
+
+
+@pytest.fixture
+def stale_primary_file(tmp_path) -> str:
+    """The block names ``nope``; the schema's ``geometry`` is the column (#1367)."""
     geo = json.loads(json.dumps(_GEO_V11))
     geo["primary_column"] = "nope"
     points = [_wkb_point(i, i) for i in range(3)]
-    return _write_wkb_file(tmp_path / "missing_col.parquet", points, geo)
+    return _write_wkb_file(tmp_path / "stale_primary.parquet", points, geo)
 
 
 @pytest.fixture
@@ -231,14 +244,14 @@ class TestMissingPrimaryColumn:
     def test_spatial_order_reports_instead_of_raising(self, missing_column_file):
         result = check_spatial_order(missing_column_file, 10, 1000, False, return_results=True)
         assert result["passed"] is False
-        assert 'geometry column "nope" not found' in result["error"]
+        assert "No geometry column found" in result["error"]
         assert result["fix_available"] is False
 
     def test_check_spatial_exits_cleanly_non_zero(self, missing_column_file):
         result = _invoke("check", "spatial", missing_column_file)
         _assert_no_traceback(result)
         assert result.exit_code == 1
-        assert 'geometry column "nope" not found' in result.output
+        assert "No geometry column found" in result.output
 
     def test_check_all_still_runs_spec_validation(self, missing_column_file):
         result = _invoke("check", "all", missing_column_file)
@@ -246,6 +259,14 @@ class TestMissingPrimaryColumn:
         assert "Spec Validation:" in result.output
         # A check that could not run is not a pass.
         assert result.exit_code == 1
+
+
+def test_a_stale_primary_column_is_checked_on_the_schemas_geometry(stale_primary_file):
+    """A block naming a column the file lacks is not the answer when the schema
+    has a geometry column: the check reads ``geometry`` (#1367 one rule)."""
+    result = check_spatial_order(stale_primary_file, 10, 1000, False, return_results=True)
+    assert result.get("error") is None
+    assert result["ratio"] is not None
 
 
 class TestNonJsonGeo:
@@ -378,7 +399,7 @@ def test_unreadable_geometry_reason_is_printed_once(missing_column_file, subcomm
     result = _invoke("check", subcommand, missing_column_file)
     _assert_no_traceback(result)
     assert result.exit_code == 1
-    assert result.output.count('geometry column "nope" not found') == 1, result.output
+    assert result.output.count("Name one with --geometry-column") == 1, result.output
 
 
 def test_check_spatial_counts_the_unreadable_file_as_failed(missing_column_file, tmp_path):
@@ -391,4 +412,4 @@ def test_check_spatial_counts_the_unreadable_file_as_failed(missing_column_file,
     _assert_no_traceback(result)
     assert result.exit_code == 1
     assert "2 failed" in result.output, result.output
-    assert result.output.count('geometry column "nope" not found') == 2, result.output
+    assert result.output.count("Name one with --geometry-column") == 2, result.output

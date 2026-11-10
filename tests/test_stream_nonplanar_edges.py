@@ -1,4 +1,10 @@
-"""IPC must carry the geometry model before the next command decides to repair."""
+"""IPC must carry the geometry model before the next command decides to repair.
+
+Each hop is a real ``gpio`` process, so nothing but the stream can carry the
+model across. The edge rules themselves are ``core/edges.py``'s
+(tests/test_edges_owner.py); a family here keeps one cell per branch of them
+that the stream reaches.
+"""
 
 from __future__ import annotations
 
@@ -48,7 +54,9 @@ def _storage(column):
     return [value for chunk in column.chunks for value in chunk.storage.to_pylist()]
 
 
-@pytest.mark.parametrize("geometry_column", ["geometry", "footprint"])
+# ``footprint``: the column found by its type, not the default name, which is
+# everything the ``geometry`` spelling exercises.
+@pytest.mark.parametrize("geometry_column", ["footprint"])
 def test_native_geography_survives_two_extract_hops(tmp_path, geometry_column):
     source = tmp_path / "source.parquet"
     destination = tmp_path / "result.parquet"
@@ -71,7 +79,9 @@ def test_native_geography_survives_two_extract_hops(tmp_path, geometry_column):
     assert b"Repaired" not in second.stderr
 
 
-@pytest.mark.parametrize("edges", ["planar", "spherical", "karney"])
+# The block against a native spherical type: its planar wins (the owner's
+# precedence), and an algorithm beyond spherical reaches the stream type.
+@pytest.mark.parametrize("edges", ["planar", "karney"])
 def test_geo_block_controls_the_stream_field(tmp_path, edges):
     source = tmp_path / "source.parquet"
     native_type = ga.wkb().with_edge_type(ga.EdgeType.SPHERICAL)
@@ -81,9 +91,9 @@ def test_geo_block_controls_the_stream_field(tmp_path, edges):
         "primary_column": "geometry",
         "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"], "edges": edges}},
     }
-    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    from geoparquet_io.core.parquet_footer import _patch_footer_file
 
-    patch_footer_kv(source, {"geo": json.dumps(geo)})
+    _patch_footer_file(source, {"geo": json.dumps(geo)})
 
     output = _read_stream(_extract(source, "-").stdout)
     assert output.schema.field("geometry").type.edge_type.name.lower() == edges
@@ -193,7 +203,7 @@ def test_empty_and_projected_streams_keep_only_surviving_geometry(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("declared", "expected"), [("planar", "planar"), ("sphercal", "spherical"), (7, "spherical")]
+    ("declared", "expected"), [("planar", None), ("sphercal", "spherical"), (7, "spherical")]
 )
 def test_stdin_edge_authority_uses_only_supported_algorithms(declared, expected):
     from geoparquet_io.core.stream_io import _stream_input_metadata
@@ -211,10 +221,12 @@ def test_stdin_edge_authority_uses_only_supported_algorithms(declared, expected)
         {b"geo": json.dumps(geo).encode()}
     )
     described = _stream_input_metadata(table)
-    assert json.loads(described[b"geo"])["columns"]["geometry"]["edges"] == expected
+    # Planar is said by leaving the key out (``edges.set_edges``).
+    assert json.loads(described[b"geo"])["columns"]["geometry"].get("edges") == expected
 
 
-@pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
+# 1.0 is the input auto mode upgrades; a 1.1 input is the owner's pass-through.
+@pytest.mark.parametrize("version", ["1.0.0"])
 def test_planar_1x_pipe_keeps_legacy_auto_output(tmp_path, version):
     source = tmp_path / "source.parquet"
     destination = tmp_path / "output.parquet"

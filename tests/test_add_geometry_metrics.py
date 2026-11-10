@@ -16,6 +16,7 @@ from geoparquet_io.core.add.geometry_metrics import (
     add_geometry_metrics,
 )
 from geoparquet_io.core.constants import VECOREL_METRICS_SCHEMA
+from geoparquet_io.core.duckdb_utils import fetch_one
 
 
 class TestBuildVecorelMetadata:
@@ -75,12 +76,12 @@ class TestAddGeometryMetricsCli:
         assert PERIMETER_COLUMN in col_names
 
         # Verify row count preserved
-        input_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{buildings_test_file}')"
-        ).fetchone()[0]
-        output_count = con.execute(
-            f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')"
-        ).fetchone()[0]
+        input_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{buildings_test_file}')")
+        )[0]
+        output_count = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM read_parquet('{temp_output_file}')")
+        )[0]
         assert input_count == output_count
         con.close()
 
@@ -91,12 +92,14 @@ class TestAddGeometryMetricsCli:
 
         con = duckdb.connect()
         con.execute("LOAD spatial;")
-        min_area = con.execute(
-            f"""SELECT MIN("{AREA_COLUMN}") FROM read_parquet('{temp_output_file}')"""
-        ).fetchone()[0]
-        min_perim = con.execute(
-            f"""SELECT MIN("{PERIMETER_COLUMN}") FROM read_parquet('{temp_output_file}')"""
-        ).fetchone()[0]
+        min_area = fetch_one(
+            con.execute(f"""SELECT MIN("{AREA_COLUMN}") FROM read_parquet('{temp_output_file}')""")
+        )[0]
+        min_perim = fetch_one(
+            con.execute(
+                f"""SELECT MIN("{PERIMETER_COLUMN}") FROM read_parquet('{temp_output_file}')"""
+            )
+        )[0]
         assert min_area > 0
         assert min_perim > 0
         con.close()
@@ -138,6 +141,13 @@ class TestAddGeometryMetricsCli:
         runner = CliRunner()
         result = runner.invoke(add, ["geometry-metrics", buildings_test_file])
         assert result.exit_code == 0
+        import io
+
+        import pyarrow as pa
+
+        table = pa.ipc.open_stream(io.BytesIO(result.stdout_bytes)).read_all()
+        assert AREA_COLUMN in table.column_names
+        assert table.num_rows == pq.ParquetFile(buildings_test_file).metadata.num_rows
 
 
 class TestVecorelCompliance:
@@ -165,9 +175,11 @@ class TestVecorelCompliance:
         assert "id" in col_names
 
         # id values should be non-null strings
-        nulls = con.execute(
-            f"""SELECT COUNT(*) FROM read_parquet('{temp_output_file}') WHERE id IS NULL"""
-        ).fetchone()[0]
+        nulls = fetch_one(
+            con.execute(
+                f"""SELECT COUNT(*) FROM read_parquet('{temp_output_file}') WHERE id IS NULL"""
+            )
+        )[0]
         assert nulls == 0
         con.close()
 
@@ -198,9 +210,11 @@ class TestVecorelCompliance:
 
         con = duckdb.connect()
         con.execute("LOAD spatial;")
-        nulls = con.execute(
-            f"""SELECT COUNT(*) FROM read_parquet('{temp_output_file}') WHERE geometry IS NULL"""
-        ).fetchone()[0]
+        nulls = fetch_one(
+            con.execute(
+                f"""SELECT COUNT(*) FROM read_parquet('{temp_output_file}') WHERE geometry IS NULL"""
+            )
+        )[0]
         assert nulls == 0
         con.close()
 

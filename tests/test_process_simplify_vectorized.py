@@ -1,8 +1,9 @@
 """Invariants the vectorized simplify path must not change (#1300).
 
-``_simplify_values`` and ``_accumulate_stats`` used to walk every geometry in
-Python -- to build ``idx``, to scatter the output WKB back into a list, to fold
-the geometry-type set, and to invert the empty mask. On inputs with many small
+``_simplify_values`` and ``_accumulate_stats`` (since replaced by the stats
+owner's per-batch measure) used to walk every geometry in Python -- to build
+``idx``, to scatter the output WKB back into a list, to fold the geometry-type
+set, and to invert the empty mask. On inputs with many small
 geometries those loops, not the Rust kernel, dominated: ``coarsen._core`` was
 7% of a 1M-building profile.
 
@@ -145,8 +146,8 @@ class TestFooterStats:
     """The ``geo`` block the streaming fold produces: the type set and the bbox.
 
     These go through ``simplify_file``, not ``simplify_table``: the in-memory
-    path hands the stats to the write funnel, and ``_accumulate_stats`` -- the
-    loop this change rewrites -- only runs while streaming. ``simplify_table``
+    path hands the stats to the write funnel, and the per-batch merge only
+    runs while streaming. ``simplify_table``
     strips the stale stats and returns a block with neither key.
     """
 
@@ -717,60 +718,48 @@ class TestDropEmpty:
         assert out.num_rows == 0
 
 
-class TestAccumulateStats:
-    """The type fold on its own, at a scale where a Python loop would show."""
+class TestBatchStatsMerge:
+    """The streaming fold: each batch measured by the owner, then merged.
+
+    ``_accumulate_stats`` used to fold shapely type ids and bounds itself; the
+    streaming writer now measures each written batch with
+    ``geo_metadata.geometry_stats_of`` and merges them with
+    ``merged_geometry_stats`` (#1367 concept 5).
+    """
 
     def test_many_rows_few_types(self):
         shapely = _shapely()
-        np = _np()
-        from geoparquet_io.core.process.simplify import _accumulate_stats
+        from geoparquet_io.core.geo_metadata import geometry_stats_of, merged_geometry_stats
 
-        geoms = shapely.from_wkb(
-            [shapely.to_wkb(shapely.Point(i, i)) for i in range(5000)]
-            + [shapely.to_wkb(_jagged(0, 0))]
+        wkb = [shapely.to_wkb(shapely.Point(i, i)) for i in range(5000)]
+        first = geometry_stats_of(_table(wkb), "geometry")
+        second = geometry_stats_of(_table([shapely.to_wkb(_jagged(0, 0))]), "geometry")
+        merged = merged_geometry_stats([first, second], geographic=True)
+        assert merged.geometry_types == ["Point", "Polygon"]
+        assert merged.bbox[0] == 0.0
+        assert merged.bbox[2] == 4999.0
+
+    def test_a_null_row_is_skipped_not_raised(self):
+        shapely = _shapely()
+        from geoparquet_io.core.geo_metadata import geometry_stats_of
+
+        stats = geometry_stats_of(_table([None, shapely.to_wkb(shapely.Point(1, 1))]), "geometry")
+        assert stats.geometry_types == ["Point"]
+        assert stats.bbox == [1.0, 1.0, 1.0, 1.0]
+
+    def test_no_batches_measure_nothing(self):
+        from geoparquet_io.core.geo_metadata import GeometryStats, merged_geometry_stats
+
+        assert merged_geometry_stats([], geographic=True) == GeometryStats(None, [])
+
+    def test_a_batch_without_bounds_leaves_the_bbox_alone(self):
+        from geoparquet_io.core.geo_metadata import GeometryStats, merged_geometry_stats
+
+        merged = merged_geometry_stats(
+            [GeometryStats([1.0, 2.0, 3.0, 4.0], ["Point"]), GeometryStats(None, [])],
+            geographic=True,
         )
-        bounds = shapely.bounds(geoms)
-        types: set = set()
-        bbox = [float("inf"), float("inf"), float("-inf"), float("-inf")]
-        _accumulate_stats(shapely, np, geoms, bounds, types, bbox)
-        assert types == {"Point", "Polygon"}
-        assert bbox[0] == 0.0
-
-    def test_an_unknown_type_id_is_skipped_not_raised(self):
-        """A geometry shapely types as -1 (none) must not land in the set."""
-        shapely = _shapely()
-        np = _np()
-        from geoparquet_io.core.process.simplify import _accumulate_stats
-
-        geoms = np.array([None, shapely.Point(1, 1)], dtype=object)
-        bounds = np.array([[np.nan] * 4, [1.0, 1.0, 1.0, 1.0]])
-        types: set = set()
-        bbox = [float("inf"), float("inf"), float("-inf"), float("-inf")]
-        _accumulate_stats(shapely, np, geoms, bounds, types, bbox)
-        assert types == {"Point"}
-
-    def test_empty_batch_is_a_noop(self):
-        shapely = _shapely()
-        np = _np()
-        from geoparquet_io.core.process.simplify import _accumulate_stats
-
-        types: set = set()
-        bbox = [float("inf"), float("inf"), float("-inf"), float("-inf")]
-        _accumulate_stats(shapely, np, np.empty(0, dtype=object), np.empty((0, 4)), types, bbox)
-        assert types == set()
-        assert bbox == [float("inf"), float("inf"), float("-inf"), float("-inf")]
-
-    def test_all_nan_bounds_leave_the_bbox_alone(self):
-        shapely = _shapely()
-        np = _np()
-        from geoparquet_io.core.process.simplify import _accumulate_stats
-
-        geoms = shapely.from_wkb([shapely.to_wkb(shapely.Point(1, 1))])
-        types: set = set()
-        bbox = [1.0, 2.0, 3.0, 4.0]
-        _accumulate_stats(shapely, np, geoms, np.full((1, 4), np.nan), types, bbox)
-        assert bbox == [1.0, 2.0, 3.0, 4.0]
-        assert types == {"Point"}
+        assert merged == GeometryStats([1.0, 2.0, 3.0, 4.0], ["Point"])
 
 
 class TestArrowHelpers:

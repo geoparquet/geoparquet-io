@@ -11,9 +11,13 @@ from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     aws_profile_option,
     column_list_option,
+    overwrite_option,
     repair_geometry_option,
     verbose_option,
+    write_memory_option,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
+from geoparquet_io.core.exceptions import GeoParquetError
 
 # =============================================================================
 # PMTiles Commands (requires tippecanoe)
@@ -104,11 +108,10 @@ def pmtiles(ctx):
     default=None,
     help="Explicit per-tile byte cap (--maximum-tile-bytes); takes precedence over --no-tile-size-limit",
 )
-@click.option(
-    "--force",
-    "-f",
-    is_flag=True,
-    help="Overwrite the output file if it already exists (tippecanoe --force)",
+@overwrite_option(
+    flag="--force",
+    short="-f",
+    help_text="Overwrite the output file if it already exists (tippecanoe --force)",
 )
 @temporary_directory_option
 @click.option(
@@ -196,8 +199,10 @@ def pmtiles_create(
             chunks=chunks,
         )
         click.echo(click.style(f"✓ Created {output_file}", fg="green"))
+    except GeoParquetError:
+        raise  # the error boundary answers it (and logs the traceback for --verbose)
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click_error_for(e) from e
 
 
 @pmtiles.command(name="pyramid")
@@ -269,13 +274,17 @@ def pmtiles_create(
     help="Max zoom of the base aggregate band (auto-detected if not set).",
 )
 @click.option("--attribution", help="Custom attribution HTML for tiles")
-@click.option(
-    "--force",
-    "-f",
-    is_flag=True,
-    help="Overwrite the output archive if it already exists",
+@overwrite_option(
+    flag="--force",
+    short="-f",
+    help_text="Overwrite the output archive if it already exists",
 )
 @temporary_directory_option
+@write_memory_option(
+    help="Memory limit for band planning and the overview rollups (e.g., '512MB', '2GB'). "
+    "Default: 50% of the memory ceiling -- physical RAM, or the container or Slurm job "
+    "cap when lower. The tippecanoe runs are separate processes and are not bounded by it."
+)
 @verbose_option
 def pmtiles_pyramid(
     input_parquet,
@@ -293,6 +302,7 @@ def pmtiles_pyramid(
     force,
     verbose,
     temporary_directory,
+    write_memory,
 ):
     """Create a multi-level PMTiles pyramid from an aggregate file.
 
@@ -337,7 +347,10 @@ def pmtiles_pyramid(
             force=force,
             verbose=verbose,
             temporary_directory=temporary_directory,
+            memory_limit=write_memory,
         )
         click.echo(click.style(f"✓ Created {output_pmtiles}", fg="green"))
+    except GeoParquetError:
+        raise  # the error boundary answers it (and logs the traceback for --verbose)
     except Exception as e:
-        raise click.ClickException(str(e)) from e
+        raise click_error_for(e) from e

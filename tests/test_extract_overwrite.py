@@ -139,18 +139,28 @@ class TestExtractBigQueryOverwrite:
         assert result.exit_code != 0
         assert "already exists" in result.output or "Use --overwrite" in result.output
 
-    @pytest.mark.network
     def test_extract_bigquery_overwrite_true_replaces(self, tmp_path):
-        """Test that --overwrite=true allows overwriting for bigquery."""
+        """Overwrite replaces existing bytes after a successful BigQuery read."""
+        from unittest.mock import MagicMock, patch
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
         output_file = tmp_path / "output.parquet"
         output_file.write_text("existing content")
-
-        runner = CliRunner()
-        result = runner.invoke(
-            cli, ["extract", "bigquery", "project.dataset.table", str(output_file), "--overwrite"]
-        )
-
-        # Note: This test may fail if credentials aren't set up
-        # In production, this would succeed and overwrite the file
-        # For now, we're testing that the --overwrite flag is accepted
-        assert result.exit_code != 2  # 2 indicates usage/parameter error
+        expected = pa.table({"id": [42]})
+        con = MagicMock()
+        con.sql.return_value.arrow.return_value.read_all.return_value = expected
+        with (
+            patch("geoparquet_io.core.extract_bigquery.BigQueryConnection") as connection,
+            patch(
+                "geoparquet_io.core.extract_bigquery._schema_rows", return_value=[("id", "BIGINT")]
+            ),
+        ):
+            connection.return_value.__enter__.return_value = con
+            result = CliRunner().invoke(
+                cli,
+                ["extract", "bigquery", "project.dataset.table", str(output_file), "--overwrite"],
+            )
+        assert result.exit_code == 0, result.output
+        assert pq.read_table(output_file).equals(expected)

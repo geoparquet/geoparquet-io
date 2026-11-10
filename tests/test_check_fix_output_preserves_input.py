@@ -44,7 +44,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core import check_fixes
+from geoparquet_io.core import check_fixes, file_utils
 from geoparquet_io.core.check_fixes import _place_result, fix_bbox_all
 from geoparquet_io.core.exceptions import GeoParquetError
 from tests.native_geo_probes import spec_problems
@@ -161,7 +161,7 @@ def _run(*args: str, input: str | None = None):
 
 
 def _assert_nothing_left_behind(tmp_path: Path) -> None:
-    assert list(tmp_path.glob(".gpio-fix-*")) == [], "a staging file was left behind"
+    assert list(tmp_path.glob(".gpio-stage-*")) == [], "a staging file was left behind"
     assert list(tmp_path.glob("*.tmp")) == [], "a staging file was left behind"
 
 
@@ -279,16 +279,16 @@ def test_a_fix_output_differing_only_in_case_is_an_in_place_fix(places_v11_file,
 class TestPlaceResult:
     """The one place a finished fix is put at the output path."""
 
-    def test_a_scratch_file_is_moved(self, tmp_path):
-        """gpio's own scratch file has no second referent, so it is consumed."""
+    def test_a_scratch_file_is_copied_and_left_to_its_owner(self, tmp_path):
+        """A scratch copy is removed by ``file_utils.scratch_file``, not consumed here."""
         scratch = tmp_path / "scratch.parquet"
         scratch.write_bytes(b"a rewrite")
         output = tmp_path / "output.parquet"
         output.write_bytes(b"a stale output to be replaced")
 
-        _place_result(str(scratch), str(output), owned=True)
+        _place_result(str(scratch), str(output))
 
-        assert not scratch.exists()
+        assert scratch.read_bytes() == b"a rewrite"
         assert output.read_bytes() == b"a rewrite"
         _assert_nothing_left_behind(tmp_path)
 
@@ -306,16 +306,15 @@ class TestPlaceResult:
         def never(*args, **kwargs):
             raise AssertionError(f"a file was placed on top of itself: {args}")
 
-        monkeypatch.setattr(check_fixes.shutil, "move", never)
         monkeypatch.setattr(check_fixes.shutil, "copy2", never)
-        monkeypatch.setattr(check_fixes.os, "replace", never)
+        monkeypatch.setattr(os, "replace", never)
 
-        _place_result(str(output), str(alias), owned=False)
+        _place_result(str(output), str(alias))
 
         assert output.read_bytes() == b"already in place"
 
     def test_a_failed_placement_leaves_an_existing_output_intact(self, tmp_path, monkeypatch):
-        """The swap is ``_staged_output``'s: a move that dies mid-way touches nothing."""
+        """The swap is ``file_utils.atomic_write``'s: a move that dies mid-way touches nothing."""
         scratch = tmp_path / "scratch.parquet"
         scratch.write_bytes(b"a rewrite")
         output = tmp_path / "output.parquet"
@@ -325,10 +324,10 @@ class TestPlaceResult:
             Path(dst).write_bytes(b"half")
             raise OSError("disk went away")
 
-        monkeypatch.setattr(check_fixes.shutil, "move", die_half_way)
+        monkeypatch.setattr(check_fixes.shutil, "copy2", die_half_way)
 
         with pytest.raises(OSError, match="disk went away"):
-            _place_result(str(scratch), str(output), owned=True)
+            _place_result(str(scratch), str(output))
 
         assert output.read_bytes() == b"the previous output"
         _assert_nothing_left_behind(tmp_path)
@@ -340,7 +339,7 @@ class TestPlaceResult:
         output = tmp_path / "output.parquet"
         output.write_bytes(b"a stale output to be replaced")
 
-        _place_result(str(source), str(output), owned=False)
+        _place_result(str(source), str(output))
 
         assert source.read_bytes() == b"the original bytes"
         assert output.read_bytes() == b"the original bytes"
@@ -468,13 +467,13 @@ class TestCheckAllScratchFiles:
         assert not output.exists()
         assert list(scratch.iterdir()) == [], "the failed chain left its scratch behind"
 
-    def test_a_scratch_that_will_not_delete_does_not_fail_the_fix(self, tmp_path, monkeypatch):
-        stubborn = tmp_path / "scratch.parquet"
-        stubborn.write_bytes(b"x")
+    def test_a_scratch_that_will_not_delete_does_not_fail_the_fix(self, scratch, monkeypatch):
+        """The scratch owner gives up quietly on a file Windows will not release."""
+        monkeypatch.setattr(file_utils, "_UNLINK_WAITS", (0,))
 
-        def refuse(path):
+        def refuse(self, **_kwargs):
             raise OSError("busy")
 
-        monkeypatch.setattr(check_fixes.os, "remove", refuse)
-
-        check_fixes._cleanup_temp_files([str(stubborn)], output_file=None)  # no raise
+        with file_utils.scratch_file() as path:  # no raise on the way out
+            Path(path).write_bytes(b"x")
+            monkeypatch.setattr(Path, "unlink", refuse)

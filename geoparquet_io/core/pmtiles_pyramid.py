@@ -9,12 +9,12 @@ under a ``gpio:pyramid`` key in the archive's metadata JSON.
 from __future__ import annotations
 
 import os
-import tempfile
 from pathlib import Path
 
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.file_utils import atomic_write, handle_output_overwrite, scratch_dir
 from geoparquet_io.core.geojson_stream import require_planar_geojson_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, success, warn
 from geoparquet_io.core.pmtiles import (
@@ -25,6 +25,7 @@ from geoparquet_io.core.pmtiles import (
     resolve_scratch_directory,
 )
 from geoparquet_io.core.process.overview.detect import (
+    ADMIN_SCHEME,
     AggregateInfo,
     aggregate_connection,
     detect_aggregate_info,
@@ -52,7 +53,7 @@ def _layer_name(layer_mode: str, scheme: str, level: int | str, stem: str) -> st
         return stem
     if layer_mode == "grouped":
         return "aggregate"
-    return str(level) if scheme == "admin" else f"r{level}"
+    return str(level) if scheme == ADMIN_SCHEME else f"r{level}"
 
 
 def _feature_layer_name(layer_mode: str, stem: str) -> str:
@@ -108,7 +109,7 @@ def _merge_pyramid_metadata(pmtiles_path: str, pyramid: dict) -> None:
     verbatim; the writer recomputes header offsets and zoom bounds).
 
     The archive is read fully into memory first so that no handle on either
-    file remains open when ``os.replace`` runs. In particular, pmtiles'
+    file remains open when the staged archive is published. In particular, pmtiles'
     ``MmapSource`` must NOT be used here: it wraps the file in an ``mmap``
     that lives on inside the reader's ``get_bytes`` closure with no way to
     close it, and on Windows an open memory map keeps the file locked (even
@@ -129,24 +130,14 @@ def _merge_pyramid_metadata(pmtiles_path: str, pyramid: dict) -> None:
     metadata = reader.metadata()
     metadata["gpio:pyramid"] = pyramid
 
-    # Unpredictable temp name in the output dir (same filesystem for the
-    # atomic replace; not symlink-followable like a fixed "<output>.meta.tmp").
-    tmp = tempfile.NamedTemporaryFile(
-        dir=os.path.dirname(os.path.abspath(pmtiles_path)),
-        prefix=Path(pmtiles_path).name + ".",
-        suffix=".meta.tmp",
-        delete=False,
-    )
-    try:
-        with tmp:
+    # Staged beside the archive (same filesystem, private directory) and
+    # published over it by the owner, which keeps the archive's mode.
+    with atomic_write(pmtiles_path, suffix=Path(pmtiles_path).suffix) as staged:
+        with open(staged, "wb") as tmp:
             writer = Writer(tmp)
             for zxy, data in all_tiles(source):
                 writer.write_tile(zxy_to_tileid(*zxy), data)
             writer.finalize(header, metadata)
-        os.replace(tmp.name, pmtiles_path)
-    except BaseException:
-        Path(tmp.name).unlink(missing_ok=True)
-        raise
 
 
 def _sibling_is_current(sibling: str, input_path: str, dropped_columns: tuple[str, ...]) -> bool:
@@ -185,6 +176,7 @@ def _resolve_band_sources(
     bands: list[Band],
     tmpdir: str,
     verbose: bool,
+    memory_limit: str | None = None,
 ) -> dict[int | str, str]:
     """Map each band level to a GeoParquet source.
 
@@ -206,7 +198,13 @@ def _resolve_band_sources(
         else:
             missing.append(band.level)
     if missing:
-        built = create_overviews(input_path, levels=missing, output_dir=tmpdir, verbose=verbose)
+        built = create_overviews(
+            input_path,
+            levels=missing,
+            output_dir=tmpdir,
+            verbose=verbose,
+            memory_limit=memory_limit,
+        )
         sources.update(dict(built))
     return sources
 
@@ -250,9 +248,10 @@ def _detect_and_plan(
     base_max_zoom: int | None,
     verbose: bool,
     stated_bands: list[Band] | None = None,
+    memory_limit: str | None = None,
 ) -> tuple[AggregateInfo, list[Band]]:
     """Detect the aggregate's shape and select zoom bands for the pyramid."""
-    with aggregate_connection(input_path, verbose) as (con, relation):
+    with aggregate_connection(input_path, verbose, memory_limit) as (con, relation):
         info = detect_aggregate_info(con, relation)
         if info.out_geometry == "none":
             raise InvalidParameterError(
@@ -300,6 +299,7 @@ def create_pmtiles_pyramid(
     force: bool = False,
     verbose: bool = False,
     temporary_directory: str | None = None,
+    memory_limit: str | None = None,
 ) -> None:
     """Create a banded multi-level PMTiles archive from an aggregate file.
 
@@ -336,6 +336,10 @@ def create_pmtiles_pyramid(
             tile-join has no scratch flag, and the in-process DuckDB rollup
             that builds missing overview levels spills under ``TMPDIR`` as
             every gpio connection does.
+        memory_limit: DuckDB memory limit for band planning and the overview
+            rollups (e.g. ``"2GB"``); ``None`` takes gpio's default, half the
+            memory ceiling (#1191). The tippecanoe runs are separate processes
+            and are not bounded by it.
 
     Raises:
         TippecanoeNotFoundError: tippecanoe missing from PATH.
@@ -374,28 +378,31 @@ def create_pmtiles_pyramid(
         _validate_path(features_source)
     # Fail fast before any tiling work: tile-join would only reject an
     # existing output after every per-band tippecanoe run had completed.
-    if os.path.exists(output_path) and not force:
-        raise InvalidParameterError(
-            "output_path",
-            f"output file already exists: {output_path}. Use --force to overwrite.",
-        )
+    handle_output_overwrite(output_path, force, flag="--force", remove=False)
     base_max, feat_min = _resolve_feature_zooms(max_zoom, features_min_zoom, include_features)
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()
     if not _check_tile_join():
         raise TileJoinNotFoundError()
 
-    require_planar_geojson_file(input_path, use_primary_geometry=True)
+    require_planar_geojson_file(input_path)
     if include_features and features_source:
-        require_planar_geojson_file(features_source, use_primary_geometry=True)
+        require_planar_geojson_file(features_source)
 
     info, plan = _detect_and_plan(
-        input_path, levels, max_tile_kb, bytes_per_cell, base_max, verbose, stated_bands
+        input_path,
+        levels,
+        max_tile_kb,
+        bytes_per_cell,
+        base_max,
+        verbose,
+        stated_bands,
+        memory_limit=memory_limit,
     )
     stem = Path(output_path).stem
 
-    with tempfile.TemporaryDirectory(dir=scratch) as tmpdir:
-        sources = _resolve_band_sources(input_path, info, plan, tmpdir, verbose)
+    with scratch_dir(directory=scratch) as tmpdir:
+        sources = _resolve_band_sources(input_path, info, plan, tmpdir, verbose, memory_limit)
         band_files: list[str] = []
         for i, band in enumerate(plan):
             min_zoom, band_max = _band_zoom_args(band, base_max)

@@ -15,17 +15,12 @@ and these tests keep it that way.
 
 import itertools
 import re
-import sys
+import tomllib
 from pathlib import Path
 from typing import Any
 
 import pytest
 import yaml
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
 
 PROJECT_ROOT = Path(__file__).parent.parent
 

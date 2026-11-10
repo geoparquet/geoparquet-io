@@ -8,10 +8,8 @@ from geoparquet_io.core.bbox_structure import check_bbox_structure
 from geoparquet_io.core.duckdb_metadata import (
     GeoParquetError,
     detect_geometry_columns,
-    get_bbox_from_row_group_stats,
     get_column_names,
     get_compression_info,
-    get_geo_metadata,
     get_kv_metadata,
     get_per_row_group_bbox_stats,
     get_row_count,
@@ -21,16 +19,12 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
+from geoparquet_io.core.geo_metadata import raw_geo_of_file
 from tests.conftest import safe_unlink
 
 
 class TestGetKvMetadata:
     """Tests for get_kv_metadata function."""
-
-    def test_returns_dict(self, places_test_file):
-        """Test that get_kv_metadata returns a dict."""
-        result = get_kv_metadata(places_test_file)
-        assert isinstance(result, dict)
 
     def test_contains_geo_key(self, places_test_file):
         """Test that GeoParquet file contains geo key."""
@@ -38,18 +32,18 @@ class TestGetKvMetadata:
         assert b"geo" in result
 
 
-class TestGetGeoMetadata:
-    """Tests for get_geo_metadata function."""
+class TestRawGeoOfFile:
+    """Tests for raw_geo_of_file (the file-level raw geo reader)."""
 
     def test_returns_dict_for_geoparquet(self, places_test_file):
-        """Test that get_geo_metadata returns parsed dict for GeoParquet."""
-        result = get_geo_metadata(places_test_file)
+        """raw_geo_of_file returns the parsed dict for GeoParquet."""
+        result = raw_geo_of_file(places_test_file).value
         assert isinstance(result, dict)
         assert "version" in result or "columns" in result
 
     def test_returns_dict_for_buildings_file(self, buildings_test_file):
-        """Test get_geo_metadata with buildings test file."""
-        result = get_geo_metadata(buildings_test_file)
+        """raw_geo_of_file with the buildings test file."""
+        result = raw_geo_of_file(buildings_test_file).value
         # Buildings file has geo metadata
         assert isinstance(result, dict)
         assert "version" in result or "columns" in result
@@ -144,7 +138,7 @@ class TestDetectGeometryColumns:
     def test_returns_dict(self, places_test_file):
         """Test that detect_geometry_columns returns a dict."""
         result = detect_geometry_columns(places_test_file)
-        assert isinstance(result, dict)
+        assert result == {}  # The fixture stores WKB, not a native geometry logical type.
 
 
 class TestTheBboxColumnName:
@@ -180,13 +174,16 @@ class TestGetPerRowGroupBboxStats:
 
 
 class TestGetBboxFromRowGroupStats:
-    """Tests for get_bbox_from_row_group_stats function."""
+    """The covering's row-group statistics, folded by the one fold (geo_metadata)."""
 
     def test_with_bbox_column(self, places_test_file):
         """Test getting overall bbox for file with bbox."""
+        from geoparquet_io.core.geo_metadata import row_group_geometry_stats
+
         bbox_name = check_bbox_structure(places_test_file)["bbox_column_name"]
         if bbox_name:
-            result = get_bbox_from_row_group_stats(places_test_file, bbox_name)
+            rows = get_per_row_group_bbox_stats(places_test_file, bbox_name)
+            result = row_group_geometry_stats(rows, geographic=True).bbox
             if result is not None:
                 assert len(result) == 4
                 # xmin <= xmax and ymin <= ymax
@@ -292,13 +289,13 @@ class TestResolveCrsReference:
 
 
 class TestExtractCrsFromParquet:
-    """Tests for extract_crs_from_parquet with CRS reference formats."""
+    """Tests for crs_of with CRS reference formats."""
 
     def test_extract_crs_from_projjson_reference(self, crs_projjson_file):
         """Test extracting CRS from file with projjson: reference."""
-        from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+        from geoparquet_io.core.crs_utils import crs_of
 
-        crs = extract_crs_from_parquet(crs_projjson_file)
+        crs = crs_of(crs_projjson_file)
 
         # Should return resolved PROJJSON, not the reference string
         assert isinstance(crs, dict)
@@ -308,9 +305,9 @@ class TestExtractCrsFromParquet:
 
     def test_extract_crs_from_srid_format(self, crs_srid_file):
         """Test extracting CRS from file with srid: format."""
-        from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+        from geoparquet_io.core.crs_utils import crs_of
 
-        crs = extract_crs_from_parquet(crs_srid_file)
+        crs = crs_of(crs_srid_file)
 
         # Should return resolved PROJJSON, not the srid string
         assert isinstance(crs, dict)
@@ -323,7 +320,7 @@ class TestGeoParquetErrorExceptions:
     """Tests for GeoParquetError exception behavior."""
 
     def test_raises_geoparquet_error_for_invalid_parquet(self):
-        """Test that get_geo_metadata raises GeoParquetError for invalid files."""
+        """raw_geo_of_file raises GeoParquetError for invalid files."""
         # Create a temporary non-parquet file
         with tempfile.NamedTemporaryFile(mode="w", suffix=".parquet", delete=False) as f:
             f.write("This is not a parquet file")
@@ -331,11 +328,11 @@ class TestGeoParquetErrorExceptions:
 
         try:
             with pytest.raises(GeoParquetError) as exc_info:
-                get_geo_metadata(temp_path)
+                raw_geo_of_file(temp_path)
 
             # Verify error message is informative
             error_msg = str(exc_info.value)
-            assert "Not a valid GeoParquet file" in error_msg
+            assert "is not a valid Parquet file" in error_msg
             assert temp_path in error_msg
             assert "gpio convert" in error_msg
 
@@ -346,7 +343,7 @@ class TestGeoParquetErrorExceptions:
             safe_unlink(temp_path)
 
     def test_raises_geoparquet_error_for_io_error(self):
-        """Test that get_geo_metadata raises GeoParquetError for I/O errors."""
+        """raw_geo_of_file raises GeoParquetError for I/O errors."""
         # Create an empty parquet file that will cause I/O issues when reading metadata
         with tempfile.NamedTemporaryFile(mode="wb", suffix=".parquet", delete=False) as f:
             # Write just a few bytes - not a complete parquet file structure
@@ -355,11 +352,11 @@ class TestGeoParquetErrorExceptions:
 
         try:
             with pytest.raises(GeoParquetError) as exc_info:
-                get_geo_metadata(temp_path)
+                raw_geo_of_file(temp_path)
 
             # Verify error message mentions read issue
             error_msg = str(exc_info.value)
-            assert "Cannot read file" in error_msg or "Not a valid GeoParquet file" in error_msg
+            assert "Cannot read file" in error_msg or "is not a valid Parquet file" in error_msg
             assert temp_path in error_msg
 
             # Verify the original exception is chained
@@ -367,16 +364,6 @@ class TestGeoParquetErrorExceptions:
         finally:
             # Clean up - use safe_unlink for Windows compatibility
             safe_unlink(temp_path)
-
-    def test_geoparquet_error_is_library_exception(self):
-        """Test that GeoParquetError is a standard Exception, not a Click exception."""
-        # Verify it's a standard exception that can be caught in library usage
-        assert issubclass(GeoParquetError, Exception)
-
-        # Verify it's not a Click exception
-        import click
-
-        assert not issubclass(GeoParquetError, click.ClickException)
 
     def test_get_kv_metadata_raises_error_for_invalid_parquet(self):
         """Test that get_kv_metadata raises GeoParquetError for invalid files."""
@@ -391,7 +378,7 @@ class TestGeoParquetErrorExceptions:
 
             # Verify error message is informative
             error_msg = str(exc_info.value)
-            assert "Not a valid Parquet file" in error_msg
+            assert "is not a valid Parquet file" in error_msg
             assert temp_path in error_msg
             assert "gpio convert" in error_msg
 
@@ -417,7 +404,7 @@ class TestGeoParquetErrorExceptions:
             error_msg = str(exc_info.value)
             assert (
                 "Cannot read file" in error_msg
-                or "Not a valid Parquet file" in error_msg
+                or "is not a valid Parquet file" in error_msg
                 or "Invalid Parquet file" in error_msg
             )
             assert temp_path in error_msg

@@ -5,26 +5,30 @@ from __future__ import annotations
 
 import gc
 
-import pyarrow.parquet as pq
-
-from geoparquet_io.core.compression import resolve_process_compression_level
-from geoparquet_io.core.crs_utils import extract_crs_from_parquet
+from geoparquet_io.core.admin_datasets import (
+    admin_column_ref,
+    build_admin_join_query,
+    open_admin_join_connection,
+    resolve_admin_dataset,
+)
+from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.crs_utils import crs_of
 from geoparquet_io.core.duckdb_utils import (
+    as_wkb_sql,
+    describe_query,
+    geom_from_wkb_sql,
     quote_identifier,
     s3_config_scope,
-    sql_path,
     validate_where_clause,
     where_sql_fragment,
 )
+from geoparquet_io.core.edges import PLANAR, representative_point_sql
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import resolve_file_url
-from geoparquet_io.core.geometry_detection import find_primary_geometry_column
-from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
-from geoparquet_io.core.memory_limits import open_bounded_connection
-from geoparquet_io.core.partition.admin_hierarchical import (
-    _build_admin_table_reference,
-    _setup_admin_dataset,
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
 )
+from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
 from geoparquet_io.core.process.aggregate.common import (
     VALID_OUT_GEOMETRY,
     MetricSpec,
@@ -47,26 +51,19 @@ from geoparquet_io.core.process.aggregate.grid_common import (
     needed_source_columns,
     source_select_list,
 )
-from geoparquet_io.core.write_funnels import write_geoparquet_table
+from geoparquet_io.core.process.aggregate.options import BUCKET_POINT_GEOMETRY
+from geoparquet_io.core.write_funnels import write_aggregate_table
 
 
-def _get_admin_ref(dataset, con, level: str) -> str:
+def _get_admin_ref(dataset, level: str) -> str:
     """Return an SQL table-reference for the admin dataset at the given level.
 
-    For datasets with per-level caches (Overture), uses the pre-filtered
-    level-specific cache file directly.  For others, falls back to the
-    generic prepare_data_source + read_parquet options path.
-
-    ``get_source_for_level`` returns a RAW path -- the user's
-    ``--dataset-source`` or a cache file under the user's home directory -- so
-    :func:`sql_path` quotes and escapes it here (#802).
+    For datasets with per-level caches (Overture), the pre-filtered
+    level-specific cache file; for others, the dataset's own source. Either
+    way :meth:`AdminDataset.table_reference` builds it, from a RAW path (#802).
     """
-    if dataset.supports_per_level_sources():
-        path = dataset.get_source_for_level(level)
-        return f"read_parquet({sql_path(path)})"
-    admin_source = dataset.prepare_data_source(con)
-    admin_ref: str = _build_admin_table_reference(dataset, admin_source)
-    return admin_ref
+    ref: str = dataset.table_reference(dataset.source_for_level(level))
+    return ref
 
 
 def _build_joined_sql(
@@ -86,12 +83,15 @@ def _build_joined_sql(
     is used directly in ST_Intersects.  ``input_pt_expr`` is a SQL expression
     yielding the per-feature POINT used for the join (geometry centroid by
     default; bbox center or an existing point column for --bucket-point, #567).
-    The admin geometry is stored as WKB (ST_AsWKB) so that _wrap_admin_geometry
-    can treat __admin_geom uniformly as WKB binary.
+    ``admin_ref`` contains a stable ``__bnd`` row key. Only that key travels
+    through the join; the polygon is attached after aggregation.
 
-    When admin_bbox_col is provided, a cheap bbox prefilter is added to the ON
-    clause so ST_Intersects is only evaluated for admin polygons whose bounding
-    box contains the feature point.
+    When admin_bbox_col is provided, a cheap point-in-bbox prefilter is added
+    to the ON clause so ST_Intersects is only evaluated for admin polygons whose
+    bounding box contains the feature point. The owner quotes every identifier
+    in it (#942 class), and keeps one admin region per input feature -- the
+    smallest admin code where polygons overlap -- so no feature is counted in
+    two regions (#543, see :func:`build_spatial_join_query`).
 
     ``where`` is applied to the inner input scan, so the spatial join, metrics,
     and breakdowns all see only the filtered rows (#568). The caller validates
@@ -103,34 +103,34 @@ def _build_joined_sql(
     relation so a geometry-less bbox-only input never trips a binder error on a
     column it does not have.
     """
-    if admin_bbox_col:
-        bbox_filter = (
-            f"b.{admin_bbox_col}.xmin <= ST_X(s.__cen) AND "
-            f"b.{admin_bbox_col}.xmax >= ST_X(s.__cen) AND "
-            f"b.{admin_bbox_col}.ymin <= ST_Y(s.__cen) AND "
-            f"b.{admin_bbox_col}.ymax >= ST_Y(s.__cen) AND "
-        )
-    else:
-        bbox_filter = ""
-    return f"""
-        SELECT s.*,
-               b.{quote_identifier(code_col)} AS __admin_code,
-               b.{quote_identifier(name_col)} AS __admin_name,
-               ST_AsWKB(b.{quote_identifier(admin_geom_col)}) AS __admin_geom
-        FROM (
+    boundary_columns = list(dict.fromkeys((code_col, name_col, "__bnd")))
+    code_ref = admin_column_ref(0, code_col)
+    name_ref = admin_column_ref(boundary_columns.index(name_col), name_col)
+    return build_admin_join_query(
+        input_relation=f"""(
             SELECT {select_list}{input_pt_expr} AS __cen
             FROM {aggregate_source_relation(input_url)}
             {where_sql_fragment(where)}
-        ) s
-        LEFT JOIN {admin_ref} b
-          ON {bbox_filter}ST_Intersects(b.{quote_identifier(admin_geom_col)}, s.__cen)
-    """
+        )""",
+        admin_table_ref=admin_ref,
+        admin_select_clause=(
+            f"{code_ref} AS __admin_code, "
+            f"{name_ref} AS __admin_name, "
+            f"{admin_column_ref(boundary_columns.index('__bnd'), '__bnd')} AS __bnd"
+        ),
+        input_geom_col="__cen",
+        admin_geom_col=admin_geom_col,
+        input_bbox_col=None,
+        admin_bbox_col=admin_bbox_col,
+        boundary_columns=boundary_columns,
+        input_alias="s",
+        input_is_point=True,
+    )
 
 
 def _build_agg_sql(
     joined_sql: str,
     metrics: list[MetricSpec],
-    breakdown_select: str,
     nodata_values: list[str] | None = None,
     column_types: dict[str, str] | None = None,
 ) -> str:
@@ -138,7 +138,7 @@ def _build_agg_sql(
     agg_parts = [
         "COALESCE(__admin_code, 'unassigned') AS admin_code",
         "ANY_VALUE(__admin_name) AS admin_name",
-        "ANY_VALUE(__admin_geom) AS __admin_geom",
+        "ANY_VALUE(__bnd) AS __bnd",
         "COUNT(*) AS count",
     ]
     metric_select = build_metric_select(
@@ -146,28 +146,35 @@ def _build_agg_sql(
     )
     if metric_select:
         agg_parts.append(metric_select)
-    if breakdown_select:
-        agg_parts.append(breakdown_select)
     return (
         f"SELECT {', '.join(agg_parts)} FROM ({joined_sql}) "
         f"GROUP BY COALESCE(__admin_code, 'unassigned')"
     )
 
 
-def _wrap_admin_geometry(agg_sql: str, out_geometry: str) -> str:
-    """Add geometry/centroid columns derived from the per-region admin polygon (WKB)."""
+def _wrap_admin_geometry(
+    agg_sql: str, out_geometry: str, admin_ref: str, admin_geom_col: str
+) -> str:
+    """Attach the matched boundary polygon once per aggregate, using its row key."""
     if out_geometry == "none":
-        return f"SELECT a.* EXCLUDE (__admin_geom) FROM ({agg_sql}) a"
+        return f"SELECT a.* EXCLUDE (__bnd) FROM ({agg_sql}) a"
 
-    geom_wkb = "a.__admin_geom"  # WKB binary stored in __admin_geom
-    centroid = f"ST_AsWKB(ST_Centroid(ST_GeomFromWKB({geom_wkb})))"
+    # A scalar lookup preserves aggregate row order when DuckDB would flip a LEFT JOIN.
+    with_geometry = (
+        f"SELECT a.*, (SELECT {as_wkb_sql(f'b.{quote_identifier(admin_geom_col)}')} "
+        f"FROM {admin_ref} b WHERE b.__bnd = a.__bnd) AS __admin_geom FROM ({agg_sql}) a"
+    )
+    geom_wkb = "a.__admin_geom"
+    # The admin polygons are planar, so their centroid is the planar point.
+    point = representative_point_sql(geom_from_wkb_sql(geom_wkb), PLANAR)
+    centroid = as_wkb_sql(point)
     if out_geometry == "polygon":
         geom_cols = f"{geom_wkb} AS geometry"
     elif out_geometry == "centroid":
         geom_cols = f"{centroid} AS geometry"
     else:  # both
         geom_cols = f"{geom_wkb} AS geometry, {centroid} AS centroid"
-    return f"SELECT a.* EXCLUDE (__admin_geom), {geom_cols} FROM ({agg_sql}) a"
+    return f"SELECT a.* EXCLUDE (__bnd, __admin_geom), {geom_cols} FROM ({with_geometry}) a"
 
 
 def aggregate_by_admin(
@@ -179,14 +186,14 @@ def aggregate_by_admin(
     breakdown_limit: int = 20,
     out_geometry: str = "polygon",
     dataset: str = "overture",
-    compression: str = "ZSTD",
+    compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
     verbose: bool = False,
     show_sql: bool = False,
     where: str | None = None,
     metric_nodata: str | None = None,
-    bucket_point: str = "geometry",
+    bucket_point: str = BUCKET_POINT_GEOMETRY,
     bbox_column: str | None = None,
     breakdown_metric: str | None = None,
     memory_limit: str | None = None,
@@ -226,7 +233,7 @@ def aggregate_by_admin(
         memory_limit: DuckDB memory limit for the join and aggregation (e.g.
             ``"8GB"``). Default: half the process's memory ceiling.
     """
-    compression_level = resolve_process_compression_level(compression, compression_level)
+    compression_level = resolve_codec(compression, compression_level, context="process").level
     configure_verbose(verbose)
     if out_geometry not in VALID_OUT_GEOMETRY:
         raise InvalidParameterError(
@@ -245,9 +252,17 @@ def aggregate_by_admin(
     if bucket_point == "bbox":
         bbox_column = _resolve_bbox_column_for_file(input_parquet, bbox_column, verbose)
     # Fail on a bad keying column before the (possibly network-bound) dataset setup.
-    _validate_keying_columns_for_file(input_parquet, bucket_point, bbox_column, verbose)
+    _validate_keying_columns_for_file(
+        input_parquet,
+        bucket_point,
+        bbox_column,
+        verbose,
+        needed_source_columns(metrics, breakdown, bd_metric),
+    )
 
-    admin_dataset, _boundary_columns = _setup_admin_dataset(dataset, verbose, [level])
+    admin_dataset, _boundary_columns, _ = resolve_admin_dataset(
+        dataset, [level], cache=False, verbose=verbose
+    )
     mapping = admin_dataset.get_level_column_mapping()
     code_col = mapping[level]
     # Overture per-level caches store only the code column (e.g. ISO-2 country code
@@ -259,16 +274,17 @@ def aggregate_by_admin(
     admin_bbox_col = admin_dataset.get_bbox_column()
 
     input_url = resolve_file_url(input_parquet, verbose)
-    geom_col = find_primary_geometry_column(input_parquet, verbose) or "geometry"
+    # None when the input has no geometry column: the bbox and point-column
+    # keying modes never read it (bucket_point_expr refuses it in geometry mode).
+    geom_col = primary_geometry_column(input_parquet, verbose=verbose)
 
     # Opened in the dataset's scope, so its public read is not signed with an
     # outer AWS profile and configure_s3's endpoint is not beaten by a secret.
     with s3_config_scope(admin_dataset.get_s3_config()):
-        con = open_bounded_connection(
-            load_spatial=True, load_httpfs=True, memory_limit=memory_limit, verbose=verbose
+        con = open_admin_join_connection(
+            spill_to_cache=False, materialize=True, memory_limit=memory_limit, verbose=verbose
         )
     try:
-        con.execute("SET geometry_always_xy = true")
         admin_dataset.configure_s3(con)
 
         read_rel = aggregate_source_relation(input_url)
@@ -282,12 +298,17 @@ def aggregate_by_admin(
             # path subtracts them: the narrowed projection drops a requested name
             # that collides with one, so validating against it would pass a column
             # the query then cannot bind.
-            cols = {
-                r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {read_rel}").fetchall()
-            } - set(_RESERVED_INTERNAL)
+            cols = {name for name, _ in describe_query(con, f"SELECT * FROM {read_rel}")} - set(
+                _RESERVED_INTERNAL
+            )
             validate_agg_columns(cols, metrics, breakdown, bd_metric)
 
-        admin_ref = _get_admin_ref(admin_dataset, con, level)
+        # Freeze boundary-row identity: codes can repeat across distinct polygons.
+        con.execute(
+            "CREATE TEMP TABLE __agg_admin AS "
+            f"SELECT row_number() OVER () AS __bnd, * FROM {_get_admin_ref(admin_dataset, level)}"
+        )
+        admin_ref = "__agg_admin"
 
         # Resolve metric column types from the input so sentinel literals match the
         # column's actual precision (REAL vs DOUBLE, #613) and non-numeric metric
@@ -301,7 +322,7 @@ def aggregate_by_admin(
         )
         # Admin boundaries are OGC:CRS84; reproject a non-CRS84 input so ST_Intersects
         # does not fail on a CRS mismatch and the join point lands correctly (#525).
-        source_crs = extract_crs_from_parquet(input_parquet, verbose, geometry_column=geom_col)
+        source_crs = crs_of(input_parquet, verbose, geometry_column=geom_col)
         input_pt_expr, exclude_cols = bucket_point_expr(
             con, read_rel, geom_col, source_crs, bucket_point, bbox_column
         )
@@ -327,32 +348,31 @@ def aggregate_by_admin(
         # table rather than re-running the expensive ST_Intersects join twice. The
         # join point has done its work by then -- the table is one row per input
         # feature, so a POINT per row is pure weight.
-        breakdown_select = ""
         if breakdown:
             con.execute(
                 f"CREATE TEMP TABLE __agg_joined AS SELECT * EXCLUDE (__cen) FROM ({joined_sql})"
             )
             joined_ref = "SELECT * FROM __agg_joined"
-            breakdown_select = build_breakdown_pivot(
+            agg_sql = build_breakdown_pivot(
                 con,
                 joined_ref,
                 breakdown,
                 breakdown_limit,
+                aggregate_sql=_build_agg_sql(joined_ref, metrics, nodata_values, column_types),
+                key_expression="COALESCE(__admin_code, 'unassigned')",
+                key_column="admin_code",
                 metrics=metrics,
                 spec=bd_metric,
                 nodata_values=nodata_values,
                 column_types=column_types,
             )
-            agg_sql = _build_agg_sql(
-                joined_ref, metrics, breakdown_select, nodata_values, column_types
-            )
         else:
-            agg_sql = _build_agg_sql(joined_sql, metrics, "", nodata_values, column_types)
-        final_sql = _wrap_admin_geometry(agg_sql, out_geometry)
+            agg_sql = _build_agg_sql(joined_sql, metrics, nodata_values, column_types)
+        final_sql = _wrap_admin_geometry(agg_sql, out_geometry, admin_ref, admin_geom_col)
 
         if show_sql or verbose:
             debug(final_sql)
-        result = con.execute(final_sql).arrow().read_all()
+        result = con.sql(final_sql).arrow().read_all()
 
         # Derive unassigned count from the already-materialized result table to
         # avoid re-executing the (potentially expensive) spatial join a second time.
@@ -369,24 +389,13 @@ def aggregate_by_admin(
         # opens; leaked native state can segfault sibling xdist tests.
         gc.collect()
 
-    if out_geometry == "none":
-        if compression_level is not None:
-            pq.write_table(
-                result,
-                output_parquet,
-                compression=compression,
-                compression_level=compression_level,
-            )
-        else:
-            pq.write_table(result, output_parquet, compression=compression)
-    else:
-        write_geoparquet_table(
-            result,
-            output_parquet,
-            geometry_column="geometry",
-            compression=compression,
-            compression_level=compression_level,
-            geoparquet_version=geoparquet_version,
-            verbose=verbose,
-        )
+    write_aggregate_table(
+        result,
+        output_parquet,
+        out_geometry,
+        compression=compression,
+        compression_level=compression_level,
+        geoparquet_version=geoparquet_version,
+        verbose=verbose,
+    )
     success(f"Aggregated to {result.num_rows} admin regions -> {output_parquet}")

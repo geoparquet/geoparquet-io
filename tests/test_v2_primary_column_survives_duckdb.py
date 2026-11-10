@@ -183,21 +183,24 @@ class TestDeriveV2GeoMetadata:
     ids=["not-json", "not-utf8", "not-an-object", "columns-not-an-object"],
 )
 def test_an_unreadable_block_is_left_alone(raw):
+    import pyarrow as pa
+
     from geoparquet_io.core.derive_geo_from_file import _with_primary_column
 
-    assert _with_primary_column(raw, "geometry") is None
+    schema = pa.schema([("geometry", pa.binary()), ("centroid", pa.binary())])
+    assert _with_primary_column(raw, "geometry", schema) is None
 
 
 @pytest.mark.parametrize("verbose", [False, True], ids=["quiet", "verbose"])
 def test_the_correction_is_a_footer_patch(tmp_path, v2_input, verbose):
-    """The relabel goes in by ``patch_footer_kv``: no page below the footer moves."""
+    """The relabel goes in by ``_patch_footer_file``: no page below the footer moves."""
     from unittest.mock import patch
 
-    from geoparquet_io.core import write_funnels
+    from geoparquet_io.core import parquet_footer
 
     out = tmp_path / "out.parquet"
     with patch.object(
-        write_funnels, "patch_footer_kv", wraps=write_funnels.patch_footer_kv
+        parquet_footer, "_patch_footer_file", wraps=parquet_footer._patch_footer_file
     ) as patched:
         _run(
             "extract",

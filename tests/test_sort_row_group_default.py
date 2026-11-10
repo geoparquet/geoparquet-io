@@ -53,9 +53,11 @@ from geoparquet_io.core.parquet_writer import (
 )
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 
-# Enough rows that the old 122,880-row default and the new one are unambiguously
-# different layouts (3 groups vs 6), while staying fast to build and sort.
-ROW_COUNT = 250_000
+# The fewest rows that still tell the layouts apart: more than one default
+# group (49,152 + 10,848) and at most one of DuckDB's old 122,880, so the new
+# default and the old one are two groups against one. An explicit 50,000 also
+# needs a full group to show it landed on 49,152.
+ROW_COUNT = 60_000
 
 # DuckDB's Parquet writer rounds a ROW_GROUP_SIZE up to a multiple of its
 # vector-chunk size, so an exact row count is not what lands on disk unless the
@@ -164,7 +166,9 @@ def test_help_advertises_the_sort_default(command):
     assert _help_default_rows(command) == DEFAULT_ROW_GROUP_ROWS
 
 
-@pytest.mark.parametrize("command", sorted(SORT_COMMANDS))
+# ``sort hilbert``'s default is G7's ``sort_hilbert-row_groups`` cell and
+# ``test_sorted_output_lands_on_exactly_the_advertised_default`` below.
+@pytest.mark.parametrize("command", sorted(set(SORT_COMMANDS) - {"hilbert"}))
 def test_default_row_groups_match_the_advertised_default(command, points_file, tmp_path):
     """A bare ``gpio sort <cmd>`` writes groups of the size ``--help`` promises.
 
@@ -476,7 +480,10 @@ class TestWriterVectorAlignment:
         factor = _check_row_group_size(str(output))
         assert factor["passed"] is True, factor["detail"]
 
-    @pytest.mark.parametrize("requested", [9_000, 10_000, 25_000, 50_000])
+    # The alignment of every value is the owner's table above; 9,000 is
+    # ``test_a_below_floor_request_still_passes_the_optimization_factor``. 50,000
+    # is #961 itself, the request the writer used to round out of the band.
+    @pytest.mark.parametrize("requested", [50_000])
     def test_an_explicit_in_band_request_is_written_in_band(self, requested, points_file, tmp_path):
         """The band has to hold for a value the user typed, not just for the default.
 

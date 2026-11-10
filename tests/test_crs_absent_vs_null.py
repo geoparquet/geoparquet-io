@@ -29,19 +29,19 @@ from pyproj import CRS as PyprojCRS
 
 from geoparquet_io.core.crs_utils import (
     CRS_ABSENT,
+    crs_equal,
     crs_from_column_meta,
     get_crs_display_name,
     is_default_crs,
-    is_geographic_crs,
+    is_geographic,
 )
-from geoparquet_io.core.inspect_utils import _crs_are_equivalent
+from geoparquet_io.core.geo_metadata import ColumnMeta, parse_column_meta
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_crs_valid,
     _check_epoch_valid,
     _check_v2_crs_consistency,
     _check_v2_crs_in_parquet_type,
-    _crs_equals,
     _is_crs84_equivalent,
     _is_ogc_crs84,
     validate_geoparquet,
@@ -71,9 +71,7 @@ CRS84_PROJJSON = PyprojCRS.from_user_input("OGC:CRS84").to_json_dict()
 EPSG4326_PROJJSON = PyprojCRS.from_epsg(4326).to_json_dict()
 EPSG3857_PROJJSON = PyprojCRS.from_epsg(3857).to_json_dict()
 
-BINARY_HELPERS = pytest.mark.parametrize(
-    "compare", [_crs_equals, _crs_are_equivalent], ids=["crs_equals", "crs_are_equivalent"]
-)
+BINARY_HELPERS = pytest.mark.parametrize("compare", [crs_equal], ids=["crs_equal"])
 
 
 def _idless(crs: dict) -> dict:
@@ -131,7 +129,7 @@ class TestCrsFromColumnMeta:
 
     def test_absent_crs_is_geographic(self):
         """Absent means OGC:CRS84, which is lon/lat."""
-        assert is_geographic_crs(CRS_ABSENT) is True
+        assert is_geographic(CRS_ABSENT) is True
 
     def test_absent_crs_is_the_default_crs(self):
         assert is_default_crs(CRS_ABSENT) is True
@@ -233,7 +231,7 @@ class TestBinaryHelpersAbsentVsNull:
 
     @BINARY_HELPERS
     def test_two_unknown_crs_declarations_agree(self, compare):
-        """Both helpers must give the same answer; ``_crs_equals`` already said True.
+        """Both helpers must give the same answer; ``crs_equal`` already said True.
 
         The call sites compare two declarations *of the same file* (geo metadata
         vs Parquet logical type), so "both say unknown" is a consistent file.
@@ -310,8 +308,8 @@ def _schema(logical_type: str) -> list[dict]:
     return [{"name": "geometry", "logical_type": logical_type}]
 
 
-def _geo_meta(col_meta: dict) -> dict:
-    return {"version": "2.0.0", "primary_column": "geometry", "columns": {"geometry": col_meta}}
+def _column_meta(col_meta: dict) -> ColumnMeta:
+    return parse_column_meta("geometry", col_meta)
 
 
 # A Parquet GEOMETRY logical type with no CRS. Per the Parquet spec that means
@@ -332,52 +330,58 @@ class TestOmittedCrsStillValidatesAsCrs84:
     """The load-bearing regression guard: absent ``crs`` is the common, valid case."""
 
     def test_crs_valid_check_passes_for_omitted_key(self):
-        check = _check_crs_valid({"encoding": "WKB"}, "geometry")
+        check = _check_crs_valid(parse_column_meta("geometry", {"encoding": "WKB"}), "geometry")
         assert check.status is CheckStatus.PASSED
         assert "defaults to OGC:CRS84" in check.message
 
     def test_crs_valid_check_warns_for_explicit_null(self):
-        check = _check_crs_valid({"encoding": "WKB", "crs": None}, "geometry")
+        check = _check_crs_valid(
+            parse_column_meta("geometry", {"encoding": "WKB", "crs": None}), "geometry"
+        )
         assert check.status is CheckStatus.WARNING
 
     def test_v2_inline_crs_not_required_when_key_omitted(self):
-        check = _check_v2_crs_in_parquet_type(_geo_meta({}), SCHEMA_NO_CRS, "geometry")
+        check = _check_v2_crs_in_parquet_type(_column_meta({}), SCHEMA_NO_CRS, "geometry")
         assert check.status is CheckStatus.PASSED
 
     def test_v2_inline_crs_not_required_for_explicit_crs84(self):
         for crs in (CRS84_ID, EPSG4326_ID, CRS84_PROJJSON):
             check = _check_v2_crs_in_parquet_type(
-                _geo_meta({"crs": crs}), SCHEMA_NO_CRS, "geometry"
+                _column_meta({"crs": crs}), SCHEMA_NO_CRS, "geometry"
             )
             assert check.status is CheckStatus.PASSED
 
     def test_v2_inline_crs_still_required_for_a_real_crs(self):
         check = _check_v2_crs_in_parquet_type(
-            _geo_meta({"crs": EPSG3857_ID}), SCHEMA_NO_CRS, "geometry"
+            _column_meta({"crs": EPSG3857_ID}), SCHEMA_NO_CRS, "geometry"
         )
         assert check.status is CheckStatus.FAILED
 
     def test_v2_consistency_passes_when_both_sides_omit_crs(self):
-        check = _check_v2_crs_consistency(_geo_meta({}), SCHEMA_NO_CRS, "geometry")
+        check = _check_v2_crs_consistency(_column_meta({}), SCHEMA_NO_CRS, "geometry", "")
         assert check.status is CheckStatus.PASSED
 
     @pytest.mark.parametrize("crs", [CRS84_ID, EPSG4326_ID, CRS84_PROJJSON, EPSG4326_PROJJSON])
     def test_v2_consistency_passes_for_explicit_crs84_vs_omitted_schema_crs(self, crs):
-        check = _check_v2_crs_consistency(_geo_meta({"crs": crs}), SCHEMA_NO_CRS, "geometry")
+        check = _check_v2_crs_consistency(_column_meta({"crs": crs}), SCHEMA_NO_CRS, "geometry", "")
         assert check.status is CheckStatus.PASSED
 
     def test_v2_consistency_fails_when_metadata_crs_is_unknown_but_schema_is_default(self):
         """Explicit null says "unknown"; an omitted Parquet crs says OGC:CRS84."""
-        check = _check_v2_crs_consistency(_geo_meta({"crs": None}), SCHEMA_NO_CRS, "geometry")
+        check = _check_v2_crs_consistency(
+            _column_meta({"crs": None}), SCHEMA_NO_CRS, "geometry", ""
+        )
         assert check.status is CheckStatus.FAILED
 
     def test_v2_consistency_fails_on_a_real_mismatch(self):
-        check = _check_v2_crs_consistency(_geo_meta({"crs": CRS84_ID}), SCHEMA_EPSG3857, "geometry")
+        check = _check_v2_crs_consistency(
+            _column_meta({"crs": CRS84_ID}), SCHEMA_EPSG3857, "geometry", ""
+        )
         assert check.status is CheckStatus.FAILED
 
     def test_v2_consistency_passes_on_a_real_match(self):
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": EPSG3857_ID}), SCHEMA_EPSG3857, "geometry"
+            _column_meta({"crs": EPSG3857_ID}), SCHEMA_EPSG3857, "geometry", ""
         )
         assert check.status is CheckStatus.PASSED
 
@@ -393,28 +397,30 @@ class TestUnknownCrsHasAValidTwoZeroRepresentation:
     """
 
     def test_v2_consistency_passes_for_null_metadata_and_srid_zero_schema(self):
-        check = _check_v2_crs_consistency(_geo_meta({"crs": None}), SCHEMA_SRID0, "geometry")
+        check = _check_v2_crs_consistency(_column_meta({"crs": None}), SCHEMA_SRID0, "geometry", "")
         assert check.status is CheckStatus.PASSED
 
     def test_v2_consistency_fails_when_only_the_schema_says_unknown(self):
         """An omitted metadata crs claims OGC:CRS84; ``srid:0`` claims unknown."""
-        check = _check_v2_crs_consistency(_geo_meta({}), SCHEMA_SRID0, "geometry")
+        check = _check_v2_crs_consistency(_column_meta({}), SCHEMA_SRID0, "geometry", "")
         assert check.status is CheckStatus.FAILED
 
     @pytest.mark.parametrize("crs", [CRS84_ID, EPSG4326_ID, EPSG3857_ID])
     def test_v2_consistency_fails_when_metadata_names_a_crs_but_schema_says_unknown(self, crs):
-        check = _check_v2_crs_consistency(_geo_meta({"crs": crs}), SCHEMA_SRID0, "geometry")
+        check = _check_v2_crs_consistency(_column_meta({"crs": crs}), SCHEMA_SRID0, "geometry", "")
         assert check.status is CheckStatus.FAILED
 
     def test_null_metadata_still_fails_against_a_named_schema_crs(self):
         """srid:0 is the only Parquet CRS an explicit null may pair with."""
-        check = _check_v2_crs_consistency(_geo_meta({"crs": None}), SCHEMA_EPSG3857, "geometry")
+        check = _check_v2_crs_consistency(
+            _column_meta({"crs": None}), SCHEMA_EPSG3857, "geometry", ""
+        )
         assert check.status is CheckStatus.FAILED
 
     def test_srid_zero_is_not_read_as_epsg_zero_or_the_default(self):
         """A non-zero srid is a real CRS claim, not the unknown marker."""
         check = _check_v2_crs_consistency(
-            _geo_meta({"crs": None}), _schema("GeometryType(crs=srid:4326)"), "geometry"
+            _column_meta({"crs": None}), _schema("GeometryType(crs=srid:4326)"), "geometry", ""
         )
         assert check.status is CheckStatus.FAILED
 
@@ -428,17 +434,25 @@ class TestEpochResolvesAbsentAndNullLikeEveryOtherCheck:
 
     def test_absent_crs_epoch_fails_on_the_default_datum_ensemble(self):
         """Absent means OGC:CRS84, a datum ensemble, which cannot carry an epoch."""
-        check = _check_epoch_valid({"epoch": 2020.0}, "geometry")
+        check = _check_epoch_valid(parse_column_meta("geometry", {"epoch": 2020.0}), "geometry")
         assert check.status is CheckStatus.FAILED
 
     def test_explicit_null_crs_epoch_warns_because_the_datum_is_unknowable(self):
-        check = _check_epoch_valid({"epoch": 2020.0, "crs": None}, "geometry")
+        check = _check_epoch_valid(
+            parse_column_meta("geometry", {"epoch": 2020.0, "crs": None}), "geometry"
+        )
         assert check.status is CheckStatus.WARNING
         assert "null" in check.message
 
     def test_no_epoch_passes_whatever_the_crs_shape(self):
-        assert _check_epoch_valid({}, "geometry").status is CheckStatus.PASSED
-        assert _check_epoch_valid({"crs": None}, "geometry").status is CheckStatus.PASSED
+        assert (
+            _check_epoch_valid(parse_column_meta("geometry", {}), "geometry").status
+            is CheckStatus.PASSED
+        )
+        assert (
+            _check_epoch_valid(parse_column_meta("geometry", {"crs": None}), "geometry").status
+            is CheckStatus.PASSED
+        )
 
 
 # =============================================================================

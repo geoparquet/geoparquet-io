@@ -1,0 +1,176 @@
+# These numbers only go down; raising either needs a reason in the PR.
+# Reviewed baseline: 14199, plus the 18 fast tests the main merge brought in
+# with #1360 (a5 from Query.Farm), less the 12 CODEOWNERS wiring tests removed.
+# Add two owner regressions for DuckDB's timeout units and Carto's retry budget.
+[fast_suite]
+# Targeted perf regressions add 18 selected cases across the retained lanes.
+# +197 for the geo-block owner consolidation: the two-geometry write-path matrix
+# (226 cells, about 3s under -n auto) replaces 56 per-path secondary-geometry
+# tests it catches more regressions than, plus #1089's one-defect verdict table
+# and #1014's one-sided CRS id cases, plus 12 rebuild cells (secondary kept or
+# projected away x geo-only, ARROW:schema or decoded-dict footer x 1.1/2.0),
+# plus 1 for declared_write_metadata leaving a decoded geo dict unchanged.
+# +10: a secondary CRS held only in field metadata, per strategy x 1.1/2.0
+# (#1400's probe kept two; the owner read keeps all ten).
+# +3: load_crs, projjson_for_label and the #1014 disagreement probe never read
+# a PROJ init= file a CRS string names.
+# +4: a {"init": ...} dict, or JSON text decoding to one, is never read
+# (owner reads and a write).
+# +1: a native srid:3857 secondary keeps EPSG:3857 on every strategy x version.
+# -3: the cold-import srid subprocess reads move to the slow lane (#1340).
+# +163, the API/CLI parity batch (#1088, #1065, #903, #1085, #1090, #1078,
+# #1108, #1063, #1321, #1087, #761). One parity registry (-3 net, nine
+# per-allowlist tests folded into four), call-parity cases for the fifteen
+# deferred leaves (+32, ops and Table doors), new API legs and their
+# fail-first tests (checks by path and Table.fix +22, pmtiles and upload +10,
+# geometry gate, no-ops and shared stats +21), WriteOptions on every write
+# leaf (+52, incl. the from_cli guard per write leaf), and review fixes (+30).
+# +13: round-2 review fixes (explicit-ZSTD asks, covering ownership, object-store
+# globs, directory checks, spec warnings, upload keys, write memory scope), less
+# the convert-geoparquet compression gap they closed.
+# +12: round-3 review fixes (upload prefix keys only from a local file +1, IPv6
+# http URLs are not globs +6, Table.fix on a directory +2, the funnel's
+# row-group sample under the write cap +2, every public check has __wrapped__ +1).
+# +8: round-4 review fixes (duckdb-kv's row-group sample under the write cap +1,
+# a remote source under a scheme alias +2, PMTiles on a directory-backed Table +2,
+# a remote object named by its last segment +3).
+# +36: every gpio.check_* answers as its gpio check command (9 checks x 4 fixtures).
+# +1: a "not GeoParquet" file-type answer is re-probed, never served from the cache.
+# +7: Table.write on each GeoArrow-native encoding matches convert (6), and a head of one (1).
+# +2: write_strategy="auto" is not a GeoParquet option asked of another format.
+# +3: Table.write/create_pmtiles/create_pmtiles_pyramid forward exactly their signature.
+# +4 (#1087): Table-door call-parity cases for inspect meta, summary and stats (+3),
+# and one malformed block read alike by gpio inspect and Table.metadata (+1).
+max_collected = 14693
+max_timeout_marks = 1
+slow_mark_sites = [
+  "docs_examples/collector.py::DocExampleItem._apply_marks",
+  "e2e/test_journeys.py::<module>",
+  "e2e/test_journeys.py::test_journey_08_admin_divisions_then_partition",
+  "e2e/test_journeys.py::test_journey_10_sorting_improves_spatial_pushdown",
+  "test_add_overwrite.py::TestAddCommandsOverwrite.test_add_admin_divisions_with_overwrite",
+  "test_add_overwrite.py::TestAddCommandsOverwrite.test_add_bbox_with_overwrite",
+  "test_add_overwrite.py::TestAddCommandsOverwrite.test_add_h3_with_overwrite",
+  "test_add_overwrite.py::TestAddCommandsOverwrite.test_add_kdtree_with_overwrite",
+  "test_add_overwrite.py::TestAddCommandsOverwrite.test_add_quadkey_with_overwrite",
+  "test_arcgis.py::TestAdaptiveBatchNetworkIntegration",
+  "test_arcgis.py::TestArcgisOutputCrsLive",
+  "test_benchmark.py::TestBenchmarkSuiteCLI.test_benchmark_suite_runs",
+  "test_benchmark_piping.py::TestExtractPerformance",
+  "test_benchmark_piping.py::TestPipingPerformance",
+  "test_benchmark_suite.py::TestChainOperationExecution",
+  "test_byte_identity_script.py::<module>",
+  "test_canonical_dataset.py::test_regeneration_reproduces_the_committed_files",
+  "test_check_interrupt.py::test_real_sigint_during_check_all_writes_no_fix",
+  "test_conversion_end_to_end.py::TestGPKGConversions",
+  "test_conversion_end_to_end.py::TestGeoJSONConversions",
+  "test_conversion_end_to_end.py::TestShapefileConversions",
+  "test_convert.py::TestConvertCore",
+  "test_convert_layer.py::TestEstoniaGeoPackageIntegration",
+  "test_convert_layer.py::TestFileGDBLayer",
+  "test_docs_examples_coverage.py::test_no_skipped_fence_hides_a_working_command",
+  "test_extract.py::TestExtractRemote",
+  "test_filegdb_crs.py::TestFileGDBCrsDetection",
+  "test_filegdb_crs.py::TestFileGDBMultiLayerCrs",
+  "test_geoarrow_srid_compat.py::test_gpio_read_of_srid_type_does_not_crash",
+  "test_geoarrow_srid_compat.py::test_pyarrow_written_srid_type_reads_back",
+  "test_geoparquet_corpus.py::<module>",
+  "test_geoparquet_versions.py::TestComprehensiveRoundTrips",
+  "test_geoparquet_versions.py::TestPartitionGeoParquetVersion",
+  "test_geoparquet_versions.py::TestVersionRoundTrip",
+  "test_import_linter.py::TestImportLinterIntegration",
+  "test_inspect.py::TestInspectSubcommands.test_geo_stats_defaults_to_one_row_group_with_hint",
+  "test_inspect.py::TestInspectSubcommands.test_geo_stats_respects_row_groups_limit",
+  "test_inspect.py::TestInspectSubcommands.test_geo_stats_shows_all_with_row_groups_flag",
+  "test_inspect.py::TestInspectSubcommands.test_inspect_meta_geometry_shows_geo_bbox_minmax",
+  "test_inspect.py::TestInspectSubcommands.test_multi_geom_parquet_geo_shows_per_column_stats",
+  "test_inspect.py::TestInspectSubcommands.test_parquet_geo_section_shows_native_row_group_stats",
+  "test_inspect.py::TestInspectSubcommands.test_v11_geo_stats_defaults_to_one_with_hint",
+  "test_inspect.py::TestInspectSubcommands.test_v11_geo_stats_respects_row_groups_limit",
+  "test_kdtree.py::TestKDTreeBinaryIDs.test_kdtree_binary_id_length",
+  "test_kdtree.py::TestKDTreeBinaryIDs.test_kdtree_partition_count",
+  "test_kdtree.py::TestPartitionKDTreeOperations",
+  "test_list_layers.py::TestListLayersFileGDB",
+  "test_mypy.py::TestMypyConfiguration.test_mypy_passes_on_package",
+  "test_output_format.py::TestAddAdminDivisions.test_default_format",
+  "test_output_format.py::TestAddAdminDivisions.test_dry_run_format",
+  "test_output_format.py::TestConvertOutput",
+  "test_partition.py::TestPartitionH3Operations",
+  "test_partition.py::TestPartitionPrefix",
+  "test_partition_admin_vecorel.py::TestVecorelPartitionEndToEnd",
+  "test_pipe_integration.py::<module>",
+  "test_pmtiles.py::TestPMTilesIntegration.test_basic_creation",
+  "test_pmtiles.py::TestPMTilesIntegration.test_layer_by_column",
+  "test_pmtiles.py::TestPMTilesIntegration.test_with_filters",
+  "test_pmtiles.py::TestPMTilesIntegration.test_with_zoom_levels",
+  "test_pmtiles_pyramid.py::test_pyramid_end_to_end_grouped",
+  "test_pmtiles_pyramid.py::test_pyramid_per_level_with_features",
+  "test_process_aggregate_a5.py::test_aggregate_a5_auto_runs",
+  "test_process_aggregate_a5.py::test_aggregate_a5_count_metric_breakdown",
+  "test_process_aggregate_a5.py::test_aggregate_a5_input_with_reserved_column_names",
+  "test_process_aggregate_a5.py::test_aggregate_a5_native_geometry_column",
+  "test_process_aggregate_a5.py::test_aggregate_a5_null_geometry_feature",
+  "test_process_aggregate_a5.py::test_aggregate_a5_out_geometry_none_is_plain_table",
+  "test_process_aggregate_a5.py::test_aggregate_a5_table_tolerates_bad_wkb",
+  "test_process_aggregate_a5.py::test_cli_process_aggregate_a5",
+  "test_process_aggregate_a5.py::test_table_aggregate_a5_api",
+  "test_process_aggregate_a5_dateline.py::test_a5_overview_parents_are_dateline_safe",
+  "test_process_aggregate_a5_dateline.py::test_a5_r7_dateline_cells_stay_inside_the_world",
+  "test_process_aggregate_a5_dateline.py::test_a_cell_away_from_the_seam_is_handed_through_untouched",
+  "test_process_aggregate_a5_dateline.py::test_the_fiji_cell_keeps_its_pinned_multipolygon",
+  "test_process_aggregate_a5_dateline.py::test_the_raw_a5_boundary_leaves_the_valid_range",
+  "test_process_aggregate_a5_dateline.py::test_the_seam_repair_leaves_counts_and_metrics_alone",
+  "test_process_aggregate_admin.py::test_aggregate_admin_country_with_unassigned",
+  "test_process_aggregate_admin.py::test_cli_process_aggregate_admin_runs",
+  "test_process_aggregate_admin.py::test_table_aggregate_admin_api",
+  "test_process_aggregate_antimeridian.py::test_a5_cells_are_antimeridian_safe",
+  "test_process_aggregate_antimeridian.py::test_a5_polar_cells_stay_valid_and_in_range",
+  "test_process_aggregate_antimeridian.py::test_aggregate_writes_the_wrap_form_bbox",
+  "test_process_aggregate_antimeridian.py::test_h3_cells_are_antimeridian_safe",
+  "test_process_aggregate_antimeridian.py::test_h3_pole_cells_stay_valid_and_in_range",
+  "test_process_aggregate_antimeridian.py::test_out_geometry_both_keeps_one_frame",
+  "test_process_aggregate_antimeridian.py::test_overview_rollup_is_antimeridian_safe",
+  "test_process_aggregate_bucket_point.py::test_aggregate_a5_bbox_autodetects_column",
+  "test_process_aggregate_bucket_point.py::test_aggregate_a5_bbox_explicit_nonstandard_column",
+  "test_process_aggregate_bucket_point.py::test_aggregate_a5_bbox_matches_geometry_keying",
+  "test_process_aggregate_bucket_point.py::test_aggregate_admin_bucket_point_bbox",
+  "test_process_aggregate_bucket_point.py::test_aggregate_h3_bbox_mode",
+  "test_process_aggregate_bucket_point.py::test_cli_aggregate_a5_bucket_point_bbox",
+  "test_process_aggregate_bucket_point.py::test_table_aggregate_a5_bucket_point_bbox",
+  "test_process_aggregate_column_validation.py::test_cli_count_metric_clean_error",
+  "test_process_aggregate_crs.py::test_aggregate_a5_reprojects_projected_input",
+  "test_process_aggregate_crs.py::test_aggregate_h3_reprojects_projected_input",
+  "test_process_aggregate_h3.py::test_aggregate_h3_auto_runs",
+  "test_process_aggregate_h3.py::test_aggregate_h3_count_metric_breakdown",
+  "test_process_aggregate_h3.py::test_aggregate_h3_native_geometry_column",
+  "test_process_aggregate_h3.py::test_aggregate_h3_null_geometry_feature",
+  "test_process_aggregate_h3.py::test_aggregate_h3_out_geometry_none_is_plain_table",
+  "test_process_aggregate_h3.py::test_cli_process_aggregate_h3",
+  "test_process_aggregate_h3.py::test_table_aggregate_h3_api",
+  "test_process_aggregate_metric_nodata.py::test_aggregate_a5_metric_nodata",
+  "test_process_aggregate_metric_nodata.py::test_cli_aggregate_a5_metric_nodata",
+  "test_process_aggregate_metric_nodata.py::test_table_aggregate_a5_metric_nodata",
+  "test_process_aggregate_where.py::test_aggregate_a5_where_filters_rows",
+  "test_process_aggregate_where.py::test_aggregate_a5_where_with_breakdown_and_metric",
+  "test_process_aggregate_where.py::test_aggregate_admin_where_filters_rows",
+  "test_process_aggregate_where.py::test_aggregate_h3_where_filters_rows",
+  "test_process_aggregate_where.py::test_cli_aggregate_a5_where_special_char_column",
+  "test_process_aggregate_where.py::test_table_aggregate_a5_where",
+  "test_process_overview.py::test_auto_level_selection_a5",
+  "test_process_overview.py::test_gold_rollup_a5",
+  "test_process_overview.py::test_gold_rollup_h3",
+  "test_process_overview.py::test_level_not_coarser_than_base_errors",
+  "test_process_overview.py::test_mixed_resolution_input_errors",
+  "test_process_overview.py::test_table_overview_api",
+  "test_rewrite_memory_1268.py::test_hilbert_past_2_gib_attribute_column",
+  "test_streaming.py::TestApplyGeoArrowExtensionType.test_real_overflow_succeeds",
+  "test_streaming.py::TestStreamIO",
+  "test_uncoded_crs_paths.py::test_pmtiles_create_lands_in_tokyo",
+  "test_wfs.py::TestDuckDBNativeWFS",
+  "test_wfs.py::TestGMLOnlyServerEndToEnd",
+  "test_wfs.py::TestProjectedCRSPreservedIntegration",
+  "test_wfs.py::TestSrsNameWithoutBbox",
+  "test_wfs.py::TestTypeInferenceIntegration",
+  "test_wfs.py::TestWFS20Integration",
+  "test_wfs.py::TestWFSIntegration"
+]

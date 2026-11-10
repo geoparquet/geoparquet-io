@@ -26,6 +26,7 @@ CURVED_GPKG = Path(__file__).parent / "data" / "curved_geometry_test.gpkg"
 def _spatial_con():
     con = duckdb.connect()
     con.execute("INSTALL spatial; LOAD spatial;")
+    con.execute("SET geometry_always_xy = true")
     return con
 
 
@@ -37,7 +38,9 @@ def _write_gpkg(path, rows):
     )
     con.execute(
         f"COPY (SELECT * FROM (VALUES {values}) v(id, geom)) "
-        f"TO '{path}' WITH (FORMAT GDAL, DRIVER 'GPKG')"
+        # An explicit SRS: DuckDB 2.0 writes none for a CRS-less geometry (1.5
+        # wrote "Undefined geographic SRS"), and convert refuses a CRS-less file.
+        f"TO '{path}' WITH (FORMAT GDAL, DRIVER 'GPKG', SRS 'EPSG:4326')"
     )
     con.close()
 

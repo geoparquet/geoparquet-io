@@ -17,49 +17,53 @@ from geoparquet_io.core.check_verdict import (
     worst,
 )
 from geoparquet_io.core.duckdb_metadata import (
+    get_file_metadata,
     get_per_row_group_bbox_stats,
     get_per_row_group_native_geo_stats,
-    get_per_row_group_weights,
+    get_row_group_bbox_stats,
+    get_row_group_sizes,
 )
 from geoparquet_io.core.duckdb_utils import (
     disable_geoparquet_conversion,
+    fetch_one,
     get_duckdb_connection,
     is_interrupt,
     sql_path,
 )
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geometry_detection import (
-    find_primary_geometry_column,
+    GeometryColumnNotFoundError,
+    primary_geometry_column,
     resolve_geometry_read,
 )
 from geoparquet_io.core.logging_config import debug, progress, warn
 from geoparquet_io.core.remote import needs_httpfs
 
-# The ordering verdict, per the Portolan spec (portolan-sdi/portolan-spec#188):
-# efficiency is the expected byte skip rate of a query window over what the
-# same row-group count achieves on an ideal tiling. The window's centre falls
-# in a row group with probability proportional to its rows and spans
-# _DEFAULT_QUERY_FRACTION of each dimension of that group's box; each group
-# weighs its compressed bytes. Both the bar and the floors are the spec's, so
-# nothing on the CLI or API overrides them.
-SPATIAL_ORDER_MIN_EFFICIENCY = 0.70
-#: A pass needs this many row groups; a clear failure does not (the spec's
-#: PORTO-FMT-050/044).
+# The Portolan spec's thresholds (portolan-sdi/portolan-spec#188). All four are
+# named constants and nothing on the CLI or API overrides them: the spec fixes
+# them, so two validators cannot disagree.
+# 0.65 comes from the 2026-11 registry survey and its Hilbert-sort control:
+# the 32 sorted copies eligible for a footer pass scored 0.696 to 0.944, so a
+# 0.70 bar rejected an already-sorted file while 0.65 accepts every tested
+# sorted copy and still fails the shuffled band (PORTO-FMT-050).
+SPATIAL_ORDER_MIN_EFFICIENCY = 0.65
+#: A footer pass needs at least this many row groups (PORTO-FMT-044/050).
 SPATIAL_ORDER_MIN_ROW_GROUPS = 8
-#: Under this efficiency a file fails from two row groups up: boxes that each
-#: cover most of the extent are plain at any count (PORTO-FMT-059).
+#: Below the pass floor, efficiency under this still fails -- from three row
+#: groups up (PORTO-FMT-059): sorted two-group copies measured as low as 0.18,
+#: and no tested sorted copy with three or more groups fell below 0.34.
 SPATIAL_ORDER_OBVIOUS_FAIL_EFFICIENCY = 0.25
-#: Under this many compressed bytes (summed over the row groups, footer-only)
-#: nothing about order is judged: pruning saves a reader almost nothing
-#: (PORTO-FMT-058).
+#: Under this many compressed row-group bytes nothing about order is judged:
+#: skipping parts of so small a file saves a reader almost nothing
+#: (PORTO-FMT-058). Footer-only, so remote files measure the same.
 SPATIAL_ORDER_MIN_FILE_BYTES = 5_000_000
 
 _SKIP_RATE_THRESHOLD = 0.5
 _DEFAULT_QUERY_FRACTION = 0.1
-#: The windows the result reports read shares for, beside the verdict's 10%.
+#: The windows the verdict reports the read share for (PORTO-FMT-060/061).
 _REPORT_FRACTIONS = (0.01, _DEFAULT_QUERY_FRACTION, 0.25)
-#: A reference skip rate at or under this is zero: one row group, or an extent
-#: that is a single point. Float noise, not a layout.
+#: Accumulated float dust on an exact 0 or 1; also the "reference skips
+#: nothing" cutoff under which the efficiency is undefined.
 _ZERO_SKIP_TOLERANCE = 1e-9
 
 #: The check's name in a "could not run" line.
@@ -104,7 +108,7 @@ def _calculate_consecutive_avg(con, raw_url, read, row_limit, verbose):
     """
     if verbose:
         progress("Calculating average distance between consecutive features...")
-    result = con.execute(query).fetchone()
+    result = fetch_one(con.execute(query))
     avg = result[0] if result else None
     if verbose:
         debug(f"Average distance between consecutive features: {avg}")
@@ -129,7 +133,7 @@ def _calculate_random_avg(con, raw_url, read, row_limit, random_sample_size, ver
     """
     if verbose:
         progress(f"Calculating average distance between {random_sample_size} random pairs...")
-    result = con.execute(query).fetchone()
+    result = fetch_one(con.execute(query))
     avg = result[0] if result else None
     if verbose:
         debug(f"Average distance between random features: {avg}")
@@ -176,7 +180,7 @@ def _build_results_dict(ratio, consecutive_avg, random_avg):
 
 def _get_row_limit_clause(con, raw_url, limit_rows, verbose):
     """Determine row limit clause based on total rows."""
-    total_rows = con.execute(f"SELECT COUNT(*) FROM {sql_path(raw_url)}").fetchone()[0]
+    total_rows = fetch_one(con.execute(f"SELECT COUNT(*) FROM {sql_path(raw_url)}"))[0]
     if verbose:
         debug(f"Total rows in file: {total_rows:,}")
 
@@ -257,10 +261,11 @@ def _spatial_order_verdict(
     """The verdict: ``(passed, judged, warnings)``, per the spec's floors.
 
     Under the 5 MB size floor nothing is judged (PORTO-FMT-058). At eight or
-    more row groups the 0.70 bar decides (PORTO-FMT-050). Below eight, a file
-    under the 0.25 obvious-fail bar still fails (PORTO-FMT-059); otherwise the
-    pass is withheld (PORTO-FMT-044) and ``warnings`` says why there is no
-    verdict.
+    more row groups the 0.65 bar decides (PORTO-FMT-050). At three to seven
+    groups, a file under the 0.25 obvious-fail bar still fails (PORTO-FMT-059)
+    -- two groups are exempt, since sorted two-group copies measured as low as
+    0.18; otherwise the pass is withheld (PORTO-FMT-044) and ``warnings`` says
+    why there is no verdict.
     """
     if file_bytes is not None and file_bytes < SPATIAL_ORDER_MIN_FILE_BYTES:
         return (
@@ -287,7 +292,7 @@ def _spatial_order_verdict(
             )
         return efficiency >= SPATIAL_ORDER_MIN_EFFICIENCY, True, []
     if (
-        num_row_groups > 1
+        num_row_groups >= 3
         and efficiency is not None
         and efficiency < SPATIAL_ORDER_OBVIOUS_FAIL_EFFICIENCY
     ):
@@ -300,48 +305,6 @@ def _spatial_order_verdict(
             f"({num_row_groups} in this file); smaller row groups "
             "(--row-group-size, 2,048 minimum) would make it judgeable"
         ],
-    )
-
-
-def check_spatial_order_bbox_stats(
-    parquet_file: str,
-    verbose: bool = False,
-    return_results: bool = False,
-    quiet: bool = False,
-) -> float | dict:
-    """Check spatial ordering using row group bbox statistics.
-
-    This method is faster than sampling because it only reads row group metadata
-    instead of actual geometry data. It checks if consecutive row groups have
-    overlapping bounding boxes, which indicates poor spatial ordering.
-
-    Args:
-        parquet_file: Path to parquet file
-        verbose: Print additional information
-        return_results: If True, return structured results dict
-        quiet: If True, suppress all output
-
-    Returns:
-        ratio (float) if return_results=False, or dict if return_results=True
-    """
-
-    bbox_col_name = check_bbox_structure(parquet_file, verbose).get("bbox_column_name")
-    if not bbox_col_name:
-        raise ValueError(
-            f"File {parquet_file} does not have a bbox column. "
-            "Use the sampling-based method instead."
-        )
-
-    if verbose:
-        debug(f"Using bbox column: {bbox_col_name}")
-
-    row_group_bboxes = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
-
-    if verbose:
-        debug(f"Analyzing {len(row_group_bboxes)} row groups")
-
-    return _check_spatial_order_from_row_group_bboxes(
-        row_group_bboxes, parquet_file, verbose, return_results, quiet, method="bbox_stats"
     )
 
 
@@ -484,18 +447,24 @@ def _row_group_weights(parquet_file: str, bboxes: list[dict]) -> dict:
     uniform weights and no size, which judges the layout but never the floor.
     """
     try:
-        per_group = get_per_row_group_weights(parquet_file)
+        groups = get_row_group_sizes(parquet_file)
     except Exception:
-        per_group = {}
-    if not per_group:
+        groups = []
+    if not groups:
         uniform = [1.0] * len(bboxes)
         return {"rows": uniform, "bytes": list(uniform), "file_bytes": None}
-    rows = [max(per_group.get(b["row_group_id"], {}).get("rows", 0.0), 1.0) for b in bboxes]
-    sizes = [max(per_group.get(b["row_group_id"], {}).get("bytes", 0.0), 1.0) for b in bboxes]
+    per_group = {group["row_group_id"]: group for group in groups}
+    rows = [
+        max(float(per_group.get(b["row_group_id"], {}).get("num_rows", 0)), 1.0) for b in bboxes
+    ]
+    sizes = [
+        max(float(per_group.get(b["row_group_id"], {}).get("compressed_bytes", 0)), 1.0)
+        for b in bboxes
+    ]
     return {
         "rows": rows,
         "bytes": sizes,
-        "file_bytes": float(sum(group["bytes"] for group in per_group.values())),
+        "file_bytes": float(sum(group["compressed_bytes"] for group in groups)),
     }
 
 
@@ -526,36 +495,35 @@ def check_spatial_order(
 
     raw_url = resolve_file_url(parquet_file, verbose)
 
-    # Try bbox-stats method first (faster)
-    bbox_col_name = check_bbox_structure(parquet_file, verbose).get("bbox_column_name")
-    if bbox_col_name:
-        if verbose:
-            debug(f"Using bbox-stats method (bbox column: {bbox_col_name})")
-        try:
-            return check_spatial_order_bbox_stats(
-                parquet_file, verbose=verbose, return_results=return_results, quiet=quiet
-            )
-        except (ValueError, KeyError, IndexError) as e:
-            # ValueError: Invalid bbox column structure
-            # KeyError: Missing expected bbox fields (xmin, ymin, xmax, ymax)
-            # IndexError: Empty or malformed row group stats
-            if verbose:
-                warn(f"Bbox-stats method failed: {e}, falling back to sampling")
-            # Fall through to try native geo_bbox stats
+    # Row-group statistics first (no data read), from the one reader: native
+    # geo_bbox stats, then the bbox column's chunk statistics.
+    bbox_names: list[str | None] = []
 
-    # Try native geo_bbox stats (GeoParquet 2.0 / parquet-geo-only)
-    geometry_column = find_primary_geometry_column(parquet_file, verbose)
-    native_geo_stats = get_per_row_group_native_geo_stats(parquet_file, geometry_column)
-    if native_geo_stats:
+    def bbox_column():
+        bbox_names.append(check_bbox_structure(parquet_file, verbose).get("bbox_column_name"))
+        return bbox_names[-1]
+
+    row_group_bboxes, source = get_row_group_bbox_stats(
+        parquet_file,
+        native=lambda: get_per_row_group_native_geo_stats(
+            parquet_file, primary_geometry_column(parquet_file, verbose=verbose)
+        ),
+        bbox_column=bbox_column,
+    )
+    if row_group_bboxes:
+        method = "bbox_stats" if source == "bbox_struct" else "native_geo_bbox"
         if verbose:
-            debug(f"Using native geo_bbox stats ({len(native_geo_stats)} row groups)")
+            if source == "bbox_struct":
+                debug(f"Using bbox-stats method (bbox column: {bbox_names[-1]})")
+            else:
+                debug(f"Using native geo_bbox stats ({len(row_group_bboxes)} row groups)")
         try:
             return _check_spatial_order_from_row_group_bboxes(
-                native_geo_stats, parquet_file, verbose, return_results, quiet
+                row_group_bboxes, parquet_file, verbose, return_results, quiet, method=method
             )
         except (ValueError, KeyError, IndexError) as e:
             if verbose:
-                warn(f"Native geo_bbox method failed: {e}, falling back to sampling")
+                warn(f"Row-group stats method failed: {e}, falling back to sampling")
             # Fall through to sampling method
 
     # Fall back to sampling method
@@ -566,24 +534,14 @@ def check_spatial_order(
             "pruning. Add a bbox column with 'gpio add bbox' so the footer-based check can run."
         )
 
-    geometry_column = find_primary_geometry_column(parquet_file, verbose)
-    if verbose:
-        debug(f"Using geometry column: {geometry_column}")
-        debug("Using sampling method")
-
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
-    try:
-        disable_geoparquet_conversion(con)
-        averages = _sample_distances(
-            con, raw_url, geometry_column, limit_rows, random_sample_size, verbose
+    geometry_column = primary_geometry_column(parquet_file, verbose=verbose)
+    if geometry_column is None:
+        # Not a crash: the check could not run, and says why (the owner's words).
+        averages: tuple | str = str(GeometryColumnNotFoundError(parquet_file))
+    else:
+        averages = _sample_file(
+            parquet_file, raw_url, geometry_column, limit_rows, random_sample_size, verbose
         )
-    except duckdb.Error as e:
-        if is_interrupt(e):
-            # The user stopping the run (Ctrl-C), not a verdict on the file.
-            raise
-        averages = f"could not read geometry column {geometry_column!r} ({e})"
-    finally:
-        con.close()
 
     if isinstance(averages, str):
         # A caller asking for results presents the verdict itself.
@@ -602,6 +560,26 @@ def check_spatial_order(
         return _build_results_dict(ratio, consecutive_avg, random_avg)
 
     return ratio
+
+
+def _sample_file(parquet_file, raw_url, geometry_column, limit_rows, random_sample_size, verbose):
+    """:func:`_sample_distances` on its own connection; a read error becomes the reason."""
+    if verbose:
+        debug(f"Using geometry column: {geometry_column}")
+        debug("Using sampling method")
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(parquet_file))
+    try:
+        disable_geoparquet_conversion(con)
+        return _sample_distances(
+            con, raw_url, geometry_column, limit_rows, random_sample_size, verbose
+        )
+    except duckdb.Error as e:
+        if is_interrupt(e):
+            # The user stopping the run (Ctrl-C), not a verdict on the file.
+            raise
+        return f"could not read geometry column {geometry_column!r} ({e})"
+    finally:
+        con.close()
 
 
 def _sample_distances(con, raw_url, geometry_column, limit_rows, random_sample_size, verbose):
@@ -828,8 +806,12 @@ def check_spatial_pushdown_readiness(
             debug(f"Using bbox column: {bbox_col_name}")
         row_group_bboxes = get_per_row_group_bbox_stats(parquet_file, bbox_col_name)
     if not row_group_bboxes:
-        geometry_column = find_primary_geometry_column(parquet_file, verbose)
-        row_group_bboxes = get_per_row_group_native_geo_stats(parquet_file, geometry_column) or []
+        geometry_column = primary_geometry_column(parquet_file, verbose=verbose)
+        row_group_bboxes = (
+            get_per_row_group_native_geo_stats(parquet_file, geometry_column) or []
+            if geometry_column is not None
+            else []
+        )
     row_group_bboxes = _finite_bboxes(row_group_bboxes)
 
     if not row_group_bboxes:
@@ -850,8 +832,9 @@ def check_spatial_pushdown_readiness(
             ],
         }
 
+    num_rgs = get_file_metadata(parquet_file)["num_row_groups"]
     if verbose:
-        debug(f"Found {len(row_group_bboxes)} row groups with bbox stats")
+        debug(f"Found {len(row_group_bboxes)} row groups with bbox stats out of {num_rgs}")
     metrics: dict = {}
     if len(row_group_bboxes) > 1:
         weights = _row_group_weights(parquet_file, row_group_bboxes)
@@ -861,6 +844,10 @@ def check_spatial_pushdown_readiness(
             sizes=weights["bytes"],
             query_fraction=query_fraction,
         )
+        if num_rgs > len(row_group_bboxes):
+            # Missing statistics cannot prove a row group is skippable.
+            scale = len(row_group_bboxes) / num_rgs
+            metrics = {**metrics, "estimated_skip_rate": metrics["estimated_skip_rate"] * scale}
     return pushdown_readiness_from_locality(len(row_group_bboxes), metrics)
 
 
@@ -941,6 +928,19 @@ def pushdown_verdict(pushdown: dict, *, native_geo: bool) -> Verdict:
     return Verdict.WARNING
 
 
+def judged_pushdown(parquet_file: str, verbose: bool = False) -> dict:
+    """:func:`check_spatial_pushdown_readiness` with :func:`pushdown_verdict`'s severity.
+
+    The pushdown block ``gpio check spatial`` judges; raises when it cannot be measured.
+    """
+    from geoparquet_io.core.file_type import detect_geoparquet_file_type
+
+    pushdown = check_spatial_pushdown_readiness(parquet_file, verbose=verbose)
+    file_type = detect_geoparquet_file_type(parquet_file)["file_type"]
+    verdict = pushdown_verdict(pushdown, native_geo=file_type in _NATIVE_GEO_FILE_TYPES)
+    return {**pushdown, SEVERITY_KEY: verdict.label}
+
+
 def with_pushdown(parquet_file: str, spatial: dict, verbose: bool = False) -> dict:
     """``spatial`` (a :func:`check_spatial_order` result) with pushdown readiness folded in.
 
@@ -951,20 +951,16 @@ def with_pushdown(parquet_file: str, spatial: dict, verbose: bool = False) -> di
     pushdown measurement that cannot be taken is left out (``None``) rather
     than guessed.
     """
-    from geoparquet_io.core.file_type import detect_geoparquet_file_type
-
     if is_could_not_run(spatial):
         return spatial
     try:
-        pushdown = check_spatial_pushdown_readiness(parquet_file, verbose=verbose)
-        file_type = detect_geoparquet_file_type(parquet_file)["file_type"]
+        pushdown = judged_pushdown(parquet_file, verbose=verbose)
     except Exception as e:
         if is_interrupt(e):
             raise
         debug(f"Pushdown readiness could not be measured: {e}")
         return {**spatial, "pushdown": None}
-    verdict = pushdown_verdict(pushdown, native_geo=file_type in _NATIVE_GEO_FILE_TYPES)
-    pushdown = {**pushdown, SEVERITY_KEY: verdict.label}
+    verdict = result_verdict(pushdown)
     merged = {**spatial, "pushdown": pushdown}
     if verdict is Verdict.PASS:
         return merged

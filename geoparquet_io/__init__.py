@@ -8,20 +8,9 @@ DuckDB or the AWS stack as side effects. The names themselves are unchanged:
 ``gpio.read(...)`` or ``from geoparquet_io import cli`` import what they need
 on first access, exactly as the old eager ``__init__`` did on every import.
 
-``geoparquet_io.cli`` keeps its historical quirk: accessed as an attribute it
-is the Click *Group*, not the ``geoparquet_io.cli`` package (the eager
-``from geoparquet_io.cli.main import cli`` used to shadow the subpackage the
-same way). A plain PEP 562 ``__getattr__`` cannot keep that promise in every
-import order -- importing any ``geoparquet_io.cli.*`` module makes the import
-machinery bind the subpackage as this module's ``cli`` attribute, and the
-hook never fires for a name that exists -- so ``cli`` is a property on the
-module's own class below, which outranks the instance ``__dict__`` whatever
-was imported first. tests/test_patch_target_shadowing.py guards the
-consequences for ``mock.patch`` targets.
+``geoparquet_io.cli`` is the CLI package. The Click group lives at
+``geoparquet_io.cli.main.cli``; the console entry point uses that module too.
 """
-
-import sys as _sys
-import types as _types
 
 # The one eager import the lazy root keeps: ``geoparquet_io.core`` installs the
 # geoarrow srid-compat shim on import (#1276), and the shim must be in place
@@ -45,9 +34,19 @@ _LAZY_EXPORTS = {
     "read_bigquery": "geoparquet_io.api:read_bigquery",
     "read_partition": "geoparquet_io.api:read_partition",
     "CheckResult": "geoparquet_io.api.check:CheckResult",
+    "check_all": "geoparquet_io.api.check:check_all",
+    "check_bbox": "geoparquet_io.api.check:check_bbox",
+    "check_bloom_filters": "geoparquet_io.api.check:check_bloom_filters",
+    "check_compression": "geoparquet_io.api.check:check_compression",
+    "check_optimization": "geoparquet_io.api.check:check_optimization",
+    "check_row_groups": "geoparquet_io.api.check:check_row_groups",
+    "check_spatial": "geoparquet_io.api.check:check_spatial",
+    "check_spatial_pushdown": "geoparquet_io.api.check:check_spatial_pushdown",
+    "validate": "geoparquet_io.api.check:validate",
     "generate_stac": "geoparquet_io.api.stac:generate_stac",
     "validate_stac": "geoparquet_io.api.stac:validate_stac",
     "GeoParquetError": "geoparquet_io.core.exceptions:GeoParquetError",
+    "WriteOptions": "geoparquet_io.core.parquet_writer:WriteOptions",
 }
 
 __all__ = [
@@ -59,9 +58,19 @@ __all__ = [
     "extract_arcgis",
     "list_layers",
     "Table",
+    "WriteOptions",
     "pipe",
     "ops",
     "CheckResult",
+    "check_all",
+    "check_bbox",
+    "check_bloom_filters",
+    "check_compression",
+    "check_optimization",
+    "check_row_groups",
+    "check_spatial",
+    "check_spatial_pushdown",
+    "validate",
     "generate_stac",
     "validate_stac",
     "GeoParquetError",
@@ -72,10 +81,7 @@ __all__ = [
 def __getattr__(name: str):
     from importlib import import_module
 
-    if name == "api":
-        # import_module sets the attribute on this package itself. ``core`` is
-        # imported eagerly above and ``cli`` is the property below, so this is
-        # the one subpackage reached lazily.
+    if name in {"api", "cli"}:
         return import_module(f"{__name__}.{name}")
     try:
         target = _LAZY_EXPORTS[name]
@@ -89,32 +95,3 @@ def __getattr__(name: str):
 
 def __dir__() -> list[str]:
     return sorted(set(globals()) | set(__all__))
-
-
-class _RootModule(_types.ModuleType):
-    """The package module's own class, so ``cli`` can be a data descriptor.
-
-    A property outranks the instance ``__dict__``, which is what keeps
-    ``geoparquet_io.cli`` the Click Group even after the import machinery has
-    bound the ``cli`` subpackage as an attribute (it does so whenever any
-    ``geoparquet_io.cli.*`` module is imported, in any process, and a module
-    ``__getattr__`` never fires for a name that exists).
-    """
-
-    @property
-    def cli(self):
-        from geoparquet_io.cli.main import cli as click_group
-
-        return click_group
-
-    @cli.setter
-    def cli(self, value) -> None:
-        # The import machinery assigns the ``cli`` subpackage here when a
-        # ``geoparquet_io.cli.*`` module is imported. The property keeps
-        # answering with the Group, so the binding is deliberately dropped;
-        # without a setter the assignment would raise and the import machinery
-        # would downgrade that to an ImportWarning.
-        return
-
-
-_sys.modules[__name__].__class__ = _RootModule

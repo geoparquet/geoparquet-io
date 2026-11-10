@@ -173,6 +173,28 @@ Filter features by a rectangular bounding box. The bbox is specified as `xmin,ym
 !!! note "Remote file support"
     S3, GCS, Azure, and HTTPS URLs are supported via DuckDB's httpfs extension. A URL is used exactly as you paste it — gpio takes it as already percent-encoded and never re-encodes it. See the [Remote Files guide](remote-files.md) for credential configuration.
 
+**Across the antimeridian**: a longitude bbox with `xmin > xmax` wraps the
+antimeridian (RFC 7946 5.2), so `170,-10,-170,10` keeps features on both sides
+of 180°. The same rule applies to `gpio convert --bbox`, `extract bigquery` and
+`extract carto`, and to `bbox=` in Python. `extract arcgis` and `extract wfs`
+cannot send a wrapped bbox to the service and refuse it by name. Run one extract
+on each side of 180° instead. Outside [-180, 180], `xmin > xmax` means the
+corners are swapped, and the bbox is refused.
+
+=== "CLI"
+
+    ```bash
+    gpio extract input.parquet pacific.parquet --bbox 170,-10,-170,10
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    gpio.read('input.parquet').extract(bbox=(170, -10, -170, 10)).write('pacific.parquet')
+    ```
+
 **CRS Awareness**: The tool detects coordinate system mismatches. If your bbox looks like lat/long coordinates but the data uses a projected CRS, you'll get a helpful warning showing the data's actual bounds.
 
 !!! note "Metadata `bbox` and `geometry_types` describe the output"

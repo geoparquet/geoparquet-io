@@ -13,6 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from geoparquet_io.core import index_ops
 from geoparquet_io.core.process.aggregate import grid_common
 from geoparquet_io.core.process.aggregate.by_a5 import A5_SCHEME
 
@@ -31,7 +32,7 @@ def record_extension_load(monkeypatch):
         seen["feature"] = feature
         raise _Loaded
 
-    monkeypatch.setattr(grid_common, "load_community_extension", fake_load)
+    monkeypatch.setattr(index_ops, "load_community_extension", fake_load)
     return seen
 
 

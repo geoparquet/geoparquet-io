@@ -4,10 +4,11 @@ This module contains the business logic for inspecting GeoParquet files,
 including summary, preview (head/tail), statistics, and metadata operations.
 """
 
-from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_metadata import get_compression_stats, get_usable_columns
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, uses_aws_profile
-from geoparquet_io.core.geo_metadata import parse_geo_metadata
+from geoparquet_io.core.duckdb_utils import (
+    get_duckdb_connection,
+    uses_aws_profile,
+)
 from geoparquet_io.core.inspect_utils import (
     extract_file_info,
     extract_geo_info,
@@ -35,20 +36,6 @@ from geoparquet_io.core.remote import (
 )
 
 
-def get_primary_geometry_column(parquet_file: str) -> str | None:
-    """Get primary geometry column for metadata highlighting.
-
-    Args:
-        parquet_file: Path to the parquet file
-
-    Returns:
-        Name of the primary geometry column, or None if not found
-    """
-    metadata, _ = get_parquet_metadata(parquet_file, verbose=False)
-    geo_meta = parse_geo_metadata(metadata, verbose=False)
-    return geo_meta.get("primary_column") if geo_meta else None
-
-
 def _build_columns_info(usable_columns: list[dict], primary_geom_col: str | None) -> list[dict]:
     """Build columns info list with geometry flag.
 
@@ -63,6 +50,8 @@ def _build_columns_info(usable_columns: list[dict], primary_geom_col: str | None
         {
             "name": col["name"],
             "type": col["type"],
+            # Exact: both are resolved names (DuckDB's described spelling, the
+            # geo block's), and a read case twin is renamed (geom, GEOM_1).
             "is_geometry": col["name"] == primary_geom_col,
         }
         for col in usable_columns
@@ -98,8 +87,9 @@ def inspect_summary(
         partition_summary = extract_partition_summary(all_files, verbose=False)
         first_file = partition_info["first_file"]
 
-        # Create shared connection for all metadata operations
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(first_file))
+        # load_spatial=None: metadata-only connection, spatial only where
+        # DuckDB's core lacks GEOMETRY (#1353).
+        con = get_duckdb_connection(load_spatial=None, load_httpfs=needs_httpfs(first_file))
         try:
             geo_info = extract_geo_info(first_file, con=con)
             usable_columns = get_usable_columns(first_file, con=con)
@@ -124,8 +114,9 @@ def inspect_summary(
             "Use --check-all to aggregate all files."
         )
 
-    # Create shared connection for all metadata operations
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_to_inspect))
+    # load_spatial=None: metadata-only connection, spatial only where DuckDB's
+    # core lacks GEOMETRY (#1353).
+    con = get_duckdb_connection(load_spatial=None, load_httpfs=needs_httpfs(file_to_inspect))
     try:
         file_info = extract_file_info(file_to_inspect, con=con)
         geo_info = extract_geo_info(file_to_inspect, con=con)
@@ -218,8 +209,9 @@ def inspect_preview(
         file_to_inspect = partition_info["first_file"]
         partition_notice = f"Previewing first file (of {partition_info['file_count']} total)."
 
-    # Create shared connection for all metadata operations
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_to_inspect))
+    # load_spatial=None: metadata-only connection, spatial only where DuckDB's
+    # core lacks GEOMETRY (#1353).
+    con = get_duckdb_connection(load_spatial=None, load_httpfs=needs_httpfs(file_to_inspect))
     try:
         file_info = extract_file_info(file_to_inspect, con=con)
         geo_info = extract_geo_info(file_to_inspect, con=con)
@@ -321,8 +313,9 @@ def inspect_stats(
             f"Showing stats for first file (of {partition_info['file_count']} total)."
         )
 
-    # Create shared connection for all metadata operations
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(file_to_inspect))
+    # load_spatial=None: metadata-only connection, spatial only where DuckDB's
+    # core lacks GEOMETRY (#1353).
+    con = get_duckdb_connection(load_spatial=None, load_httpfs=needs_httpfs(file_to_inspect))
     try:
         file_info = extract_file_info(file_to_inspect, con=con)
         geo_info = extract_geo_info(file_to_inspect, con=con)
@@ -431,12 +424,8 @@ def display_metadata(
         format_all_metadata(parquet_file, json_output, effective_row_groups)
     elif specific_flags > 1:
         # Multiple specific flags - show each requested section
-        primary_col = get_primary_geometry_column(parquet_file)
-
         if parquet:
-            format_parquet_metadata_enhanced(
-                parquet_file, json_output, effective_row_groups, primary_col
-            )
+            format_parquet_metadata_enhanced(parquet_file, json_output, effective_row_groups)
         if parquet_geo:
             format_parquet_geo_metadata(parquet_file, json_output, effective_row_groups)
         if geoparquet:
@@ -444,10 +433,7 @@ def display_metadata(
     else:
         # Single specific flag
         if parquet:
-            primary_col = get_primary_geometry_column(parquet_file)
-            format_parquet_metadata_enhanced(
-                parquet_file, json_output, effective_row_groups, primary_col
-            )
+            format_parquet_metadata_enhanced(parquet_file, json_output, effective_row_groups)
         elif geoparquet:
             format_geoparquet_metadata(parquet_file, json_output)
         elif parquet_geo:

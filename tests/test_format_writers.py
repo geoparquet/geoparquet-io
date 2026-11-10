@@ -18,6 +18,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
+from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.format_writers import (
     write_csv,
     write_flatgeobuf,
@@ -510,7 +511,8 @@ class TestNoGeometryConversions:
         output_file = tmp_path / "output.json"
 
         # Should raise error about missing geometry
-        with pytest.raises(GeoParquetError, match="(?i)cannot export to geojson.*no geometry"):
+        # The owner's one error (#1367), naming the CSV alternative.
+        with pytest.raises(GeoParquetError, match="(?s)No geometry column found.*GeoJSON.*CSV"):
             write_geojson(
                 input_path=plain_parquet,
                 output_path=str(output_file),
@@ -847,9 +849,11 @@ class TestCRSPreservation:
         con = get_duckdb_connection(load_spatial=True)
         try:
             # Use ST_Read_Meta to get metadata including CRS
-            result = con.execute(f"""
+            result = fetch_one(
+                con.execute(f"""
                 SELECT * FROM ST_Read_Meta('{flatgeobuf_output}')
-            """).fetchone()
+            """)
+            )
 
             assert result is not None, "Should be able to read FlatGeobuf metadata"
             layers = result[3]  # List of layer dicts
@@ -884,9 +888,11 @@ class TestCRSPreservation:
         con = get_duckdb_connection(load_spatial=True)
         try:
             # Use ST_Read_Meta to get metadata including CRS
-            result = con.execute(f"""
+            result = fetch_one(
+                con.execute(f"""
                 SELECT * FROM ST_Read_Meta('{geopackage_output}')
-            """).fetchone()
+            """)
+            )
 
             assert result is not None, "Should be able to read GeoPackage metadata"
             layers = result[3]  # List of layer dicts

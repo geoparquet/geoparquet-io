@@ -31,7 +31,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 from tests.native_geo_probes import (
     conus_wkb,
     geo_block,
@@ -55,6 +55,17 @@ def _one_file(out: Path) -> Path:
     if out.is_dir():
         return sorted(out.rglob("*.parquet"))[0]
     return out
+
+
+def _spec_failures_and_warnings(path) -> tuple[list[str], list[str]]:
+    """``check spec``'s failed and warning messages, from one run of it."""
+    from tests.native_geo_probes import spec_report
+
+    checks = spec_report(path)["checks"]
+    return tuple(
+        [f"{c['name']}: {c['message']}" for c in checks if c["status"] == status]
+        for status in ("failed", "warning")
+    )
 
 
 def _edges_in_geo_block(path, column="geometry"):
@@ -157,11 +168,17 @@ def test_a_native_geography_stays_geography(path_name, native_geography, tmp_pat
 
     assert native_geo_edges(out) == SPHERICAL
     assert _edges_in_geo_block(out) == "spherical"
-    assert spec_problems(out) == []
-    assert spec_problems(out, status="warning") == []
+    assert _spec_failures_and_warnings(out) == ([], [])
 
 
-@pytest.mark.parametrize("path_name", list(WRITE_PATHS), ids=list(WRITE_PATHS))
+#: ``convert geoparquet``, ``sort hilbert`` and ``extract`` (the pipe) retype a
+#: block-declared spherical column at 2.0 in tests/test_edges_owner.py's
+#: cross-path table (``[vincenty-2.0-geographic]``); the paths it does not run
+#: are held to it here.
+DECLARED_AT_2_0_PATHS = ["add-bbox", "add-quadkey", "sort-column", "partition-string"]
+
+
+@pytest.mark.parametrize("path_name", DECLARED_AT_2_0_PATHS, ids=DECLARED_AT_2_0_PATHS)
 def test_declared_spherical_edges_become_a_geography_at_2_0(
     path_name, declared_spherical_wkb, tmp_path
 ):
@@ -172,8 +189,7 @@ def test_declared_spherical_edges_become_a_geography_at_2_0(
 
     assert native_geo_edges(out) == SPHERICAL
     assert _edges_in_geo_block(out) == "spherical"
-    assert spec_problems(out) == []
-    assert spec_problems(out, status="warning") == []
+    assert _spec_failures_and_warnings(out) == ([], [])
 
 
 def test_a_1_1_output_keeps_wkb_with_edges_in_the_block(native_geography, tmp_path):
@@ -209,8 +225,7 @@ def test_only_the_spherical_secondary_becomes_a_geography(
     assert native_geo_edges(out, "geometry") == PLANAR
     assert native_geo_edges(out, "geog") == SPHERICAL
     assert _edges_in_geo_block(out, "geog") == "spherical"
-    assert spec_problems(out) == []
-    assert spec_problems(out, status="warning") == []
+    assert _spec_failures_and_warnings(out) == ([], [])
 
 
 def test_an_ellipsoidal_algorithm_is_kept_verbatim(rows, tmp_path):
@@ -221,7 +236,7 @@ def test_an_ellipsoidal_algorithm_is_kept_verbatim(rows, tmp_path):
     """
     import geoarrow.pyarrow as ga
 
-    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    from geoparquet_io.core.parquet_footer import _patch_footer_file
 
     source = tmp_path / "in.parquet"
     write_native_geo_only(source, rows, {"geometry": (2, ga.wkb())})
@@ -232,7 +247,7 @@ def test_an_ellipsoidal_algorithm_is_kept_verbatim(rows, tmp_path):
             "geometry": {"encoding": "WKB", "geometry_types": ["Polygon"], "edges": "vincenty"}
         },
     }
-    patch_footer_kv(str(source), {"geo": json.dumps(geo)})
+    _patch_footer_file(str(source), {"geo": json.dumps(geo)})
 
     out = _run_path("add-bbox", source, tmp_path / "out.parquet")
 
@@ -336,9 +351,11 @@ def test_duckdb_still_reads_the_output(native_geography, tmp_path):
 
     con = get_duckdb_connection(load_spatial=True)
     try:
-        count, area_ok = con.execute(
-            f"SELECT count(*), bool_and(ST_Area(geometry) > 0) FROM {sql_path(str(out))}"
-        ).fetchone()
+        count, area_ok = fetch_one(
+            con.execute(
+                f"SELECT count(*), bool_and(ST_Area(geometry) > 0) FROM {sql_path(str(out))}"
+            )
+        )
     finally:
         con.close()
     assert (count, area_ok) == (200, True)
@@ -375,7 +392,7 @@ def test_an_unpatchable_footer_falls_back_to_the_block_rewrite(duckdb_v2, monkey
     def refuse(*args, **kwargs):
         raise FooterPatchUnsupported("refused for the test")
 
-    monkeypatch.setattr(write_funnels, "patch_footer", refuse)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", refuse)
     write_funnels.apply_nonplanar_edges({"geometry": "spherical"}, str(duckdb_v2))
 
     assert _edges_in_geo_block(duckdb_v2) == "spherical"
@@ -390,10 +407,10 @@ def test_a_race_propagates_without_a_rewrite(duckdb_v2, monkeypatch):
     def race(*args, **kwargs):
         raise FooterPatchRaced("changed for the test")
 
-    monkeypatch.setattr(write_funnels, "patch_footer", race)
+    monkeypatch.setattr("geoparquet_io.core.parquet_footer._patch_footer_file", race)
     monkeypatch.setattr(
         write_funnels,
-        "_rewrite_file_with_geo_metadata",
+        "rewrite_footer_kv",
         lambda *a, **k: pytest.fail("a raced patch must not fall back to a rewrite"),
     )
     with pytest.raises(FooterPatchRaced):
@@ -403,9 +420,9 @@ def test_a_race_propagates_without_a_rewrite(duckdb_v2, monkeypatch):
 def test_a_geo_key_less_output_is_carried_by_the_logical_type(duckdb_v2, caplog):
     """Parquet-geo-only: the GEOGRAPHY type is the one carrier, and it is enough."""
     from geoparquet_io.core import write_funnels
-    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    from geoparquet_io.core.parquet_footer import _patch_footer_file
 
-    patch_footer_kv(str(duckdb_v2), {"geo": None})
+    _patch_footer_file(str(duckdb_v2), {"geo": None})
     write_funnels.apply_nonplanar_edges({"geometry": "spherical"}, str(duckdb_v2), verbose=True)
 
     assert native_geo_edges(duckdb_v2) == SPHERICAL
@@ -422,11 +439,18 @@ def test_an_output_with_no_carrier_at_all_says_the_edges_are_lost(tmp_path, capl
     assert "Edge interpretation is lost" in caplog.text
 
 
-def test_an_edges_value_parquet_cannot_name_stays_in_the_block_only(duckdb_v2):
-    """A malformed input ``edges`` must not crash the write in the retype."""
+def test_an_edges_value_parquet_cannot_name_is_refused_before_the_retype(duckdb_v2):
+    """A malformed ``edges`` must not crash the write in the retype.
+
+    The edges owner refuses a value outside its vocabulary once, at the version
+    gate, with a parameter error and before the footer is touched (#1367
+    concept 6). No read path hands one over: a carried typo is no declaration
+    (``edges.detect_edges``), so only a direct caller can reach this."""
     from geoparquet_io.core import write_funnels
+    from geoparquet_io.core.exceptions import InvalidParameterError
 
-    write_funnels.apply_nonplanar_edges({"geometry": "geodesic"}, str(duckdb_v2))
+    before = duckdb_v2.read_bytes()
+    with pytest.raises(InvalidParameterError, match="Unknown edges 'geodesic'"):
+        write_funnels.apply_nonplanar_edges({"geometry": "geodesic"}, str(duckdb_v2))
 
-    assert _edges_in_geo_block(duckdb_v2) == "geodesic"
-    assert logical_geo_types(duckdb_v2)["geometry"][0] == "Geometry"
+    assert duckdb_v2.read_bytes() == before

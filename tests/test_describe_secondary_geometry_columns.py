@@ -4,7 +4,7 @@ Two halves of the same blind spot (#1000, #952) — the write path only really
 knew about the PRIMARY geometry column:
 
 * **#1000**: `add *` (and every caller that passes no ``geometry_info``) never
-  told ``build_geo_metadata`` a secondary existed, so a secondary NATIVE
+  told the strategy block builder (now ``compose_geo_block``) a secondary existed, so a secondary NATIVE
   geometry column was left out of ``geo.columns`` entirely — which GeoParquet
   2.0 requires for every geometry column in the file. The funnel now derives
   ``geometry_info`` from the ``input_file`` witness itself
@@ -36,7 +36,7 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import derive_geo_from_file
 from geoparquet_io.core.derive_geo_from_file import derive_secondary_geometry_info
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 from geoparquet_io.core.write_strategies import duckdb_kv
 
 
@@ -50,20 +50,23 @@ def _geo(path) -> dict:
 def _scans(monkeypatch) -> Counter:
     """Count duckdb-kv's stats scans per column."""
     seen: Counter = Counter()
-    real = duckdb_kv.compute_geo_stats_via_sql
 
-    def counting(con, query, column, **kwargs):
-        seen[column] += 1
-        return real(con, query, column, **kwargs)
+    def counting(real):
+        def wrapped(source, column, **kwargs):
+            seen[column] += 1
+            return real(source, column, **kwargs)
 
-    monkeypatch.setattr(duckdb_kv, "compute_geo_stats_via_sql", counting)
+        return wrapped
+
+    for name in ("geometry_stats_of", "geometry_types_of"):
+        monkeypatch.setattr(duckdb_kv, name, counting(getattr(duckdb_kv, name)))
     return seen
 
 
 def _duckdb_rows(path) -> int:
     con = get_duckdb_connection(load_spatial=True)
     try:
-        return con.execute(f"SELECT count(*) FROM read_parquet({sql_path(str(path))})").fetchone()[
+        return fetch_one(con.execute(f"SELECT count(*) FROM read_parquet({sql_path(str(path))})"))[
             0
         ]
     finally:
@@ -89,9 +92,9 @@ def _write_two_geometry_file(path, rows: bool = True, geometry_types=None) -> No
     con.execute("INSTALL spatial; LOAD spatial;")
     points, polys = [], []
     for x, y in [(0, 0), (1, 1), (2, 2)]:
-        points.append(con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))").fetchone()[0])
+        points.append(fetch_one(con.execute(f"SELECT ST_AsWKB(ST_Point({x}, {y}))"))[0])
         wkt = f"POLYGON(({x - 0.5} {y - 0.5}, {x + 0.5} {y - 0.5}, {x + 0.5} {y + 0.5}, {x - 0.5} {y + 0.5}, {x - 0.5} {y - 0.5}))"
-        polys.append(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))").fetchone()[0])
+        polys.append(fetch_one(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{wkt}'))"))[0])
     con.close()
 
     if not rows:

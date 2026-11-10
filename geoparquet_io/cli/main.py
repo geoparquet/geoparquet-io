@@ -1,67 +1,86 @@
 import atexit
 import os
 import sys
+from importlib import import_module
 from importlib.metadata import entry_points
 from typing import NoReturn
 
 import click
 from click_plugins import with_plugins
 
-from geoparquet_io.cli.commands.add import add
-from geoparquet_io.cli.commands.benchmark import benchmark
-from geoparquet_io.cli.commands.check import check
-from geoparquet_io.cli.commands.convert import convert
-from geoparquet_io.cli.commands.extract import extract
-from geoparquet_io.cli.commands.inspect import inspect
-from geoparquet_io.cli.commands.partition import partition
-from geoparquet_io.cli.commands.pmtiles import pmtiles
-from geoparquet_io.cli.commands.process import process
-from geoparquet_io.cli.commands.publish import publish
-from geoparquet_io.cli.commands.sort import sort
 from geoparquet_io.cli.decorators import (
     ErrorBoundaryGroup,
-    GlobAwareCommand,
-    handle_geoparquet_errors,
 )
+from geoparquet_io.cli.exception_handler import click_error_for
 from geoparquet_io.core.logging_config import setup_cli_logging
 
+_GROUP_HELP = {
+    "add": "Commands for enhancing GeoParquet files in various ways.",
+    "benchmark": "Benchmark GeoParquet performance.",
+    "check": "Check GeoParquet files for best practices.",
+    "convert": "Convert between formats and coordinate systems.",
+    "extract": "Extract data from files and services to GeoParquet.",
+    "inspect": "Inspect GeoParquet files and show metadata, previews, or statistics.",
+    "partition": "Commands for partitioning GeoParquet files.",
+    "pmtiles": "PMTiles generation commands.",
+    "process": "Transform or reduce GeoParquet data (aggregate, overview, ...).",
+    "publish": "Commands for publishing GeoParquet data (STAC metadata, cloud uploads).",
+    "sort": "Commands for sorting GeoParquet files.",
+}
 
-class OptionalIntCommand(GlobAwareCommand):
-    """Custom Command that supports options with optional integer values.
 
-    Inherits from GlobAwareCommand to also detect shell-expanded glob patterns
-    and provide helpful error messages.
+def __getattr__(name):
+    if name in _GROUP_HELP:
+        return cli.commands[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-    Options listed in optional_int_options can be used as flags (defaulting to 10)
-    or with an explicit integer value. For example:
-        --head           -> uses default value of 10
-        --head 5         -> uses value 5
-        (no --head)      -> uses None
-    """
 
-    # Options that support optional integer values and their defaults
-    optional_int_options = {"--head": 10, "--tail": 10}
+class _LazyCommands(dict):
+    """Keep Click's command mapping introspectable while deferring imports."""
 
-    def make_context(self, info_name, args, parent=None, **extra):
-        """Preprocess args to insert default values for optional int options."""
-        args = list(args)  # Make a mutable copy
-        for opt, default_val in self.optional_int_options.items():
-            if opt in args:
-                idx = args.index(opt)
-                # Check if next arg exists and looks like an integer
-                if idx + 1 < len(args):
-                    next_arg = args[idx + 1]
-                    # If next arg starts with - (another option) or doesn't look like int
-                    if next_arg.startswith("-") or not next_arg.lstrip("-").isdigit():
-                        args.insert(idx + 1, str(default_val))
-                else:
-                    # Option at end of args
-                    args.insert(idx + 1, str(default_val))
-        return super().make_context(info_name, args, parent=parent, **extra)
+    def __getitem__(self, name):
+        command = super().__getitem__(name)
+        if command is None:
+            module = import_module(f"geoparquet_io.cli.commands.{name}")
+            command = self[name] = getattr(module, name)
+        return command
+
+    def get(self, name, default=None):
+        return self[name] if name in self else default
+
+    def items(self):
+        return ((name, self[name]) for name in self)
+
+    def values(self):
+        return (self[name] for name in self)
+
+
+class LazyGroup(ErrorBoundaryGroup):
+    """Load selected groups only; root help uses their first help paragraph."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.commands = _LazyCommands({**dict.fromkeys(_GROUP_HELP), **self.commands})
+
+    def format_commands(self, ctx, formatter):
+        # Click's implementation calls get_command for every row, loading all groups.
+        commands = []
+        for name in self.list_commands(ctx):
+            assert isinstance(self.commands, _LazyCommands)
+            command = dict.get(self.commands, name)
+            if command is None:
+                command = click.Command(name, help=_GROUP_HELP[name])
+            if not command.hidden:
+                commands.append((name, command))
+        if commands:
+            limit = formatter.width - 6 - max(len(name) for name, _ in commands)
+            rows = [(name, command.get_short_help_str(limit)) for name, command in commands]
+            with formatter.section("Commands"):
+                formatter.write_dl(rows)
 
 
 @with_plugins(entry_points(group="gpio.plugins"))
-@click.group(cls=ErrorBoundaryGroup)
+@click.group(cls=LazyGroup)
 @click.version_option(prog_name="geoparquet-io")
 @click.option("--timestamps", is_flag=True, help="Show timestamps in output messages")
 @click.option(
@@ -106,32 +125,8 @@ def cli(ctx, timestamps, s3_endpoint, s3_region, s3_no_ssl, aws_profile):
     setup_cli_logging(verbose=False, show_timestamps=timestamps)
 
 
-# ---------------------------------------------------------------------------
-# Command groups extracted into geoparquet_io/cli/commands/
-#
-# Each of those modules declares a standalone `@click.group()` and is attached
-# here, explicitly, one line per group. Registration is deliberately not done by
-# the group module itself (no `@cli.group()` there, no import-time
-# self-registration): that would need `cli.main`, and `cli.main` imports the
-# group -- a cycle. Keeping it here also means `grep add_command` lists the
-# whole tree.
-# ---------------------------------------------------------------------------
-cli.add_command(add)
-cli.add_command(benchmark)
-cli.add_command(check)
-cli.add_command(convert)
-cli.add_command(extract)
-cli.add_command(inspect)
-cli.add_command(partition)
-cli.add_command(pmtiles)
-cli.add_command(process)
-cli.add_command(publish)
-cli.add_command(sort)
-
-
 # Skills command (for LLM integration)
 @cli.command()
-@handle_geoparquet_errors
 @click.option("--show", is_flag=True, help="Print skill content to stdout")
 @click.option("--copy", "copy_to", type=click.Path(), help="Copy skill to directory")
 @click.option("--name", default="geoparquet", help="Skill name (default: geoparquet)")
@@ -186,7 +181,7 @@ def skills(show: bool, copy_to: str | None, name: str):
             click.echo("  gpio skills --show       # Print to stdout")
             click.echo("  gpio skills --copy .     # Copy to current directory")
     except FileNotFoundError as e:
-        raise click.ClickException(str(e)) from e
+        raise click_error_for(e) from e
 
 
 def _process_status(code: object) -> int:

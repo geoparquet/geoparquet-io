@@ -102,7 +102,7 @@ gpio benchmark explain INPUT_FILE [OPTIONS]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--query, -q` | `SELECT *` | Custom SQL query (use `{file}` as placeholder) |
+| `--query, -q` | `SELECT *` | Custom SQL query. `{file}` is replaced by the file path as a quoted SQL string literal, as in `read_parquet({file})` (`'{file}'` means the same) |
 | `--format` | table | Output format: `table` or `json` |
 | `--output, -o` | - | Save results to JSON file |
 
@@ -116,7 +116,7 @@ gpio benchmark explain input.parquet
 gpio benchmark explain input.parquet --format json
 
 # Custom query with filter (to test pushdown)
-gpio benchmark explain input.parquet --query "SELECT * FROM read_parquet('{file}') WHERE id > 10"
+gpio benchmark explain input.parquet --query "SELECT * FROM read_parquet({file}) WHERE id > 10"
 
 # Save to file
 gpio benchmark explain input.parquet --output plan.json

@@ -12,6 +12,8 @@ Fixtures used in this module:
 
 from unittest.mock import patch
 
+import pyarrow.parquet as pq
+
 
 class TestGetBloomFilterInfo:
     """Tests for get_bloom_filter_info in duckdb_metadata.py."""
@@ -21,7 +23,9 @@ class TestGetBloomFilterInfo:
         from geoparquet_io.core.duckdb_metadata import get_bloom_filter_info
 
         result = get_bloom_filter_info(places_test_file)
-        assert isinstance(result, list)
+        schema = pq.ParquetFile(places_test_file).schema
+        expected = {schema.column(i).path.replace(".", ", ") for i in range(len(schema))}
+        assert {entry["column_name"] for entry in result} == expected
 
     def test_no_bloom_filters_in_places(self, places_test_file):
         """Test that places file (standard test file) has no bloom filters."""
@@ -64,14 +68,6 @@ class TestGetBloomFilterInfo:
         result = get_bloom_filter_info(buildings_test_file)
         assert isinstance(result, list)
         assert len(result) > 0
-
-    def test_sorted_by_bloom_filter_presence(self, places_test_file):
-        """Test that results are sorted with bloom-filtered columns first."""
-        from geoparquet_io.core.duckdb_metadata import get_bloom_filter_info
-
-        result = get_bloom_filter_info(places_test_file)
-        # All have zero bloom filters, so ordering is by column name presence
-        assert isinstance(result, list)
 
 
 class TestGetBloomFilterInfoWithMockedData:

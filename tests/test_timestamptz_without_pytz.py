@@ -7,7 +7,7 @@ value imports ``pytz``. gpio does not depend on pytz, so these tests hide it
 
 import json
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import duckdb
 import pytest
@@ -15,7 +15,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core import inspect_utils
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 from geoparquet_io.core.inspect import inspect_stats
 from geoparquet_io.core.inspect_utils import (
     _create_stats_table,
@@ -24,8 +24,8 @@ from geoparquet_io.core.inspect_utils import (
 )
 
 # Noon UTC keeps the calendar date stable in any session time zone within +-12h.
-TZ_MIN = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
-TZ_MAX = datetime(2024, 6, 30, 12, 30, tzinfo=timezone.utc)
+TZ_MIN = datetime(2024, 1, 1, 12, 0, tzinfo=UTC)
+TZ_MAX = datetime(2024, 6, 30, 12, 30, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)
@@ -258,10 +258,8 @@ def test_partition_string_preview_timestamptz_without_pytz(temporal_file):
 
 
 def test_aggregate_breakdown_values_timestamptz_without_pytz(temporal_file):
-    from geoparquet_io.core.process.aggregate.common import (
-        resolve_breakdown_values,
-        sql_literal,
-    )
+    from geoparquet_io.core.duckdb_utils import sql_literal
+    from geoparquet_io.core.process.aggregate.common import resolve_breakdown_values
 
     con = get_duckdb_connection(load_spatial=True)
     try:
@@ -270,9 +268,9 @@ def test_aggregate_breakdown_values_timestamptz_without_pytz(temporal_file):
         assert set(top) == {TZ_MIN, TZ_MAX}
         assert has_other is True  # the NULL row is the third value
         # The kept values must still select their own rows when spelled as literals.
-        (matched,) = con.execute(
-            f"SELECT COUNT(*) FROM ({source}) WHERE ts_tz = {sql_literal(top[0])}"
-        ).fetchone()
+        (matched,) = fetch_one(
+            con.execute(f"SELECT COUNT(*) FROM ({source}) WHERE ts_tz = {sql_literal(top[0])}")
+        )
         assert matched == 1
     finally:
         con.close()
@@ -280,9 +278,8 @@ def test_aggregate_breakdown_values_timestamptz_without_pytz(temporal_file):
 
 def test_api_table_stats_falls_back_per_column_when_batch_fails(monkeypatch, temporal_file):
     import geoparquet_io as gpio
-    from geoparquet_io.core import duckdb_utils
 
-    real_fetch_row = duckdb_utils.fetch_row
+    real_fetch_row = inspect_utils.fetch_row
     calls = []
 
     def fail_batched_once(con, query, params=None, **kwargs):
@@ -291,11 +288,12 @@ def test_api_table_stats_falls_back_per_column_when_batch_fails(monkeypatch, tem
             raise duckdb.BinderException("simulated batched failure")
         return real_fetch_row(con, query, params, **kwargs)
 
-    monkeypatch.setattr(duckdb_utils, "fetch_row", fail_batched_once)
+    monkeypatch.setattr(inspect_utils, "fetch_row", fail_batched_once)
 
-    stats = gpio.read(temporal_file).stats()
+    table = gpio.read(temporal_file)
+    stats = table.stats()
 
-    assert len(calls) == 1  # per-column fallback goes through inspect_utils
+    assert len(calls) == 1 + len(table.column_names)  # the batch, then one query per column
     assert stats["ts_tz"]["min"] == TZ_MIN
     assert stats["ts_tz"]["nulls"] == 1
     assert stats["d"]["max"] == date(2024, 6, 30)
@@ -304,7 +302,6 @@ def test_api_table_stats_falls_back_per_column_when_batch_fails(monkeypatch, tem
 @pytest.mark.parametrize("make_interrupt", INTERRUPTS, ids=INTERRUPT_IDS)
 def test_api_table_stats_interrupt_is_not_swallowed(monkeypatch, temporal_file, make_interrupt):
     import geoparquet_io as gpio
-    from geoparquet_io.core import duckdb_utils
 
     interrupt = make_interrupt()
 
@@ -312,7 +309,7 @@ def test_api_table_stats_interrupt_is_not_swallowed(monkeypatch, temporal_file, 
         raise interrupt
 
     table = gpio.read(temporal_file)
-    monkeypatch.setattr(duckdb_utils, "fetch_row", interrupted)
+    monkeypatch.setattr(inspect_utils, "fetch_row", interrupted)
 
     with pytest.raises(type(interrupt)):
         table.stats()
@@ -426,10 +423,8 @@ def test_aggregate_breakdown_out_of_range_temporal_values(edge_file):
 @pytest.mark.parametrize("column", ["tstz_bc", "tstz_far"])
 def test_breakdown_out_of_range_timestamptz_counts_its_rows_in_any_zone(edge_file, zone, column):
     """The breakdown spells each kept value back as a SQL literal, read in the session zone."""
-    from geoparquet_io.core.process.aggregate.common import (
-        resolve_breakdown_values,
-        sql_literal,
-    )
+    from geoparquet_io.core.duckdb_utils import sql_literal
+    from geoparquet_io.core.process.aggregate.common import resolve_breakdown_values
 
     con = get_duckdb_connection(load_spatial=True)
     try:
@@ -437,9 +432,11 @@ def test_breakdown_out_of_range_timestamptz_counts_its_rows_in_any_zone(edge_fil
         source = f"SELECT * FROM {sql_path(edge_file)}"
         top, _ = resolve_breakdown_values(con, source, column, limit=2)
         (out_of_range,) = [value for value in top if isinstance(value, str)]
-        (matched,) = con.execute(
-            f"SELECT COUNT(*) FROM ({source}) WHERE {column} = {sql_literal(out_of_range)}"
-        ).fetchone()
+        (matched,) = fetch_one(
+            con.execute(
+                f"SELECT COUNT(*) FROM ({source}) WHERE {column} = {sql_literal(out_of_range)}"
+            )
+        )
         assert matched == 1
     finally:
         con.close()

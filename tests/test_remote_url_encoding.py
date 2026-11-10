@@ -26,10 +26,11 @@ from pathlib import Path
 
 import pytest
 
-from geoparquet_io.core.file_utils import resolve_file_url, safe_file_url
+from geoparquet_io.core.duckdb_utils import sql_path
+from geoparquet_io.core.file_utils import resolve_file_url
 
 # =============================================================================
-# resolve_file_url() / safe_file_url(): an http(s) URL is passed through
+# resolve_file_url(): an http(s) URL is passed through
 # =============================================================================
 
 
@@ -97,26 +98,26 @@ class TestHttpUrlIsTakenAsEncoded:
             assert resolve_file_url(url) == url
 
 
-class TestSafeFileUrlTransformsOnce:
-    """``safe_file_url`` adds SQL escaping and nothing else."""
+class TestSqlPathTransformsOnce:
+    """``sql_path`` of a resolved URL adds SQL quoting and nothing else."""
 
     def test_percent_encoded_url_is_neither_re_encoded_nor_escaped(self):
         url = "https://example.com/my%20file.parquet"
-        assert safe_file_url(url) == url
+        assert sql_path(resolve_file_url(url)) == f"'{url}'"
 
     def test_literal_percent_20_in_a_filename_survives(self):
         url = "https://example.com/my%2520file.parquet"
-        assert safe_file_url(url) == url
+        assert sql_path(resolve_file_url(url)) == f"'{url}'"
 
     def test_raw_space_is_now_passed_through_unencoded_breaking_change(self):
-        """BREAKING (#825): the SQL-facing wrapper does not encode either."""
+        """BREAKING (#825): the SQL boundary does not encode either."""
         url = "https://example.com/my file.parquet"
-        assert safe_file_url(url) == url
+        assert sql_path(resolve_file_url(url)) == f"'{url}'"
 
     def test_only_the_sql_quote_is_transformed(self):
-        """The one transform ``safe_file_url`` still applies is SQL escaping."""
+        """The one transform at the SQL boundary is the quote escape."""
         url = "https://example.com/o'brien%20data.parquet"
-        assert safe_file_url(url) == "https://example.com/o''brien%20data.parquet"
+        assert sql_path(resolve_file_url(url)) == "'https://example.com/o''brien%20data.parquet'"
 
 
 # =============================================================================

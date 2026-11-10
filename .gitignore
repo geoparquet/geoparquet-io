@@ -197,12 +197,6 @@ cython_debug/
 .agent/
 .grepai/
 
-# Menard cache files
-.menard/embeddings_*.json
-.menard/embeddings_*.state
-.menard/import_graph.json
-.menard/import_graph.state
-.menard/symbols_cache.json
 .claude/worktrees/
 .serena/
 
@@ -211,6 +205,3 @@ cython_debug/
 
 # Internal agentic dev planning artifacts
 docs/superpowers/
-
-# mutmut mutation-testing working tree
-mutants/

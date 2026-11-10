@@ -11,6 +11,7 @@ import pytest
 
 from geoparquet_io.core.duckdb_metadata import get_schema_info
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from geoparquet_io.core.validate import (
     CheckStatus,
     _check_geometry_types_list,
@@ -47,12 +48,16 @@ def _col(*types):
 class TestGeometryTypesUnique:
     @pytest.mark.parametrize("types", [["Point", "Point"], ["Polygon Z", "Polygon Z", "Polygon"]])
     def test_duplicates_fail(self, types):
-        check = _check_geometry_types_list({"geometry_types": types}, "geometry")
+        check = _check_geometry_types_list(
+            parse_column_meta("geometry", {"geometry_types": types}), "geometry"
+        )
         assert check.status == CheckStatus.FAILED
         assert "duplicate" in check.message
 
     def test_distinct_pass(self):
-        check = _check_geometry_types_list({"geometry_types": ["Polygon", "Polygon Z"]}, "geometry")
+        check = _check_geometry_types_list(
+            parse_column_meta("geometry", {"geometry_types": ["Polygon", "Polygon Z"]}), "geometry"
+        )
         assert check.status == CheckStatus.PASSED
 
 
@@ -135,11 +140,23 @@ class TestGeometryTypesMatchStats:
 
 
 class TestGeometryTypesMatchStatsEdges:
-    def test_wkb_integer_codes_are_mapped(self):
-        from geoparquet_io.core.validate import _stats_geometry_type_name
+    def test_the_stats_types_are_folded_by_the_owner(self, monkeypatch):
+        # Codes, DuckDB strings and unmapped values read through the one fold:
+        # 1001 and "multipolygon_zm" are named, 0 and "triangle" are dropped.
+        import geoparquet_io.core.duckdb_metadata as dm
+        import geoparquet_io.core.validate as v
 
-        assert _stats_geometry_type_name(1001) == "Point Z"
-        assert _stats_geometry_type_name("multipolygon_zm") == "MultiPolygon ZM"
+        chunks = [
+            {"geometry_types": [1001, 0]},
+            {"geometry_types": ["multipolygon_zm", "triangle"]},
+        ]
+        monkeypatch.setattr(dm, "get_native_geo_stats_by_row_group", lambda *a, **k: chunks)
+        monkeypatch.setattr(v, "is_remote_url", lambda *_: False)
+        check = _check_geometry_types_match_stats("f.parquet", "geometry", ["Point Z"])
+        assert check.status == CheckStatus.FAILED
+        assert "MultiPolygon ZM" in check.message
+        assert "triangle" not in check.message and "Unknown" not in check.message
+        assert not hasattr(v, "_stats_geometry_type_name")
 
     def test_remote_file_is_skipped(self):
         check = _check_geometry_types_match_stats("s3://bucket/file.parquet", "geometry", ["Point"])

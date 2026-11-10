@@ -13,6 +13,7 @@ import pytest
 from geoparquet_io.core.crs_utils import merge_longitude_ranges
 from geoparquet_io.core.duckdb_metadata import aggregate_native_geo_stats
 from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.geo_metadata import parse_column_meta
 from geoparquet_io.core.inspect_utils import (
     extract_partition_summary,
     format_partition_markdown_output,
@@ -45,7 +46,16 @@ def _declared_bbox(path):
 
 
 def _rewrite_geo(path, out_path, *, version=None, **column_updates):
-    """Copy a GeoParquet file with its geo metadata version/column fields edited."""
+    """Copy a GeoParquet file with its geo metadata version/column fields edited.
+
+    The geometry column keeps its Parquet Geometry logical type whatever else the
+    process has imported: pyarrow only reads it back as the ``geoarrow.wkb``
+    extension (and so only writes it out again) once that extension is
+    registered, which ``geoarrow.pyarrow`` does on import. Without this the file
+    came out as plain BLOB or as GEOMETRY depending on test order (HANDOFFS 52).
+    """
+    import geoarrow.pyarrow  # noqa: F401  -- registers geoarrow.wkb
+
     table = pq.read_table(path)
     meta = dict(table.schema.metadata or {})
     geo = json.loads(meta[b"geo"])
@@ -107,24 +117,36 @@ def con():
 class TestBboxValid:
     @pytest.mark.parametrize("n", [4, 6])
     def test_accepts_spec_lengths(self, n):
-        check = _check_bbox_valid({"bbox": [float(i) for i in range(n)]}, "geometry")
+        check = _check_bbox_valid(
+            parse_column_meta("geometry", {"bbox": [float(i) for i in range(n)]}), "geometry"
+        )
         assert check.status == CheckStatus.PASSED, check.message
 
     def test_accepts_xyzm_bbox_on_2_0(self):
-        check = _check_bbox_valid({"bbox": [float(i) for i in range(8)]}, "geometry", "2.0.0")
+        check = _check_bbox_valid(
+            parse_column_meta("geometry", {"bbox": [float(i) for i in range(8)]}),
+            "geometry",
+            "2.0.0",
+        )
         assert check.status == CheckStatus.PASSED, check.message
 
     @pytest.mark.parametrize("version", ["1.0.0", "1.1.0"])
     def test_rejects_xyzm_bbox_below_2_0(self, version):
         # The XYZM bbox is spec text only on the 2.0 line; the released 1.1.0
         # schema allows only 4 or 6 elements.
-        check = _check_bbox_valid({"bbox": [float(i) for i in range(8)]}, "geometry", version)
+        check = _check_bbox_valid(
+            parse_column_meta("geometry", {"bbox": [float(i) for i in range(8)]}),
+            "geometry",
+            version,
+        )
         assert check.status == CheckStatus.FAILED
         assert "2.0" in check.message
 
     @pytest.mark.parametrize("n", [1, 2, 3, 5, 7, 9])
     def test_rejects_other_lengths(self, n):
-        check = _check_bbox_valid({"bbox": [float(i) for i in range(n)]}, "geometry")
+        check = _check_bbox_valid(
+            parse_column_meta("geometry", {"bbox": [float(i) for i in range(n)]}), "geometry"
+        )
         assert check.status == CheckStatus.FAILED
         assert "4, 6 or 8" in check.message
 
@@ -302,31 +324,27 @@ class TestNativeGeoStatsWrap:
 
     def test_aggregate_keeps_a_wrapping_extent(self):
         stats = aggregate_native_geo_stats(
-            [_chunk(175.0, 0.0, -175.0, 5.0), _chunk(178.0, 1.0, 179.0, 2.0)]
+            [_chunk(175.0, 0.0, -175.0, 5.0), _chunk(178.0, 1.0, 179.0, 2.0)],
+            geographic=True,
         )
         assert stats["bbox"] == [175.0, 0.0, -175.0, 5.0]
 
     def test_aggregate_without_wrap_is_unchanged(self):
         stats = aggregate_native_geo_stats(
-            [_chunk(0.0, 0.0, 10.0, 5.0), _chunk(-5.0, 1.0, 4.0, 20.0)]
+            [_chunk(0.0, 0.0, 10.0, 5.0), _chunk(-5.0, 1.0, 4.0, 20.0)],
+            geographic=True,
         )
         assert stats["bbox"] == [-5.0, 0.0, 10.0, 20.0]
 
     def test_check_accepts_data_inside_a_wrapping_stat(self, antimeridian_file, con, monkeypatch):
-        monkeypatch.setattr(
-            "geoparquet_io.core.duckdb_metadata.get_aggregated_native_geo_stats",
-            lambda *a, **k: {"bbox": [170.0, -10.0, -170.0, 10.0]},
-        )
+        _stats(monkeypatch, [170.0, -10.0, -170.0, 10.0])
         check = _check_native_geo_stats_contains_data(str(antimeridian_file), "geometry", con, 0)
         assert check.status == CheckStatus.PASSED, check.message
         assert "antimeridian" in check.message
 
     def test_check_still_fails_geometry_in_the_wrap_gap(self, tmp_path, con, monkeypatch):
         path = _write_v2(tmp_path / "gap_stats.parquet", ["POINT (175 0)", "POINT (0 0)"])
-        monkeypatch.setattr(
-            "geoparquet_io.core.duckdb_metadata.get_aggregated_native_geo_stats",
-            lambda *a, **k: {"bbox": [170.0, -10.0, -170.0, 10.0]},
-        )
+        _stats(monkeypatch, [170.0, -10.0, -170.0, 10.0])
         check = _check_native_geo_stats_contains_data(str(path), "geometry", con, 0)
         assert check.status == CheckStatus.FAILED
         assert "1 of 2" in check.message
@@ -353,16 +371,22 @@ class TestPartitionSummaryBbox:
         assert summary["combined_bbox"] == [170.0, -10.0, -170.0, 10.0]
 
     def test_short_bbox_is_ignored(self, tmp_path, xyz_file):
+        """The malformed declared bbox is dropped; the native statistics answer.
+
+        With the Geometry logical type kept, the file's geospatial statistics
+        carry the true extent. Their 6-element form puts Z after XY, so reading
+        it as GeoParquet's interleaved bbox gave ``[0, 0, 12, 5]`` (zmin as ymax).
+        """
         broken = _rewrite_geo(xyz_file, tmp_path / "broken.parquet", bbox=[0.0, 0.0, 1.0])
         summary = extract_partition_summary([str(broken)])
-        assert summary["combined_bbox"] is None
+        assert summary["combined_bbox"] == [0.0, 0.0, 12.0, 12.0]
 
 
 def _stats(monkeypatch, bbox):
-    """Force the aggregated native geospatial statistics to ``bbox``."""
+    """Force the native geospatial statistics to one row group spanning ``bbox``."""
     monkeypatch.setattr(
-        "geoparquet_io.core.duckdb_metadata.get_aggregated_native_geo_stats",
-        lambda *a, **k: {"bbox": bbox},
+        "geoparquet_io.core.duckdb_metadata.get_native_geo_stats_by_row_group",
+        lambda *a, **k: [_chunk(*bbox)],
     )
 
 
@@ -408,6 +432,27 @@ class TestNativeGeoStatsWrapNeedsGeographicCrs:
             stats_check.message,
             bbox_check.message,
         )
+
+    def test_an_inverted_row_group_is_named_though_the_fold_hides_it(
+        self, antimeridian_file, con, monkeypatch
+    ):
+        # Projected coordinates fold plainly, so one inverted chunk beside a wider
+        # sane one no longer shows as xmin > xmax in the file's extent. Each
+        # chunk's well-formedness is validate's question, asked per row group.
+        chunks = [
+            dict(_chunk(-180.0, -10.0, 180.0, 10.0), row_group_id=0),
+            dict(_chunk(170.0, -5.0, -170.0, 5.0), row_group_id=1),
+        ]
+        monkeypatch.setattr(
+            "geoparquet_io.core.duckdb_metadata.get_native_geo_stats_by_row_group",
+            lambda *a, **k: chunks,
+        )
+        check = _check_native_geo_stats_contains_data(
+            str(antimeridian_file), "geometry", con, 0, crs=UTM_33N
+        )
+        assert check.status == CheckStatus.FAILED, check.message
+        assert "projected" in check.message.lower()
+        assert "row group 1" in check.message
 
     def _stats_check(self, path):
         result = validate_geoparquet(str(path))
@@ -528,6 +573,21 @@ class TestWrapIsVisibleWhereTheValuesArePrinted:
         check = _check_native_geo_statistics(str(antimeridian_file), "geometry")
         assert check.status == CheckStatus.PASSED, check.message
         assert "antimeridian" in check.message
+
+    def test_native_geo_statistics_wrap_note_needs_a_geographic_crs(
+        self, antimeridian_file, tmp_path, monkeypatch
+    ):
+        """The note asks BBox.crosses_antimeridian with the column's CRS: an
+        inverted aggregate on a projected file is not a wrap, so no note."""
+        monkeypatch.setattr(
+            "geoparquet_io.core.duckdb_metadata.get_native_geo_stats_by_row_group",
+            lambda *a, **k: [_chunk(175.0, 0.0, -175.0, 5.0)],
+        )
+        projected = _rewrite_geo(antimeridian_file, tmp_path / "utm.parquet", crs=UTM_33N)
+        check = _check_native_geo_statistics(str(projected), "geometry")
+        assert "antimeridian" not in check.message
+        geographic = _check_native_geo_statistics(str(antimeridian_file), "geometry")
+        assert "antimeridian" in geographic.message
 
     def test_native_geo_statistics_message_is_unannotated_without_a_wrap(self, antimeridian_file):
         check = _check_native_geo_statistics(str(antimeridian_file), "geometry")

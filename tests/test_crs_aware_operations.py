@@ -29,9 +29,9 @@ from geoparquet_io.core.add.quadkey import add_quadkey_column, add_quadkey_table
 from geoparquet_io.core.add.s2 import add_s2_column, add_s2_table
 from geoparquet_io.core.common import add_bbox
 from geoparquet_io.core.crs_utils import (
-    crs_transform_sql_expr,
-    extract_crs_from_table,
-    parse_crs_string_to_projjson,
+    crs_of,
+    projjson_for_label,
+    transform_geom_sql,
 )
 from geoparquet_io.core.duckdb_utils import build_spatial_join_condition
 from geoparquet_io.core.reproject import reproject
@@ -58,31 +58,31 @@ def _agreement(a: list, b: list) -> float:
 
 
 class TestCrsTransformSqlExpr:
-    """Unit tests for the shared ``crs_transform_sql_expr`` helper."""
+    """Unit tests for the shared ``transform_geom_sql`` helper."""
 
     def test_none_crs_is_untransformed(self):
-        assert crs_transform_sql_expr('"geometry"', None) == '"geometry"'
+        assert transform_geom_sql('"geometry"', None) == '"geometry"'
 
     def test_default_crs_is_untransformed(self):
         # EPSG:4326 / OGC:CRS84 are the target — never transformed.
-        assert crs_transform_sql_expr('"g"', "EPSG:4326") == '"g"'
-        assert crs_transform_sql_expr('"g"', "OGC:CRS84") == '"g"'
-        assert crs_transform_sql_expr('"g"', {"id": {"authority": "EPSG", "code": 4326}}) == '"g"'
+        assert transform_geom_sql('"g"', "EPSG:4326") == '"g"'
+        assert transform_geom_sql('"g"', "OGC:CRS84") == '"g"'
+        assert transform_geom_sql('"g"', {"id": {"authority": "EPSG", "code": 4326}}) == '"g"'
 
     def test_projected_crs_wraps_in_transform(self):
-        expr = crs_transform_sql_expr('ST_Centroid("g")', "EPSG:5070")
+        expr = transform_geom_sql('ST_Centroid("g")', "EPSG:5070")
         assert expr == "ST_Transform(ST_Centroid(\"g\"), 'EPSG:5070', 'OGC:CRS84')"
 
     def test_projjson_dict_is_resolved(self):
-        crs = parse_crs_string_to_projjson("EPSG:5070")
-        expr = crs_transform_sql_expr('"g"', crs)
+        crs = projjson_for_label("EPSG:5070")
+        expr = transform_geom_sql('"g"', crs)
         assert "ST_Transform" in expr and "EPSG:5070" in expr
 
     def test_custom_target(self):
-        expr = crs_transform_sql_expr('"g"', "EPSG:4326", target_crs="EPSG:3857")
+        expr = transform_geom_sql('"g"', "EPSG:4326", target_crs="EPSG:3857")
         # 4326 source is the default and is skipped regardless of target.
         assert expr == '"g"'
-        expr = crs_transform_sql_expr('"g"', "EPSG:5070", target_crs="EPSG:3857")
+        expr = transform_geom_sql('"g"', "EPSG:5070", target_crs="EPSG:3857")
         assert expr == "ST_Transform(\"g\", 'EPSG:5070', 'EPSG:3857')"
 
 
@@ -173,7 +173,7 @@ def _projected_table(crs84_file: str, target: str = "EPSG:5070"):
     con.execute("INSTALL spatial; LOAD spatial")
     con.execute("SET geometry_always_xy = true")
     table = (
-        con.execute(
+        con.sql(
             f"""
         SELECT * EXCLUDE(geometry),
                ST_AsWKB(ST_Transform(geometry, 'OGC:CRS84', '{target}')) AS geometry
@@ -187,7 +187,7 @@ def _projected_table(crs84_file: str, target: str = "EPSG:5070"):
     geo_meta = {
         "version": "1.1.0",
         "primary_column": "geometry",
-        "columns": {"geometry": {"encoding": "WKB", "crs": parse_crs_string_to_projjson(target)}},
+        "columns": {"geometry": {"encoding": "WKB", "crs": projjson_for_label(target)}},
     }
     return table.replace_schema_metadata({b"geo": json.dumps(geo_meta).encode("utf-8")})
 
@@ -197,7 +197,7 @@ def test_grid_keying_table_reprojects(name, fn, col, kwargs, fields_geom_type_on
     """The table API detects a projected CRS in geo metadata and reprojects."""
     table84 = pq.read_table(fields_geom_type_only_file)
     table_proj = _projected_table(fields_geom_type_only_file)
-    assert extract_crs_from_table(table_proj, "geometry") is not None
+    assert crs_of(table_proj, geometry_column="geometry") is not None
 
     cells84 = fn(table84, **kwargs).column(col).to_pylist()
     cells_proj = fn(table_proj, **kwargs).column(col).to_pylist()
@@ -288,7 +288,7 @@ def test_partition_admin_reprojects_projected_input_single_source(
 ):
     """``partition admin`` joins a projected input against CRS84 boundaries.
 
-    Exercises the single-source enrichment path (``_perform_enrichment_join``):
+    Exercises the single-source join (one ``run_admin_join`` step):
     without reprojecting the projected (EPSG:5070) input to the admin CRS the
     join raises a CRS-mismatch error; with it every feature falls inside the
     covering ``XX`` polygon and lands in a single partition.
@@ -302,7 +302,7 @@ def test_partition_admin_reprojects_projected_input_single_source(
         return CurrentAdminDataset(source_path=local_admin_dataset, verbose=verbose)
 
     monkeypatch.setattr(
-        "geoparquet_io.core.partition.admin_hierarchical.AdminDatasetFactory.create",
+        "geoparquet_io.core.admin_datasets.AdminDatasetFactory.create",
         staticmethod(fake_create),
     )
 
@@ -328,7 +328,7 @@ def test_partition_admin_reprojects_projected_input_per_level(
     """``partition admin`` reprojects a projected input on the per-level path.
 
     Exercises the chained temp-table enrichment path
-    (``_perform_per_level_enrichment_join``) used by Overture-shaped datasets:
+    (``run_admin_join``'s per-level chain) used by Overture-shaped datasets:
     each level's join must see the input reprojected to the admin (CRS84) CRS.
     The fields fixture lies within lon 16-20 / lat 45-49 (in CRS84), split here
     into two regions; every feature must be attributed to the covering country
@@ -367,7 +367,7 @@ def test_partition_admin_reprojects_projected_input_per_level(
         return OvertureAdminDataset(source_path=admin_file, verbose=verbose)
 
     monkeypatch.setattr(
-        "geoparquet_io.core.partition.admin_hierarchical.AdminDatasetFactory.create",
+        "geoparquet_io.core.admin_datasets.AdminDatasetFactory.create",
         staticmethod(fake_create),
     )
 

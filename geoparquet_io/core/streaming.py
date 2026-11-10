@@ -16,27 +16,17 @@ Arrow IPC is used because:
 
 from __future__ import annotations
 
-import hashlib
-import json
 import sys
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.ipc as ipc
 
-from geoparquet_io.core.crs_utils import _crs_from_geoarrow_field, geoarrow_crs_to_projjson
+from geoparquet_io.core.edges import EDGES, geoarrow_edge_type
 from geoparquet_io.core.geo_metadata import (
-    GEOGRAPHY_EDGE_ALGORITHMS,
     backfill_derived_stats,
-    carried_column_name,
-    carried_geometry_column,
-    carried_version,
-    decode_carried_geo,
     prune_geo_metadata_to_columns,
-    sanitize_geo_metadata,
 )
-from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
-from geoparquet_io.core.geometry_detection import STANDARD_GEOMETRY_NAMES
 from geoparquet_io.core.logging_config import debug
 
 # Marker for stdin/stdout in CLI arguments
@@ -57,11 +47,6 @@ _MAX_WKB_CHUNK_BYTES = 1_500_000_000
 
 def is_stdin(path: str | None) -> bool:
     """Check if path indicates stdin streaming."""
-    return path == STREAM_MARKER
-
-
-def is_stdout(path: str | None) -> bool:
-    """Check if path indicates explicit stdout streaming."""
     return path == STREAM_MARKER
 
 
@@ -168,40 +153,6 @@ def write_arrow_stream(table: pa.Table) -> None:
     writer.close()
 
 
-def extract_geo_metadata(table: pa.Table) -> dict | None:
-    """
-    Extract GeoParquet metadata from Arrow table schema.
-
-    Args:
-        table: PyArrow Table with potential geo metadata
-
-    Returns:
-        Parsed geo metadata dict, or None if not present
-    """
-    if table.schema.metadata and b"geo" in table.schema.metadata:
-        try:
-            return json.loads(table.schema.metadata[b"geo"].decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            return None
-    return None
-
-
-def apply_geo_metadata(table: pa.Table, geo_meta: dict) -> pa.Table:
-    """
-    Apply geo metadata to Arrow table schema.
-
-    Args:
-        table: PyArrow Table to update
-        geo_meta: GeoParquet metadata dict to apply
-
-    Returns:
-        New table with updated schema metadata
-    """
-    metadata = dict(table.schema.metadata) if table.schema.metadata else {}
-    metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
-    return table.replace_schema_metadata(metadata)
-
-
 def apply_metadata_to_table(table: pa.Table, metadata: dict | None) -> pa.Table:
     """
     Apply raw metadata dict to Arrow table schema.
@@ -216,64 +167,6 @@ def apply_metadata_to_table(table: pa.Table, metadata: dict | None) -> pa.Table:
     if not metadata:
         return table
     return table.replace_schema_metadata(metadata)
-
-
-def find_geometry_column_from_metadata(metadata: dict | None) -> str | None:
-    """
-    Find the primary geometry column name from metadata.
-
-    A column-name reader shared with read-only callers (``Table.geometry_column``),
-    so it takes the line #945 drew: it guards rather than sanitizes, and refuses
-    to hand back the one thing that cannot be a column name. A carried
-    ``primary_column: 123`` used to travel from here through ``extract`` into
-    ``quote_identifier`` and fail with ``TypeError: argument of type 'int' is
-    not iterable``, four frames from anything a user can act on (#968).
-
-    It also no longer falls back to the literal ``"geometry"``: on a file whose
-    column is called ``geom`` that default names a column that does not exist,
-    which is the silently-wrong-coordinates bug #945's review identified. Every
-    caller asks the file's schema when this reader says nothing, which is the
-    answer a block-less file already gets.
-
-    Args:
-        metadata: Schema metadata dict (with bytes keys)
-
-    Returns:
-        Geometry column name or None if the block does not name a usable one
-    """
-
-    if not metadata or b"geo" not in metadata:
-        return None
-    geo_meta = decode_carried_geo(metadata[b"geo"])
-    if not isinstance(geo_meta, dict):
-        return None
-    return carried_column_name(geo_meta.get("primary_column"))
-
-
-def find_geometry_column_from_table(table: pa.Table) -> str | None:
-    """
-    Find the geometry column name from table metadata or common names.
-
-    Args:
-        table: PyArrow Table to inspect
-
-    Returns:
-        Geometry column name or None if not found
-    """
-    metadata = dict(table.schema.metadata) if table.schema.metadata else {}
-
-    # Try to find from geo metadata
-    geom_col = find_geometry_column_from_metadata(metadata)
-    if geom_col and geom_col in table.column_names:
-        return geom_col
-
-    # Fall back to common names
-
-    for name in STANDARD_GEOMETRY_NAMES:
-        if name in table.column_names:
-            return name
-
-    return None
 
 
 def read_stdin_to_temp_file(verbose: bool = False) -> str:
@@ -297,10 +190,6 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
     Returns:
         Path to the temporary parquet file. Caller must delete after use.
     """
-    import os
-    import tempfile
-    import uuid
-
     # Registers the GeoArrow extension types process-wide, so a geometry column
     # arriving on the stream as `geoarrow.wkb` is written to the scratch file
     # with its Parquet GEOMETRY/GEOGRAPHY logical type -- and the CRS inside it --
@@ -310,6 +199,8 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
     # is why it happens here rather than being relied on (#1006).
     import geoarrow.pyarrow  # noqa: F401
     import pyarrow.parquet as pq
+
+    from geoparquet_io.core.file_utils import scratch_path
 
     if verbose:
         debug("Reading Arrow IPC stream from stdin...")
@@ -321,9 +212,8 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
         metadata = prune_geo_metadata_to_columns(metadata, table.column_names)
         table = table.replace_schema_metadata(backfill_derived_stats(metadata, table, verbose))
 
-    # Write to temp file with UUID for uniqueness
-    temp_dir = tempfile.gettempdir()
-    temp_path = os.path.join(temp_dir, f"gpio_stdin_{uuid.uuid4()}.parquet")
+    # The caller holds the spool and removes it (file_utils.unlink_released_file).
+    temp_path = scratch_path(prefix="gpio_stdin_")
 
     pq.write_table(table, temp_path)
 
@@ -481,11 +371,11 @@ def apply_geoarrow_extension_type(
         new_type = wkb_arr.type
         if crs:
             new_type = wkb_arr.type.with_crs(crs)
-        if edges == "planar" or edges in GEOGRAPHY_EDGE_ALGORITHMS:
-            new_type = new_type.with_edge_type(ga.EdgeType[edges.upper()])
+        if edges in EDGES:
+            new_type = new_type.with_edge_type(geoarrow_edge_type(edges))
         # PyArrow extension equality ignores the serialized CRS and edges.
         # Rewrap whenever either was supplied, even when the types compare equal.
-        if crs or edges == "planar" or edges in GEOGRAPHY_EDGE_ALGORITHMS:
+        if crs or edges in EDGES:
             # Use from_storage to preserve CRS (cast() resets it)
             new_chunks = []
             for chunk in wkb_arr.chunks:
@@ -515,176 +405,6 @@ def apply_geoarrow_extension_type(
             "Arrow's 32-bit binary layout; simplify very large geometries before "
             "streaming."
         ) from e
-
-
-def extract_crs_from_table(
-    table: pa.Table,
-    geometry_column: str | None = None,
-) -> dict | str | None:
-    """
-    Extract CRS from Arrow table.
-
-    Checks in order:
-    1. Geoarrow extension type CRS (``field.type.crs`` — the shape PyArrow
-       produces once ``geoarrow.pyarrow`` has registered its extension types)
-    2. GeoParquet geo metadata
-    3. The geometry field's raw ``ARROW:extension:metadata`` — the *other*
-       import state, where nothing registered the extension type and the CRS is
-       still sitting on the field. Without it a GeoArrow file with no ``geo``
-       block returned None and the write labelled projected data as the CRS84
-       default (issue #863).
-
-    Args:
-        table: PyArrow Table to inspect
-        geometry_column: Name of geometry column (auto-detect if None)
-
-    Returns:
-        CRS as PROJJSON dict, string, or None if not found
-    """
-
-    # Find geometry column if not specified
-    if geometry_column is None:
-        geometry_column = find_geometry_column_from_table(table)
-
-    if geometry_column and geometry_column in table.column_names:
-        geom_type = table.column(geometry_column).type
-
-        # Check for geoarrow extension type with CRS
-        if hasattr(geom_type, "crs") and geom_type.crs is not None:
-            resolved = geoarrow_crs_to_projjson(geom_type.crs)
-            if resolved is not None:
-                return resolved
-            # Unreadable CRS object: fall through to the geo metadata rather
-            # than returning a value that isn't a CRS (issue #816).
-
-    # Fall back to geo metadata
-    if table.schema.metadata and b"geo" in table.schema.metadata:
-        try:
-            from geoparquet_io.core.crs_utils import crs_is_explicitly_null, warn_null_crs_once
-
-            geo_bytes = table.schema.metadata[b"geo"]
-            # `Table.write()` resolves the CRS through here before it builds any
-            # metadata, so this reader sees a malformed carried block first and
-            # has to survive it too (#771).
-            geo_meta = sanitize_geo_metadata(json.loads(geo_bytes.decode("utf-8")))
-            if isinstance(geo_meta, dict):
-                columns = geo_meta.get("columns", {})
-                # The literal `"geometry"` default named a column that does not
-                # exist on a file whose column is `geom`, and reported its CRS
-                # as absent (#887 review). Ask the table's schema instead — the
-                # shared recovery #960 shared out (#968).
-                geom_col_name = geometry_column or carried_geometry_column(
-                    geo_meta, table.column_names
-                )
-                if geom_col_name in columns:
-                    if crs_is_explicitly_null(columns[geom_col_name]):
-                        warn_null_crs_once(
-                            f"table:{hashlib.sha1(geo_bytes, usedforsecurity=False).hexdigest()}"
-                        )
-                    return columns[geom_col_name].get("crs")
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            pass
-
-    # Last resort: a GeoArrow field whose extension type nothing registered, so
-    # the CRS is still in `ARROW:extension:metadata`. Reached only when the file
-    # has no `geo` block for this column at all — a `geo` block that declares a
-    # null CRS returns above, because "unknown" is an answer.
-    if geometry_column:
-        return _crs_from_geoarrow_field(table, geometry_column)
-
-    return None
-
-
-def extract_version_from_metadata(metadata: dict | None) -> str | None:
-    """
-    Extract GeoParquet version string from schema metadata.
-
-    Upgrades 1.0 to 1.1 since 1.1 is backwards compatible and preferred.
-
-    Args:
-        metadata: Schema metadata dict (with bytes keys)
-
-    Returns:
-        Version string suitable for --geoparquet-version (e.g., "1.1", "2.0")
-        or None if no version detected
-    """
-    if not metadata or b"geo" not in metadata:
-        return None
-
-    try:
-        geo_meta = json.loads(metadata[b"geo"].decode("utf-8"))
-        if isinstance(geo_meta, dict):
-            # A truthiness guard let `2`, `2.0`, `["2.0"]` and `true` through to
-            # `.split`, and the `except` below names the two decoder errors
-            # specifically, so the `AttributeError` passed straight through it
-            # and out of `gpio sort hilbert` as a traceback (#979).
-            version = carried_version(geo_meta.get("version"))
-            if version:
-                parts = version.split(".")
-                if len(parts) >= 2:
-                    major = parts[0]
-                    # Upgrade all 1.x versions to 1.1 (backwards compatible)
-                    if major == "1":
-                        return "1.1"
-                    # Flatten any 2.x to "2.0" — the highest 2.x this writer
-                    # knows — so this path agrees with its file-based twin,
-                    # resolve_geoparquet_version_from_file (common.py).
-                    if major == "2":
-                        return "2.0"
-                    return f"{major}.{parts[1]}"
-        return None
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        return None
-
-
-def has_geoarrow_extension_in_table(table: pa.Table) -> bool:
-    """
-    Check if table has geoarrow extension types (indicating native geo types).
-
-    Args:
-        table: PyArrow Table to inspect
-
-    Returns:
-        True if table has geoarrow extension type columns
-    """
-
-    # Field, not type: the extension name may be carried in the field metadata
-    # instead of a resolved extension type, and both shapes are the same
-    # column (#792).
-    return any(is_geoarrow_extension_field(field) for field in table.schema)
-
-
-def detect_version_for_output(
-    original_metadata: dict | None,
-    table: pa.Table | None = None,
-) -> str | None:
-    """
-    Detect the appropriate GeoParquet version for output.
-
-    Logic:
-    - If geo metadata has version 1.x -> return "1.1" (upgrade 1.0 to 1.1)
-    - If geo metadata has version 2.x -> return "2.0"
-    - If no geo metadata but has geoarrow types -> return "2.0" (upgrade)
-    - Otherwise -> return None (will use default 1.1)
-
-    Args:
-        original_metadata: Schema metadata from input
-        table: Arrow table (optional, for detecting geoarrow types)
-
-    Returns:
-        Version string or None
-    """
-    # First check geo metadata for explicit version
-    version = extract_version_from_metadata(original_metadata)
-    if version:
-        return version
-
-    # Check for parquet-geo-only (geoarrow types without geo metadata)
-    if table is not None and has_geoarrow_extension_in_table(table):
-        return "2.0"  # Upgrade to 2.0 with proper metadata
-
-    # No version info - will use default (1.1)
-    return None
 
 
 class StreamingError(Exception):

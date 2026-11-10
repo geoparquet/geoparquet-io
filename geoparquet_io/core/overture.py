@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from geoparquet_io.core.http_retry import make_request_with_retry
 from geoparquet_io.core.logging_config import debug, warn
 
 # Overture's STAC root names the latest release. Its older releases.json is frozen
@@ -15,16 +16,6 @@ OVERTURE_S3_TEMPLATE = (
 _cached_release: str | None = None
 
 
-def _fetch_latest_release() -> str:
-    """Fetch the latest Overture Maps release version from the API."""
-    import json
-    import urllib.request
-
-    with urllib.request.urlopen(OVERTURE_RELEASES_URL, timeout=5) as resp:  # nosec B310
-        data = json.loads(resp.read())
-    return str(data["latest"])
-
-
 def get_latest_overture_release(verbose: bool = False) -> str:
     """Get the latest Overture Maps release, with caching and fallback."""
     global _cached_release
@@ -32,7 +23,10 @@ def get_latest_overture_release(verbose: bool = False) -> str:
         return _cached_release
 
     try:
-        release = _fetch_latest_release()
+        data = make_request_with_retry("GET", OVERTURE_RELEASES_URL)
+        if not isinstance(data, dict):
+            raise ValueError("Overture catalog is not a JSON object")
+        release = str(data["latest"])
         _cached_release = release
         if verbose:
             debug(f"Using Overture Maps release: {release}")

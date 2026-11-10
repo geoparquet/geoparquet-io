@@ -266,8 +266,8 @@ def test_an_excluded_column_is_not_blamed_on_the_fetch(run_extract, caplog):
 def test_could_not_read_and_nothing_to_read_are_told_apart(run_extract, caplog):
     """Both declare ``[]``, but the user is told which of the two happened.
 
-    ``_compute_geometry_types`` swallows the geoarrow error and returns ``[]``,
-    so the two outcomes are indistinguishable at the call site unless the
+    ``geo_metadata.geometry_types_of`` swallows the geoarrow error and returns
+    ``[]``, so the two outcomes are indistinguishable at the call site unless the
     non-NULL geometries are counted first. They are worth telling apart: one is
     a data-quality problem worth chasing, the other is just an empty column.
     """

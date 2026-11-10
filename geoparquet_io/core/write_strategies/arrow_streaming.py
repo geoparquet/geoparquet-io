@@ -12,31 +12,37 @@ Speed: Slightly slower due to batch overhead
 from __future__ import annotations
 
 import itertools
-import json
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
-    _bbox_column_to_declare,
     _canonicalize_wkb_columns,
-    _compute_geometry_types,
-    _detect_version_from_table,
-    _parse_geo_metadata_quietly,
     table_geometry_info,
 )
-from geoparquet_io.core.compression import validate_compression_settings
-from geoparquet_io.core.crs_utils import apply_output_crs
-from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion, quote_identifier
+from geoparquet_io.core.compression import ResolvedCodec, resolve_codec
+from geoparquet_io.core.duckdb_utils import (
+    _wrap_query_with_wkb_conversion,
+    describe_query,
+    duckdb_type_is_geometry,
+    query_schema,
+)
+from geoparquet_io.core.edges import edges_of
 from geoparquet_io.core.geo_metadata import (
-    GEOPARQUET_VERSIONS,
+    DETECT_BBOX_COLUMN,
     NATIVE_GEOMETRY_VERSIONS,
-    bbox_column_to_declare,
-    compute_geo_stats_via_sql,
-    create_geo_metadata,
-    strip_bboxless_covering,
-    strip_illegal_bbox_covering,
+    GeoBlockOptions,
+    QuerySource,
+    SchemaSource,
+    compose_geo_block,
+    geometry_stats_of,
+    geometry_types_of,
+    missing_geometry_types,
+    sanitized_carried_geo,
+    with_geo_key,
 )
 from geoparquet_io.core.geoarrow_encoding import (
     WKB_EXTENSION_NAMES,
@@ -45,22 +51,22 @@ from geoparquet_io.core.geoarrow_encoding import (
     wkb_array_to_geoarrow,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
+from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
+    regroup,
+    resolve_output_geoparquet_version,
+    resolve_row_group_rows_for_query,
+    resolve_row_group_rows_for_table,
     without_geometry_dictionary,
 )
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
-    _parse_existing_geo_metadata,
-    merge_secondary_geometry_metadata,
     native_geometry_crs,
 )
 
 if TYPE_CHECKING:
     import duckdb
-
-# Default batch size for streaming (100K rows per batch)
-DEFAULT_BATCH_SIZE = 100_000
 
 
 def _is_wkb_carrier(field: pa.Field) -> bool:
@@ -170,6 +176,21 @@ def _narrows_to_32_bit_binary(field_type: pa.DataType) -> bool:
     return storage == pa.binary()
 
 
+@contextmanager
+def _sized_reader(con, query: str, batch_size: int) -> Iterator[pa.RecordBatchReader]:
+    """Stream ``query`` in ``batch_size``-row batches (see :func:`~geoparquet_io.core.parquet_writer.regroup`).
+
+    On DuckDB 2.0 nothing else may run on ``con`` until the reader is drained or
+    closed, so it is closed on the way out, failure included: the memory scope
+    around it restores its settings on ``con`` next.
+    """
+    reader = con.sql(query).to_arrow_reader(batch_size=batch_size)
+    try:
+        yield pa.RecordBatchReader.from_batches(reader.schema, regroup(reader, batch_size))
+    finally:
+        reader.close()
+
+
 def _binary_cast_spans(batch: pa.RecordBatch, schema: pa.Schema) -> list[tuple[int, int]]:
     """Row spans that keep every narrowed WKB column under Arrow's 32-bit ceiling.
 
@@ -212,18 +233,11 @@ def _has_carried_bbox(original_metadata: dict | None, geometry_column: str) -> b
     signal that this write must compute a fresh one.
     """
 
-    geo_meta = _parse_existing_geo_metadata(original_metadata)
+    geo_meta = sanitized_carried_geo(original_metadata)
     if not isinstance(geo_meta, dict):
         return False
     col_meta = (geo_meta.get("columns") or {}).get(geometry_column)
     return isinstance(col_meta, dict) and col_meta.get("bbox") is not None
-
-
-def _detect_bbox_column(schema: pa.Schema, original_metadata: dict | None) -> dict:
-    """The bbox column this write may declare, through the shared gate (#1035)."""
-
-    name = bbox_column_to_declare(schema, _parse_existing_geo_metadata(original_metadata))
-    return {"has_bbox_column": name is not None, "bbox_column_name": name}
 
 
 def _check_geometry_type(
@@ -234,17 +248,15 @@ def _check_geometry_type(
 ) -> tuple[bool, str]:
     """Check if geometry column needs WKB conversion. Returns (needs_conversion, final_sql)."""
 
-    type_result = con.execute(
-        f"SELECT TYPEOF({quote_identifier(geometry_column)}) FROM ({query}) LIMIT 1"
-    ).fetchone()
-    duckdb_type = type_result[0] if type_result else None
-    needs_wkb = duckdb_type == "GEOMETRY"
+    duckdb_type = dict(describe_query(con, query)).get(geometry_column)
+    # A CRS-typed GEOMETRY crosses Arrow with its CRS; only a bare one is wrapped.
+    needs_wkb = duckdb_type_is_geometry(duckdb_type, allow_crs=False)
 
     if verbose:
         msg = "wrapping with WKB conversion" if needs_wkb else "no conversion needed"
         debug(f"Geometry column is {duckdb_type}, {msg}")
 
-    final_sql = _wrap_query_with_wkb_conversion(query, geometry_column, con) if needs_wkb else query
+    final_sql = _wrap_query_with_wkb_conversion(query, geometry_column) if needs_wkb else query
     return needs_wkb, final_sql
 
 
@@ -279,138 +291,144 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         custom_metadata: dict | None = None,
         geometry_info: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        memory_limit: str | None = None,
     ) -> None:
-        """Write query results to GeoParquet using streaming RecordBatch approach."""
+        """Write query results to GeoParquet using streaming RecordBatch approach.
+
+        ``memory_limit`` bounds the stats scan and the streamed query.
+        """
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
 
-        # Setup compression and version config
-        validated_compression, validated_level, _ = validate_compression_settings(
-            compression or "ZSTD", compression_level, verbose
-        )
-        if validated_compression == "UNCOMPRESSED":
-            validated_compression = None
+        # One owner validates and resolves the codec; the writers take its kwargs.
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
 
-        batch_size = row_group_rows or DEFAULT_BATCH_SIZE
-
-        # Handle non-geo queries: write plain Parquet without geo metadata
-        if geometry_column is None:
-            self._write_plain_parquet_from_query(
-                con, query, output_path, validated_compression, validated_level, batch_size, verbose
+        # Every statement below runs on `con` under the write's memory cap; the
+        # reader is drained inside the scope, before its settings are restored.
+        with scoped_write_memory_limit(con, memory_limit, verbose):
+            # Each batch becomes one row group, so the batch size is the facade's
+            # row-group count -- an MB target included. This read 100,000 whenever
+            # no row count came in, a second default beside the facade's (#1215).
+            batch_size = resolve_row_group_rows_for_query(
+                con, query, row_group_rows, row_group_size_mb, verbose
             )
-            return
 
-        version_config = GEOPARQUET_VERSIONS.get(geoparquet_version, GEOPARQUET_VERSIONS["1.1"])
+            # Handle non-geo queries: write plain Parquet without geo metadata
+            if geometry_column is None:
+                self._write_plain_parquet_from_query(
+                    con, query, output_path, codec, batch_size, verbose
+                )
+                return
 
-        # Check geometry type and prepare SQL
-        _, final_sql = _check_geometry_type(con, query, geometry_column, verbose)
+            # Check geometry type and prepare SQL
+            _, final_sql = _check_geometry_type(con, query, geometry_column, verbose)
 
-        # Determine version flags
-        use_native_geometry = geoparquet_version in NATIVE_GEOMETRY_VERSIONS
-        should_add_geo_metadata = geoparquet_version != "parquet-geo-only"
-        geoarrow_native = geoparquet_version == "1.1-geoarrow"
+            # Determine version flags
+            use_native_geometry = geoparquet_version in NATIVE_GEOMETRY_VERSIONS
+            should_add_geo_metadata = geoparquet_version != "parquet-geo-only"
+            geoarrow_native = geoparquet_version == "1.1-geoarrow"
 
-        # Pre-compute metadata. A carried bbox is only reusable when it survived
-        # into original_metadata; if a caller invalidated it (filter, reproject,
-        # multi-file merge) it must be recomputed here or the v1.x output would
-        # ship with no bbox at all.
-        precomputed_bbox, precomputed_geom_types = self._precompute_metadata(
-            con,
-            query,
-            geometry_column,
-            verbose,
-            should_add_geo_metadata,
-            need_bbox=use_native_geometry
-            or not _has_carried_bbox(original_metadata, geometry_column),
-        )
-
-        # Compute the geoarrow target type once from whole-dataset geometry types.
-        # All batches will be coerced to this single physical type (schema is fixed
-        # from batch 1 and cannot change mid-stream).
-        geoarrow_target_type = None
-        geoarrow_encoding = None
-        if geoarrow_native and should_add_geo_metadata:
-            from geoparquet_io.core.common import compute_geometry_dimensions_via_sql
-            from geoparquet_io.core.geoarrow_encoding import determine_geoarrow_target_type
-
-            # Detect Z/M dimensionality so 3D/measured coordinates select a
-            # dimension-aware native type (or fall back to WKB) rather than being
-            # silently coerced down to 2D.
-            dimensions = compute_geometry_dimensions_via_sql(con, query, geometry_column)
-            geoarrow_target_type, geoarrow_encoding = determine_geoarrow_target_type(
-                precomputed_geom_types, input_crs, dimensions=dimensions
+            # Pre-compute metadata. A carried bbox is only reusable when it survived
+            # into original_metadata; if a caller invalidated it (filter, reproject,
+            # multi-file merge) it must be recomputed here or the v1.x output would
+            # ship with no bbox at all.
+            precomputed_bbox, precomputed_geom_types = self._precompute_metadata(
+                con,
+                query,
+                geometry_column,
+                verbose,
+                should_add_geo_metadata,
+                need_bbox=use_native_geometry
+                or not _has_carried_bbox(original_metadata, geometry_column),
             )
+
+            # Compute the geoarrow target type once from whole-dataset geometry types.
+            # All batches will be coerced to this single physical type (schema is fixed
+            # from batch 1 and cannot change mid-stream).
+            geoarrow_target_type = None
+            geoarrow_encoding = None
+            if geoarrow_native and should_add_geo_metadata:
+                from geoparquet_io.core.geoarrow_encoding import determine_geoarrow_target_type
+
+                # The owner's types carry the Z/M suffix, so 3D/measured coordinates
+                # select a dimension-aware native type (or fall back to WKB) rather
+                # than being silently coerced down to 2D.
+                geoarrow_target_type, geoarrow_encoding = determine_geoarrow_target_type(
+                    precomputed_geom_types, input_crs
+                )
+                if verbose:
+                    debug(f"1.1-geoarrow target encoding: {geoarrow_encoding}")
+
+            # The block is composed over a zero-row probe, before the reader opens:
+            # measuring a secondary's missing geometry_types queries `con` (#1433).
+            schema = query_schema(con, final_sql)
+
+            if geometry_column not in schema.names:
+                raise ValueError(
+                    f"Geometry column '{geometry_column}' not found in query result. "
+                    f"Available columns: {schema.names}"
+                )
+
+            # Build geo metadata. Built even for parquet-geo-only, which writes no
+            # `geo` block: the native Parquet GEOMETRY types below are keyed off the
+            # CRS the block declares per column, so it is what the types come from
+            # before it is dropped (#848). Discarded immediately afterwards.
+            geo_meta = self._build_geo_metadata_for_query(
+                schema,
+                geometry_column,
+                original_metadata,
+                input_crs,
+                verbose,
+                geoparquet_version,
+                precomputed_geom_types,
+                precomputed_bbox,
+                geometry_info,
+                geoarrow_encoding=geoarrow_encoding,
+                custom_metadata=custom_metadata,
+                measure_source=QuerySource(con, query),
+            )
+            native_crs = native_geometry_crs(
+                geoparquet_version, geo_meta, geometry_column, geometry_info
+            )
+            if not should_add_geo_metadata:
+                geo_meta = None
+
+            # Prepare writer kwargs
+            writer_kwargs = codec.pyarrow_kwargs()
+
             if verbose:
-                debug(f"1.1-geoarrow target encoding: {geoarrow_encoding}")
+                debug(f"Executing query with batch size {batch_size:,}...")
 
-        if verbose:
-            debug(f"Executing query with batch size {batch_size:,}...")
+            # Nothing below queries `con` while the reader is open.
+            with _sized_reader(con, final_sql, batch_size) as reader:
+                schema = reader.schema
 
-        result = con.execute(final_sql)
-        reader = result.fetch_record_batch(rows_per_batch=batch_size)
-        schema = reader.schema
+                if verbose:
+                    progress(f"Streaming to {output_path}...")
 
-        if geometry_column not in schema.names:
-            raise ValueError(
-                f"Geometry column '{geometry_column}' not found in query result. "
-                f"Available columns: {schema.names}"
-            )
+                # Secondary geometry columns must reach the schema builder explicitly:
+                # parquet-geo-only writes no geo metadata, so there is nothing else left
+                # to name them by the time the schema is built.
+                geometry_columns = {geometry_column}
+                if geometry_info:
+                    geometry_columns.update(geometry_info.get("secondary") or [])
 
-        # Build geo metadata. Built even for parquet-geo-only, which writes no
-        # `geo` block: the native Parquet GEOMETRY types below are keyed off the
-        # CRS the block declares per column, so it is what the types come from
-        # before it is dropped (#848). Discarded immediately afterwards.
-        geo_meta = self._build_geo_metadata_for_query(
-            schema,
-            geometry_column,
-            original_metadata,
-            input_crs,
-            verbose,
-            version_config["metadata_version"],
-            precomputed_geom_types,
-            precomputed_bbox,
-            geometry_info,
-            geoarrow_encoding=geoarrow_encoding,
-            custom_metadata=custom_metadata,
-        )
-        native_crs = native_geometry_crs(
-            geoparquet_version, geo_meta, geometry_column, geometry_info
-        )
-        if not should_add_geo_metadata:
-            geo_meta = None
-
-        # Prepare writer kwargs
-        writer_kwargs = {"compression": validated_compression or "NONE"}
-        if validated_level is not None and validated_compression:
-            writer_kwargs["compression_level"] = validated_level
-
-        if verbose:
-            progress(f"Streaming to {output_path}...")
-
-        # Secondary geometry columns must reach the schema builder explicitly:
-        # parquet-geo-only writes no geo metadata, so there is nothing else left
-        # to name them by the time the schema is built.
-        geometry_columns = {geometry_column}
-        if geometry_info:
-            geometry_columns.update(geometry_info.get("secondary") or [])
-
-        # Stream batches to file
-        self._stream_batches_to_file(
-            reader,
-            output_path,
-            schema,
-            geometry_column,
-            geo_meta,
-            use_native_geometry,
-            native_crs,
-            precomputed_geom_types,
-            writer_kwargs,
-            verbose,
-            extra_kv_metadata=extra_kv_metadata,
-            geoarrow_target_type=geoarrow_target_type,
-            geometry_columns=geometry_columns,
-        )
+                # Stream batches to file
+                self._stream_batches_to_file(
+                    reader,
+                    output_path,
+                    schema,
+                    geometry_column,
+                    geo_meta,
+                    use_native_geometry,
+                    native_crs,
+                    writer_kwargs,
+                    verbose,
+                    extra_kv_metadata=extra_kv_metadata,
+                    geoarrow_target_type=geoarrow_target_type,
+                    geometry_columns=geometry_columns,
+                )
 
     def _precompute_metadata(
         self,
@@ -428,9 +446,10 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
 
         if verbose:
             debug("Pre-computing bbox/geometry types via SQL...")
-        return compute_geo_stats_via_sql(
-            con, query, geometry_column, need_bbox=need_bbox, need_geometry_types=True
-        )
+        if not need_bbox:
+            return None, geometry_types_of(QuerySource(con, query), geometry_column)
+        stats = geometry_stats_of(QuerySource(con, query), geometry_column)
+        return stats.bbox, stats.geometry_types
 
     def _build_geo_metadata_for_query(
         self,
@@ -439,55 +458,42 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         original_metadata: dict | None,
         input_crs: dict | None,
         verbose: bool,
-        metadata_version: str,
+        geoparquet_version: str,
         precomputed_geom_types: list[str],
         precomputed_bbox: list[float] | None,
         geometry_info: dict | None = None,
         geoarrow_encoding: str | None = None,
         custom_metadata: dict | None = None,
+        *,
+        measure_source: QuerySource,
     ) -> dict:
-        """Build geo metadata for query results.
+        """Compose the geo block for query results, over the query's own schema.
 
         Always returns a block, even for parquet-geo-only: the caller keys the
-        native Parquet GEOMETRY types off it and then drops it (#848).
+        native Parquet GEOMETRY types off it and then drops it (#848). The
+        encoding is the one the batches are written in: WKB, or the native
+        encoding ``geoarrow_target_type`` resolved for 1.1-geoarrow.
         """
-
-        bbox_info = _detect_bbox_column(schema, original_metadata)
+        measured: dict = {"geometry_types": precomputed_geom_types}
+        if precomputed_bbox is not None:
+            measured["bbox"] = precomputed_bbox
         # custom_metadata is the covering a caller computed (`add bbox
         # --bbox-name`, the index commands): its provenance, the only way a
         # column not named exactly `bbox` gets declared (#738/#953).
-        geo_meta = create_geo_metadata(
-            original_metadata=original_metadata,
-            geom_col=geometry_column,
-            bbox_info=bbox_info,
-            custom_metadata=custom_metadata,
-            verbose=verbose,
-            version=metadata_version,
+        return compose_geo_block(
+            SchemaSource(schema, original_metadata),
+            GeoBlockOptions(
+                geometry_column=geometry_column,
+                version=geoparquet_version,
+                custom_metadata=custom_metadata,
+                encoding=geoarrow_encoding or "WKB",
+                crs=input_crs,
+                stats={geometry_column: measured},
+                geometry_info=geometry_info,
+                measure_missing=lambda block: missing_geometry_types(measure_source, block),
+                verbose=verbose,
+            ),
         )
-
-        col_meta = geo_meta["columns"][geometry_column]
-        apply_output_crs(col_meta, input_crs)
-        col_meta["encoding"] = "WKB"
-        col_meta["geometry_types"] = precomputed_geom_types
-        if precomputed_bbox is not None:
-            col_meta["bbox"] = precomputed_bbox
-
-        # Override encoding when geoarrow_target_type resolved a native encoding.
-        # geoarrow_encoding is "WKB" when mixed/unconvertible — no override needed.
-        if geoarrow_encoding is not None and geoarrow_encoding != "WKB":
-            col_meta["encoding"] = geoarrow_encoding
-
-        # Handle secondary geometry columns from geometry_info. They arrive
-        # after create_geo_metadata's gate, so it runs again over them (#954).
-        merge_secondary_geometry_metadata(geo_meta, geometry_info)
-
-        # `_detect_bbox_column` above only answers whether this write may
-        # DECLARE the column; the entry the input already declared over an
-        # illegal struct has to go too, which is the same gate's other half
-        # (#1172). The DuckDB strategies get it from
-        # `declare_carried_bbox_column`.
-        geo_meta = strip_illegal_bbox_covering(geo_meta, schema)
-        return strip_bboxless_covering(geo_meta, verbose)
 
     def _stream_batches_to_file(
         self,
@@ -498,7 +504,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         geo_meta: dict | None,
         use_native_geometry: bool,
         native_crs: dict[str, dict | None],
-        precomputed_geom_types: list[str],
         writer_kwargs: dict,
         verbose: bool,
         extra_kv_metadata: dict[str, str] | None = None,
@@ -531,7 +536,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geo_meta=geo_meta,
             use_native_geometry=use_native_geometry,
             native_crs=native_crs,
-            geom_types=precomputed_geom_types,
             verbose=verbose,
             extra_kv_metadata=extra_kv_metadata,
             geoarrow_target_type=geoarrow_target_type,
@@ -583,7 +587,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geo_meta=geo_meta,
             use_native_geometry=use_native_geometry,
             native_crs=native_crs,
-            geom_types=[],
             verbose=verbose,
             extra_kv_metadata=extra_kv_metadata,
             geoarrow_target_type=geoarrow_target_type,
@@ -689,8 +692,13 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         input_crs: dict | None = None,
         custom_metadata: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        original_metadata: dict | None = None,
+        memory_limit: str | None = None,
     ) -> None:
-        """Write Arrow table to GeoParquet using batch streaming."""
+        """Write Arrow table to GeoParquet using batch streaming.
+
+        Pure pyarrow: no DuckDB runs, so ``memory_limit`` has nothing to bound.
+        """
 
         configure_verbose(verbose)
         self._validate_output_path(output_path)
@@ -704,31 +712,25 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         # Read before the facade below, which drops `geo` under parquet-geo-only.
         # It is still the witness for which columns are geometry, and without it
         # a secondary lost its native type and kept its dictionary (#1122).
-        carried_geo = _parse_geo_metadata_quietly(table.schema.metadata)
+        carried_geo = sanitized_carried_geo(table.schema.metadata)
         table = apply_output_kv_metadata(table, geoparquet_version, extra_kv_metadata)
 
-        validated_compression, validated_level, _ = validate_compression_settings(
-            compression or "ZSTD", compression_level, verbose
-        )
-        if validated_compression == "UNCOMPRESSED":
-            validated_compression = None
+        codec = resolve_codec(compression, compression_level, context="write", verbose=verbose)
 
-        batch_size = row_group_rows or DEFAULT_BATCH_SIZE
+        # Each batch becomes one row group; see write_from_query.
+        batch_size = resolve_row_group_rows_for_table(
+            table, row_group_rows, row_group_size_mb, verbose=verbose
+        )
 
         # Handle non-geo tables: write plain Parquet without geo metadata
         if geometry_column is None:
-            self._write_plain_parquet_from_table(
-                table, output_path, validated_compression, validated_level, batch_size, verbose
-            )
+            self._write_plain_parquet_from_table(table, output_path, codec, batch_size, verbose)
             return
 
-        # Auto-detect version from table schema metadata if not specified
-        effective_version = geoparquet_version
-        if effective_version is None:
-            effective_version = _detect_version_from_table(table, verbose)
-
-        version_config = GEOPARQUET_VERSIONS.get(effective_version, GEOPARQUET_VERSIONS["1.1"])
-        metadata_version = version_config["metadata_version"]
+        # Auto mode: the facade decides from the table's own schema.
+        effective_version = resolve_output_geoparquet_version(
+            geoparquet_version, table=table, verbose=verbose
+        )
 
         # This entry point gets no `geometry_info`, so the table's own schema is
         # what names a block-less table's secondaries (#1175). Below 2.0 they also
@@ -753,69 +755,56 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         geoarrow_encoding = None
 
         geom_types: list[str] = []
+        measured: dict = {}
         if should_add_geo_metadata:
-            geom_types = _compute_geometry_types(table, geometry_column, verbose)
+            # The bbox and types in one owner scan, as the in-memory path
+            # measures them: the table entry point used to declare no bbox.
+            stats = geometry_stats_of(table, geometry_column, verbose=verbose)
+            geom_types = stats.geometry_types
+            measured = {"bbox": stats.bbox, "geometry_types": geom_types}
 
             if geoarrow_native:
-                from geoparquet_io.core.geoarrow_encoding import (
-                    detect_wkb_dimensions,
-                    determine_geoarrow_target_type,
-                )
+                from geoparquet_io.core.geoarrow_encoding import determine_geoarrow_target_type
 
-                # Detect Z/M dimensionality from the actual geometry so 3D/measured
-                # coordinates select a dimension-aware native type (or fall back to
-                # WKB) instead of being silently coerced down to 2D.
-                dimensions = detect_wkb_dimensions(table.column(geometry_column))
+                # The owner's types carry the Z/M suffix, so 3D/measured
+                # coordinates select a dimension-aware native type (or fall back
+                # to WKB) instead of being silently coerced down to 2D.
                 geoarrow_target_type, geoarrow_encoding = determine_geoarrow_target_type(
-                    geom_types, input_crs, dimensions=dimensions
+                    geom_types, input_crs
                 )
                 if verbose:
                     debug(f"1.1-geoarrow target encoding: {geoarrow_encoding}")
 
-        # The same gate the other three strategies ask, rather than a hard-coded
-        # "no bbox column". A table that carries no `geo` block of its own -- what
-        # `convert` of a CSV builds, so `add_bbox` had nothing to record its
-        # computed column into -- left the schema as the only evidence, and this
-        # entry point consulted none of it: the struct was written undeclared
-        # while duckdb-kv, disk-rewrite and in-memory all declared it. A covering
-        # in `custom_metadata` still wins, as `create_geo_metadata` applies it
-        # after this one.
-        bbox_column = _bbox_column_to_declare(table, verbose)
-
+        # The same covering rule the other three strategies use, rather than a
+        # hard-coded "no bbox column". A table that carries no `geo` block of its
+        # own -- what `convert` of a CSV builds, so `add_bbox` had nothing to
+        # record its computed column into -- left the schema as the only
+        # evidence: the struct was written undeclared while duckdb-kv,
+        # disk-rewrite and in-memory all declared it. A covering in
+        # `custom_metadata` is provenance and still wins.
+        #
         # Built for every version, parquet-geo-only included: it writes no `geo`
         # block, but the native Parquet GEOMETRY types are keyed off the CRS this
         # resolves per column, so it is built first and dropped after (#848).
-        geo_meta = create_geo_metadata(
-            original_metadata=None,
-            geom_col=geometry_column,
-            bbox_info={
-                "has_bbox_column": bbox_column is not None,
-                "bbox_column_name": bbox_column,
-            },
-            custom_metadata=custom_metadata,
-            verbose=verbose,
-            version=metadata_version,
-        )
-        geo_meta["columns"][geometry_column]["encoding"] = "WKB"
-        geo_meta["columns"][geometry_column]["geometry_types"] = geom_types
-
-        apply_output_crs(geo_meta["columns"][geometry_column], input_crs)
-
-        # Before `native_geometry_crs` below: a secondary's native Parquet type is
-        # keyed off the CRS its own entry declares, so the entry has to exist first.
-        merge_secondary_geometry_metadata(geo_meta, geometry_info)
-
-        # Override encoding when geoarrow_target_type resolved a native encoding.
-        # geoarrow_encoding is "WKB" for mixed/unconvertible geometry — no override.
-        if geoarrow_encoding is not None and geoarrow_encoding != "WKB":
-            geo_meta["columns"][geometry_column]["encoding"] = geoarrow_encoding
-
-        # The two covering gates `write_from_query` runs, which this entry point
-        # did not: a covering reaches it only through `custom_metadata`, and that
-        # is provenance, not a licence to write a struct the spec forbids or a
-        # covering with no bbox member left (#1172, #1035, #954).
-        geo_meta = strip_bboxless_covering(
-            strip_illegal_bbox_covering(geo_meta, table.schema), verbose
+        # The covering gates run here too: a covering reaches this entry point
+        # only through `custom_metadata`, and that is provenance, not a licence
+        # to write a struct the spec forbids or a covering with no bbox member
+        # left (#1172, #1035, #954).
+        geo_meta = compose_geo_block(
+            SchemaSource(table.schema, original_metadata),
+            GeoBlockOptions(
+                geometry_column=geometry_column,
+                version=effective_version,
+                covering=DETECT_BBOX_COLUMN,
+                covering_provenance=table.schema.metadata,
+                custom_metadata=custom_metadata,
+                encoding=geoarrow_encoding or "WKB",
+                crs=input_crs,
+                stats={geometry_column: measured or {"geometry_types": geom_types}},
+                geometry_info=geometry_info,
+                measure_missing=lambda block: missing_geometry_types(table, block),
+                verbose=verbose,
+            ),
         )
 
         native_crs = native_geometry_crs(
@@ -831,7 +820,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geo_meta=geo_meta,
             use_native_geometry=use_native_geometry,
             native_crs=native_crs,
-            geom_types=geo_meta["columns"][geometry_column]["geometry_types"] if geo_meta else [],
             verbose=verbose,
             extra_kv_metadata=extra_kv_metadata,
             geoarrow_target_type=geoarrow_target_type,
@@ -840,9 +828,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geometry_columns=geometry_columns,
         )
 
-        writer_kwargs = {"compression": validated_compression or "NONE"}
-        if validated_level is not None and validated_compression:
-            writer_kwargs["compression_level"] = validated_level
+        writer_kwargs = codec.pyarrow_kwargs()
         writer_kwargs = without_geometry_dictionary(
             writer_kwargs, schema_with_meta, geometry_columns
         )
@@ -856,7 +842,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         batches_written = 0
 
         with pq.ParquetWriter(output_path, schema_with_meta, **writer_kwargs) as writer:
-            for batch in table.to_batches(max_chunksize=batch_size):
+            for batch in regroup(table.to_batches(), batch_size):
                 rows, groups = self._write_batch(
                     writer,
                     batch,
@@ -879,7 +865,6 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         geo_meta: dict | None,
         use_native_geometry: bool,
         native_crs: dict[str, dict | None],
-        geom_types: list[str],
         verbose: bool,
         extra_kv_metadata: dict[str, str] | None = None,
         geoarrow_target_type=None,
@@ -916,7 +901,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                     field.name,
                     native_wkb_type(
                         native_crs.get(field.name),
-                        edges=(declared.get(field.name) or {}).get("edges"),
+                        edges=edges_of(declared.get(field.name)),
                     ),
                 )
                 if field.name in geo_columns
@@ -946,9 +931,8 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         schema = canonicalize_wkb_fields(schema, geo_columns, native_columns=native_columns)
 
         if geo_meta is not None:
-            if "geometry_types" not in geo_meta["columns"].get(geometry_column, {}):
-                geo_meta["columns"][geometry_column]["geometry_types"] = geom_types
-            schema_metadata[b"geo"] = json.dumps(geo_meta).encode("utf-8")
+            # The composer measured ``geometry_types``; the block is written as composed.
+            schema_metadata = with_geo_key(schema_metadata, geo_meta)
 
         if extra_kv_metadata:
             for key, value in extra_kv_metadata.items():
@@ -1029,15 +1013,12 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         self,
         table: pa.Table,
         output_path: str,
-        compression: str | None,
-        compression_level: int | None,
+        codec: ResolvedCodec,
         batch_size: int,
         verbose: bool,
     ) -> None:
         """Write plain Parquet (no geo metadata) from an Arrow table using streaming."""
-        writer_kwargs = {"compression": compression or "NONE"}
-        if compression_level is not None and compression:
-            writer_kwargs["compression_level"] = compression_level
+        writer_kwargs = codec.pyarrow_kwargs()
 
         rows_written = 0
         batches_written = 0
@@ -1046,7 +1027,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             debug(f"Writing plain Parquet in batches of {batch_size:,}...")
 
         with pq.ParquetWriter(output_path, table.schema, **writer_kwargs) as writer:
-            for batch in table.to_batches(max_chunksize=batch_size):
+            for batch in regroup(table.to_batches(), batch_size):
                 table_batch = pa.Table.from_batches([batch], schema=table.schema)
                 writer.write_table(table_batch)
                 rows_written += batch.num_rows
@@ -1060,8 +1041,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         con: duckdb.DuckDBPyConnection,
         query: str,
         output_path: str,
-        compression: str | None,
-        compression_level: int | None,
+        codec: ResolvedCodec,
         batch_size: int,
         verbose: bool,
     ) -> None:
@@ -1069,41 +1049,39 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         if verbose:
             debug(f"Executing query with batch size {batch_size:,}...")
 
-        result = con.execute(query)
-        reader = result.fetch_record_batch(rows_per_batch=batch_size)
-        schema = reader.schema
+        # Nothing below queries `con` while the reader is open.
+        with _sized_reader(con, query, batch_size) as reader:
+            schema = reader.schema
 
-        writer_kwargs = {"compression": compression or "NONE"}
-        if compression_level is not None and compression:
-            writer_kwargs["compression_level"] = compression_level
+            writer_kwargs = codec.pyarrow_kwargs()
 
-        rows_written = 0
-        batches_written = 0
+            rows_written = 0
+            batches_written = 0
 
-        first_batch = None
-        try:
-            first_batch = next(iter(reader))
-        except StopIteration:
-            # Empty result set
-            with pq.ParquetWriter(output_path, schema, **writer_kwargs):
-                pass
-            if verbose:
-                success("Wrote 0 rows (empty result)")
-            return
+            first_batch = None
+            try:
+                first_batch = next(iter(reader))
+            except StopIteration:
+                # Empty result set
+                with pq.ParquetWriter(output_path, schema, **writer_kwargs):
+                    pass
+                if verbose:
+                    success("Wrote 0 rows (empty result)")
+                return
 
-        with pq.ParquetWriter(output_path, schema, **writer_kwargs) as writer:
-            # Write first batch
-            table_batch = pa.Table.from_batches([first_batch], schema=schema)
-            writer.write_table(table_batch)
-            rows_written += first_batch.num_rows
-            batches_written += 1
-
-            # Write remaining batches
-            for batch in reader:
-                table_batch = pa.Table.from_batches([batch], schema=schema)
+            with pq.ParquetWriter(output_path, schema, **writer_kwargs) as writer:
+                # Write first batch
+                table_batch = pa.Table.from_batches([first_batch], schema=schema)
                 writer.write_table(table_batch)
-                rows_written += batch.num_rows
+                rows_written += first_batch.num_rows
                 batches_written += 1
 
-        if verbose:
-            success(f"Wrote {rows_written:,} rows in {batches_written} row groups")
+                # Write remaining batches
+                for batch in reader:
+                    table_batch = pa.Table.from_batches([batch], schema=schema)
+                    writer.write_table(table_batch)
+                    rows_written += batch.num_rows
+                    batches_written += 1
+
+            if verbose:
+                success(f"Wrote {rows_written:,} rows in {batches_written} row groups")

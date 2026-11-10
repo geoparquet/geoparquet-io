@@ -12,9 +12,17 @@ Docs: docs/guide/process-raster.md
 
 from __future__ import annotations
 
-import json
-
 import pyarrow as pa
+
+from geoparquet_io.core.geo_metadata import (
+    KEEP_CRS,
+    GeoBlockOptions,
+    SchemaSource,
+    compose_geo_block,
+    with_geo_block,
+)
+from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
+from geoparquet_io.core.parquet_writer import version_to_describe
 
 
 def finalize_raster_table(
@@ -30,16 +38,15 @@ def finalize_raster_table(
     """
     rename = rename or {}
     table = table.rename_columns([rename.get(name, name) for name in table.column_names])
-    geo_column: dict = {"encoding": "WKB"}
-    if crs is not None:
-        geo_column["crs"] = crs
-    geo = {
-        "version": "1.1.0",
-        "primary_column": "geometry",
-        "columns": {"geometry": geo_column},
-    }
-    target = pa.schema(
-        [pa.field(f.name, f.type, nullable=f.nullable) for f in table.schema],
-        metadata={b"geo": json.dumps(geo).encode("utf-8")},
+    geo = compose_geo_block(
+        SchemaSource(table.schema),
+        GeoBlockOptions(
+            geometry_column=BUILT_GEOMETRY_COLUMN,
+            version=version_to_describe(table.schema),
+            describe=True,
+            covering=None,
+            crs=KEEP_CRS if crs is None else crs,
+        ),
     )
-    return table.cast(target)
+    target = pa.schema([pa.field(f.name, f.type, nullable=f.nullable) for f in table.schema])
+    return with_geo_block(table.cast(target), geo)

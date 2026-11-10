@@ -19,6 +19,10 @@ from geoparquet_io.core.check_parquet_structure import (
 )
 
 
+def test_check_profile_string_preserves_public_enum_name():
+    assert str(CheckProfile.web) == "CheckProfile.web"
+
+
 class TestAssessRowGroupSize:
     """Tests for assess_row_group_size function."""
 
@@ -444,14 +448,14 @@ class TestCheckAllReadsTheGeoBlockOnce:
     def test_the_block_is_read_once(self, places_test_file, monkeypatch):
         from geoparquet_io.core import check_parquet_structure as cps
 
-        real = cps.get_geo_metadata
+        real = cps.raw_geo_of_file
         reads = []
 
         def counting(parquet_file, *args, **kwargs):
             reads.append(str(parquet_file))
             return real(parquet_file, *args, **kwargs)
 
-        monkeypatch.setattr(cps, "get_geo_metadata", counting)
+        monkeypatch.setattr(cps, "raw_geo_of_file", counting)
 
         cps.check_all(places_test_file, return_results=True, quiet=True)
 
@@ -460,11 +464,11 @@ class TestCheckAllReadsTheGeoBlockOnce:
     def test_a_check_called_on_its_own_still_reads_for_itself(self, places_test_file):
         """``geo_meta`` is an optimisation, not a new requirement on callers."""
         from geoparquet_io.core.check_parquet_structure import (
-            check_covering_encoding,
+            check_cover_encoding,
             check_metadata_and_bbox,
         )
 
-        covering = check_covering_encoding(places_test_file, return_results=True, quiet=True)
+        covering = check_cover_encoding(places_test_file, return_results=True, quiet=True)
         bbox = check_metadata_and_bbox(places_test_file, return_results=True, quiet=True)
 
         assert covering["passed"] is True
@@ -472,7 +476,7 @@ class TestCheckAllReadsTheGeoBlockOnce:
 
     def test_a_caller_supplied_block_is_the_one_judged(self, places_test_file):
         """Non-vacuity: the parameter is used, not accepted and ignored."""
-        from geoparquet_io.core.check_parquet_structure import check_covering_encoding
+        from geoparquet_io.core.check_parquet_structure import check_cover_encoding
 
         broken = {
             "version": "1.1.0",
@@ -480,7 +484,7 @@ class TestCheckAllReadsTheGeoBlockOnce:
             "columns": {"geometry": {"encoding": "WKB", "covering": {"h3": {"column": "h3"}}}},
         }
 
-        result = check_covering_encoding(
+        result = check_cover_encoding(
             places_test_file, return_results=True, quiet=True, geo_meta=broken
         )
 

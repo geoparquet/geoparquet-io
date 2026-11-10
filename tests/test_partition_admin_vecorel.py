@@ -149,7 +149,7 @@ class TestVecorelPartitionLocalIntegration:
             return OvertureAdminDataset(source_path=admin_file, verbose=verbose)
 
         monkeypatch.setattr(
-            "geoparquet_io.core.partition.admin_hierarchical.AdminDatasetFactory.create",
+            "geoparquet_io.core.admin_datasets.AdminDatasetFactory.create",
             staticmethod(fake_create),
         )
 
@@ -252,7 +252,7 @@ class TestNonVecorelPartitionLocalIntegration:
             return OvertureAdminDataset(source_path=admin_file, verbose=verbose)
 
         monkeypatch.setattr(
-            "geoparquet_io.core.partition.admin_hierarchical.AdminDatasetFactory.create",
+            "geoparquet_io.core.admin_datasets.AdminDatasetFactory.create",
             staticmethod(fake_create),
         )
 

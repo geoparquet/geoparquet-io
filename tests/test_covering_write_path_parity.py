@@ -18,7 +18,11 @@ Every gpio write ends at one of four places, and each used to decide the
   ran none of the gates a file write runs.
 
 What each class pins is the *parity*: the same input, through any of them, comes
-out declaring the same covering.
+out declaring the same covering. The decision itself is
+``geo_metadata.compose_geo_block``'s; a case runs on every strategy only where a
+strategy once answered it differently (a carried non-self-evident name, a table
+with no block, a secondary column's illegal covering), and on one representative
+where the code that answers it runs before a strategy is chosen.
 """
 
 from __future__ import annotations
@@ -83,7 +87,9 @@ class TestTableWriteKeepsADeclaredCovering:
     DEFAULT strategy.
     """
 
-    @pytest.mark.parametrize("strategy", STRATEGIES)
+    # The default strategy is the documented call; a non-self-evident name on
+    # every strategy is ``test_a_gdal_style_covering_survives``.
+    @pytest.mark.parametrize("strategy", ["duckdb-kv"])
     def test_the_documented_add_bbox_call_keeps_its_column(
         self, buildings_test_file, strategy, tmp_path
     ):
@@ -149,7 +155,9 @@ class TestTableWriteKeepsADeclaredCovering:
         assert bbox_covering_column(out) == "geometry_bbox"
         assert spec_failures(out) == {}
 
-    @pytest.mark.parametrize("strategy", STRATEGIES)
+    # Merging the entries is the composer's (one call for every strategy, which
+    # the gdal case above shows each strategy reaches).
+    @pytest.mark.parametrize("strategy", ["duckdb-kv"])
     def test_an_index_entry_beside_it_survives_too(self, quadkey_file, strategy, tmp_path):
         """``covering`` holds one entry per kind; carrying it must not lose the others."""
         import geoparquet_io as gpio
@@ -161,7 +169,9 @@ class TestTableWriteKeepsADeclaredCovering:
         assert set(covering) == {"bbox", "quadkey"}, covering
         assert spec_failures(out) == {}
 
-    @pytest.mark.parametrize("strategy", STRATEGIES)
+    # in-memory and disk-rewrite are tests/test_covering_bbox_field_order.py's
+    # #1172 pin; duckdb-kv (the default) its ``test_the_python_api_write``.
+    @pytest.mark.parametrize("strategy", ["streaming"])
     def test_an_illegal_declared_covering_is_still_dropped(
         self, overture_order_covering, strategy, tmp_path
     ):
@@ -189,11 +199,8 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
     ``gpio check bbox`` then reported an undeclared bbox column.
     """
 
-    @pytest.mark.parametrize(
-        ("flag", "value"),
-        [("--limit", "10"), ("--where", "name IS NOT NULL"), ("--bbox", "-180,-90,180,90")],
-        ids=["limit", "where", "bbox"],
-    )
+    # --where and --bbox take the same branch of ``_stale_stat_columns`` as --limit.
+    @pytest.mark.parametrize(("flag", "value"), [("--limit", "10")], ids=["limit"])
     def test_extract_keeps_it(self, v2_with_declared_covering, flag, value, tmp_path):
         out = tmp_path / "extracted.parquet"
 
@@ -235,20 +242,14 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
 
         assert bbox_covering_column(out) == "bbox"
 
-    @pytest.mark.parametrize("strategy", ["streaming", "in-memory", "disk-rewrite"])
-    def test_write_memory_is_warned_not_refused(
-        self, v2_with_declared_covering, strategy, tmp_path
-    ):
-        """Keeping the covering routes the write; the user's flags did not change.
+    def test_write_memory_is_honoured_on_the_rewrite(self, v2_with_declared_covering, tmp_path):
+        """Keeping the covering routes the write; the user's flags still apply.
 
-        Taking the rewrite to keep the input's covering is a decision the funnel
-        makes, so the memory-limit guard it lands in must behave as it does for
-        the other funnel-made reroute (1.1-geoarrow): warn and drop the limit.
-        Raising instead turned `extract --limit N --write-strategy streaming
-        --write-memory 2GB` of a 2.0 input -- exit 0 before the carry existed --
-        into exit 2.
+        `extract --limit N --write-strategy streaming --write-memory 2GB` of a
+        2.0 input was exit 2, then a warning that dropped the limit (#1172).
+        Every strategy now bounds its DuckDB work by it (#761).
         """
-        out = tmp_path / f"wm_{strategy}.parquet"
+        out = tmp_path / "wm_streaming.parquet"
 
         output = run_cli(
             "extract",
@@ -258,48 +259,15 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
             "--limit",
             "10",
             "--write-strategy",
-            strategy,
+            "streaming",
             "--write-memory",
             "2GB",
+            "--verbose",
         )
 
-        assert "--write-memory is ignored" in output, output
+        assert "DuckDB memory limit: 2GB" in output, output
         assert bbox_covering_column(out) == "bbox"
         assert spec_failures(out) == {}
-
-    def test_a_rewrite_the_user_asked_for_still_refuses_it(
-        self, v2_with_declared_covering, tmp_path
-    ):
-        """The control: `--geoparquet-version 1.1` is the user's own rewrite.
-
-        Nothing the funnel decided put this write on the streaming strategy, so
-        the flag combination is a real error and stays one.
-        """
-        from click.testing import CliRunner
-
-        from geoparquet_io.cli.main import cli
-
-        out = tmp_path / "asked.parquet"
-        result = CliRunner().invoke(
-            cli,
-            [
-                "extract",
-                "geoparquet",
-                str(v2_with_declared_covering),
-                str(out),
-                "--limit",
-                "10",
-                "--geoparquet-version",
-                "1.1",
-                "--write-strategy",
-                "streaming",
-                "--write-memory",
-                "2GB",
-            ],
-        )
-
-        assert result.exit_code == 2, result.output
-        assert "only supported with the 'duckdb-kv' write strategy" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +278,7 @@ class TestTheFastPathKeepsALegalCoveringAfterInvalidation:
 class TestASecondaryColumnsIllegalCoveringIsGatedEverywhere:
     """The struct-shape gate is per *column*, and every path has to run it.
 
-    Each DuckDB path's declare step (``declare_carried_bbox_column``) is scoped
+    Each DuckDB path's declare step (the composer's bbox-covering step) is scoped
     to the primary, so a SECONDARY column's ``covering`` over an Overture-order
     struct was never judged at all: the fast path and the two DuckDB rewrite
     strategies wrote it verbatim and ``gpio check spec`` then failed the file
@@ -402,7 +370,8 @@ class TestACoveringNamingAnAbsentColumnIsPrunedOnEveryPath:
         assert self.ABSENT not in bbox_covering_columns(out)
         assert spec_failures(out) == {}
 
-    @pytest.mark.parametrize("strategy", STRATEGIES)
+    # The prune runs in ``write_parquet_with_metadata`` before a strategy is chosen.
+    @pytest.mark.parametrize("strategy", ["duckdb-kv"])
     def test_the_duckdb_funnel_already_pruned_it(
         self, table_declaring_an_absent_bbox_column, strategy, tmp_path
     ):
@@ -489,33 +458,18 @@ class TestTheStdoutStreamIsGatedLikeAFileWrite:
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Fixtures: inputs, built once per module and only ever read
 # ---------------------------------------------------------------------------
 
 
-def _rewrite_covering(source: Path, target: Path, covering: dict | None, **columns) -> Path:
-    """``source`` with the primary column's ``covering`` replaced."""
-    table = pq.read_table(str(source))
-    metadata = dict(table.schema.metadata or {})
-    geo = json.loads(metadata[b"geo"].decode("utf-8"))
-    col_meta = geo["columns"][geo["primary_column"]]
-    if covering is None:
-        col_meta.pop("covering", None)
-    else:
-        col_meta["covering"] = covering
-    col_meta.update(columns)
-    metadata[b"geo"] = json.dumps(geo).encode("utf-8")
-    pq.write_table(table.replace_schema_metadata(metadata), str(target))
-    return target
-
-
-@pytest.fixture
-def gdal_style_covering(tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def gdal_style_covering(tmp_path_factory) -> Path:
     """A ``geometry_bbox`` struct and a covering naming it -- what GDAL writes.
 
     Nothing but the input's own block vouches for that name: it is not the one
     self-evident ``bbox``, so a write that cannot see the block cannot declare it.
     """
+    tmp_path = tmp_path_factory.mktemp("gdal_style_covering")
     table = pq.read_table(str(PLACES_TEST_FILE))
     index = table.schema.get_field_index("bbox")
     table = table.set_column(index, "geometry_bbox", table.column("bbox"))
@@ -532,18 +486,20 @@ def gdal_style_covering(tmp_path) -> Path:
     return target
 
 
-@pytest.fixture
-def quadkey_file(tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def quadkey_file(tmp_path_factory) -> Path:
     """A bbox covering with a ``quadkey`` index entry beside it."""
+    tmp_path = tmp_path_factory.mktemp("quadkey_file")
     target = tmp_path / "quadkey.parquet"
     run_cli("add", "quadkey", PLACES_TEST_FILE, target)
     assert set(covering_of(target) or {}) == {"bbox", "quadkey"}
     return target
 
 
-@pytest.fixture
-def overture_order_covering(tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def overture_order_covering(tmp_path_factory) -> Path:
     """1.1, a covering declared over Overture's ``xmin, xmax, ymin, ymax`` struct."""
+    tmp_path = tmp_path_factory.mktemp("overture_order_covering")
     target = tmp_path / "overture_declared.parquet"
     table = pq.read_table(str(COUNTRY_PARTITION_DIR / "Honduras.parquet"))
     pq.write_table(table, str(target))
@@ -551,8 +507,8 @@ def overture_order_covering(tmp_path) -> Path:
     return target
 
 
-@pytest.fixture
-def v2_with_illegal_secondary_covering(tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def v2_with_illegal_secondary_covering(tmp_path_factory) -> Path:
     """2.0, a SECONDARY geometry column, and its covering over an illegal struct.
 
     The #953 shape carrying #1035's defect on the secondary: primary Point
@@ -565,7 +521,8 @@ def v2_with_illegal_secondary_covering(tmp_path) -> Path:
     file: declaring it on the 1.1 source instead would let the conversion strip
     it, and the fixture would then prove nothing.
     """
-    from geoparquet_io.core.parquet_footer import patch_footer_kv
+    tmp_path = tmp_path_factory.mktemp("v2_with_illegal_secondary_covering")
+    from geoparquet_io.core.parquet_footer import _patch_footer_file
     from tests.fixtures.multi_geometry import create_multi_geometry_with_secondary_bbox
 
     source = tmp_path / "multi_11.parquet"
@@ -595,7 +552,7 @@ def v2_with_illegal_secondary_covering(tmp_path) -> Path:
         "bbox": {axis: ["boundary_extent", axis] for axis in ("xmin", "ymin", "xmax", "ymax")}
     }
     target = tmp_path / "multi_20_declared.parquet"
-    patch_footer_kv(str(v2), {"geo": json.dumps(geo)}, output_file=str(target))
+    _patch_footer_file(str(v2), {"geo": json.dumps(geo)}, output_file=str(target))
 
     assert set(spec_failures(target)) == {"covering_bbox_structure_boundary"}, (
         "the fixture must carry exactly the defect under test"
@@ -603,9 +560,10 @@ def v2_with_illegal_secondary_covering(tmp_path) -> Path:
     return target
 
 
-@pytest.fixture
-def v2_with_declared_covering(tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def v2_with_declared_covering(tmp_path_factory) -> Path:
     """GeoParquet 2.0, a bbox column, and a covering the file itself declares."""
+    tmp_path = tmp_path_factory.mktemp("v2_with_declared_covering")
     v2 = tmp_path / "v2.parquet"
     run_cli(
         "convert",

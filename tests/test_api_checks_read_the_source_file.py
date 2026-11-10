@@ -87,6 +87,30 @@ def test_a_table_with_no_file_behind_it_answers_prospectively(places_test_file, 
     assert result.to_dict()["stats"]["num_groups"] >= 1  # it still answers
 
 
+@pytest.mark.parametrize(
+    "noop",
+    [
+        lambda t: t.head(t.num_rows),
+        lambda t: t.tail(t.num_rows + 1),
+        lambda t: t.extract(repair_geometry=False),
+    ],
+    ids=["head_all", "tail_more", "extract_unfiltered"],
+)
+def test_a_no_op_returns_the_same_table_still_measured(places_test_file, noop):
+    """#1090: an operation that cannot change the rows returns ``self``, so the
+    Table is still a view of its file and its checks are measured."""
+    table = gpio.read(places_test_file)
+    derived = noop(table)
+    assert derived is table
+    assert derived.check_row_groups().prospective is False
+
+
+def test_extract_with_a_filter_or_a_repair_is_not_a_no_op(places_test_file):
+    table = gpio.read(places_test_file)
+    assert table.extract() is not table  # repair_geometry=True may rewrite rows
+    assert table.extract(where="true", repair_geometry=False) is not table
+
+
 def test_a_prospective_check_describes_what_write_would_produce(tmp_path, places_test_file):
     """The temp write uses ``write()``'s own defaults, so the answer is the file the caller would get."""
     derived = gpio.read(places_test_file).head(200)

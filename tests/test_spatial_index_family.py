@@ -69,6 +69,7 @@ import json
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -81,29 +82,30 @@ from click.testing import CliRunner
 from geoparquet_io.cli.main import cli
 from geoparquet_io.core.add.a5 import add_a5_column, add_a5_table
 from geoparquet_io.core.add.h3 import add_h3_column, add_h3_table
+from geoparquet_io.core.add.quadkey import _lat_lon_to_quadkey as lat_lon_to_quadkey
 from geoparquet_io.core.add.quadkey import (
-    _lat_lon_to_quadkey,
     add_quadkey_column,
     add_quadkey_table,
 )
 from geoparquet_io.core.add.s2 import add_s2_column, add_s2_table
 from geoparquet_io.core.crs_utils import get_crs_display_name
 from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.index_ops import (
+    calculate_index_resolution,
+    get_index_spec,
+    validate_partition_resolutions,
+)
 from geoparquet_io.core.partition.auto_resolution import (
-    _calculate_a5_resolution,
-    _calculate_h3_resolution,
-    _calculate_quadkey_resolution,
     calculate_auto_resolution,
 )
 from geoparquet_io.core.partition.by_a5 import partition_by_a5
 from geoparquet_io.core.partition.by_h3 import partition_by_h3
 from geoparquet_io.core.partition.by_quadkey import (
-    _validate_resolutions,
     partition_by_quadkey,
 )
 from geoparquet_io.core.partition.by_s2 import partition_by_s2
 from geoparquet_io.core.partition.common import calculate_partition_stats
-from tests.conftest import skip_if_geography_unavailable
+from tests.conftest import skip_if_geography_unavailable, skip_if_grid_unavailable
 
 # Row count of tests/data/places_test.parquet, pinned by the original
 # per-index file tests.
@@ -227,7 +229,7 @@ A5 = IndexSpec(
     hive_prefix="a5_cell=",
     auto_hive_prefix="a5_cell=",
     auto_conflict_resolution=15,
-    calc=_calculate_a5_resolution,
+    calc=partial(calculate_index_resolution, get_index_spec("a5")),
     calc_expect=CalcExpect(
         # A5/S2: power-of-4 progression with 6 base cells.
         small=(0, 2),
@@ -261,7 +263,7 @@ H3 = IndexSpec(
     partition_col_kw="h3_column_name",
     auto_hive_prefix="h3_cell=",
     auto_conflict_resolution=5,
-    calc=_calculate_h3_resolution,
+    calc=partial(calculate_index_resolution, get_index_spec("h3")),
     calc_expect=CalcExpect(
         # H3: ~122 cells at res 0, ~7x more per level.
         small=(0, 2),
@@ -299,8 +301,7 @@ S2 = IndexSpec(
     partition_invalid_resolution=31,
     partition_invalid_match="must be between 0 and 30",
     hive_prefix="s2_cell=",
-    calc=_calculate_a5_resolution,  # S2 shares A5's math (6 base cells, x4)
-    calc_kwargs={"index_name": "S2"},
+    calc=partial(calculate_index_resolution, get_index_spec("s2")),
     calc_expect=CalcExpect(
         small=(0, 2),
         medium=(0, 2),
@@ -334,7 +335,7 @@ QUADKEY = IndexSpec(
     auto_conflict_match="(?i)cannot specify --resolution or --partition-resolution",
     auto_first_kwargs={"partition_resolution": None, "use_centroid": False},
     auto_manual_extra=lambda res: {"partition_resolution": res},
-    calc=_calculate_quadkey_resolution,
+    calc=partial(calculate_index_resolution, get_index_spec("quadkey")),
     calc_expect=CalcExpect(
         # Quadkey: 4^zoom tiles.
         small=(0, 3),
@@ -368,6 +369,15 @@ ADD_INVALID_RESOLUTION = [
 PARTITION_FAMILY = _params((A5, S2), "partition_marks")
 PARTITION_CLI = _params((A5, S2, QUADKEY), "partition_marks")
 AUTO_FAMILY = _params((A5, H3, QUADKEY), "auto_marks")
+# Every index's ``--auto`` runs the one driver, ``index_ops.partition_index``;
+# the per-index facts in it are the resolution calculator (``CALC_FAMILY``,
+# every index), the hive prefix and the conflict message (both run on every
+# index below). The driver properties themselves are run once each, spread
+# over the indexes, with quadkey's structurally different partition-resolution
+# leg in the auto-versus-manual comparison (#1402).
+AUTO_ONE = {name: _params((spec,), "auto_marks") for name, spec in (("a5", A5), ("h3", H3))}
+AUTO_STRUCTURAL = _params((H3, QUADKEY), "auto_marks")
+AUTO_QUADKEY = _params((QUADKEY,), "auto_marks")
 CALC_FAMILY = _params((H3, QUADKEY, A5, S2), "auto_marks")
 
 
@@ -610,6 +620,9 @@ def test_add_streaming_file_to_stdout(spec, places_test_file, monkeypatch):
     mock_stdout = mock.MagicMock()
     mock_stdout.buffer = output_buffer
     mock_stdout.isatty.return_value = False
+    # pandas, if this is the first test in the worker to import it, reads
+    # ``sys.stdout.encoding`` at import time and refuses a MagicMock.
+    mock_stdout.encoding = "utf-8"
     monkeypatch.setattr(sys, "stdout", mock_stdout)
 
     spec.add_file(places_test_file, "-", **spec.add_file_kwargs(spec.default_resolution))
@@ -640,6 +653,7 @@ def test_add_cli_basic(spec, places_test_file, tmp_path):
     """Basic CLI invocation writes the cell column."""
     if spec.cli_needs_geography:
         skip_if_geography_unavailable()
+    skip_if_grid_unavailable(spec.name)
 
     output_file = str(tmp_path / "out.parquet")
     runner = CliRunner()
@@ -770,6 +784,7 @@ def test_partition_cli_basic(spec, places_test_file, tmp_path):
     """Basic CLI invocation creates partition files."""
     if spec.cli_needs_geography:
         skip_if_geography_unavailable()
+    skip_if_grid_unavailable(spec.name)
 
     output_folder = str(tmp_path / "parts")
     runner = CliRunner()
@@ -796,6 +811,7 @@ def test_partition_cli_preview(spec, places_test_file, tmp_path):
     """CLI preview mode creates no files."""
     if spec.cli_needs_geography:
         skip_if_geography_unavailable()
+    skip_if_grid_unavailable(spec.name)
 
     output_folder = str(tmp_path / "parts")
     runner = CliRunner()
@@ -820,7 +836,7 @@ def test_partition_cli_preview(spec, places_test_file, tmp_path):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("spec", AUTO_FAMILY)
+@pytest.mark.parametrize("spec", AUTO_ONE["a5"])
 def test_partition_auto_resolution(spec, fields_5070_file, tmp_path):
     """Auto-resolution partitioning creates valid, non-empty partitions."""
     output_dir = tmp_path / "auto_output"
@@ -847,7 +863,7 @@ def test_partition_auto_resolution(spec, fields_5070_file, tmp_path):
         assert table.num_rows > 0, f"Partition {file} should have rows"
 
 
-@pytest.mark.parametrize("spec", AUTO_FAMILY)
+@pytest.mark.parametrize("spec", AUTO_STRUCTURAL)
 def test_partition_auto_vs_manual(spec, fields_5070_file, tmp_path):
     """Auto-resolution matches a manual run at the resolution it calculates."""
     auto_dir = tmp_path / "auto"
@@ -885,7 +901,7 @@ def test_partition_auto_vs_manual(spec, fields_5070_file, tmp_path):
     assert len(auto_files) == len(manual_files), "Auto and manual should create same partitions"
 
 
-@pytest.mark.parametrize("spec", AUTO_FAMILY)
+@pytest.mark.parametrize("spec", AUTO_ONE["h3"])
 def test_partition_auto_with_constraints(spec, fields_5070_file, tmp_path):
     """Auto-resolution respects the max_partitions constraint (loosely)."""
     output_dir = tmp_path / "constrained"
@@ -944,7 +960,7 @@ def test_partition_auto_error_when_both_auto_and_resolution(spec, fields_5070_fi
         )
 
 
-@pytest.mark.parametrize("spec", AUTO_FAMILY)
+@pytest.mark.parametrize("spec", AUTO_QUADKEY)
 def test_partition_auto_preview(spec, fields_5070_file):
     """Preview mode with auto-resolution runs without an output folder."""
     spec.partition(
@@ -1077,26 +1093,26 @@ class TestAddS2Specific:
 
 
 class TestLatLonToQuadkey:
-    """Tests for _lat_lon_to_quadkey function."""
+    """Tests for lat_lon_to_quadkey function."""
 
     def test_known_location(self):
         """Test quadkey generation for a known location."""
         # San Francisco area at zoom level 10
-        quadkey = _lat_lon_to_quadkey(37.7749, -122.4194, 10)
+        quadkey = lat_lon_to_quadkey(37.7749, -122.4194, 10)
         assert isinstance(quadkey, str)
         assert len(quadkey) == 10
 
     def test_equator_prime_meridian(self):
         """Test quadkey at equator/prime meridian."""
-        quadkey = _lat_lon_to_quadkey(0.0, 0.0, 5)
+        quadkey = lat_lon_to_quadkey(0.0, 0.0, 5)
         assert isinstance(quadkey, str)
         assert len(quadkey) == 5
 
     def test_different_resolutions(self):
         """Test that higher resolution produces longer quadkeys."""
         lat, lon = 40.7128, -74.0060  # New York
-        qk_low = _lat_lon_to_quadkey(lat, lon, 5)
-        qk_high = _lat_lon_to_quadkey(lat, lon, 15)
+        qk_low = lat_lon_to_quadkey(lat, lon, 5)
+        qk_high = lat_lon_to_quadkey(lat, lon, 15)
         assert len(qk_low) == 5
         assert len(qk_high) == 15
         # Higher resolution should start with the lower resolution key
@@ -1154,16 +1170,20 @@ class TestQuadkeyCLIValidation:
         assert result.exit_code != 0
 
 
-# Column names that are legal in Parquet but are not bare SQL identifiers.
-# 'weird name' broke the file-based path with a parser error; 'has"quote'
-# broke it with an unterminated-quoted-identifier error (issue #680).
-HOSTILE_QUADKEY_NAMES = ["weird name", 'has"quote', "quad-key", "SELECT"]
+#: A column name that is legal in Parquet but not a bare SQL identifier.
+#: 'weird name' broke the file-based path with a parser error and 'has"quote'
+#: with an unterminated-quoted-identifier error (issue #680).
+#: Both #680 shapes in one name (a space and an embedded ``"``): each path is a
+#: routing test for ``quote_identifier``, whose own contract runs every hostile
+#: name (``tests/test_geometry_identifier_quoting.py::TestQuoteIdentifierContract``),
+#: so one name that trips both failures is run per path (#1402).
+HOSTILE_QUADKEY_NAME = 'weird "name'
 
 
 def _expected_bbox_quadkeys(table, resolution):
     """Golden quadkeys computed in Python from the bbox struct midpoints."""
     return [
-        _lat_lon_to_quadkey(
+        lat_lon_to_quadkey(
             (b["ymin"] + b["ymax"]) / 2.0,
             (b["xmin"] + b["xmax"]) / 2.0,
             resolution,
@@ -1187,7 +1207,7 @@ class TestQuadkeyColumnNameQuoting:
         # was derived from the Slippy-tile formula independently of this module.
         assert result["quadkey"][0].as_py() == "0333311123230"
 
-    @pytest.mark.parametrize("name", HOSTILE_QUADKEY_NAMES)
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_file_based_bbox_path_hostile_name(self, places_test_file, tmp_path, name):
         """File-based bbox path: hostile names keep the correct quadkey values."""
         out = tmp_path / "hostile.parquet"
@@ -1199,7 +1219,7 @@ class TestQuadkeyColumnNameQuoting:
         assert result[name].to_pylist() == _expected_bbox_quadkeys(source, 13)
         assert result.num_rows == source.num_rows
 
-    @pytest.mark.parametrize("name", ["weird name", 'has"quote'])
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_file_based_centroid_path_hostile_name(self, places_test_file, tmp_path, name):
         """File-based centroid path: hostile names keep the correct quadkey values."""
         default_out = tmp_path / "centroid_default.parquet"
@@ -1219,7 +1239,7 @@ class TestQuadkeyColumnNameQuoting:
         assert expected == _expected_bbox_quadkeys(pq.read_table(places_test_file), 13)
         assert actual == expected
 
-    @pytest.mark.parametrize("name", ["weird name", 'has"quote'])
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_cli_hostile_name_end_to_end(self, places_test_file, tmp_path, name):
         """CLI e2e: --quadkey-name accepts hostile names and writes correct values."""
         out = tmp_path / "cli.parquet"
@@ -1245,7 +1265,7 @@ class TestQuadkeyColumnNameQuoting:
             pq.read_table(places_test_file), 13
         )
 
-    @pytest.mark.parametrize("name", ["weird name", 'has"quote'])
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_geo_metadata_primary_column_survives_hostile_name(
         self, places_test_file, tmp_path, name
     ):
@@ -1268,7 +1288,7 @@ class TestQuadkeyColumnNameQuoting:
         assert covering.get("quadkey") == {"column": name, "resolution": 13}, covering
         assert covering.get("bbox", {}).get("xmin") == ["bbox", "xmin"], covering
 
-    @pytest.mark.parametrize("name", ["weird name", 'has"quote'])
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_table_path_hostile_name(self, places_test_file, name):
         """Sibling table path already quotes — pin it against regressions."""
         source = pq.read_table(places_test_file)
@@ -1277,7 +1297,7 @@ class TestQuadkeyColumnNameQuoting:
         assert name in result.column_names
         assert result[name].to_pylist() == _expected_bbox_quadkeys(source, 13)
 
-    @pytest.mark.parametrize("name", ["weird name", 'has"quote'])
+    @pytest.mark.parametrize("name", [HOSTILE_QUADKEY_NAME])
     def test_streaming_path_hostile_name(self, places_test_file, tmp_path, monkeypatch, name):
         """Sibling streaming path already quotes — pin it against regressions."""
         source = pq.read_table(places_test_file)
@@ -1292,29 +1312,29 @@ class TestQuadkeyColumnNameQuoting:
 
 
 class TestValidateResolutions:
-    """Tests for quadkey's _validate_resolutions function."""
+    """Tests for quadkey's validate_partition_resolutions function."""
 
     def test_valid_resolutions(self):
         """Test with valid resolutions."""
         # Should not raise
-        _validate_resolutions(13, 9)
-        _validate_resolutions(23, 23)
-        _validate_resolutions(0, 0)
+        validate_partition_resolutions(13, 9, get_index_spec("quadkey"))
+        validate_partition_resolutions(23, 23, get_index_spec("quadkey"))
+        validate_partition_resolutions(0, 0, get_index_spec("quadkey"))
 
     def test_resolution_out_of_range(self):
         """Test with resolution out of range."""
         with pytest.raises(InvalidParameterError):
-            _validate_resolutions(25, 9)
+            validate_partition_resolutions(25, 9, get_index_spec("quadkey"))
 
     def test_partition_resolution_out_of_range(self):
         """Test with partition resolution out of range."""
         with pytest.raises(InvalidParameterError):
-            _validate_resolutions(13, 25)
+            validate_partition_resolutions(13, 25, get_index_spec("quadkey"))
 
     def test_partition_resolution_exceeds_resolution(self):
         """Test with partition resolution exceeding column resolution."""
         with pytest.raises(InvalidParameterError):
-            _validate_resolutions(5, 10)
+            validate_partition_resolutions(5, 10, get_index_spec("quadkey"))
 
 
 class TestCalculatePartitionStats:

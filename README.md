@@ -7,7 +7,7 @@
 [![PyPI version](https://badge.fury.io/py/geoparquet-io.svg)](https://badge.fury.io/py/geoparquet-io)
 [![Tests](https://github.com/geoparquet/geoparquet-io/actions/workflows/tests.yml/badge.svg?event=push)](https://github.com/geoparquet/geoparquet-io/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/geoparquet/geoparquet-io/branch/main/graph/badge.svg)](https://codecov.io/gh/geoparquet/geoparquet-io)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/geoparquet/geoparquet-io/blob/main/LICENSE)
 
 Fast I/O and transformation tools for [GeoParquet](https://geoparquet.org/) files, powered by [DuckDB](https://duckdb.org/) and [PyArrow](https://arrow.apache.org/docs/python/).

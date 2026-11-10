@@ -36,7 +36,7 @@ are the actual #969 defect.
 
 The Click layer owns *blank entries only*. Whether a non-blank name actually
 exists is a schema question, so it belongs to whichever backend can see the
-schema -- ``core.extract.validate_columns`` for parquet,
+schema -- ``core.extract.build_column_selection`` for parquet,
 ``core.column_selection.resolve_columns_against_schema`` for BigQuery, Carto and
 ArcGIS -- and is covered in those backends' own tests.
 

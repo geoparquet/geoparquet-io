@@ -27,20 +27,12 @@ from __future__ import annotations
 import argparse
 import re
 import sys
+import tomllib
 from pathlib import Path
 
 import click
 
 from geoparquet_io.core.parquet_writer import DEFAULT_ROW_GROUP_ROWS
-
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    try:
-        import tomllib  # type: ignore[import-not-found]
-    except ModuleNotFoundError:
-        import tomli as tomllib  # type: ignore[no-redef]
-
 
 # ---------------------------------------------------------------------------
 # Shared utilities

@@ -9,12 +9,17 @@ Evaluates five factors that affect spatial query performance:
 5. Efficient compression (ZSTD)
 """
 
-from geoparquet_io.core.check_parquet_structure import _NO_COMPRESSION_INFO, check_compression
+from geoparquet_io.core.check_parquet_structure import (
+    _NO_COMPRESSION_INFO,
+    _is_small_single_group,
+    check_compression,
+)
 from geoparquet_io.core.check_spatial_order import check_spatial_order
 from geoparquet_io.core.check_verdict import PASS_GLYPH, WARNING_GLYPH
 from geoparquet_io.core.file_type import detect_geoparquet_file_type
 from geoparquet_io.core.logging_config import error, info, progress, success, warn
 from geoparquet_io.core.metadata_utils import has_parquet_geo_row_group_stats
+from geoparquet_io.core.sizing import bytes_to_mb
 
 
 def _score_to_level(score):
@@ -112,10 +117,10 @@ def _check_row_group_size(parquet_file, verbose=False):
 
     stats = get_row_group_stats(parquet_file)
     avg_rows = stats["avg_rows_per_group"]
-    total_size_mb = stats["total_size"] / (1024 * 1024)
+    total_size_mb = bytes_to_mb(stats["total_size"])
 
     # Small files with a single row group are always fine
-    if total_size_mb < 64 and stats["num_groups"] == 1:
+    if _is_small_single_group(stats["total_size"], stats["num_groups"]):
         return {
             "passed": True,
             "detail": f"Small file ({total_size_mb:.1f} MB), single row group is appropriate",

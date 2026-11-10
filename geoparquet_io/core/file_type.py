@@ -10,10 +10,9 @@ from typing import Any
 from geoparquet_io.core.duckdb_metadata import (
     detect_geometry_columns,
     detect_native_geometry_columns,
-    get_geo_metadata,
 )
 from geoparquet_io.core.file_utils import _get_file_cache_key
-from geoparquet_io.core.geo_metadata import carried_version
+from geoparquet_io.core.geo_metadata import declared_version, raw_geo_of_file
 from geoparquet_io.core.logging_config import debug
 
 # LRU cache for detect_geoparquet_file_type results
@@ -29,6 +28,8 @@ def _check_file_type_cache(parquet_file: str) -> dict | None:
         cached_mtime, result = _file_type_cache[cache_key]
         # For remote files (mtime=0), always use cache
         # For local files, invalidate if file changed
+        # shortcut: a remote file's positive answer is never revalidated, so a
+        # replaced object reads stale until restart; key on ETag if that bites.
         if mtime == 0 or cached_mtime == mtime:
             return result
     return None
@@ -94,7 +95,7 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
     }
 
     # Check for geo metadata (uses PyArrow for local files, DuckDB for remote)
-    geo_meta = get_geo_metadata(parquet_file, con=con)
+    geo_meta = raw_geo_of_file(parquet_file, con=con).value
     if geo_meta:
         result["has_geo_metadata"] = True
         if isinstance(geo_meta, dict) and "version" in geo_meta:
@@ -103,7 +104,9 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
             # `check bbox`, `check optimization` and `add bbox` down with a bare
             # `AttributeError` (#979). `geo_version` is documented as the
             # version *or None*, and every consumer already handles None.
-            result["geo_version"] = carried_version(geo_meta["version"], source=str(parquet_file))
+            result["geo_version"] = declared_version(
+                geo_meta, default=None, source=str(parquet_file)
+            )
 
     # Check for native Parquet geo types using schema. A GeoArrow struct column
     # counts here (its coordinate stats prune like native ones, #461), but only
@@ -125,8 +128,9 @@ def detect_geoparquet_file_type(parquet_file, verbose=False, con=None):
         result["bbox_recommended"] = False  # Native geo types provide row group stats
     # else: remains "unknown"
 
-    # Cache the result (only if no connection provided)
-    if con is None:
+    # Cache only a positive answer, and only without a connection: an "unknown"
+    # is a refusal (not GeoParquet), and a refusal must not outlive a fixed file.
+    if con is None and result["file_type"] != "unknown":
         _update_file_type_cache(parquet_file, result)
 
     if verbose:

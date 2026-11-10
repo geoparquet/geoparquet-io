@@ -288,13 +288,19 @@ class TestVerdictFunction:
     """``_spatial_order_verdict``: the one thing a reader wants to check."""
 
     def test_at_or_above_the_floor_the_bar_decides(self):
-        assert _spatial_order_verdict(FLOOR, 0.70, None) == (True, True, [])
-        assert _spatial_order_verdict(FLOOR, 0.69, None)[:2] == (False, True)
+        assert _spatial_order_verdict(FLOOR, 0.65, None) == (True, True, [])
+        assert _spatial_order_verdict(FLOOR, 0.64, None)[:2] == (False, True)
 
     def test_below_the_floor_a_clear_failure_is_judged(self):
-        """The spec's PORTO-FMT-059: efficiency under 0.25 fails from two groups."""
-        assert _spatial_order_verdict(2, 0.0, None)[:2] == (False, True)
+        """PORTO-FMT-059: efficiency under 0.25 fails from three groups up.
+
+        Two groups are exempt -- the spec's sort control measured sorted
+        two-group copies as low as 0.18, so a clear-fail there would reject
+        files a re-sort cannot improve.
+        """
+        assert _spatial_order_verdict(3, 0.0, None)[:2] == (False, True)
         assert _spatial_order_verdict(FLOOR - 1, 0.24, None)[:2] == (False, True)
+        assert _spatial_order_verdict(2, 0.0, None)[1] is False, "two groups are withheld"
 
     def test_below_the_floor_a_middling_file_is_not_judged_and_names_the_lever(self):
         passed, judged, warnings = _spatial_order_verdict(FLOOR - 1, 0.5, None)
@@ -324,7 +330,7 @@ class TestVerdictFunction:
         assert spatial_verdict_withheld({"passed": False}) is False
 
     def test_the_bars_and_floors_are_the_spec_constants(self):
-        assert SPATIAL_ORDER_MIN_EFFICIENCY == 0.70
+        assert SPATIAL_ORDER_MIN_EFFICIENCY == 0.65
         assert SPATIAL_ORDER_OBVIOUS_FAIL_EFFICIENCY == 0.25
         assert FLOOR == 8
         assert mod.SPATIAL_ORDER_MIN_FILE_BYTES == 0, "patched for these tests"
@@ -518,7 +524,7 @@ class TestBadlyOrderedFilesStillFail:
 
         assert result(boxes)["passed"] is False
 
-    @pytest.mark.parametrize("n", [2, 3, 5, FLOOR - 1])
+    @pytest.mark.parametrize("n", [3, 5, FLOOR - 1])
     def test_unsorted_data_below_the_floor_is_a_clear_failure(self, n):
         """PORTO-FMT-059: efficiency 0.00 is plain at any count of two or more."""
         r = result(unsorted(n))
@@ -794,14 +800,27 @@ class TestCliWithheldVerdict:
         assert "spatially ordered" not in r.output.split("Pushdown")[0]
         assert "Row groups:" in r.output
 
-    def test_two_shuffled_row_groups_are_a_clear_failure(self, tmp_path):
-        """PORTO-FMT-059 end to end: the case that used to print a green pass."""
-        path = _write_bbox_file(tmp_path / "two.parquet", 400, 2, shuffle_seed=1)
+    def test_three_shuffled_row_groups_are_a_clear_failure(self, tmp_path):
+        """PORTO-FMT-059 end to end: the case that used to print a green pass.
+
+        Three groups, not two: the recalibrated spec exempts two-group files,
+        whose sorted copies measured as low as 0.18.
+        """
+        path = _write_bbox_file(tmp_path / "three.parquet", 600, 3, shuffle_seed=1)
 
         r = _run(["spatial", path])
 
         assert "Data may not be optimally spatially ordered" in r.output
-        assert "efficiency 0.00" in r.output
+        assert "efficiency 0.0" in r.output
+
+    def test_two_shuffled_row_groups_are_withheld(self, tmp_path):
+        """At two groups the clear-fail rule stands down and the pass is withheld."""
+        path = _write_bbox_file(tmp_path / "two.parquet", 400, 2, shuffle_seed=1)
+
+        r = _run(["spatial", path])
+
+        assert "Spatial ordering not judged" in r.output
+        assert "Data may not be optimally spatially ordered" not in r.output
 
     def test_check_all_prints_no_check_mark_either(self, small_file):
         r = _run(["all", small_file])
@@ -957,29 +976,20 @@ class TestFixKeepsTheFileJudgeable:
         assert out.exists()
         assert pq.ParquetFile(out).metadata.num_row_groups >= 10
 
-    def test_the_target_is_computed_from_the_footer(self, tmp_path):
-        from geoparquet_io.core.check_fixes import _judgeable_row_group_rows
+    def test_the_target_is_computed_from_the_footer(self):
+        # The facade owns the rewrite size (#1098): the default applies only
+        # when it keeps the input's row-group count.
+        from geoparquet_io.core.parquet_writer import resolve_row_group_rows_for_rewrite
 
-        path = _write_bbox_file(tmp_path / "ten.parquet", 20_480, 10, shuffle_seed=0)
+        assert resolve_row_group_rows_for_rewrite(20_480, 10) == 2048
 
-        assert _judgeable_row_group_rows(path) == 2048
-
-    def test_a_large_input_still_gets_the_facade_default(self, monkeypatch):
-        from geoparquet_io.core import check_fixes
-
-        monkeypatch.setattr(
-            check_fixes,
-            "_judgeable_row_group_rows",
-            check_fixes._judgeable_row_group_rows,
-        )
-        monkeypatch.setattr(
-            "geoparquet_io.core.duckdb_metadata.get_file_metadata",
-            lambda *a, **k: {"num_rows": 10_000_000, "num_row_groups": 9},
+    def test_a_large_input_still_gets_the_facade_default(self):
+        from geoparquet_io.core.parquet_writer import (
+            DEFAULT_ROW_GROUP_ROWS,
+            resolve_row_group_rows_for_rewrite,
         )
 
-        from geoparquet_io.core.check_fixes import DEFAULT_ROW_GROUP_ROWS
-
-        assert check_fixes._judgeable_row_group_rows("whatever.parquet") == DEFAULT_ROW_GROUP_ROWS
+        assert resolve_row_group_rows_for_rewrite(10_000_000, 9) == DEFAULT_ROW_GROUP_ROWS
 
 
 class TestSamplingFallbackSaysWhatItMeasures:
@@ -1033,17 +1043,15 @@ class TestFooterCheckOwnsTheVerdict:
     def test_bbox_stats_failure_falls_back_to_native_stats(self, tmp_path, monkeypatch):
         """A malformed bbox column must fall through, not abort the check."""
 
-        def _boom(*args, **kwargs):
-            raise ValueError("malformed bbox column")
+        def _native_first(parquet_file, *, native, bbox_column):
+            # The one row-group stats reader: native first (main's #1367 flow).
+            return native(), "native"
 
         monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
-        monkeypatch.setattr(mod, "check_spatial_order_bbox_stats", _boom)
-        monkeypatch.setattr(
-            mod, "check_bbox_structure", lambda *a, **k: {"bbox_column_name": "bbox"}
-        )
+        monkeypatch.setattr(mod, "get_row_group_bbox_stats", _native_first)
         monkeypatch.setattr(mod, "get_per_row_group_native_geo_stats", lambda *a, **k: tiling(9))
-        # module-level import, so patch the binding the function actually uses
-        monkeypatch.setattr(mod, "find_primary_geometry_column", lambda *a, **k: "geometry")
+        monkeypatch.setattr(mod, "primary_geometry_column", lambda *a, **k: "geometry")
+        monkeypatch.setattr(mod, "get_row_group_sizes", lambda *a, **k: [])
         monkeypatch.setattr(mod, "resolve_file_url", lambda p, v=False: str(p))
 
         out = mod.check_spatial_order(
@@ -1055,7 +1063,7 @@ class TestFooterCheckOwnsTheVerdict:
             quiet=True,
         )
 
-        assert out["judged"] and out["passed"], "fell through to the native-stats path"
+        assert out["judged"] and out["passed"], "the native-stats path judged the layout"
 
 
 class TestPushdownGoesThroughCore:
@@ -1080,9 +1088,10 @@ class TestPushdownGoesThroughCore:
     def test_api_pushdown_reads_native_geo_stats_like_the_cli(self, tmp_path, monkeypatch):
         """A GeoParquet 2.0 file has no bbox column; its native statistics count."""
         monkeypatch.setattr(mod, "check_bbox_structure", lambda *a, **k: {"bbox_column_name": None})
-        monkeypatch.setattr(mod, "find_primary_geometry_column", lambda *a, **k: "geometry")
+        monkeypatch.setattr(mod, "primary_geometry_column", lambda *a, **k: "geometry")
         monkeypatch.setattr(mod, "get_per_row_group_native_geo_stats", lambda *a, **k: tiling(9))
-        monkeypatch.setattr(mod, "get_per_row_group_weights", lambda *a, **k: {})
+        monkeypatch.setattr(mod, "get_row_group_sizes", lambda *a, **k: [])
+        monkeypatch.setattr(mod, "get_file_metadata", lambda *a, **k: {"num_row_groups": 9})
 
         r = mod.check_spatial_pushdown_readiness(str(tmp_path / "native.parquet"))
 
@@ -1152,10 +1161,10 @@ class TestUntouchedConsumersSeeNoFailure:
         assert checks["spatial_sorting"]["passed"] is True
 
     def test_check_optimization_fails_a_clearly_shuffled_small_file(self, tmp_path):
-        """Two shuffled groups are a clear failure now (PORTO-FMT-059)."""
+        """Three shuffled groups are a clear failure (PORTO-FMT-059); two are exempt."""
         from geoparquet_io.core.check_optimization import check_optimization
 
-        path = _write_bbox_file(tmp_path / "two.parquet", 400, 2, shuffle_seed=1)
+        path = _write_bbox_file(tmp_path / "three.parquet", 600, 3, shuffle_seed=1)
 
         checks = check_optimization(path, return_results=True, quiet=True)["checks"]
 

@@ -23,7 +23,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection
 from geoparquet_io.core.geometry_repair import (
     repair_arrow_table_geometry,
     repair_query_geometry,
@@ -44,7 +44,7 @@ def _wkb_of(*wkts: str) -> list[bytes]:
     con = get_duckdb_connection(load_spatial=True)
     try:
         return [
-            bytes(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{w}'))::BLOB").fetchone()[0])
+            bytes(fetch_one(con.execute(f"SELECT ST_AsWKB(ST_GeomFromText('{w}'))::BLOB"))[0])
             for w in wkts
         ]
     finally:
@@ -93,7 +93,7 @@ def _geometry_types(path, column: str = "geometry") -> set[str]:
     con = get_duckdb_connection(load_spatial=True)
     try:
         return {
-            con.execute("SELECT ST_GeometryType(ST_GeomFromWKB(?::BLOB))", [wkb]).fetchone()[0]
+            fetch_one(con.execute("SELECT ST_GeometryType(ST_GeomFromWKB(?::BLOB))", [wkb]))[0]
             for wkb in _storage_wkb(path, column)
         }
     finally:
@@ -117,7 +117,7 @@ def _wkb_query_table(con, *wkts: str):
         f"SELECT {i} AS id, ST_AsWKB(ST_GeomFromText('{w}')) AS geometry"
         for i, w in enumerate(wkts)
     )
-    return con.execute(rows).arrow().read_all()
+    return con.sql(rows).arrow().read_all()
 
 
 def test_repair_query_geometry_skips_nonplanar_edges(caplog):

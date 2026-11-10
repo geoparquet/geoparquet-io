@@ -5,9 +5,12 @@ Registered on the root ``gpio`` group by ``cli/main.py`` via
 dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 """
 
+from dataclasses import asdict
+
 import click
 
-from geoparquet_io.cli.decorators import handle_geoparquet_errors, verbose_option
+from geoparquet_io.cli.decorators import verbose_option
+from geoparquet_io.core.json_output import dumps_json
 from geoparquet_io.core.logging_config import configure_verbose
 
 
@@ -28,7 +31,6 @@ def benchmark():
 
 
 @benchmark.command("compare")
-@handle_geoparquet_errors
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option(
     "--iterations",
@@ -121,7 +123,6 @@ def benchmark_compare(
 
 
 @benchmark.command("suite")
-@handle_geoparquet_errors
 @click.option(
     "--operations",
     type=click.Choice(["core", "full"]),
@@ -234,8 +235,8 @@ def benchmark_suite(
             info("\nTo view profile details, use:")
             info(f"  uv run python -m pstats {profile_files[0]}")
             info("\nOr generate a summary:")
-            info("  from geoparquet_io.benchmarks.profile_report import format_profile_stats")
-            info(f"  print(format_profile_stats('{profile_files[0]}'))")
+            info("  import pstats")
+            info(f"  pstats.Stats('{profile_files[0]}').sort_stats('cumulative').print_stats(20)")
 
     # Save if requested
     if output:
@@ -244,14 +245,13 @@ def benchmark_suite(
 
 
 @benchmark.command("explain")
-@handle_geoparquet_errors
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option(
     "--query",
     "-q",
     type=str,
     default=None,
-    help="Custom SQL query. Use {file} as placeholder for file path.",
+    help="Custom SQL query. {file} is replaced by the file path as a quoted SQL string literal, as in read_parquet({file}).",
 )
 @click.option(
     "--format",
@@ -285,7 +285,7 @@ def benchmark_explain(
     Example:
         gpio benchmark explain input.parquet
         gpio benchmark explain input.parquet --format json
-        gpio benchmark explain input.parquet --query "SELECT * FROM read_parquet('{file}') WHERE id > 10"
+        gpio benchmark explain input.parquet --query "SELECT * FROM read_parquet({file}) WHERE id > 10"
         gpio benchmark explain input.parquet --output plan.json
     """
     configure_verbose(verbose)
@@ -312,7 +312,6 @@ def benchmark_explain(
 
 
 @benchmark.command("report")
-@handle_geoparquet_errors
 @click.argument("result_files", nargs=-1, type=click.Path(exists=True))
 @click.option(
     "--format",
@@ -364,6 +363,6 @@ def benchmark_report(
                 )
 
     if output_format == "json":
-        click.echo(json.dumps([r.__dict__ for r in all_results], indent=2, default=str))
+        click.echo(dumps_json([asdict(r) for r in all_results], indent=2))
     else:
         progress(format_table(all_results))

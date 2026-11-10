@@ -1,34 +1,23 @@
-"""Keep the `integration` marker meaningful in CI (issue #667, deliverable 4).
+"""Guard CI lane policy for the integration marker (#667, #1402).
 
-The issue asks to "wire ``-m integration`` into CI so the marker is meaningful".
-Investigation of the current workflow shows the marker is ALREADY selected: the
-fast job runs ``-m "not slow and not network and not meta"``, which admits
-integration-marked tests (that is how ``tests/test_geoparquet_corpus.py``
-already runs on every PR). What was missing was not a lane but a guarantee --
-nothing stopped a future selection from excluding it, and nothing tied each
-journey to a lane.
-
-So the smallest change that gives the marker real semantics is this guard plus
-a sharper marker description in ``pyproject.toml``, NOT a new ``-m integration``
-job: a separate job would repeat checkout + ``uv sync --all-extras`` + the
-DuckDB extension install + tippecanoe (several minutes of runner time) only to
-re-run tests the fast job already runs, and the brief says not to restructure
-CI. These tests fail loudly if that reasoning stops holding.
-
-Pattern follows ``tests/test_coverage_job.py``, which guards the coverage leg of
-the same workflow the same way. Deliberately NOT marked ``meta``: it parses a
-file and imports a module (no subprocesses), and it must fail on the PR that
-breaks the wiring, not in the nightly lane.
+Integration tests run in the fast lane unless also marked slow/network (meta
+checks have their own lane). Whole-pipeline checks in test_journeys,
+test_pipe_integration, and test_geoparquet_corpus are slow by policy (#1402),
+keeping the fast matrix within its twenty-minute budget. The existing fast,
+slow, and network selections route the tests. This lightweight wiring guard
+stays in the fast lane.
 """
 
 from __future__ import annotations
 
 import ast
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
 
+from tests import test_geoparquet_corpus, test_pipe_integration
 from tests.e2e import test_journeys
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +25,11 @@ WORKFLOW = PROJECT_ROOT / ".github" / "workflows" / "tests.yml"
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 
 LANE_MARKERS = {"slow", "network", "meta", "integration", "corpus"}
+SLOW_INTEGRATION_MODULES = {
+    "tests/e2e/test_journeys.py": test_journeys,
+    "tests/test_pipe_integration.py": test_pipe_integration,
+    "tests/test_geoparquet_corpus.py": test_geoparquet_corpus,
+}
 
 # `-m "a and not b"`, `-m 'a and not b'`, or a bare `-m network`.
 _SELECTION = re.compile(r"-m\s+(?:\"([^\"]+)\"|'([^']+)'|(?!-)(\S+))")
@@ -153,17 +147,75 @@ def test_each_journey_lands_in_exactly_one_ci_job():
         )
 
 
-def test_fast_lane_runs_the_fast_journeys():
-    """Journeys 1-7 must run on every PR, i.e. under the fast-suite selection."""
-    fast = [e for e in _selections() if selects(e, {"integration"})]
-    assert fast, "no CI selection admits plain integration-marked tests"
-    fast_journeys = {name for name, marks in _journeys().items() if not marks & {"slow", "network"}}
-    # By name, not by count: a count would stay green if a journey were
-    # quietly slow-marked while some helper test padded the number back up.
-    for number in range(1, 8):
-        assert any(f"journey_{number:02d}" in name for name in fast_journeys), (
-            f"journey {number} is no longer in the fast lane: {sorted(fast_journeys)}"
-        )
+@pytest.mark.parametrize("module", SLOW_INTEGRATION_MODULES.values())
+def test_whole_pipeline_modules_run_in_slow_lane(module):
+    """Whole-pipeline checks are slow to bound the fast matrix (#1402)."""
+    marks = module.pytestmark
+    if not isinstance(marks, list):
+        marks = [marks]
+    names = {mark.name for mark in marks}
+    assert "slow" in names, f"{module.__name__} must remain slow (#1402)"
+    assert not selects("not slow and not network and not meta", names)
+    assert selects("(slow or meta) and not network", names)
+
+
+def slow_mark_sites(root):
+    """Snapshot every slow marker expression, including function and alias forms."""
+    sites = []
+    for path in sorted(root.rglob("*.py")):
+        if "geoparquet-testing" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        aliases = {"pytest": "pytest"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                aliases.update({a.asname or a.name: a.name for a in node.names})
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                aliases.update({a.asname or a.name: node.module + "." + a.name for a in node.names})
+
+        def resolved(node, aliases=aliases):
+            if isinstance(node, ast.Name):
+                return aliases.get(node.id, node.id)
+            if isinstance(node, ast.Attribute):
+                return resolved(node.value) + "." + node.attr
+            return ""
+
+        def visit(node, scope, path=path):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                scope = (*scope, node.name)
+            if isinstance(node, ast.Attribute) and resolved(node) == "pytest.mark.slow":
+                sites.append(
+                    path.relative_to(root).as_posix() + "::" + ".".join(scope or ["<module>"])
+                )
+            for child in ast.iter_child_nodes(node):
+                visit(child, scope)
+
+        visit(tree, ())
+    return sorted(sites)
+
+
+def test_slow_marks_are_ratchet_pinned():
+    pinned = tomllib.loads((PROJECT_ROOT / "tests/suite_budget.toml").read_text())["fast_suite"][
+        "slow_mark_sites"
+    ]
+    assert slow_mark_sites(PROJECT_ROOT / "tests") == pinned
+
+
+def test_slow_snapshot_catches_function_and_alias_marks(tmp_path):
+    (tmp_path / "example.py").write_text(
+        "from pytest import mark as m\n@pytest.mark.slow\ndef test_a(): pass\n"
+        "@m.slow.with_args()\ndef test_b(): pass\npytestmark = m.slow\n"
+    )
+    assert slow_mark_sites(tmp_path) == [
+        "example.py::<module>",
+        "example.py::test_a",
+        "example.py::test_b",
+    ]
+
+
+def test_plain_integration_tests_still_run_in_fast_lane():
+    assert "not slow and not network and not meta" in _selections()
+    assert selects("not slow and not network and not meta", {"integration"})
 
 
 def test_marker_description_documents_the_lane():

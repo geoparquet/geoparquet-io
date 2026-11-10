@@ -53,6 +53,8 @@ def _run(code: str) -> subprocess.CompletedProcess:
     )
 
 
+# Cold-imports gpio in a fresh subprocess, too slow for the fast lane's cap on Windows (#1340).
+@pytest.mark.slow
 @pytest.mark.parametrize(
     ("srid", "expected_crs"),
     [("srid:0", "None"), ("srid:5070", "5070")],
@@ -77,6 +79,7 @@ def test_gpio_read_of_srid_type_does_not_crash(srid, expected_crs, tmp_path):
         assert expected_crs in crs_line
 
 
+@pytest.mark.slow
 def test_pyarrow_written_srid_type_reads_back(tmp_path):
     import geoarrow.pyarrow as ga
     import pyarrow.parquet as pq

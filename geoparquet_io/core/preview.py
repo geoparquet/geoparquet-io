@@ -21,12 +21,11 @@ duckdb into the process.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from geoparquet_io.core.exceptions import InvalidParameterError
+from geoparquet_io.core.bbox_parse import BBox, parse_bbox
 
 #: The one reason a preview carries no estimate.
 NO_STATS_REASON = (
@@ -98,133 +97,102 @@ def preview_bbox_filter(
             ``xmin <= xmax`` and ``ymin <= ymax``, or if ``geometry_column``
             names a column the file does not have.
     """
-    query_bbox = _validated_bbox(bbox)
+    query_bbox = parse_bbox(bbox)
 
-    from geoparquet_io.core.duckdb_metadata import get_row_group_sizes
+    from geoparquet_io.core.duckdb_metadata import (
+        _get_connection_for_file,
+        _materialize_row_group_metadata,
+        get_row_group_sizes,
+    )
 
-    sizes = get_row_group_sizes(parquet_file)
-    totals = {
-        "total_row_groups": len(sizes),
-        "total_rows": sum(size["num_rows"] for size in sizes),
-        "total_bytes": sum(size["compressed_bytes"] for size in sizes),
-    }
+    con, _ = _get_connection_for_file(parquet_file)
+    try:
+        # A cursor owns its TEMP tables. Materialize this footer only for this
+        # preview, so repeated statistics queries cannot fetch it again.
+        _materialize_row_group_metadata(parquet_file, con, "_gpio_preview_metadata")
+        sizes = get_row_group_sizes(parquet_file, con=con, metadata_table="_gpio_preview_metadata")
+        totals = {
+            "total_row_groups": len(sizes),
+            "total_rows": sum(size["num_rows"] for size in sizes),
+            "total_bytes": sum(size["compressed_bytes"] for size in sizes),
+        }
 
-    stats, source = _row_group_spatial_stats(parquet_file, geometry_column)
-    if not stats:
+        stats, source = _row_group_spatial_stats(
+            parquet_file, geometry_column, con=con, metadata_table="_gpio_preview_metadata"
+        )
+        if not stats:
+            return BboxFilterPreview(
+                has_estimate=False,
+                reason=NO_STATS_REASON,
+                stats_source=None,
+                row_groups=(),
+                est_rows=None,
+                est_bytes=None,
+                **totals,
+            )
+
+        matched = _matching_row_groups(stats, sizes, query_bbox)
         return BboxFilterPreview(
-            has_estimate=False,
-            reason=NO_STATS_REASON,
-            stats_source=None,
-            row_groups=(),
-            est_rows=None,
-            est_bytes=None,
+            has_estimate=True,
+            reason=None,
+            stats_source=source,
+            row_groups=matched,
+            est_rows=sum(group.num_rows for group in matched),
+            est_bytes=sum(group.compressed_bytes for group in matched),
             **totals,
         )
 
-    matched = _matching_row_groups(stats, sizes, query_bbox)
-    return BboxFilterPreview(
-        has_estimate=True,
-        reason=None,
-        stats_source=source,
-        row_groups=matched,
-        est_rows=sum(group.num_rows for group in matched),
-        est_bytes=sum(group.compressed_bytes for group in matched),
-        **totals,
-    )
-
-
-def _validated_bbox(bbox: Sequence[float]) -> tuple[float, float, float, float]:
-    """``bbox`` as four floats, or the InvalidParameterError saying what it must be."""
-    try:
-        xmin, ymin, xmax, ymax = (float(value) for value in bbox)
-    except (TypeError, ValueError) as exc:
-        raise InvalidParameterError(
-            "bbox", "must be four numbers: (xmin, ymin, xmax, ymax)"
-        ) from exc
-    if not all(math.isfinite(value) for value in (xmin, ymin, xmax, ymax)):
-        # NaN compares False against everything, so letting it through would
-        # silently "match" every row group instead of estimating anything.
-        raise InvalidParameterError("bbox", f"must be finite numbers: {bbox!r}")
-    if xmin > xmax or ymin > ymax:
-        raise InvalidParameterError(
-            "bbox", f"xmin > xmax or ymin > ymax: ({xmin}, {ymin}, {xmax}, {ymax})"
-        )
-    return (xmin, ymin, xmax, ymax)
+    finally:
+        con.close()
 
 
 def _row_group_spatial_stats(
-    parquet_file: str, geometry_column: str | None
+    parquet_file: str, geometry_column: str | None, con, *, metadata_table: str
 ) -> tuple[list[dict], Literal["native", "bbox_struct"] | None]:
-    """The file's per-row-group bboxes and where they came from, or ``([], None)``.
-
-    Native Parquet geo statistics first, then a bbox covering column's chunk
-    statistics -- the same order and owners as ``ops.get_row_group_geo_stats``.
-    An explicit ``geometry_column`` is honored on both rungs: a name the file
-    does not have raises instead of reading as "the file has no statistics",
-    and the covering fallback only uses a covering that column itself declares
-    -- never the primary column's (#1171: a secondary's read must not be
-    pruned on the primary's extents).
-    """
-    stats = _native_stats(parquet_file, geometry_column)
-    if stats:
-        return stats, "native"
-
-    from geoparquet_io.core.duckdb_metadata import get_per_row_group_bbox_stats
-
-    bbox_column = _covering_bbox_column(parquet_file, geometry_column)
-    if bbox_column:
-        stats = get_per_row_group_bbox_stats(parquet_file, bbox_column)
-        if stats:
-            return stats, "bbox_struct"
-    return [], None
-
-
-def _native_stats(parquet_file: str, geometry_column: str | None) -> list[dict]:
-    """Per-row-group native geo statistics; a typo'd explicit column raises."""
-    from geoparquet_io.core.duckdb_metadata import (
-        get_native_geo_stats_by_row_group,
-        get_per_row_group_native_geo_stats,
+    """Resolve the geometry and covering once, using this preview's footer rows."""
+    from geoparquet_io.core.bbox_structure import (
+        bbox_covering_column_for,
+        bbox_structure_from_metadata,
     )
+    from geoparquet_io.core.duckdb_metadata import (
+        get_per_row_group_native_geo_stats,
+        get_row_group_bbox_stats,
+        get_schema_info,
+    )
+    from geoparquet_io.core.geo_metadata import raw_geo_of_file
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
+    from geoparquet_io.core.parquet_schema import root_schema_columns
 
-    if geometry_column is None:
-        return get_per_row_group_native_geo_stats(parquet_file)
+    schema = get_schema_info(parquet_file, con=con)
+    raw_geo = raw_geo_of_file(parquet_file, con=con)
+    geo = raw_geo.block
+    columns = [(col["name"], col.get("logical_type")) for col in root_schema_columns(schema)]
+    primary = primary_geometry_column(columns, geo=raw_geo.value)
+    selected = geometry_column or primary
 
-    chunks = get_native_geo_stats_by_row_group(parquet_file, geometry_column)
-    if chunks is None:
-        raise InvalidParameterError(
-            "geometry_column", f"the file has no column named {geometry_column!r}"
+    def native():
+        if not selected:
+            return []
+        return get_per_row_group_native_geo_stats(
+            parquet_file,
+            selected,
+            con=con,
+            strict=geometry_column is not None,
+            metadata_table=metadata_table,
         )
-    return [
-        {key: chunk[key] for key in ("row_group_id", "xmin", "ymin", "xmax", "ymax")}
-        for chunk in chunks
-        if chunk["xmin"] is not None
-    ]
 
+    def bbox_column():
+        if geometry_column is None or geometry_column == primary:
+            return bbox_structure_from_metadata(schema, geo).get("bbox_column_name")
+        return bbox_covering_column_for(geo, geometry_column)
 
-def _covering_bbox_column(parquet_file: str, geometry_column: str | None) -> str | None:
-    """The bbox covering column the preview may prune on, or ``None``.
-
-    With no explicit column (or the primary named explicitly) that is the
-    primary's covering, conventional-name fallback included. Any other column
-    may only be pruned on a covering its own ``geo`` entry declares.
-    """
-    from geoparquet_io.core.bbox_structure import bbox_covering_column_for, check_bbox_structure
-
-    if geometry_column is None or geometry_column == _primary_geometry_column(parquet_file):
-        return check_bbox_structure(parquet_file).get("bbox_column_name")
-
-    from geoparquet_io.core.duckdb_metadata import get_geo_metadata
-
-    return bbox_covering_column_for(get_geo_metadata(parquet_file), geometry_column)
-
-
-def _primary_geometry_column(parquet_file: str) -> str | None:
-    from geoparquet_io.core.duckdb_metadata import find_primary_geometry_column_duckdb
-
-    try:
-        return find_primary_geometry_column_duckdb(parquet_file)
-    except Exception:
-        return None
+    return get_row_group_bbox_stats(
+        parquet_file,
+        native=native,
+        bbox_column=bbox_column,
+        con=con,
+        metadata_table=metadata_table,
+    )
 
 
 def _matching_row_groups(
@@ -251,14 +219,18 @@ def _matching_row_groups(
 
 
 def _intersects(stat: dict, bbox: tuple[float, float, float, float]) -> bool:
-    """Whether a row group's bbox statistics intersect the query bbox (edges count)."""
-    xmin, ymin, xmax, ymax = bbox
-    if stat["ymax"] < ymin or stat["ymin"] > ymax:
-        return False
-    if stat["xmin"] > stat["xmax"]:
-        # The Parquet geospatial statistics permit xmin > xmax for a group
-        # wrapping the antimeridian (see aggregate_native_geo_stats): the X
-        # range is the two lobes [xmin, 180] and [-180, xmax], not an empty
-        # interval. Pruning it as empty would drop rows the real read returns.
-        return bool(stat["xmin"] <= xmax or stat["xmax"] >= xmin)
-    return not (stat["xmax"] < xmin or stat["xmin"] > xmax)
+    """Whether a row group's bbox statistics intersect the query bbox (edges count).
+
+    Either box may wrap the antimeridian: the query bbox, and a group's
+    statistics, which Parquet permits to have xmin > xmax (see
+    aggregate_native_geo_stats). Each is split into its lobes by the owner
+    (``BBox.pieces``) and they intersect when any two lobes do; pruning a
+    wrapped group as an empty interval would drop rows the real read returns.
+    """
+    group = BBox(stat["xmin"], stat["ymin"], stat["xmax"], stat["ymax"])
+    return any(_boxes_meet(g, q) for g in group.pieces() for q in BBox(*bbox).pieces())
+
+
+def _boxes_meet(a: BBox, b: BBox) -> bool:
+    """Whether two non-wrapping boxes intersect (edges count)."""
+    return not (a.xmax < b.xmin or a.xmin > b.xmax or a.ymax < b.ymin or a.ymin > b.ymax)

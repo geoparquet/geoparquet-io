@@ -11,6 +11,11 @@ in a legal shape is declared; one that is not is carried through undeclared
 and said so, once per process; a covering the *input* declared over an illegal
 struct is dropped, and said so. The column itself is never reordered behind the
 user -- ``gpio add bbox --force`` is the command that does that.
+
+The gate and the drop are pinned on the owner (``TestTheGate``, the Arrow
+funnel tests); each write path is held to the Overture-order cell (it asks the
+gate: valid output, no covering, the warning), the control runs on one path per
+writer family, and the input-declared drop on the two #1172 strategies.
 """
 
 from __future__ import annotations
@@ -76,47 +81,56 @@ def _rewrite_geo(source: Path, target: Path, **changes: object) -> Path:
     return _write_with_defects(table.replace_schema_metadata(metadata), target)
 
 
-@pytest.fixture
-def overture_v1_0(unsorted_test_file, tmp_path) -> Path:
+UNSORTED = Path(__file__).parent / "data" / "unsorted.parquet"
+
+# The inputs below are built (and validated) once per module: every test only
+# reads them. The two tests that run a command in place on one work on a copy.
+
+
+@pytest.fixture(scope="module")
+def _inputs_dir(tmp_path_factory) -> Path:
+    return tmp_path_factory.mktemp("covering_inputs")
+
+
+@pytest.fixture(scope="module")
+def overture_v1_0(_inputs_dir) -> Path:
     """``tests/data/unsorted.parquet`` as shipped: 1.0, bbox in Overture's order, valid."""
-    target = tmp_path / "overture_v10.parquet"
-    shutil.copy2(str(unsorted_test_file), target)
+    target = _inputs_dir / "overture_v10.parquet"
+    shutil.copy2(str(UNSORTED), target)
     assert bbox_field_names(target) == OVERTURE_ORDER
     assert spec_failures(target) == {}, "the fixture must be clean, or nothing below is proved"
     return target
 
 
-@pytest.fixture
-def overture_v1_1(unsorted_test_file, tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def overture_v1_1(_inputs_dir) -> Path:
     """The same column at 1.1 with no covering: also valid, and version-preserving
     cannot help it -- it is already at the version it will be written at."""
-    target = _rewrite_geo(
-        Path(str(unsorted_test_file)), tmp_path / "overture_v11.parquet", version="1.1.0"
-    )
+    target = _rewrite_geo(UNSORTED, _inputs_dir / "overture_v11.parquet", version="1.1.0")
     assert covering_of(target) is None
     assert spec_failures(target) == {}, "the fixture must be clean, or nothing below is proved"
     return target
 
 
-@pytest.fixture
-def spec_order_v1_0(unsorted_test_file, tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def spec_order_v1_0(_inputs_dir) -> Path:
     """The control: the same file with its bbox struct in the spec's order."""
-    table = _with_bbox_fields(pq.read_table(str(unsorted_test_file)), SPEC_ORDER)
-    target = _write_with_defects(table, tmp_path / "spec_order_v10.parquet")
+    table = _with_bbox_fields(pq.read_table(str(UNSORTED)), SPEC_ORDER)
+    target = _write_with_defects(table, _inputs_dir / "spec_order_v10.parquet")
     assert spec_failures(target) == {}
     return target
 
 
-@pytest.fixture
-def spec_order_v1_1(spec_order_v1_0, tmp_path) -> Path:
-    return _rewrite_geo(spec_order_v1_0, tmp_path / "spec_order_v11.parquet", version="1.1.0")
+@pytest.fixture(scope="module")
+def spec_order_v1_1(spec_order_v1_0, _inputs_dir) -> Path:
+    return _rewrite_geo(spec_order_v1_0, _inputs_dir / "spec_order_v11.parquet", version="1.1.0")
 
 
 HONDURAS_ROWS = 1350
 
 
-@pytest.fixture
-def declared_illegal_v1_1(tmp_path) -> Path:
+@pytest.fixture(scope="module")
+def declared_illegal_v1_1(_inputs_dir) -> Path:
     """A 1.1 file that already *declares* a covering over an Overture-order struct.
 
     ``tests/data/country_partition/Honduras.parquet`` is that shape as shipped
@@ -125,7 +139,7 @@ def declared_illegal_v1_1(tmp_path) -> Path:
     """
     table = pq.read_table("tests/data/country_partition/Honduras.parquet")
     order = np.random.RandomState(0).permutation(table.num_rows)
-    target = _write_with_defects(table.take(pa.array(order)), tmp_path / "declared.parquet")
+    target = _write_with_defects(table.take(pa.array(order)), _inputs_dir / "declared.parquet")
     assert bbox_field_names(target) == OVERTURE_ORDER
     assert covering_of(target)
     assert "covering_bbox_structure_geometry" in spec_failures(target)
@@ -301,13 +315,33 @@ WRITE_PATHS = [
         lambda src, out: ["sort", "hilbert", src, out, "--geoparquet-version", "1.1-geoarrow"],
     ),
 ]
-WRITE_IDS = [name for name, _ in WRITE_PATHS]
+
+
+def _cells(shape: str, keep: set[str]):
+    return [
+        pytest.param(path_id, argv, id=path_id)
+        for path_id, argv in WRITE_PATHS
+        if path_id in keep or shape == "overture"
+    ]
+
+
+#: The control (a legal struct is declared) is the gate's answer
+#: (``TestTheGate``); one path per writer family shows a path keeps it.
+SPEC_ORDER_PATHS = {"convert-1.1", "check-row-group"}
+#: A covering the input declared is dropped inside ``compose_geo_block``, the
+#: same call the overture cell shows each path makes. #1172's failure was the
+#: two Arrow strategies, so they keep the end-to-end drop.
+DECLARED_ILLEGAL_PATHS = {"extract-in-memory", "extract-disk-rewrite"}
 
 
 class TestEveryWritePath:
-    @pytest.mark.parametrize(("path_id", "argv"), WRITE_PATHS, ids=WRITE_IDS)
     @pytest.mark.parametrize(
-        ("shape", "expects_covering"), [("overture", False), ("spec_order", True)]
+        ("shape", "expects_covering", "path_id", "argv"),
+        [
+            pytest.param(shape, expects, *cell.values, id=f"{shape}-{expects}-{cell.id}")
+            for shape, expects in (("overture", False), ("spec_order", True))
+            for cell in _cells(shape, SPEC_ORDER_PATHS)
+        ],
     )
     def test_output_is_valid_and_declares_only_a_legal_covering(
         self, request, shape, expects_covering, path_id, argv, tmp_path, caplog
@@ -333,7 +367,14 @@ class TestEveryWritePath:
         assert bbox_field_names(out) == bbox_field_names(source)
         assert ("Not declaring a 'covering'" in caplog.text) is not expects_covering
 
-    @pytest.mark.parametrize(("path_id", "argv"), WRITE_PATHS, ids=WRITE_IDS)
+    @pytest.mark.parametrize(
+        ("path_id", "argv"),
+        [
+            pytest.param(path_id, argv, id=path_id)
+            for path_id, argv in WRITE_PATHS
+            if path_id in DECLARED_ILLEGAL_PATHS
+        ],
+    )
     def test_a_covering_the_input_declared_over_an_illegal_struct_is_dropped_and_said(
         self, declared_illegal_v1_1, path_id, argv, tmp_path, caplog
     ):
@@ -343,8 +384,9 @@ class TestEveryWritePath:
         "so it is not written" and then wrote it anyway, because the gate they
         ask -- ``bbox_column_to_declare`` -- answers "do not declare this
         column" and nothing dropped the entry the input had already declared
-        (#1172). The slice is the whole list now: it is what says the drop
-        reached every path.
+        (#1172). The drop now lives in ``compose_geo_block`` beside the gate,
+        which every path's overture cell above shows it reaches; these two are
+        the #1172 pin.
         """
         out = tmp_path / f"{path_id}.parquet"
 
@@ -467,14 +509,15 @@ class TestCheckBbox:
         assert "proper metadata covering" not in output
         assert "gpio add bbox --force" in output
 
-    def test_fix_declines_without_calling_the_file_optimal(self, overture_v1_1):
-        before = pq.read_schema(str(overture_v1_1))
+    def test_fix_declines_without_calling_the_file_optimal(self, overture_v1_1, tmp_path):
+        work = Path(shutil.copy2(overture_v1_1, tmp_path / "work.parquet"))
+        before = pq.read_schema(str(work))
 
-        output = run_cli("check", "bbox", overture_v1_1, "--fix")
+        output = run_cli("check", "bbox", work, "--fix")
 
         assert "No automatic fix available" in output, output
         assert "optimal" not in output, output
-        assert pq.read_schema(str(overture_v1_1)).equals(before), "the file was rewritten"
+        assert pq.read_schema(str(work)).equals(before), "the file was rewritten"
 
     def test_check_all_fix_does_not_call_it_optimal_either(self, overture_v1_1, tmp_path):
         """The second pass, once every other defect is repaired."""
@@ -499,18 +542,19 @@ class TestCheckBbox:
 class TestAddBboxMetadata:
     """Declaring the covering is this command's whole job, so it refuses rather than skips."""
 
-    def test_the_cli_refuses_and_names_the_rewrite(self, overture_v1_1):
+    def test_the_cli_refuses_and_names_the_rewrite(self, overture_v1_1, tmp_path):
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import cli
 
-        result = CliRunner().invoke(cli, ["add", "bbox-metadata", str(overture_v1_1)])
+        work = Path(shutil.copy2(overture_v1_1, tmp_path / "work.parquet"))
+        result = CliRunner().invoke(cli, ["add", "bbox-metadata", str(work)])
 
         assert result.exit_code != 0, result.output
         assert "in that order" in result.output
-        assert f"gpio add bbox --force {overture_v1_1}" in result.output
-        assert covering_of(overture_v1_1) is None, "the file was modified anyway"
-        assert spec_failures(overture_v1_1) == {}
+        assert f"gpio add bbox --force {work}" in result.output
+        assert covering_of(work) is None, "the file was modified anyway"
+        assert spec_failures(work) == {}
 
     def test_the_table_api_refuses_and_its_hint_actually_works(self, overture_v1_1, tmp_path):
         import geoparquet_io as gpio
