@@ -831,6 +831,55 @@ def _declared_1x(declared: str | None) -> str:
     return "1.0" if (declared or "").split(".")[:2] == ["1", "0"] else "1.1"
 
 
+#: The output version a GeoArrow-native primary column is written under: the one
+#: key of ``GEOPARQUET_VERSIONS`` whose writers pass a coordinate struct through
+#: and name its encoding.
+GEOARROW_CARRIER_VERSION = "1.1-geoarrow"
+
+#: The requests :func:`geoarrow_output_version` satisfies with it. GeoParquet 1.1
+#: permits the six GeoArrow encodings beside WKB, and both keys write metadata
+#: version 1.1.0, so a 1.1 request over native data asks for a file this writer
+#: can produce. 1.0 and the 2.0 draft are WKB-only (``GEOARROW_ENCODINGS``), and
+#: parquet-geo-only has no ``geo`` block to name an encoding in at all.
+_GEOARROW_REQUESTS = frozenset({"1.1", GEOARROW_CARRIER_VERSION})
+
+
+def geoarrow_output_version(
+    requested: str, encoding: str | None, geometry_column: str | None
+) -> str:
+    """The version an output whose primary holds GeoArrow-native geometry declares.
+
+    ``encoding`` is the native GeoArrow encoding that column actually holds
+    (``geo_metadata.geoarrow_primary_encoding``'s answer about a table, or
+    ``write_strategies.base.query_geoarrow_encoding``'s about a query); None
+    means WKB bytes or a GEOMETRY type and leaves ``requested`` alone.
+
+    A 1.1 request becomes :data:`GEOARROW_CARRIER_VERSION`, which is the same
+    1.1.0 file with the encoding named truthfully. Every write path used to
+    stamp the requested version's carrier over the struct instead --
+    ``encoding: WKB`` beside a ``STRUCT(x, y)`` at 1.1, and at 2.0 a file with
+    no geometry identity at all, both of which ``gpio check spec`` fails
+    (#1438). The rest are refused: nothing in gpio re-encodes a coordinate
+    struct as WKB (DuckDB has no function that reads one), so there is no file
+    to write for them, and refusing beats writing one that contradicts itself.
+
+    One answer for every write path and for the CLI and Python API alike. Auto
+    mode arrives here already resolved to 1.1-geoarrow.
+    """
+    if not encoding:
+        return requested
+    if requested in _GEOARROW_REQUESTS:
+        return GEOARROW_CARRIER_VERSION
+    column = geometry_column or "the geometry column"
+    raise InvalidParameterError(
+        "geoparquet_version",
+        f'{requested} stores geometry as WKB, but "{column}" holds GeoArrow-native '
+        f"{encoding} geometry, which gpio cannot re-encode as WKB. Write "
+        f"--geoparquet-version {GEOARROW_CARRIER_VERSION} (what auto mode picks for "
+        "this input) to keep the native encoding.",
+    )
+
+
 def _version_of_file(
     parquet_file: str, verbose: bool = False, preserve_input: bool = False
 ) -> str | None:
@@ -849,15 +898,19 @@ def _version_of_file(
 
     file_type = info.get("file_type")
     # The repair policy keeps the declared 1.x as is (``_version_for_file_type``),
-    # the answer ``check --fix`` gets from its check results, so both agree.
-    auto_v1 = file_type == "geoparquet_v1" and not preserve_input
-    if auto_v1 and _declares_geoarrow_encoding(parquet_file):
+    # the answer ``check --fix`` gets from its check results, so both agree --
+    # except over native data, where "1.1" is not a version the input *is*: it
+    # names the WKB carrier, and keeping it made ``check --fix`` relabel a
+    # coordinate struct ``encoding: WKB``. 1.1-geoarrow is the only answer that
+    # preserves such an input, so it is the repair policy's too, and
+    # :func:`geoarrow_output_version` holds every path to it (#1438).
+    if file_type == "geoparquet_v1" and _declares_geoarrow_encoding(parquet_file):
         # A GeoArrow-native 1.1 file declares version 1.1.0 just as a WKB one
         # does, so "1.1" is the version but not the *encoding*: writing it meant
         # passing the nested-list geometry through under `encoding: WKB`, a block
         # contradicting the schema beside it (#1176). "1.1-geoarrow" is the one
         # version that preserves what the input actually is.
-        return "1.1-geoarrow"
+        return GEOARROW_CARRIER_VERSION
     return _version_of_file_type(info, preserve_input)
 
 
@@ -883,16 +936,14 @@ def _version_of_table(
     """
     metadata = table.schema.metadata
     if metadata and b"geo" in metadata:
-        carried = carried_geoparquet_version(metadata, preserve_input=preserve_input)
-        if (
-            carried == "1.1"
-            and not preserve_input
-            and geoarrow_primary_encoding(sanitized_carried_geo(metadata))
-        ):
+        block = sanitized_carried_geo(metadata)
+        declared_1x = is_geoparquet_1x(carried_version(block.get("version")))
+        if declared_1x and geoarrow_primary_encoding(block):
             # A GeoArrow-native 1.x table keeps its encoding, as a file does in
-            # _version_of_file: plain "1.1" relabelled the struct `WKB` (#1176).
-            return "1.1-geoarrow"
-        return carried
+            # _version_of_file: plain "1.1" relabelled the struct `WKB` (#1176),
+            # and the repair policy's "1.0"/"1.1" did the same (#1438).
+            return GEOARROW_CARRIER_VERSION
+        return carried_geoparquet_version(metadata, preserve_input=preserve_input)
     if any(is_geoarrow_extension_field(field) for field in table.schema):
         if verbose:
             debug("Native geo types with no geo key: native-geo-only data")

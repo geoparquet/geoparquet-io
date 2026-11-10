@@ -18,11 +18,11 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _normalize_arrow_large_types,
 )
 from geoparquet_io.core.compression import resolve_codec
-from geoparquet_io.core.duckdb_utils import _get_query_columns, _wrap_query_with_wkb_conversion
+from geoparquet_io.core.duckdb_utils import _get_query_columns
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata, write_arrow_table
-from geoparquet_io.core.write_strategies.base import BaseWriteStrategy
+from geoparquet_io.core.write_strategies.base import BaseWriteStrategy, wkb_export_query
 
 if TYPE_CHECKING:
     import duckdb
@@ -85,7 +85,7 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
             debug(f"Using GeoParquet version: {geoparquet_version}")
 
         if has_geometry:
-            final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
+            final_query = wkb_export_query(con, query, geometry_column)
         else:
             final_query = query
             if verbose:
