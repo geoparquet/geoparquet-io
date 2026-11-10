@@ -41,6 +41,10 @@ Or with conda (also works with mamba or pixi):
 conda install -c conda-forge geoparquet-io
 ```
 
+> **Note:** the conda-forge feedstock doesn't yet carry gpio's DuckDB pin (`<1.6`, see
+> [#1346](https://github.com/geoparquet/geoparquet-io/issues/1346)), so a plain install pulls
+> DuckDB 2.0 and breaks `add s2`/`partition s2`/a5. Pin it: `conda install -c conda-forge geoparquet-io 'python-duckdb<1.6'`
+
 ## Quickstart
 
 ```sh
