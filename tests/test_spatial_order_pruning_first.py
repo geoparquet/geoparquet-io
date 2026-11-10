@@ -743,10 +743,6 @@ class TestSizeFloor:
 class TestCliVerdicts:
     """End-to-end on a bbox-bearing file: one line per verdict, the numbers on it."""
 
-    @pytest.fixture(autouse=True)
-    def _cli_no_size_floor(self, monkeypatch):
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
-
     @pytest.fixture
     def sorted_file(self, tmp_path):
         return _write_bbox_file(tmp_path / "sorted.parquet", 4000, 40)
@@ -781,10 +777,6 @@ class TestCliVerdicts:
 
 class TestCliWithheldVerdict:
     """Below the floors the CLI prints the reason and no check mark (review of #774)."""
-
-    @pytest.fixture(autouse=True)
-    def _cli_no_size_floor(self, monkeypatch):
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
 
     @pytest.fixture
     def small_file(self, tmp_path):
@@ -867,10 +859,6 @@ class TestCliWithheldVerdict:
 class TestWithheldVerdictReachesEverySurface:
     """The places a withheld verdict leaked as a pass, all through one predicate."""
 
-    @pytest.fixture(autouse=True)
-    def _cli_no_size_floor(self, monkeypatch):
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
-
     def test_check_all_multi_file_counts_a_withheld_verdict_as_not_judged(self, tmp_path):
         d = tmp_path / "part"
         d.mkdir()
@@ -923,12 +911,6 @@ class TestWithheldVerdictReachesEverySurface:
         assert set(params) == {"self", "sample_size", "limit_rows"}
 
 
-def struct_point(x, y):
-    import struct
-
-    return struct.pack("<BI2d", 1, 1, x, y)
-
-
 class TestBatchFixLeavesUnjudgedSoundFilesAlone:
     """``check all --fix`` sorts only what it can defend rewriting.
 
@@ -958,10 +940,6 @@ class TestBatchFixLeavesUnjudgedSoundFilesAlone:
 
 class TestFixKeepsTheFileJudgeable:
     """``--fix`` must not turn a judgeable file into an unjudgeable one (#1098)."""
-
-    @pytest.fixture(autouse=True)
-    def _cli_no_size_floor(self, monkeypatch):
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
 
     def test_fix_keeps_at_least_the_input_row_group_count(self, tmp_path):
         import pyarrow.parquet as pq
@@ -1069,10 +1047,6 @@ class TestFooterCheckOwnsTheVerdict:
 class TestPushdownGoesThroughCore:
     """``check spatial`` and ``Table.check_spatial_pushdown()`` reach the verdict the same way."""
 
-    @pytest.fixture(autouse=True)
-    def _cli_no_size_floor(self, monkeypatch):
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
-
     def test_cli_pushdown_matches_the_api_on_a_bbox_file(self, tmp_path):
         import geoparquet_io as gpio
 
@@ -1101,10 +1075,6 @@ class TestPushdownGoesThroughCore:
 
 class TestBboxColumnIsTheCoveringsColumn:
     """The verdict reads the column ``geo.covering.bbox`` names, not the first ``*bbox`` struct."""
-
-    @pytest.fixture(autouse=True)
-    def _cli_no_size_floor(self, monkeypatch):
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
 
     def test_a_stale_bbox_column_ahead_of_the_real_one_is_ignored(self, tmp_path):
         """A sorted-looking decoy first in the schema must not pass a shuffled file."""
@@ -1145,10 +1115,6 @@ class TestBboxColumnIsTheCoveringsColumn:
 
 class TestUntouchedConsumersSeeNoFailure:
     """A withheld verdict must read as not-a-failure to code that only knows ``passed``."""
-
-    @pytest.fixture(autouse=True)
-    def _cli_no_size_floor(self, monkeypatch):
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
 
     def test_check_optimization_does_not_tell_a_withheld_file_to_resort(self, tmp_path):
         """A one-group file has no verdict, so no re-sort advice (#755 downstream)."""

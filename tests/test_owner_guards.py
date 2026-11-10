@@ -106,7 +106,7 @@ EXPECTED_COUNTS = {
     "G13.options": 11,
     "G13.bbox_parsers": 0,
     "G4.whitelist": 148,
-    "G4.tests_whitelist": 90,
+    "G4.tests_whitelist": 92,
 }
 
 
