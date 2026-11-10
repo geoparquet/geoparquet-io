@@ -55,7 +55,9 @@
 # output reads back as and which the witness read as "not GeoArrow" (+15 across
 # the strategies, the measured geometry_types, the WKB-only refusal and the 1.1
 # request, plus 2 type-naming cases over an extension type).
-max_collected = 14757
+# +2: `sort str`, the sibling the Hilbert fix missed, on its CLI and Table
+# paths; its six-encoding matrix is `slow`.
+max_collected = 14759
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

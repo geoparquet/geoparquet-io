@@ -5,10 +5,11 @@ whatever it held, so every native encoding (a coordinate struct, or a list of
 them) died with a DuckDB binder error, while the CLI wrote the same file.
 
 #1438: four more sites hand-rolled the same WKB assumption -- the Hilbert sort
-(``ST_IsEmpty`` on the raw column), the disk-rewrite strategy (``ST_AsWKB`` on
-it), the in-memory and streaming strategies (which labelled a coordinate struct
-``encoding: WKB``), and an explicit WKB-carrier version, which declared one over
-data it cannot hold. ``geometry_types`` came out ``[]`` on every path.
+and its sibling the STR sort (``ST_IsEmpty`` on the raw column), the
+disk-rewrite strategy (``ST_AsWKB`` on it), the in-memory and streaming
+strategies (which labelled a coordinate struct ``encoding: WKB``), and an
+explicit WKB-carrier version, which declared one over data it cannot hold.
+``geometry_types`` came out ``[]`` on every path.
 
 Each case runs over both carrier shapes a GeoArrow column arrives in (see
 ``CARRIERS``): the bare coordinate struct, and the same struct resolved into its
@@ -272,7 +273,7 @@ def test_a_1_1_request_keeps_the_native_encoding(version, carrier, tmp_path):
         assert geo["version"] == "1.1.0"
 
 
-# -- the Hilbert sort and check --fix (#1438 item 1) --------------------------
+# -- the spatial sorts and check --fix (#1438 item 1) -------------------------
 
 
 def test_sort_hilbert_reads_a_native_point_column(tmp_path):
@@ -286,6 +287,30 @@ def test_sort_hilbert_reads_a_native_point_column(tmp_path):
 def test_the_table_hilbert_sort_reads_a_native_point_column():
     source = gpio.read(_fixture("point"))
     assert source.sort_hilbert().to_arrow().num_rows == source.to_arrow().num_rows
+
+
+def test_sort_str_reads_a_native_point_column(tmp_path):
+    """``sort str`` is ``sort hilbert``'s sibling: the same assumption, the same fix."""
+    out = tmp_path / "sorted.parquet"
+    result = CliRunner().invoke(cli, ["sort", "str", str(_fixture("point")), str(out)])
+    assert result.exit_code == 0, result.output
+    assert pq.read_metadata(out).num_rows == pq.read_metadata(_fixture("point")).num_rows
+    _assert_native_output(out, "point")
+
+
+def test_the_table_str_sort_reads_a_native_point_column():
+    source = gpio.read(_fixture("point"))
+    assert source.sort_str().to_arrow().num_rows == source.to_arrow().num_rows
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("encoding", ENCODINGS)
+def test_sort_str_reads_every_native_encoding(encoding, tmp_path):
+    out = tmp_path / "sorted.parquet"
+    result = CliRunner().invoke(cli, ["sort", "str", str(_fixture(encoding)), str(out)])
+    assert result.exit_code == 0, result.output
+    _assert_native_output(out, encoding)
+    assert _wkb(out) == _wkb(_fixture(encoding))
 
 
 @pytest.mark.slow
