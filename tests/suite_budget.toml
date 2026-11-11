@@ -96,7 +96,13 @@
 # deprecation warning blames the caller and not gpio's own wrapper (1),
 # `check_all` forwards the spec sample size (1), and a collision names the
 # keyword the caller wrote (1).
-max_collected = 14926
+# +13, one canonical name per twin (#1436 decision 4): the two census checks
+# that fail a new Table/ops name mismatch and an unrecorded deprecated alias
+# (2), and the alias mechanism across both collapsed twins -- the marker the
+# census reads, the kept signature, warning once per process, the canonical
+# name staying silent, and the alias handing core the call the canonical name
+# does, plus the root keeping both BigQuery spellings (11).
+max_collected = 14939
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

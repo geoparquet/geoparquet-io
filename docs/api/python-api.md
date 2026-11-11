@@ -59,6 +59,25 @@ functions `str | os.PathLike[str]`. Two things still widen to `Any`: pyarrow shi
 type stubs, so a `pa.Table` in or out of the `ops` functions is untyped, and
 the modules under `geoparquet_io.core` are not yet annotated throughout.
 
+## One Name Per Operation
+
+A `Table` method and its `ops` function carry the same name, so an operation is
+spelled once whichever door you come in by
+([#1436](https://github.com/geoparquet/geoparquet-io/issues/1436)). Two were
+spelled twice, and the old names are deprecated: they still work and still do
+the same thing, warn once per process, and will be removed in the next minor
+release. This one has no CLI counterpart — no command name changed — so there
+is a single table:
+
+| Deprecated | Use instead |
+|---|---|
+| `ops.read_bigquery(...)`, `gpio.read_bigquery(...)` | `ops.from_bigquery(...)`, `gpio.from_bigquery(...)` — beside `from_arcgis`, `from_carto`, `from_wfs` and `Table.from_bigquery` |
+| `Table.overview(level)` | `Table.create_overviews(level)` — the name its `ops` twin already had |
+
+`Table.create_overviews` rolls the table up to the one level it can hold in
+memory; `ops.create_overviews` writes one GeoParquet sibling per coarser level.
+Same command, two shapes, one name.
+
 ## Quick Start
 
 ```python
@@ -251,7 +270,7 @@ mutually exclusive with every argument that shapes the query -- `columns`,
 `exclude_columns`, `where`, `bbox`, `bbox_mode`, `bbox_threshold`, `limit` --
 since the statement already says all of that. The arguments that shape the
 output (`geography_column`, `geometry_format`, `edges`, `repair_geometry`)
-still apply. The same `sql=` argument is on `ops.read_bigquery()`.
+still apply. The same `sql=` argument is on `ops.from_bigquery()`.
 
 !!! warning "Filter inside the statement"
     A query job materializes its whole result before anything is read, so an
@@ -1382,7 +1401,7 @@ Every output row carries `admin_code` and `admin_name` bucket identifiers. Featu
 !!! note "Known limitation"
     `admin_name` currently equals the ISO code (same as `admin_code`).
 
-#### `overview(level, cell_column=None, scheme=None, memory_limit=None)`
+#### `create_overviews(level, cell_column=None, scheme=None, memory_limit=None)`
 
 Roll an aggregate table up to a coarser overview level by true cell hierarchy
 (`a5_cell_to_parent` / `h3_cell_to_parent`; admin region codes collapse to
@@ -1392,11 +1411,11 @@ their ISO country prefix). The table must be a `process aggregate` output.
 import geoparquet_io as gpio
 
 # Grid aggregate: roll res-10 cells up to res 6
-coarse = gpio.read('cells.parquet').overview(6)
+coarse = gpio.read('cells.parquet').create_overviews(6)
 coarse.write('cells_r6.parquet')
 
 # Region-level admin aggregate: roll up to country
-by_country = gpio.read('by_region.parquet').overview('country')
+by_country = gpio.read('by_region.parquet').create_overviews('country')
 by_country.write('by_region_country.parquet')
 ```
 
@@ -2172,7 +2191,7 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.sort_quadkey(table, column_name='quadkey', resolution=13, use_centroid=False, remove_column=False)` | Sort by quadkey |
 | `ops.reproject(table, target_crs='EPSG:4326', source_crs=None, geometry_column=None, assume_crs84=False)` | Reproject geometry (`assume_crs84` treats an unknown/null CRS as OGC:CRS84) |
 | `ops.extract(table, columns=None, exclude_columns=None, bbox=None, where=None, limit=None, geometry_column=None)` | Filter columns/rows |
-| `ops.read_bigquery(table_id, project=None, credentials_file=None, where=None, bbox=None, bbox_mode='auto', bbox_threshold=500000, limit=None, columns=None, exclude_columns=None)` | Read BigQuery table (`None`/`[]` selects every column; a blank entry in the list raises) |
+| `ops.from_bigquery(table_id, project=None, credentials_file=None, where=None, bbox=None, bbox_mode='auto', bbox_threshold=500000, limit=None, columns=None, exclude_columns=None)` | Read BigQuery table (`None`/`[]` selects every column; a blank entry in the list raises) |
 | `ops.from_arcgis(service_url, token=None, where='1=1', bbox=None, include_cols=None, exclude_cols=None, limit=None, max_workers=1, output_crs=None, max_allowable_offset=None, repair_geometry=True, timeout=60.0, batch_size=None)` | Fetch ArcGIS Feature Service (`batch_size` lowers the page size for layers the server cannot serialize a full page of) |
 | `ops.convert_to_geojson(table, output, precision=7, write_bbox=False, id_field=None)` | Convert to GeoJSON |
 | `ops.convert_to_geopackage(table, output, layer_name=None, overwrite=False, bbox=None, geometry=None, where=None, use_first_geometry=False)` | Convert to GeoPackage, optionally filtering rows |

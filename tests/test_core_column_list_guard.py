@@ -399,7 +399,7 @@ class TestJoinColumnList:
 class TestBigQueryListArguments:
     """A blank entry in a *list* argument is a mistake, not an unset option (#992).
 
-    ``ops.read_bigquery``/``Table.from_bigquery`` take ``columns`` as a list and
+    ``ops.from_bigquery``/``Table.from_bigquery`` take ``columns`` as a list and
     join it into the string option the core takes. ``[""]`` joined to ``""``,
     which :func:`split_column_list` reads as "option not given" -- correctly, for
     a string (``--include-cols "$COLS"`` with ``COLS`` unset, #973). For a list
@@ -426,14 +426,14 @@ class TestBigQueryListArguments:
     def test_a_blank_entry_in_columns_is_rejected(self, columns):
         with self._forbid_extract():
             with pytest.raises(InvalidParameterError) as exc:
-                ops.read_bigquery("p.d.t", columns=columns)
+                ops.from_bigquery("p.d.t", columns=columns)
         assert "columns" in str(exc.value)
         assert "empty or whitespace-only" in str(exc.value)
 
     def test_a_blank_entry_in_exclude_columns_is_rejected(self):
         with self._forbid_extract():
             with pytest.raises(InvalidParameterError) as exc:
-                ops.read_bigquery("p.d.t", exclude_columns=[""])
+                ops.from_bigquery("p.d.t", exclude_columns=[""])
         assert "exclude_columns" in str(exc.value)
 
     @pytest.mark.parametrize("columns", [[""], ["id", ""]])
@@ -453,14 +453,14 @@ class TestBigQueryListArguments:
         """The list argument's own "unset": None or empty, never a blank entry."""
         with self._spy_on_extract() as extract:
             with pytest.raises(SystemExit):
-                ops.read_bigquery("p.d.t", columns=columns, exclude_columns=columns)
+                ops.from_bigquery("p.d.t", columns=columns, exclude_columns=columns)
         assert extract.call_args.kwargs["include_cols"] is None
         assert extract.call_args.kwargs["exclude_cols"] is None
 
     def test_a_real_list_is_still_joined(self):
         with self._spy_on_extract() as extract:
             with pytest.raises(SystemExit):
-                ops.read_bigquery("p.d.t", columns=["id", "name"], exclude_columns=["junk"])
+                ops.from_bigquery("p.d.t", columns=["id", "name"], exclude_columns=["junk"])
         assert extract.call_args.kwargs["include_cols"] == "id,name"
         assert extract.call_args.kwargs["exclude_cols"] == "junk"
 

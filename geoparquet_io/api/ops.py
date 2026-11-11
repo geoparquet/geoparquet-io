@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 import pyarrow as pa
 
+from geoparquet_io.api._deprecation import deprecated_alias as _deprecated_alias
 from geoparquet_io.core import index_ops
 from geoparquet_io.core.add.a5 import add_a5_table
 from geoparquet_io.core.add.bbox import add_bbox_table
@@ -1982,7 +1983,7 @@ def sub_partition_by_s2(
     )
 
 
-def read_bigquery(
+def from_bigquery(
     table_id: str | None = None,
     *,
     sql: str | None = None,
@@ -2060,19 +2061,19 @@ def read_bigquery(
 
     Example:
         >>> from geoparquet_io.api import ops
-        >>> table = ops.read_bigquery('myproject.geodata.buildings')
+        >>> table = ops.from_bigquery('myproject.geodata.buildings')
         >>> table = ops.add_bbox(table)
         >>> pq.write_table(table, 'output.parquet')
 
         >>> # Parse VARCHAR column as WKT geometry
-        >>> table = ops.read_bigquery(
+        >>> table = ops.from_bigquery(
         ...     'myproject.dataset.table',
         ...     geography_column='geometry',
         ...     geometry_format='wkt'
         ... )
 
         >>> # Run your own GoogleSQL instead of reading a table
-        >>> table = ops.read_bigquery(
+        >>> table = ops.from_bigquery(
         ...     sql="SELECT name, geog FROM `p.d.t` QUALIFY ROW_NUMBER() "
         ...         "OVER (PARTITION BY id ORDER BY version DESC) = 1",
         ...     project='myproject',
@@ -2132,6 +2133,13 @@ def read_bigquery(
         raise RuntimeError(f"Failed to read from BigQuery: {table_id or sql}")
 
     return arrow_table
+
+
+#: The pre-#1436 spelling. BigQuery was the one service reader called ``read_*``
+#: while ``from_arcgis``/``from_carto``/``from_wfs`` -- and ``Table.from_bigquery``
+#: itself -- were ``from_*``, so the twin had two names. Kept working, warning
+#: once per process, for one minor release.
+read_bigquery = _deprecated_alias(from_bigquery, old="ops.read_bigquery", new="ops.from_bigquery")
 
 
 def convert_to_geojson(

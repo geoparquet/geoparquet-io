@@ -205,8 +205,8 @@ class TestEdgesParameter:
         assert "geography_column" in sig.parameters
         assert "geometry_format" in sig.parameters
 
-        # Check ops.read_bigquery
-        sig = inspect.signature(ops.read_bigquery)
+        # Check ops.from_bigquery
+        sig = inspect.signature(ops.from_bigquery)
         assert "edges" in sig.parameters
         assert "geography_column" in sig.parameters
         assert "geometry_format" in sig.parameters
@@ -223,8 +223,8 @@ class TestEdgesParameter:
         assert sig.parameters["geography_column"].default is None
         assert sig.parameters["geometry_format"].default == "wkt"
 
-        # Check ops.read_bigquery defaults
-        sig = inspect.signature(ops.read_bigquery)
+        # Check ops.from_bigquery defaults
+        sig = inspect.signature(ops.from_bigquery)
         assert sig.parameters["edges"].default is None
         assert sig.parameters["geography_column"].default is None
         assert sig.parameters["geometry_format"].default == "wkt"
@@ -978,19 +978,19 @@ class TestPythonAPI:
         assert hasattr(Table, "from_bigquery")
         assert callable(Table.from_bigquery)
 
-    def test_ops_read_bigquery_exists(self):
-        """Test that ops.read_bigquery function exists."""
+    def test_ops_from_bigquery_exists(self):
+        """Test that ops.from_bigquery function exists."""
         from geoparquet_io.api import ops
 
-        assert hasattr(ops, "read_bigquery")
-        assert callable(ops.read_bigquery)
+        assert hasattr(ops, "from_bigquery")
+        assert callable(ops.from_bigquery)
 
-    def test_read_bigquery_top_level_export(self):
-        """Test that read_bigquery is exported at top level."""
+    def test_from_bigquery_top_level_export(self):
+        """Test that from_bigquery is exported at top level."""
         import geoparquet_io as gpio
 
-        assert hasattr(gpio, "read_bigquery")
-        assert callable(gpio.read_bigquery)
+        assert hasattr(gpio, "from_bigquery")
+        assert callable(gpio.from_bigquery)
 
 
 class TestBigQueryConnection:
@@ -2603,12 +2603,12 @@ class TestSqlCommandLine:
 class TestSqlPythonApi:
     """Every CLI option needs a Python API path (CLAUDE.md)."""
 
-    def test_read_bigquery_takes_sql(self):
+    def test_ops_from_bigquery_takes_sql(self):
         import inspect
 
         from geoparquet_io.api import ops
 
-        params = inspect.signature(ops.read_bigquery).parameters
+        params = inspect.signature(ops.from_bigquery).parameters
         assert "sql" in params
         assert params["table_id"].default is None
 
@@ -2621,12 +2621,12 @@ class TestSqlPythonApi:
         assert "sql" in params
         assert params["table_id"].default is None
 
-    def test_read_bigquery_passes_the_sql_through(self):
+    def test_ops_from_bigquery_passes_the_sql_through(self):
         from geoparquet_io.api import ops
 
         with patch("geoparquet_io.core.extract_bigquery.extract_bigquery") as mock:
             mock.return_value = pa.table({"id": [1]})
-            ops.read_bigquery(sql="SELECT 1 AS id", project="my-project")
+            ops.from_bigquery(sql="SELECT 1 AS id", project="my-project")
         assert mock.call_args.kwargs["sql"] == "SELECT 1 AS id"
         assert mock.call_args.kwargs["table_id"] is None
 
@@ -2810,11 +2810,11 @@ class TestSqlErrorsSpeakTheApisNames:
         from geoparquet_io.core.exceptions import InvalidParameterError
 
         with pytest.raises(InvalidParameterError, match=r"Given with sql: columns, limit\."):
-            ops.read_bigquery(sql="SELECT 1", project="my-project", columns=["x"], limit=5)
+            ops.from_bigquery(sql="SELECT 1", project="my-project", columns=["x"], limit=5)
 
     def test_a_bad_bbox_mode_does_not_report_table_none(self):
         from geoparquet_io.api import ops
 
         with pytest.raises(ValueError) as exc:
-            ops.read_bigquery(sql="SELECT 1", project="my-project", bbox_mode="bogus")
+            ops.from_bigquery(sql="SELECT 1", project="my-project", bbox_mode="bogus")
         assert "'None'" not in str(exc.value)
