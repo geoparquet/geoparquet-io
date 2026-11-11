@@ -86,7 +86,17 @@
 # paths (2), `remote=None` is admitted and normalized (1), the deprecation
 # blames the caller through either door (1), and a collision names the keyword
 # the caller wrote (2).
-max_collected = 14875
+# +45, the check-options object (#1436): the third per-concern object gets the
+# same construction-time guard. The value itself and the one-owner defaults
+# (17), the CLI packer and no leaf taking a raw check flag (7), the API's
+# `options=` on the five migrated checks plus the keyword migration path (16),
+# and `Table.fix`'s repair selection travelling in the object (5).
+# +6, review fixes for the check-options object: `CheckOptions.remote` is
+# activated for a path check, a Table check and `Table.fix` (3), the
+# deprecation warning blames the caller and not gpio's own wrapper (1),
+# `check_all` forwards the spec sample size (1), and a collision names the
+# keyword the caller wrote (1).
+max_collected = 14926
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

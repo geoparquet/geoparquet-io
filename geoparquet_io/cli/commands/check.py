@@ -33,17 +33,20 @@ from geoparquet_io.cli._shared import (
 )
 from geoparquet_io.cli.decorators import (
     ParquetInputCommand,
+    check_fix_options,
     check_partition_options,
+    check_profile_option,
     enable_verbose_logging,
-    overwrite_option,
+    pack_check_options,
     refuse_together,
+    spatial_sample_options,
     strict_option,
     verbose_option,
 )
 from geoparquet_io.cli.exception_handler import error_text
 from geoparquet_io.cli.fix_helpers import NoBackupConfirmation, handle_fix_common
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
-from geoparquet_io.core.check_parquet_structure import CheckProfile
+from geoparquet_io.core.check_options import DEFAULT_SPEC_SAMPLE_ROWS, CheckOptions
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
 from geoparquet_io.core.check_spatial_order import SPATIAL_ORDER_CHECK
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
@@ -671,17 +674,19 @@ def fix_output_for(fix_output: str | None, file_path: str) -> str | None:
 
 def begin_check_run(
     parquet_file: str,
+    check: CheckOptions,
     *,
     check_all_files: bool,
     check_sample: int | None,
     verbose: bool,
-    fix: bool,
-    fix_output: str | None,
-    no_backup: bool,
-    overwrite: bool = False,
     strict: bool = False,
 ) -> MultiFileCheckRunner:
     """Resolve the input to files and build the runner every ``check`` command shares.
+
+    The repair selection arrives whole, as the one ``CheckOptions`` the command
+    was handed (#1436); only the three CLI-only facts -- which files of a
+    dataset to read, and how loud to be -- are still named one by one, because
+    they are not check options (see ``core.check_options``).
 
     An input that matched no parquet files -- a glob that resolves to nothing,
     an empty directory -- is an error (exit 1), with or without ``--fix``: a
@@ -696,27 +701,87 @@ def begin_check_run(
         check_all=check_all_files,
         check_sample=check_sample,
         verbose=verbose,
-        fix=fix,
+        fix=bool(check.fix),
     )
 
     if not files_to_check:
-        nothing_fixed = "; nothing was fixed" if fix else ""
+        nothing_fixed = "; nothing was fixed" if check.fix else ""
         raise click.ClickException(f"No parquet files found in {parquet_file}{nothing_fixed}")
 
     if notice:
         click.echo(click.style(f"📁 {notice}", fg="cyan"))
 
-    refuse_shared_fix_output(files_to_check, fix, fix_output)
+    refuse_shared_fix_output(files_to_check, bool(check.fix), check.fix_output)
 
     return MultiFileCheckRunner(
         files_to_check,
         verbose=verbose,
-        fix_output=fix_output,
-        overwrite=overwrite,
-        confirmation=NoBackupConfirmation(no_backup, len(files_to_check)),
+        fix_output=check.fix_output,
+        overwrite=bool(check.overwrite),
+        confirmation=NoBackupConfirmation(bool(check.no_backup), len(files_to_check)),
         strict=strict,
         matched=matched,
     )
+
+
+def run_single_stage_check(
+    runner: MultiFileCheckRunner,
+    check: CheckOptions,
+    *,
+    verbose: bool,
+    check_fn,
+    check_kwargs: dict | None = None,
+    fix_fn,
+    already_fine: str,
+    applying: str,
+    fixed_line: str,
+    fixed_action: str,
+) -> None:
+    """Run one check over the run's files, and ``--fix`` each file that offers a repair.
+
+    ``check compression`` and ``check row-group`` are the same loop -- run one
+    check, record its verdict, and if ``--fix`` was asked and the check offers a
+    repair, apply it and report what was rewritten. They each carried their own
+    copy of it, which the duplicate-pair guard caught once the option
+    boilerplate above them was shared (#1436); the four lines of text they
+    differ by are arguments now.
+    """
+    kwargs = check_kwargs or {}
+    for file_path in runner.files:
+        runner.start_file(file_path)
+
+        show_output = runner.show_output
+        result = runner.run_check(
+            file_path,
+            partial(
+                check_fn,
+                file_path,
+                verbose and show_output,
+                return_results=True,
+                quiet=not show_output,
+                **kwargs,
+            ),
+        )
+        if result is None:
+            continue
+
+        runner.record_result(file_path, result)
+        if not check.fix:
+            continue
+        if not result.get("fix_available", False):
+            runner.no_fix(file_path, result, already_fine, show=show_output)
+            continue
+
+        if show_output:
+            click.echo(f"\n{applying}")
+        applied = runner.fix_file(
+            file_path,
+            fix_fn,
+            verbose=verbose,
+            recheck=quiet_recheck(check_fn, False, **kwargs),
+        )
+        if applied is not None and show_output:
+            runner.echo_fixed(file_path, applied, fixed_line, fixed_action)
 
 
 def _echo_spec_result(spec_result, spec_details: bool) -> None:
@@ -760,42 +825,14 @@ def _echo_spec_result(spec_result, spec_details: bool) -> None:
     callback=enable_verbose_logging,
     is_eager=True,
 )
-@click.option("--fix", is_flag=True, help="Fix detected issues")
-@click.option(
-    "--fix-output",
-    type=click.Path(),
-    help="Output path for fixed file (default: overwrites with .bak backup)",
-)
-@click.option(
-    "--no-backup",
-    is_flag=True,
-    help="Skip .bak backup when fixing",
-)
-@overwrite_option
-@click.option(
-    "--random-sample-size",
-    default=100,
-    show_default=True,
-    help="Sample size for spatial order check",
-)
-@click.option(
-    "--limit-rows",
-    default=500000,
-    show_default=True,
-    help="Max rows for spatial order check",
-)
+@check_fix_options(help_text="Fix detected issues")
+@spatial_sample_options
 @click.option(
     "--spec-details",
     is_flag=True,
     help="Show full spec validation results instead of summary",
 )
-@click.option(
-    "--profile",
-    type=click.Choice([c.value for c in CheckProfile], case_sensitive=False),
-    required=False,
-    default=None,
-    help="Check best practices for specific use case",
-)
+@check_profile_option
 @click.option(
     "--pmtiles",
     is_flag=True,
@@ -804,20 +841,15 @@ def _echo_spec_result(spec_result, spec_details: bool) -> None:
 @strict_option
 @check_partition_options
 @click.pass_context
+@pack_check_options
 def check_all(
     ctx,
     parquet_file,
     verbose,
-    fix,
-    fix_output,
-    no_backup,
-    overwrite,
-    random_sample_size,
-    limit_rows,
+    check,
     spec_details,
     check_all_files,
     check_sample,
-    profile,
     pmtiles,
     strict,
 ):
@@ -831,18 +863,15 @@ def check_all(
     with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
+            check,
             check_all_files=check_all_files,
             check_sample=check_sample,
             verbose=verbose,
-            fix=fix,
-            fix_output=fix_output,
-            no_backup=no_backup,
-            overwrite=overwrite,
             strict=strict,
         )
 
         # Check pmtiles requires --fix
-        if pmtiles and not fix:
+        if pmtiles and not check.fix:
             raise click.UsageError("--pmtiles requires --fix to generate PMTiles from fixed files")
 
         # Check tippecanoe availability once before processing files
@@ -882,7 +911,7 @@ def check_all(
                     verbose and show_output,
                     return_results=True,
                     quiet=quiet,
-                    profile=profile,
+                    profile=check.profile,
                 )
                 if show_output:
                     click.echo("\nSpatial Order Analysis:")
@@ -891,8 +920,8 @@ def check_all(
                     partial(
                         check_spatial_impl,
                         file_path,
-                        random_sample_size,
-                        limit_rows,
+                        check.resolved_random_sample_size(),
+                        check.resolved_limit_rows(),
                         verbose and show_output,
                         return_results=True,
                         quiet=quiet,
@@ -905,7 +934,7 @@ def check_all(
                         validate_geoparquet,
                         file_path,
                         validate_data=True,
-                        sample_size=1000,
+                        sample_size=check.resolved_spec_sample_size(),
                         verbose=False,
                     ),
                     "Spec validation",
@@ -934,10 +963,10 @@ def check_all(
             )
 
             # If --fix flag is set, apply fixes
-            if fix:
+            if check.fix:
                 from geoparquet_io.cli.fix_helpers import apply_check_all_fixes
 
-                per_file_output = fix_output_for(fix_output, file_path)
+                per_file_output = fix_output_for(check.fix_output, file_path)
                 verified = _VerifyCapture()
 
                 all_results = {**structure_results, "spatial": spatial_result}
@@ -948,13 +977,13 @@ def check_all(
                         file_path=file_path,
                         all_results=all_results,
                         fix_output=per_file_output,
-                        overwrite=overwrite,
+                        overwrite=bool(check.overwrite),
                         verbose=verbose,
                         profile=None,
                         check_structure_impl=verified.check_structure,
                         check_spatial_impl=verified.check_spatial,
-                        random_sample_size=random_sample_size,
-                        limit_rows=limit_rows,
+                        random_sample_size=check.resolved_random_sample_size(),
+                        limit_rows=check.resolved_limit_rows(),
                         confirmation=runner.confirmation,
                         quiet=not show_output,
                     ),
@@ -971,7 +1000,7 @@ def check_all(
 
                 # Generate PMTiles
                 # Use fixed output path if available, otherwise original
-                source_file = per_file_output if fix and per_file_output else file_path
+                source_file = per_file_output if check.fix and per_file_output else file_path
                 # Path().with_suffix() mangles a URL's scheme separator
                 if is_remote_url(source_file):
                     output_pmtiles = source_file.rsplit(".", 1)[0] + ".pmtiles"
@@ -1055,18 +1084,7 @@ def _echo_pushdown(pushdown: dict | None) -> None:
 
 @check.command(name="spatial", cls=ParquetInputCommand)
 @click.argument("parquet_file")
-@click.option(
-    "--random-sample-size",
-    default=100,
-    show_default=True,
-    help="Sample size for spatial order check",
-)
-@click.option(
-    "--limit-rows",
-    default=500000,
-    show_default=True,
-    help="Max rows for spatial order check",
-)
+@spatial_sample_options
 @click.option(
     "--verbose",
     is_flag=True,
@@ -1074,31 +1092,16 @@ def _echo_pushdown(pushdown: dict | None) -> None:
     callback=enable_verbose_logging,
     is_eager=True,
 )
-@click.option("--fix", is_flag=True, help="Fix with Hilbert ordering")
-@click.option(
-    "--fix-output",
-    type=click.Path(),
-    help="Output path (default: overwrites with .bak backup)",
-)
-@click.option(
-    "--no-backup",
-    is_flag=True,
-    help="Skip .bak backup when fixing",
-)
-@overwrite_option
+@check_fix_options(help_text="Fix with Hilbert ordering")
 @strict_option
 @check_partition_options
 @click.pass_context
+@pack_check_options
 def check_spatial(
     ctx,
     parquet_file,
-    random_sample_size,
-    limit_rows,
     verbose,
-    fix,
-    fix_output,
-    no_backup,
-    overwrite,
+    check,
     check_all_files,
     check_sample,
     strict,
@@ -1111,13 +1114,10 @@ def check_spatial(
     with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
+            check,
             check_all_files=check_all_files,
             check_sample=check_sample,
             verbose=verbose,
-            fix=fix,
-            fix_output=fix_output,
-            no_backup=no_backup,
-            overwrite=overwrite,
             strict=strict,
         )
 
@@ -1131,8 +1131,8 @@ def check_spatial(
                 partial(
                     _spatial_with_pushdown,
                     file_path,
-                    random_sample_size,
-                    limit_rows,
+                    check.resolved_random_sample_size(),
+                    check.resolved_limit_rows(),
                     verbose and show_output,
                     quiet=quiet,
                 ),
@@ -1148,7 +1148,7 @@ def check_spatial(
             # Record result for summary
             runner.record_result(file_path, result)
 
-            if fix:
+            if check.fix:
                 if not result.get("fix_available", False):
                     runner.no_fix(file_path, result, "already spatially ordered!", show=show_output)
                     continue
@@ -1160,7 +1160,11 @@ def check_spatial(
                     fix_spatial_ordering,
                     verbose=verbose,
                     recheck=lambda path: _spatial_with_pushdown(
-                        path, random_sample_size, limit_rows, False, quiet=True
+                        path,
+                        check.resolved_random_sample_size(),
+                        check.resolved_limit_rows(),
+                        False,
+                        quiet=True,
                     ),
                 )
                 if applied is not None and show_output:
@@ -1184,29 +1188,16 @@ def check_spatial(
     callback=enable_verbose_logging,
     is_eager=True,
 )
-@click.option("--fix", is_flag=True, help="Recompress geometry with ZSTD")
-@click.option(
-    "--fix-output",
-    type=click.Path(),
-    help="Output path (default: overwrites with .bak backup)",
-)
-@click.option(
-    "--no-backup",
-    is_flag=True,
-    help="Skip .bak backup when fixing",
-)
-@overwrite_option
+@check_fix_options(help_text="Recompress geometry with ZSTD")
 @strict_option
 @check_partition_options
 @click.pass_context
+@pack_check_options
 def check_compression_cmd(
     ctx,
     parquet_file,
     verbose,
-    fix,
-    fix_output,
-    no_backup,
-    overwrite,
+    check,
     check_all_files,
     check_sample,
     strict,
@@ -1220,57 +1211,24 @@ def check_compression_cmd(
     with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
+            check,
             check_all_files=check_all_files,
             check_sample=check_sample,
             verbose=verbose,
-            fix=fix,
-            fix_output=fix_output,
-            no_backup=no_backup,
-            overwrite=overwrite,
             strict=strict,
         )
 
-        for file_path in runner.files:
-            runner.start_file(file_path)
-
-            show_output = runner.show_output
-            quiet = not show_output
-            result = runner.run_check(
-                file_path,
-                partial(
-                    check_compression,
-                    file_path,
-                    verbose and show_output,
-                    return_results=True,
-                    quiet=quiet,
-                ),
-            )
-            if result is None:
-                continue
-
-            # Record result for summary
-            runner.record_result(file_path, result)
-
-            if fix:
-                if not result.get("fix_available", False):
-                    runner.no_fix(file_path, result, "already using ZSTD!", show=show_output)
-                    continue
-
-                if show_output:
-                    click.echo("\nRe-compressing with ZSTD...")
-                applied = runner.fix_file(
-                    file_path,
-                    fix_compression,
-                    verbose=verbose,
-                    recheck=quiet_recheck(check_compression, False),
-                )
-                if applied is not None and show_output:
-                    runner.echo_fixed(
-                        file_path,
-                        applied,
-                        "Compression optimized successfully!",
-                        "Re-compressed with ZSTD",
-                    )
+        run_single_stage_check(
+            runner,
+            check,
+            verbose=verbose,
+            check_fn=check_compression,
+            fix_fn=fix_compression,
+            already_fine="already using ZSTD!",
+            applying="Re-compressing with ZSTD...",
+            fixed_line="Compression optimized successfully!",
+            fixed_action="Re-compressed with ZSTD",
+        )
 
         # Print summary for multi-file checks, and exit with the run's code
         runner.finish()
@@ -1294,17 +1252,7 @@ def _bbox_fix_action(needs_column: bool, needs_metadata: bool) -> str:
     callback=enable_verbose_logging,
     is_eager=True,
 )
-@click.option("--fix", is_flag=True, help="Fix bbox (add for v1.x, remove for v2/parquet-geo)")
-@click.option(
-    "--fix-output",
-    type=click.Path(),
-    help="Output path (default: overwrites with .bak backup)",
-)
-@click.option(
-    "--no-backup",
-    is_flag=True,
-    help="Skip .bak backup when fixing",
-)
+@check_fix_options(help_text="Fix bbox (add for v1.x, remove for v2/parquet-geo)")
 @click.option(
     "--sample-rows",
     type=click.IntRange(min=0),
@@ -1317,20 +1265,15 @@ def _bbox_fix_action(needs_column: bool, needs_metadata: bool) -> str:
     is_flag=True,
     help="Compare every row's bbox against its geometry, not a sample",
 )
-@overwrite_option
 @strict_option
 @check_partition_options
 @click.pass_context
+@pack_check_options
 def check_bbox_cmd(
     ctx,
     parquet_file,
     verbose,
-    fix,
-    fix_output,
-    no_backup,
-    sample_rows,
-    all_rows,
-    overwrite,
+    check,
     check_all_files,
     check_sample,
     strict,
@@ -1360,22 +1303,21 @@ def check_bbox_cmd(
 
     configure_verbose(verbose)
     refuse_together(
-        ("--all-rows", all_rows),
+        ("--all-rows", check.all_rows),
         ("--sample-rows", ctx.get_parameter_source("sample_rows") is not ParameterSource.DEFAULT),
         end=": --all-rows compares every row.",
     )
-    bbox_recheck = quiet_recheck(check_bbox, False, verify_rows=sample_rows, all_rows=all_rows)
+    verify_rows = check.resolved_sample_rows()
+    all_rows = bool(check.all_rows)
+    bbox_recheck = quiet_recheck(check_bbox, False, verify_rows=verify_rows, all_rows=all_rows)
 
     with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
+            check,
             check_all_files=check_all_files,
             check_sample=check_sample,
             verbose=verbose,
-            fix=fix,
-            fix_output=fix_output,
-            no_backup=no_backup,
-            overwrite=overwrite,
             strict=strict,
         )
 
@@ -1392,7 +1334,7 @@ def check_bbox_cmd(
                     verbose and show_output,
                     return_results=True,
                     quiet=quiet,
-                    verify_rows=sample_rows,
+                    verify_rows=verify_rows,
                     all_rows=all_rows,
                 ),
             )
@@ -1402,7 +1344,7 @@ def check_bbox_cmd(
             # Record result for summary
             runner.record_result(file_path, result)
 
-            if fix:
+            if check.fix:
                 if not result.get("fix_available", False):
                     # Not "optimal" unless it passed: `--fix` declines a covering
                     # whose repair rewrites the column, not the metadata (#1035).
@@ -1477,39 +1419,19 @@ def check_bbox_cmd(
     callback=enable_verbose_logging,
     is_eager=True,
 )
-@click.option("--fix", is_flag=True, help="Optimize row group size")
-@click.option(
-    "--fix-output",
-    type=click.Path(),
-    help="Output path (default: overwrites with .bak backup)",
-)
-@click.option(
-    "--no-backup",
-    is_flag=True,
-    help="Skip .bak backup when fixing",
-)
-@click.option(
-    "--profile",
-    type=click.Choice([c.value for c in CheckProfile], case_sensitive=False),
-    required=False,
-    default=None,
-    help="Check best practices for specific use case",
-)
-@overwrite_option
+@check_fix_options(help_text="Optimize row group size")
+@check_profile_option
 @strict_option
 @check_partition_options
 @click.pass_context
+@pack_check_options
 def check_row_group_cmd(
     ctx,
     parquet_file,
     verbose,
-    fix,
-    fix_output,
-    no_backup,
-    overwrite,
+    check,
     check_all_files,
     check_sample,
-    profile,
     strict,
 ):
     """Check row group size."""
@@ -1521,58 +1443,25 @@ def check_row_group_cmd(
     with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
+            check,
             check_all_files=check_all_files,
             check_sample=check_sample,
             verbose=verbose,
-            fix=fix,
-            fix_output=fix_output,
-            no_backup=no_backup,
-            overwrite=overwrite,
             strict=strict,
         )
 
-        for file_path in runner.files:
-            runner.start_file(file_path)
-
-            show_output = runner.show_output
-            quiet = not show_output
-            result = runner.run_check(
-                file_path,
-                partial(
-                    check_row_groups,
-                    file_path,
-                    verbose and show_output,
-                    return_results=True,
-                    quiet=quiet,
-                    profile=profile,
-                ),
-            )
-            if result is None:
-                continue
-
-            # Record result for summary
-            runner.record_result(file_path, result)
-
-            if fix:
-                if not result.get("fix_available", False):
-                    runner.no_fix(file_path, result, "row groups are optimal!", show=show_output)
-                    continue
-
-                if show_output:
-                    click.echo("\nOptimizing row groups...")
-                applied = runner.fix_file(
-                    file_path,
-                    fix_row_groups,
-                    verbose=verbose,
-                    recheck=quiet_recheck(check_row_groups, False, profile=profile),
-                )
-                if applied is not None and show_output:
-                    runner.echo_fixed(
-                        file_path,
-                        applied,
-                        "Row groups optimized successfully!",
-                        "Rewrote the row groups",
-                    )
+        run_single_stage_check(
+            runner,
+            check,
+            verbose=verbose,
+            check_fn=check_row_groups,
+            check_kwargs={"profile": check.profile},
+            fix_fn=fix_row_groups,
+            already_fine="row groups are optimal!",
+            applying="Optimizing row groups...",
+            fixed_line="Row groups optimized successfully!",
+            fixed_action="Rewrote the row groups",
+        )
 
         # Print summary for multi-file checks, and exit with the run's code
         runner.finish()
@@ -1636,20 +1525,21 @@ def check_stac_cmd(ctx, stac_file, verbose, strict):
 @click.option(
     "--sample-size",
     type=click.IntRange(0, None),
-    default=1000,
+    default=DEFAULT_SPEC_SAMPLE_ROWS,
     show_default=True,
     help="Number of rows to sample for data validation (0 = all rows)",
 )
 @verbose_option
 @strict_option
 @click.pass_context
+@pack_check_options
 def check_spec(
     ctx,
     parquet_file,
     geoparquet_version,
     json_output,
     skip_data_validation,
-    sample_size,
+    check,
     verbose,
     strict,
 ):
@@ -1706,7 +1596,7 @@ def check_spec(
             parquet_file,
             target_version=geoparquet_version,
             validate_data=not skip_data_validation,
-            sample_size=sample_size,
+            sample_size=check.resolved_spec_sample_size(),
             verbose=verbose,
         )
 
@@ -1731,10 +1621,12 @@ def check_spec(
 @strict_option
 @check_partition_options
 @click.pass_context
+@pack_check_options
 def check_optimization_cmd(
     ctx,
     parquet_file,
     verbose,
+    check,
     check_all_files,
     check_sample,
     strict,
@@ -1771,12 +1663,10 @@ def check_optimization_cmd(
     with activate_remote(ctx):
         runner = begin_check_run(
             parquet_file,
+            check,
             check_all_files=check_all_files,
             check_sample=check_sample,
             verbose=verbose,
-            fix=False,
-            fix_output=None,
-            no_backup=False,
             strict=strict,
         )
 

@@ -87,9 +87,11 @@
     "fix_output_for",
     "quiet_recheck",
     "refuse_no_parquet_match",
-    "refuse_shared_fix_output"
+    "refuse_shared_fix_output",
+    "run_single_stage_check"
   ],
   "geoparquet_io.cli.decorators": [
+    "CHECK_OPTION_PARAMS",
     "DEFAULT_KDTREE_APPROX",
     "DEFAULT_KDTREE_TARGET_ROWS",
     "ErrorBoundaryGroup",
@@ -105,7 +107,9 @@
     "bbox_option",
     "breakdown_metric_option",
     "bucket_point_options",
+    "check_fix_options",
     "check_partition_options",
+    "check_profile_option",
     "column_list_option",
     "column_name_option",
     "compression_options",
@@ -119,6 +123,7 @@
     "metric_nodata_option",
     "output_format_options",
     "overwrite_option",
+    "pack_check_options",
     "pack_remote_options",
     "pack_write_options",
     "parse_row_group_options",
@@ -135,6 +140,7 @@
     "s3_endpoint_options",
     "show_sql_option",
     "spatial_filter_options",
+    "spatial_sample_options",
     "strict_option",
     "timeout_option",
     "verbose_option",
