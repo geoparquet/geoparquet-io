@@ -731,21 +731,36 @@ def _bound_values(np: Any, data: Any, starts: Any, ends: Any, acc: _Bound, ctx: 
     _bound_vertices(np, _normalized_lon(np, lon), lat, chain_of, chains.role, acc, ctx)
 
 
-def _binary_storage(array: Any) -> Any:
+def _binary_storage(array: Any, encoding: str | None = None) -> Any:
+    """``array``'s values as WKB bytes this reader can walk.
+
+    With ``encoding``, a GeoArrow-native column (a coordinate struct, or a list
+    of them) is read through the owner's extension type and serialized by
+    ``ga.as_wkb``. Cast alone, a struct is "Unsupported cast from
+    struct<x: double, y: double> to large_binary", and the write could only drop
+    the column's bounding box over it (#1451).
+    """
+    import geoarrow.pyarrow as ga
     import pyarrow as pa
 
+    from geoparquet_io.core.geo_metadata import geoarrow_typed_array
+
     storage = array.storage if isinstance(array, pa.ExtensionArray) else array
-    if not (pa.types.is_binary(storage.type) or pa.types.is_large_binary(storage.type)):
-        storage = storage.cast(pa.large_binary())
-    return storage
+    if pa.types.is_binary(storage.type) or pa.types.is_large_binary(storage.type):
+        return storage
+    typed = geoarrow_typed_array(array, encoding)
+    if isinstance(typed.type, pa.ExtensionType):
+        wkb = ga.as_wkb(typed)
+        return wkb.storage if isinstance(wkb, pa.ExtensionArray) else wkb
+    return storage.cast(pa.large_binary())
 
 
-def _bound_array(array: Any, acc: _Bound, ctx: _Context) -> None:
+def _bound_array(array: Any, acc: _Bound, ctx: _Context, encoding: str | None = None) -> None:
     """Fold an Arrow array of WKB into ``acc``, a bounded slice of bytes at a time."""
     import pyarrow as pa
 
     np = _np()
-    storage = _binary_storage(array)
+    storage = _binary_storage(array, encoding)
     length = len(storage)
     if length == 0:
         return
@@ -784,6 +799,7 @@ def row_group_geography_bboxes(
     *,
     orientation: str | None = None,
     ellipsoid: tuple[float, float] | None = None,
+    encoding: str | None = None,
 ) -> ColumnBounds:
     """Each row group's geodesic bound for one column, and the whole file's.
 
@@ -791,6 +807,11 @@ def row_group_geography_bboxes(
     memory bound is a batch, not the file. A row group that cannot be bounded
     gets ``None``; an unreadable one also makes the file-level answer
     ``None``, since a whole-file bound that skips rows would under-cover.
+
+    ``encoding`` is the column's declared GeoArrow encoding when it holds a
+    coordinate struct rather than WKB bytes, which the reader needs to know
+    *which* of the six it is: ``multipoint`` and ``linestring`` share an Arrow
+    type and a great-circle bound is not the same for both (#1451).
     """
     import pyarrow.parquet as pq
 
@@ -805,7 +826,7 @@ def row_group_geography_bboxes(
                 for batch in reader.iter_batches(
                     batch_size=_BATCH_ROWS, row_groups=[index], columns=[column], use_threads=False
                 ):
-                    _bound_array(batch.column(0), acc, ctx)
+                    _bound_array(batch.column(0), acc, ctx, encoding)
             except _WkbError:
                 per_group.append(None)
                 unreadable += 1
@@ -832,11 +853,13 @@ def geography_statistics(
     *,
     orientations: Mapping[str, str | None] | None = None,
     ellipsoids: Mapping[str, tuple[float, float]] | None = None,
+    encodings: Mapping[str, str | None] | None = None,
 ) -> dict[str, ColumnBounds]:
     """Geodesic bounds for every column about to be retyped GEOGRAPHY.
 
-    ``geography`` maps column -> edges; ``orientations`` and ``ellipsoids``
-    give each column's declared ``orientation`` and its CRS's ellipsoid.
+    ``geography`` maps column -> edges; ``orientations``, ``ellipsoids`` and
+    ``encodings`` give each column's declared ``orientation``, its CRS's
+    ellipsoid and the GeoArrow encoding it is stored in, if any.
     """
     return {
         name: row_group_geography_bboxes(
@@ -845,6 +868,7 @@ def geography_statistics(
             edges,
             orientation=(orientations or {}).get(name),
             ellipsoid=(ellipsoids or {}).get(name),
+            encoding=(encodings or {}).get(name),
         )
         for name, edges in geography.items()
     }

@@ -14,8 +14,15 @@ explicit WKB-carrier version, which declared one over data it cannot hold.
 Each case runs over both carrier shapes a GeoArrow column arrives in (see
 ``CARRIERS``): the bare coordinate struct, and the same struct resolved into its
 extension type, which is what gpio's own GeoArrow output reads back as.
+
+#1451: the siblings #1438 missed -- the cell-key driver every ``add``,
+``sort quadkey`` and ``partition`` goes through, the GeoJSON writer, the
+geodesic bounds a non-planar column's box is measured with, and a 3D
+coordinate struct, which the Arrow-side wrap could only read two dimensions
+of.
 """
 
+import json
 from pathlib import Path
 
 import geoarrow.pyarrow as ga
@@ -489,3 +496,170 @@ def test_the_streaming_table_path_still_converts_wkb_to_native(tmp_path):
     column = _geo_column(out)
     assert column["encoding"] in SPEC_TYPE
     assert not pa.types.is_binary(pq.read_schema(out).field("geometry").type)
+
+
+# -- the index, GeoJSON and bbox siblings (#1451) -----------------------------
+
+
+def _native_point_table(coords: dict[str, list[float]], **column_entry) -> pa.Table:
+    """A native point table whose coordinate struct holds ``coords``.
+
+    ``column_entry`` goes into the ``geo`` block's column entry beside the
+    encoding, which is how a caller declares ``edges``.
+    """
+    struct = pa.StructArray.from_arrays(
+        [pa.array(values, pa.float64()) for values in coords.values()], names=list(coords)
+    )
+    geo = {
+        "version": "1.1.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "point", **column_entry}},
+    }
+    table = pa.table({"id": pa.array(range(len(struct))), "geometry": struct})
+    return table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
+
+
+def _passes_check_spec(path: Path) -> bool:
+    result = CliRunner().invoke(cli, ["check", "spec", str(path)])
+    assert result.exit_code == 0, result.output
+    return True
+
+
+def test_add_h3_reads_a_native_point_column(tmp_path):
+    """``index_expression`` handed ``ST_Centroid`` the coordinate struct (#1451).
+
+    The cell-key driver is one owner for ``add``, ``sort quadkey``,
+    ``partition`` and ``process aggregate``, so every one of them died with
+    ``ST_Centroid(STRUCT(x DOUBLE, y DOUBLE))``.
+    """
+    out = tmp_path / "h3.parquet"
+    result = CliRunner().invoke(
+        cli, ["add", "h3", str(_fixture("point")), str(out), "--resolution", "7"]
+    )
+    assert result.exit_code == 0, result.output
+    cells = pq.read_table(out)["h3_cell"].to_pylist()
+    # Every row keeps its row; the fixture's NULL and POINT EMPTY rows (the
+    # second and third) are the only ones with no coordinates to key a cell by.
+    assert [cell is not None for cell in cells] == [True, False, False, True]
+    assert _geo_column(out)["encoding"] == "point"
+    assert _passes_check_spec(out)
+
+
+def test_partition_h3_reads_a_native_point_column(tmp_path):
+    """The partition driver keys its cells through the same expression (#1451)."""
+    out = tmp_path / "parts"
+    # --force: the fixture is four rows, which the partition analysis rightly
+    # calls too small -- the point here is that the cells can be keyed at all.
+    result = CliRunner().invoke(
+        cli, ["partition", "h3", str(_fixture("point")), str(out), "--resolution", "3", "--force"]
+    )
+    assert result.exit_code == 0, result.output
+    parts = sorted(out.rglob("*.parquet"))
+    assert parts
+    # The fixture's two keyable rows; its NULL and POINT EMPTY rows key no cell.
+    assert sum(pq.read_metadata(part).num_rows for part in parts) == 2
+    assert all(_passes_check_spec(part) for part in parts)
+
+
+def test_sort_quadkey_reads_a_native_point_column(tmp_path):
+    """``sort quadkey`` adds its cells through the driver before sorting (#1451)."""
+    out = tmp_path / "sorted.parquet"
+    result = CliRunner().invoke(cli, ["sort", "quadkey", str(_fixture("point")), str(out)])
+    assert result.exit_code == 0, result.output
+    assert pq.read_metadata(out).num_rows == pq.read_metadata(_fixture("point")).num_rows
+    assert _passes_check_spec(out)
+
+
+def test_process_aggregate_keys_a_native_point_column(tmp_path):
+    """``bucket_point_expr`` read the column as a shape, not as a key (#1451).
+
+    It is the one site the index driver's fix does not reach: aggregate builds
+    its own keying point and handed ``index_point`` the struct itself.
+    """
+    out = tmp_path / "agg.parquet"
+    result = CliRunner().invoke(
+        cli,
+        ["process", "aggregate", "h3", str(_fixture("point")), str(out), "--resolution", "3"],
+    )
+    assert result.exit_code == 0, result.output
+    table = pq.read_table(out)
+    counts = dict(zip(table["h3_cell"].to_pylist(), table["count"].to_pylist(), strict=True))
+    # One cell each for the two keyable rows, and the NULL and POINT EMPTY rows
+    # in the unassigned bucket.
+    assert sorted(counts.values()) == [1, 1, 2]
+    assert counts[None] == 2
+
+
+def test_convert_geojson_refuses_a_native_column(tmp_path):
+    """GeoJSON serialization needs a real shape, which a struct is not (#1451).
+
+    ``ST_AsGeoJSON``, ``ST_IsValid`` and ``ST_ReducePrecision`` all take
+    GEOMETRY, and gpio does not re-encode a coordinate struct, so the answer is
+    the GDAL writers' refusal rather than a binder error from inside the query.
+    """
+    out = tmp_path / "out.geojson"
+    result = CliRunner().invoke(cli, ["convert", "geojson", str(_fixture("polygon")), str(out)])
+    assert result.exit_code != 0, result.output
+    assert "GeoArrow-native" in result.output and "geometry" in result.output
+    assert "Binder Error" not in result.output
+    assert not out.exists()
+
+
+def test_spherical_edges_keep_a_native_column_bounded(tmp_path, caplog):
+    """``_binary_storage`` cast the struct to ``large_binary`` and gave up (#1451).
+
+    The geodesic bounds reader is the one that measures a non-planar column's
+    box, so the only thing the write could do with "Unsupported cast from
+    struct<x: double, y: double> to large_binary" was drop the box.
+    """
+    src = tmp_path / "spherical.parquet"
+    pq.write_table(_native_point_table({"x": [1.0, 3.0], "y": [2.0, 4.0]}, edges="spherical"), src)
+    out = tmp_path / "out.parquet"
+    with caplog.at_level("WARNING"):
+        gpio.read(src).write(out)
+    assert "geodesic bounding boxes" not in caplog.text
+    column = _geo_column(out)
+    assert column["edges"] == "spherical"
+    assert column["bbox"] == [1.0, 2.0, 3.0, 4.0]
+
+
+@pytest.mark.parametrize("strategy", ["in-memory", "streaming"])
+def test_a_3d_native_column_is_measured_like_the_sql_strategies(strategy, tmp_path):
+    """The wrap was 2-D only: "struct has 3 children, expected 2" (#1451).
+
+    The error was swallowed as "no statistics", so the Arrow-side strategies
+    wrote no ``bbox`` at all while the SQL-side ones measured the same column.
+    """
+    src = tmp_path / "in.parquet"
+    pq.write_table(_native_point_table({"x": [1.0, 3.0], "y": [2.0, 4.0], "z": [10.0, 20.0]}), src)
+    reference = tmp_path / "duckdb-kv.parquet"
+    gpio.read(src).write(reference, write_strategy="duckdb-kv")
+    out = tmp_path / f"{strategy}.parquet"
+    gpio.read(src).write(out, write_strategy=strategy)
+    assert _geo_column(reference)["bbox"] == [1.0, 2.0, 3.0, 4.0]
+    assert _geo_column(out)["bbox"] == _geo_column(reference)["bbox"]
+
+
+@pytest.mark.parametrize(
+    ("names", "expected_type"),
+    [
+        (("x", "y"), "Point"),
+        (("x", "y", "z"), "Point Z"),
+        (("x", "y", "m"), "Point M"),
+        (("x", "y", "z", "m"), "Point ZM"),
+    ],
+)
+def test_the_geoarrow_wrap_reads_every_coordinate_layout(names, expected_type):
+    """The extension type the column is read with carries its dimensions (#1451)."""
+    from geoparquet_io.core.geo_metadata import geoarrow_geometry_types, geoarrow_typed_array
+
+    column = pa.StructArray.from_arrays(
+        [pa.array([1.0 + i, 3.0 + i], pa.float64()) for i, _ in enumerate(names)],
+        names=list(names),
+    )
+    assert geoarrow_geometry_types("point", column.type) == [expected_type]
+    wrapped = geoarrow_typed_array(column, "point")
+    assert isinstance(wrapped.type, pa.ExtensionType)
+    box = ga.box(ga.as_wkb(wrapped)).storage
+    assert pc.struct_field(box, "xmin").to_pylist() == [1.0, 3.0]
+    assert pc.struct_field(box, "ymin").to_pylist() == [2.0, 4.0]

@@ -102,7 +102,14 @@
 # census reads, the kept signature, warning once per process, the canonical
 # name staying silent, and the alias handing core the call the canonical name
 # does, plus the root keeping both BigQuery spellings (11).
-max_collected = 14939
+# +12 (#1451): the four siblings #1438 left -- the cell-key driver every `add`,
+# `sort quadkey` and `partition` goes through (+3, one command each) and
+# `process aggregate`, which builds its own keying point (+1), the GeoJSON
+# writer's refusal (+1), the geodesic bounds of a non-planar native column
+# (+1), and a 3D coordinate struct, measured on the two Arrow-side strategies
+# against what the SQL-side ones produce (+2) with the four coordinate layouts
+# the wrap has to carry (+4).
+max_collected = 14951
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

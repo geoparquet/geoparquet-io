@@ -1021,6 +1021,11 @@ re-encode a coordinate struct as WKB, so asking for one of them over such an
 input is refused rather than written as a file whose metadata contradicts its
 schema.
 
+For the same reason, exporting such an input to another format — GeoJSON,
+GeoPackage, FlatGeobuf, Shapefile — is refused: those writers read WKB, and a
+coordinate struct is not WKB. Spatial indexes, sorts and partitions do read
+it; only the format writers need the bytes.
+
 ### Verbose Output
 
 Track progress and see detailed information:

@@ -429,9 +429,21 @@ def _geodesic_bounds(
         for name, edges in targets.items()
         if is_ellipsoidal(edges)
     }
+    # A GeoArrow-native column is not WKB bytes, and only the block says which
+    # of the six encodings it is; without it the reader could not bound it and
+    # the box was dropped (#1451).
+    encodings = {
+        name: (columns.get(name) or {}).get("encoding")
+        for name in targets
+        if isinstance(columns.get(name), dict)
+    }
     try:
         bounds = geography_statistics(
-            output_file, targets, orientations=orientations, ellipsoids=ellipsoids
+            output_file,
+            targets,
+            orientations=orientations,
+            ellipsoids=ellipsoids,
+            encodings=encodings,
         )
     except MemoryError:
         raise

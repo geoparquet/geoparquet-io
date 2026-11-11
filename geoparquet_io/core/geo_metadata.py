@@ -1939,6 +1939,82 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
     return _covering_gates(geo_meta, view, version, options.verbose)
 
 
+def _coordinate_children(arrow_type) -> set[str] | None:
+    """The coordinate names of ``arrow_type``'s innermost struct, or None.
+
+    The one reader of a GeoArrow column's coordinate layout: a GeoArrow
+    extension type through its ``storage_type`` -- what the
+    ``ARROW:extension:name`` carrier gpio's own GeoArrow output holds reads
+    back as, since gpio imports ``geoarrow.pyarrow`` -- then the list wrappers
+    off, then the struct's own children folded. None when what is left is not a
+    coordinate struct.
+
+    Two answers depend on it and must not disagree: the column's one
+    ``geometry_types`` entry (``LineString`` and ``LineString ZM`` are distinct
+    entries) and the extension type the column is read back with, whose
+    dimensions have to match its children or ``ga.as_wkb`` refuses it
+    ("struct has 3 children, expected 2", #1451).
+    """
+    import pyarrow as pa
+
+    if isinstance(arrow_type, pa.ExtensionType):
+        arrow_type = arrow_type.storage_type
+    while isinstance(arrow_type, pa.DataType) and (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    ):
+        arrow_type = arrow_type.value_type
+    if not (isinstance(arrow_type, pa.DataType) and pa.types.is_struct(arrow_type)):
+        return None
+    children = {fold(field.name) for field in arrow_type}
+    return children if {"x", "y"} <= children else None
+
+
+def geoarrow_typed_array(column, encoding: str | None):
+    """``column`` in a form ``geoarrow.pyarrow`` can read, or ``column`` itself.
+
+    A GeoArrow-native column reaches gpio as a plain coordinate struct carrying
+    no extension type -- that is how pyarrow reads a 1.1-geoarrow file and how
+    DuckDB exports one -- and ``ga.as_wkb`` refuses it ("Can't create
+    geoarrow.array from Arrow array of type None"), so every Arrow-side stats
+    scan of a native column measured nothing (#1438). ``encoding`` names which
+    of the six the column is, which the Arrow type cannot (``multipoint`` and
+    ``linestring`` are both ``list<struct<x, y>>``), so the column is wrapped
+    in that extension type and read as any other.
+
+    The type carries the column's own dimensions: the bare factory is XY, which
+    refused a 3D struct outright, and that error was swallowed into "no
+    statistics" (#1451). A column that already holds its extension type, or
+    that is not a coordinate struct of ``encoding``, comes back untouched.
+    """
+    import geoarrow.pyarrow as ga
+    import geoarrow.types as gt
+    import pyarrow as pa
+
+    encoding = (encoding or "").lower()
+    children = _coordinate_children(column.type)
+    if children is None or not geoarrow_geometry_types(encoding, column.type):
+        return column
+    # Already the type ``ga.as_wkb`` wants: wrapping it again would double the
+    # extension layer.
+    if isinstance(column.type, pa.ExtensionType):
+        return column
+    dimensions = {
+        (False, False): gt.Dimensions.XY,
+        (True, False): gt.Dimensions.XYZ,
+        (False, True): gt.Dimensions.XYM,
+        (True, True): gt.Dimensions.XYZM,
+    }[("z" in children, "m" in children)]
+    geoarrow_type = getattr(ga, encoding)().with_dimensions(dimensions)
+    # A ChunkedArray back, as a table's own column is: the readers that take
+    # this combine chunks on it.
+    if isinstance(column, pa.ChunkedArray):
+        wrapped = geoarrow_type.wrap_array(column.combine_chunks())
+        return pa.chunked_array([wrapped], type=wrapped.type)
+    return geoarrow_type.wrap_array(column)
+
+
 def geoarrow_geometry_types(encoding: str, arrow_type) -> list[str]:
     """``geometry_types`` of a GeoArrow-native column: one entry, from its type.
 
@@ -1954,29 +2030,12 @@ def geoarrow_geometry_types(encoding: str, arrow_type) -> list[str]:
     ``[]`` when the encoding is not one of the spec's six, or when
     ``arrow_type`` is not a coordinate struct (so the dimensions, which
     ``LineString`` and ``LineString ZM`` are distinct entries by, cannot be
-    read). A GeoArrow extension type is one through its ``storage_type``.
+    read -- see :func:`_coordinate_children`, which reads them).
     """
-    import pyarrow as pa
-
     if encoding not in GEOARROW_ENCODINGS:
         return []
-    # A GeoArrow column pyarrow has resolved into its extension type -- what the
-    # ``ARROW:extension:name`` carrier gpio's own GeoArrow output holds reads
-    # back as, since gpio imports ``geoarrow.pyarrow`` -- is a coordinate struct
-    # under one more layer. Judged unwrapped it read as "not a struct", so the
-    # witness said "not GeoArrow" and the block declared WKB over it (#1438).
-    if isinstance(arrow_type, pa.ExtensionType):
-        arrow_type = arrow_type.storage_type
-    while isinstance(arrow_type, pa.DataType) and (
-        pa.types.is_list(arrow_type)
-        or pa.types.is_large_list(arrow_type)
-        or pa.types.is_fixed_size_list(arrow_type)
-    ):
-        arrow_type = arrow_type.value_type
-    if not (isinstance(arrow_type, pa.DataType) and pa.types.is_struct(arrow_type)):
-        return []
-    children = {fold(field.name) for field in arrow_type}
-    if not {"x", "y"} <= children:
+    children = _coordinate_children(arrow_type)
+    if children is None:
         return []
     suffix = {
         (True, True): " ZM",
@@ -2426,28 +2485,15 @@ _ENVELOPE_ORDER = ("xmin", "ymin", "xmax", "ymax")
 
 
 def _geoarrow_typed_column(table: pa.Table, geometry_column: str):
-    """``table``'s ``geometry_column`` in a form ``geoarrow.pyarrow`` can read.
+    """``table``'s ``geometry_column`` as :func:`geoarrow_typed_array` reads it.
 
-    A GeoArrow-native column reaches gpio as a plain coordinate struct carrying
-    no extension type -- that is how pyarrow reads a 1.1-geoarrow file and how
-    DuckDB exports one -- and ``ga.as_wkb`` refuses it ("Can't create
-    geoarrow.array from Arrow array of type None"), so every Arrow-side stats
-    scan of a native table measured nothing (#1438). The table's own ``geo``
-    block names which of the six encodings it is, which the Arrow type cannot
-    (``multipoint`` and ``linestring`` are both ``list<struct<x, y>>``), so the
-    column is wrapped in that extension type and read as any other.
+    The encoding comes from the table's own ``geo`` block, which is where a
+    stats scan of a table finds it.
     """
-    import geoarrow.pyarrow as ga
-    import pyarrow as pa
-
-    column = table.column(geometry_column)
-    encoding = geoarrow_primary_encoding(sanitized_carried_geo(table.schema.metadata))
-    if not encoding or not geoarrow_geometry_types(encoding, column.type):
-        return column
-    # A ChunkedArray back, as the caller's own column is: the readers that take
-    # this combine chunks on it.
-    wrapped = getattr(ga, encoding)().wrap_array(column.combine_chunks())
-    return pa.chunked_array([wrapped], type=wrapped.type)
+    return geoarrow_typed_array(
+        table.column(geometry_column),
+        geoarrow_primary_encoding(sanitized_carried_geo(table.schema.metadata)),
+    )
 
 
 def _row_envelopes(table: pa.Table, geometry_column: str):
