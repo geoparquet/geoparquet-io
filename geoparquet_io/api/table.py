@@ -15,7 +15,7 @@ from __future__ import annotations
 import dataclasses
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -601,7 +601,9 @@ class Table:
         operation that changes the CRS (reproject) passes ``crs=`` explicitly
         so the hint never mislabels transformed coordinates.
         """
-        hint = self._crs_hint if crs is Table._KEEP_CRS_HINT else crs
+        # The sentinel default widens `crs` to `object`; past the identity test
+        # only the declared CRS shapes remain, which the cast states.
+        hint = self._crs_hint if crs is Table._KEEP_CRS_HINT else cast("dict | str | None", crs)
         derived = Table(table, geometry_column=geometry_column, crs=hint)
         derived._auto_version_hint = self._auto_version_hint
         # `_source_path` is deliberately not carried: a derived table is
@@ -962,12 +964,14 @@ class Table:
     @property
     def num_rows(self) -> int:
         """Get number of rows in the table."""
-        return self._table.num_rows
+        rows: int = self._table.num_rows
+        return rows
 
     @property
     def column_names(self) -> list[str]:
         """Get list of column names."""
-        return self._table.column_names
+        names: list[str] = self._table.column_names
+        return names
 
     @property
     def crs(self) -> dict | str | None:
@@ -987,7 +991,7 @@ class Table:
         """
         from geoparquet_io.core.crs_utils import crs_of
 
-        embedded = crs_of(self._table, geometry_column=self._geometry_column)
+        embedded: dict | str | None = crs_of(self._table, geometry_column=self._geometry_column)
         if embedded is not None:
             return embedded
         return self._crs_hint
@@ -1098,7 +1102,8 @@ class Table:
         """
         from geoparquet_io.core.geo_metadata import geo_info_from_metadata
 
-        return geo_info_from_metadata(self._table.schema.metadata)["version"]
+        version: str | None = geo_info_from_metadata(self._table.schema.metadata)["version"]
+        return version
 
     def info(self, verbose: bool = True) -> dict | None:
         """
@@ -1477,12 +1482,13 @@ class Table:
             # Forward the input CRS so a non-default CRS survives the write (otherwise
             # the geometry silently defaults to OGC:CRS84). write_from_table expects a
             # PROJJSON dict, so normalise a string identifier (e.g. "EPSG:3857").
-            input_crs = self.crs
-            if isinstance(input_crs, str):
+            carried_crs = self.crs
+            input_crs: dict | str | None = carried_crs if isinstance(carried_crs, dict) else None
+            if isinstance(carried_crs, str):
                 from geoparquet_io.core.crs_utils import projjson_for_label
 
-                input_crs = projjson_for_label(input_crs)
-            elif input_crs is None:
+                input_crs = projjson_for_label(carried_crs)
+            elif carried_crs is None:
                 # `self.crs` is None for an unknown CRS and for the default
                 # alike. Unknown has to be said on the way out (`crs: null`,
                 # a `srid:0` type), or it is written as OGC:CRS84 (#1276).
@@ -1564,7 +1570,7 @@ class Table:
 
             # Row filters (#1308) apply to the formats whose writers filter
             # in-query: GeoPackage, FlatGeobuf and CSV.
-            filter_options = {
+            filter_options: dict[str, Any] = {
                 key: format_options.get(key)
                 for key in ("bbox", "geometry", "where")
                 if format_options.get(key) is not None

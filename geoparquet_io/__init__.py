@@ -12,6 +12,8 @@ on first access, exactly as the old eager ``__init__`` did on every import.
 ``geoparquet_io.cli.main.cli``; the console entry point uses that module too.
 """
 
+from typing import TYPE_CHECKING
+
 # The one eager import the lazy root keeps: ``geoparquet_io.core`` installs the
 # geoarrow srid-compat shim on import (#1276), and the shim must be in place
 # before any pyarrow read in the process — ``pq.read_table`` segfaults on a
@@ -20,6 +22,41 @@ on first access, exactly as the old eager ``__init__`` did on every import.
 # tests/test_geoarrow_srid_compat.py proves ``import geoparquet_io`` is enough,
 # and tests/test_embeddable_imports.py that it still pulls no click or duckdb.
 import geoparquet_io.core  # noqa: F401
+
+# The lazy ``__getattr__`` below is invisible to a type checker, which resolves
+# every attribute it serves to ``Any`` — so without this block the py.typed
+# marker would promise types that ``gpio.read(...)`` never delivers. These
+# imports run only under a type checker (``TYPE_CHECKING`` is False at run
+# time), so the package stays as lazy as #1307 made it. They list the same names
+# as ``_LAZY_EXPORTS``, which tests/test_mypy.py checks.
+if TYPE_CHECKING:
+    from geoparquet_io.api import (
+        InvalidParameterError,
+        Table,
+        convert,
+        extract_arcgis,
+        list_layers,
+        ops,
+        pipe,
+        read,
+        read_bigquery,
+        read_partition,
+    )
+    from geoparquet_io.api.check import (
+        CheckResult,
+        check_all,
+        check_bbox,
+        check_bloom_filters,
+        check_compression,
+        check_optimization,
+        check_row_groups,
+        check_spatial,
+        check_spatial_pushdown,
+        validate,
+    )
+    from geoparquet_io.api.stac import generate_stac, validate_stac
+    from geoparquet_io.core.exceptions import GeoParquetError
+    from geoparquet_io.core.parquet_writer import WriteOptions
 
 #: name -> "module:attribute" it is imported from, on first access.
 _LAZY_EXPORTS = {
