@@ -14,7 +14,7 @@ import pyarrow.ipc as ipc
 import pyarrow.parquet as pq
 import pytest
 
-from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.parquet_writer import resolve_row_group_rows
 from geoparquet_io.core.str_order import _str_layout, _str_order_query, str_order, str_order_table
@@ -509,7 +509,7 @@ def _assert_str_materialized_scan_bounds():
                    ST_Point(i % 31, i % 17) AS geometry
             FROM range(4096) t(i)
         """)
-        query = _str_order_query("str_cost", "geometry", 4096, 64)
+        query = _str_order_query("str_cost", quote_identifier("geometry"), 4096, 64)
         profile = json.loads(
             con.execute("EXPLAIN (ANALYZE, FORMAT JSON) " + query).fetchall()[0][1]
         )

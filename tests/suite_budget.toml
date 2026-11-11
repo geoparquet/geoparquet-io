@@ -60,7 +60,23 @@
 # column the schema lacks (1), a block key spelled in another case (1), the
 # keyword-only target (1), and the repair-opt-out sentence present for GeoJSON
 # and absent elsewhere (2).
-max_collected = 14762
+# +47 (#1438): the sites that still hand-rolled a WKB assumption, one fast case
+# each over the point fixture (4 strategies, sort hilbert x CLI/Table, check
+# --fix x CLI/Table), the measured geometry_types over the six encodings, the
+# output-version rule -- a 1.1/1.1-geoarrow request keeps the native encoding, a
+# WKB-only one is refused -- per version, per door and over the four convert
+# fixtures, and the type-naming rule's own cases (the Z/M suffixes it reads the
+# Arrow type for, and the guards that leave a measured answer alone). The
+# exhaustive six-encoding x four-strategy combinations are `slow`.
+# +17 (#1438 review): the native fixture matrix now runs over both carrier
+# shapes a GeoArrow column arrives in -- the bare coordinate struct and the same
+# struct resolved into its extension type, which is what gpio's own GeoArrow
+# output reads back as and which the witness read as "not GeoArrow" (+15 across
+# the strategies, the measured geometry_types, the WKB-only refusal and the 1.1
+# request, plus 2 type-naming cases over an extension type).
+# +2: `sort str`, the sibling the Hilbert fix missed, on its CLI and Table
+# paths; its six-encoding matrix is `slow`.
+max_collected = 14828
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
@@ -184,6 +200,10 @@ slow_mark_sites = [
   "test_rewrite_memory_1268.py::test_hilbert_past_2_gib_attribute_column",
   "test_streaming.py::TestApplyGeoArrowExtensionType.test_real_overflow_succeeds",
   "test_streaming.py::TestStreamIO",
+  "test_table_write_geoarrow_encodings.py::test_check_all_fix_repairs_every_native_encoding",
+  "test_table_write_geoarrow_encodings.py::test_every_strategy_keeps_every_native_encoding",
+  "test_table_write_geoarrow_encodings.py::test_sort_hilbert_reads_every_native_encoding",
+  "test_table_write_geoarrow_encodings.py::test_sort_str_reads_every_native_encoding",
   "test_uncoded_crs_paths.py::test_pmtiles_create_lands_in_tokyo",
   "test_wfs.py::TestDuckDBNativeWFS",
   "test_wfs.py::TestGMLOnlyServerEndToEnd",

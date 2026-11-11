@@ -513,6 +513,7 @@
     "geo_info_of_file",
     "geo_key_value",
     "geoarrow_dimension",
+    "geoarrow_geometry_types",
     "geoarrow_primary_encoding",
     "geoarrow_wkb_codes",
     "geometry_stats_of",
@@ -632,6 +633,7 @@
   ],
   "geoparquet_io.core.parquet_writer": [
     "DEFAULT_ROW_GROUP_ROWS",
+    "GEOARROW_CARRIER_VERSION",
     "ParquetWriteSettings",
     "SPATIAL_BAND_TOP_ROWS",
     "WRITER_VECTOR_ROWS",
@@ -641,6 +643,7 @@
     "carried_geoparquet_version",
     "dictionary_columns",
     "estimate_row_size",
+    "geoarrow_output_version",
     "geoparquet_copy_options",
     "located_row_group_layout",
     "note_duckdb_copy_rounding",

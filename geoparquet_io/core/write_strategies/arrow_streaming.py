@@ -63,7 +63,9 @@ from geoparquet_io.core.parquet_writer import (
 )
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
+    geoarrow_encoding_of,
     native_geometry_crs,
+    query_geoarrow_encoding,
 )
 
 if TYPE_CHECKING:
@@ -360,14 +362,27 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geoarrow_target_type = None
             geoarrow_encoding = None
             if geoarrow_native and should_add_geo_metadata:
-                from geoparquet_io.core.geoarrow_encoding import determine_geoarrow_target_type
-
-                # The owner's types carry the Z/M suffix, so 3D/measured coordinates
-                # select a dimension-aware native type (or fall back to WKB) rather
-                # than being silently coerced down to 2D.
-                geoarrow_target_type, geoarrow_encoding = determine_geoarrow_target_type(
-                    precomputed_geom_types, input_crs
+                # A query whose geometry is already a coordinate struct has no
+                # WKB to convert: it is written as itself, under the encoding it
+                # already holds (#1438).
+                geoarrow_encoding = query_geoarrow_encoding(
+                    con,
+                    query,
+                    geometry_column,
+                    metadata=original_metadata,
+                    geometry_info=geometry_info,
                 )
+                if geoarrow_encoding is None:
+                    from geoparquet_io.core.geoarrow_encoding import (
+                        determine_geoarrow_target_type,
+                    )
+
+                    # The owner's types carry the Z/M suffix, so 3D/measured
+                    # coordinates select a dimension-aware native type (or fall
+                    # back to WKB) rather than being silently coerced down to 2D.
+                    geoarrow_target_type, geoarrow_encoding = determine_geoarrow_target_type(
+                        precomputed_geom_types, input_crs
+                    )
                 if verbose:
                     debug(f"1.1-geoarrow target encoding: {geoarrow_encoding}")
 
@@ -773,6 +788,13 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         geoarrow_target_type = None
         geoarrow_encoding = None
 
+        # A column that is already a GeoArrow coordinate struct is written as
+        # itself: there is no WKB to convert, so no target type to coerce to,
+        # and the encoding it already holds is the one this write produces. The
+        # conversion below reads WKB, so it labelled a native column `WKB` and
+        # passed it through under that name (#1438).
+        native_encoding = geoarrow_encoding_of(table.schema, geometry_column, carried_geo)
+
         geom_types: list[str] = []
         measured: dict = {}
         if should_add_geo_metadata:
@@ -782,7 +804,9 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             geom_types = stats.geometry_types
             measured = {"bbox": stats.bbox, "geometry_types": geom_types}
 
-            if geoarrow_native:
+            if geoarrow_native and native_encoding:
+                geoarrow_encoding = native_encoding
+            elif geoarrow_native:
                 from geoparquet_io.core.geoarrow_encoding import determine_geoarrow_target_type
 
                 # The owner's types carry the Z/M suffix, so 3D/measured
@@ -791,8 +815,8 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 geoarrow_target_type, geoarrow_encoding = determine_geoarrow_target_type(
                     geom_types, input_crs
                 )
-                if verbose:
-                    debug(f"1.1-geoarrow target encoding: {geoarrow_encoding}")
+            if verbose and geoarrow_native:
+                debug(f"1.1-geoarrow target encoding: {geoarrow_encoding}")
 
         # The same covering rule the other three strategies use, rather than a
         # hard-coded "no bbox column". A table that carries no `geo` block of its

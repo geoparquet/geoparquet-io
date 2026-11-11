@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from geoparquet_io.core.convert import convert_to_geoparquet
+from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.validate import validate_geoparquet
 
@@ -85,12 +86,31 @@ class TestConvertPreservesNativeEncoding:
 
         assert pq.read_table(str(output)).num_rows == pq.read_table(path).num_rows
 
-    def test_an_explicit_version_still_wins(self, native_input, tmp_path):
-        """``--geoparquet-version 1.1`` asked for WKB; auto mode is what changed."""
-        path, _encoding = native_input
+    def test_an_explicit_1_1_keeps_the_native_encoding(self, native_input, tmp_path):
+        """``--geoparquet-version 1.1`` is satisfiable: 1.1 permits the six encodings.
+
+        It used to be honoured in the block and nowhere else -- the coordinate
+        struct passed through under ``encoding: WKB``, the same
+        file-contradicts-itself output #1176 fixed for auto mode, and one
+        ``gpio check spec`` fails (#1438).
+        """
+        path, encoding = native_input
         output = tmp_path / "out.parquet"
 
         convert_to_geoparquet(path, str(output), geoparquet_version="1.1")
 
         geo = _geo_block(output)
-        assert geo["columns"][geo["primary_column"]]["encoding"] == "WKB"
+        assert geo["version"] == "1.1.0"
+        assert geo["columns"][geo["primary_column"]]["encoding"] == encoding
+
+    @pytest.mark.parametrize("version", ["1.0", "2.0", "parquet-geo-only"])
+    def test_a_wkb_only_version_is_refused(self, native_input, version, tmp_path):
+        """1.0 and the 2.0 draft are WKB-only, and nothing re-encodes a struct (#1438)."""
+        path, encoding = native_input
+        output = tmp_path / "out.parquet"
+
+        with pytest.raises(InvalidParameterError, match="1.1-geoarrow") as excinfo:
+            convert_to_geoparquet(path, str(output), geoparquet_version=version)
+
+        assert encoding in str(excinfo.value)
+        assert not output.exists()

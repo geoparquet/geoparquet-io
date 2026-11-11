@@ -19,7 +19,6 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.arrow_geo_metadata import table_geometry_info
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import (
-    _wrap_query_with_wkb_conversion,
     get_duckdb_connection,
     register_arrow,
     sql_path,
@@ -50,7 +49,10 @@ from geoparquet_io.core.remote import remote_write_context, upload_if_remote
 from geoparquet_io.core.write_strategies.arrow_streaming import to_geoarrow_column
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
+    geoarrow_encoding_of,
     native_geometry_crs,
+    with_declared_primary_encoding,
+    wkb_export_query,
     written_block_encoding,
 )
 
@@ -183,7 +185,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 stats = geometry_stats_of(QuerySource(con, query), geometry_column)
                 bbox, geometry_types = stats.bbox, stats.geometry_types
 
-                final_query = _wrap_query_with_wkb_conversion(query, geometry_column)
+                final_query = wkb_export_query(con, query, geometry_column)
 
                 copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
                 if resolved_row_group_rows:
@@ -343,8 +345,13 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                 locals(),
                 geoparquet_version=effective_version,
                 # This entry point gets no `geometry_info`, so the table's own
-                # schema is what names a block-less table's secondaries (#1175).
-                geometry_info=table_geometry_info(table, geometry_column, carried_geo),
+                # schema is what names a block-less table's secondaries (#1175)
+                # and what says the primary's native encoding (#1438).
+                geometry_info=with_declared_primary_encoding(
+                    table_geometry_info(table, geometry_column, carried_geo),
+                    geometry_column,
+                    geoarrow_encoding_of(table.schema, geometry_column, carried_geo),
+                ),
             )
         finally:
             con.close()
