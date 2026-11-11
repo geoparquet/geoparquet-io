@@ -35,7 +35,7 @@ from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any
 
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
-from geoparquet_io.core.remote import RemoteOptions
+from geoparquet_io.core.remote import RemoteOptions, _caller_stacklevel
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -102,7 +102,9 @@ class CheckOptions:
         remote: How the file is reached, as one
             :class:`~geoparquet_io.core.remote.RemoteOptions`. The check
             concern does not restate an endpoint or a credential; it holds the
-            one object that owns them (#1436).
+            one object that owns them (#1436). Every API check runs inside its
+            ``activate()`` scope, as a ``gpio check`` command runs inside the
+            root group's (``cli._shared.activate_remote``).
     """
 
     profile: CheckProfile | None = None
@@ -232,9 +234,13 @@ def check_options_from_keywords(
 
     both = sorted(asked.keys() & base.asked())
     if both:
+        # Named as the caller wrote it: `validate(sample_size=)` sets
+        # `spec_sample_size`, and quoting the field sends them looking for a
+        # keyword their call does not have.
+        keywords = _SPELLINGS_BY_ENTRY_POINT.get(where, {})
+        named = ", ".join(keywords.get(field, field) for field in both)
         raise TypeError(
-            f"{where}() got {', '.join(both)} both in options= and as a keyword; "
-            "set each field in one place"
+            f"{where}() got {named} both in options= and as a keyword; set each field in one place"
         )
     _warn_deprecated_spellings(where, asked)
     return base.merge(CheckOptions.pick(asked))
@@ -254,10 +260,20 @@ _SPELLINGS_BY_ENTRY_POINT: dict[str, dict[str, str]] = {
 
 
 def _warn_deprecated_spellings(where: str, asked: Any) -> None:
-    """Warn once per process for each deprecated keyword *where* was given."""
+    """Warn once per process for each deprecated keyword *where* was given.
+
+    The frame count comes from :func:`geoparquet_io.core.remote._caller_stacklevel`,
+    the one owner of that question: ``stacklevel`` differs by entry point --
+    ``api/check.py``'s five path-level checks are wrapped by ``_one_file_only``,
+    which puts a frame between the check and its caller, while ``Table``'s
+    methods are not -- and counting frames until the first one outside
+    ``geoparquet_io`` is right for both doors. A second copy here drifted from
+    the remote concern's and said the same thing twice.
+    """
     import warnings
 
     keywords = _SPELLINGS_BY_ENTRY_POINT.get(where, {})
+    stacklevel = _caller_stacklevel()
     for field in sorted(asked):
         key = f"{where}.{field}"
         if key in _warned_spellings:
@@ -268,5 +284,5 @@ def _warn_deprecated_spellings(where: str, asked: Any) -> None:
             f"{where}({keyword}=...) is deprecated and will be removed in the next "
             f"minor release; pass options=gpio.CheckOptions({field}=...) instead",
             DeprecationWarning,
-            stacklevel=4,
+            stacklevel=stacklevel,
         )

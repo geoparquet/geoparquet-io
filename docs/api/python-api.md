@@ -53,9 +53,9 @@ def tidy(src: str, dst: str) -> str:
     return f"{rows} rows, {gpio.check_all(dst).verdict()}"
 ```
 
-Every path argument accepts `pathlib.Path` as well as `str` — `read()` and
-`write()` declare `str | Path`, the `check_*` functions
-`str | os.PathLike[str]`. Two things still widen to `Any`: pyarrow ships no
+Every path argument accepts `pathlib.Path` as well as `str` — `read()`,
+`write()` and the `ops` functions declare `str | Path`, the `check_*`
+functions `str | os.PathLike[str]`. Two things still widen to `Any`: pyarrow ships no
 type stubs, so a `pa.Table` in or out of the `ops` functions is untyped, and
 the modules under `geoparquet_io.core` are not yet annotated throughout.
 
@@ -1633,9 +1633,11 @@ value — the use-case band, the sample bounds, the repair selection, and the
 `gpio.RemoteOptions` that owns how the file is reached
 ([#1436](https://github.com/geoparquet/geoparquet-io/issues/1436)). Pass it as
 `options=` to `gpio.check_all`, `check_bbox`, `check_row_groups`,
-`check_spatial`, `validate`, `Table.check_bbox`, `Table.check_row_groups` and
-`Table.fix`. Every field defaults to `None`, "not asked", which resolves to the
-same default the matching CLI flag declares.
+`check_spatial`, `validate`, `Table.check_bbox`, `Table.check_row_groups`,
+`Table.check_spatial` and `Table.fix`. Every field defaults to `None`, "not
+asked", which resolves to the same default the matching CLI flag declares.
+`remote` is activated for the check's duration, so a profile or endpoint set
+there is how the file is reached.
 
 ```python
 options = gpio.CheckOptions(profile='web', limit_rows=1_000_000)

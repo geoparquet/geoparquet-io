@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from functools import cache, lru_cache
 from typing import TYPE_CHECKING
 
+from geoparquet_io.core.column_selection import fold
 from geoparquet_io.core.duckdb_utils import (
     _geoarrow_coord_exprs,
     _strip_trailing_order_by,
@@ -1927,6 +1928,7 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
             geo_meta["columns"][column].setdefault(key, value)
     _apply_stats(geo_meta, secondaries.stats)
     _apply_stats(geo_meta, options.stats)
+    _name_geoarrow_geometry_types(col_meta, view, primary)
     if options.measure_missing is not None:
         _apply_stats(geo_meta, options.measure_missing(geo_meta))
     provenance = geo_meta if carried else sanitized_carried_geo(options.covering_provenance)
@@ -1935,6 +1937,79 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
     )
     # Steps 10-13.
     return _covering_gates(geo_meta, view, version, options.verbose)
+
+
+def geoarrow_geometry_types(encoding: str, arrow_type) -> list[str]:
+    """``geometry_types`` of a GeoArrow-native column: one entry, from its type.
+
+    A GeoArrow coordinate struct holds exactly one geometry type -- the one its
+    ``encoding`` names -- and one coordinate layout, which its innermost
+    struct's children name (``x``/``y``, plus ``z`` and/or ``m``). So the answer
+    needs no scan, and it is the only one available: the DuckDB and Arrow type
+    scans both read a geometry's type off WKB or a GEOMETRY value, and a
+    coordinate struct is neither, so every write of a native input declared
+    ``geometry_types: []`` -- "not known" over a column whose type is fixed by
+    its schema (#1438).
+
+    ``[]`` when the encoding is not one of the spec's six, or when
+    ``arrow_type`` is not a coordinate struct (so the dimensions, which
+    ``LineString`` and ``LineString ZM`` are distinct entries by, cannot be
+    read). A GeoArrow extension type is one through its ``storage_type``.
+    """
+    import pyarrow as pa
+
+    if encoding not in GEOARROW_ENCODINGS:
+        return []
+    # A GeoArrow column pyarrow has resolved into its extension type -- what the
+    # ``ARROW:extension:name`` carrier gpio's own GeoArrow output holds reads
+    # back as, since gpio imports ``geoarrow.pyarrow`` -- is a coordinate struct
+    # under one more layer. Judged unwrapped it read as "not a struct", so the
+    # witness said "not GeoArrow" and the block declared WKB over it (#1438).
+    if isinstance(arrow_type, pa.ExtensionType):
+        arrow_type = arrow_type.storage_type
+    while isinstance(arrow_type, pa.DataType) and (
+        pa.types.is_list(arrow_type)
+        or pa.types.is_large_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    ):
+        arrow_type = arrow_type.value_type
+    if not (isinstance(arrow_type, pa.DataType) and pa.types.is_struct(arrow_type)):
+        return []
+    children = {fold(field.name) for field in arrow_type}
+    if not {"x", "y"} <= children:
+        return []
+    suffix = {
+        (True, True): " ZM",
+        (True, False): " Z",
+        (False, True): " M",
+        (False, False): "",
+    }[("z" in children, "m" in children)]
+    name = geometry_type_name(f"{encoding}{suffix}")
+    return [name] if name else []
+
+
+def _name_geoarrow_geometry_types(col_meta: dict, view: _SourceView, primary: str) -> None:
+    """Step 8b: a GeoArrow-native primary's ``geometry_types``, named by its encoding.
+
+    Only when the measured answer is absent or the spec's "not known" ``[]``:
+    a write that converts WKB into native GeoArrow has measured the real list
+    off the WKB and keeps it, dimension suffixes included.
+    """
+    if col_meta.get("geometry_types"):
+        return
+    encoding = col_meta.get("encoding")
+    if encoding not in GEOARROW_ENCODINGS:
+        return
+    try:
+        field_index = view.schema.get_field_index(primary)
+    except Exception as e:  # an unprobeable query: leave the measured answer
+        debug(f"Could not read the output schema to name {primary}'s geometry type: {e}")
+        return
+    if field_index < 0:
+        return
+    types = geoarrow_geometry_types(encoding, view.schema.field(field_index).type)
+    if types:
+        col_meta["geometry_types"] = types
 
 
 def _refuse_contradicting_edges(options: GeoBlockOptions, primary: str) -> None:
@@ -2350,13 +2425,38 @@ def bbox_struct_type():
 _ENVELOPE_ORDER = ("xmin", "ymin", "xmax", "ymax")
 
 
+def _geoarrow_typed_column(table: pa.Table, geometry_column: str):
+    """``table``'s ``geometry_column`` in a form ``geoarrow.pyarrow`` can read.
+
+    A GeoArrow-native column reaches gpio as a plain coordinate struct carrying
+    no extension type -- that is how pyarrow reads a 1.1-geoarrow file and how
+    DuckDB exports one -- and ``ga.as_wkb`` refuses it ("Can't create
+    geoarrow.array from Arrow array of type None"), so every Arrow-side stats
+    scan of a native table measured nothing (#1438). The table's own ``geo``
+    block names which of the six encodings it is, which the Arrow type cannot
+    (``multipoint`` and ``linestring`` are both ``list<struct<x, y>>``), so the
+    column is wrapped in that extension type and read as any other.
+    """
+    import geoarrow.pyarrow as ga
+    import pyarrow as pa
+
+    column = table.column(geometry_column)
+    encoding = geoarrow_primary_encoding(sanitized_carried_geo(table.schema.metadata))
+    if not encoding or not geoarrow_geometry_types(encoding, column.type):
+        return column
+    # A ChunkedArray back, as the caller's own column is: the readers that take
+    # this combine chunks on it.
+    wrapped = getattr(ga, encoding)().wrap_array(column.combine_chunks())
+    return pa.chunked_array([wrapped], type=wrapped.type)
+
+
 def _row_envelopes(table: pa.Table, geometry_column: str):
     """``(storage, x0, y0, x1, y1)``: every row's WKB and envelope, NULL rows null."""
     import geoarrow.pyarrow as ga
     import pyarrow as pa
     import pyarrow.compute as pc
 
-    wkb = ga.as_wkb(table.column(geometry_column)).combine_chunks()
+    wkb = ga.as_wkb(_geoarrow_typed_column(table, geometry_column)).combine_chunks()
     storage = wkb.storage if isinstance(wkb, pa.ExtensionArray) else wkb
     box = ga.box(ga.as_wkb(storage)).storage
     return (storage, *(pc.struct_field(box, f) for f in _ENVELOPE_ORDER))
@@ -2375,7 +2475,7 @@ def _row_envelopes_of_readable(table: pa.Table, geometry_column: str):
         import pyarrow as pa
         import pyarrow.compute as pc
 
-        wkb = ga.as_wkb(table.column(geometry_column)).combine_chunks()
+        wkb = ga.as_wkb(_geoarrow_typed_column(table, geometry_column)).combine_chunks()
         storage = wkb.storage if isinstance(wkb, pa.ExtensionArray) else wkb
         readable = []
         for i in range(len(storage)):

@@ -53,6 +53,22 @@ if TYPE_CHECKING:
     from geoparquet_io.core.preview import BboxFilterPreview
 
 
+def _path_str(value: str | Path) -> str:
+    """Normalize a path argument to the ``str`` the core modules are typed for.
+
+    The published surface takes ``str | Path`` wherever it takes a path; the
+    core functions behind it are annotated ``str``. Normalizing once, at the
+    top of the entry point, keeps that promise without widening every core
+    signature -- and leaves the forwarding call below untouched.
+    """
+    return str(value)
+
+
+def _opt_path_str(value: str | Path | None) -> str | None:
+    """``_path_str`` for an optional path argument, passing ``None`` through."""
+    return None if value is None else str(value)
+
+
 def add_bbox(
     table: pa.Table,
     column_name: str = "bbox",
@@ -624,8 +640,8 @@ def aggregate_admin(
 
 
 def create_overview_file(
-    input_parquet: str,
-    overview_out: str,
+    input_parquet: str | Path,
+    overview_out: str | Path,
     *,
     levels: str | list[int | str] | None = None,
     cell_detail: float | None = None,
@@ -634,7 +650,7 @@ def create_overview_file(
     bytes_per_cell: float | None = None,
     cell_column: str | None = None,
     scheme: str | None = None,
-    output_dir: str | None = None,
+    output_dir: str | Path | None = None,
     compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
@@ -693,6 +709,10 @@ def create_overview_file(
         ...                          levels='8,7,6,5')
         'pyramid.parquet'
     """
+    input_parquet = _path_str(input_parquet)
+    overview_out = _path_str(overview_out)
+    output_dir = _opt_path_str(output_dir)
+
     from geoparquet_io.core.process.overview.run import (
         create_overview_file as _create_overview_file,
     )
@@ -719,14 +739,14 @@ def create_overview_file(
 
 
 def create_overviews(
-    input_parquet: str,
+    input_parquet: str | Path,
     *,
     levels: str | list[int | str] | None = None,
     max_tile_kb: int = 500,
     bytes_per_cell: float | None = None,
     cell_column: str | None = None,
     scheme: str | None = None,
-    output_dir: str | None = None,
+    output_dir: str | Path | None = None,
     compression: str | None = None,
     compression_level: int | None = None,
     geoparquet_version: str | None = None,
@@ -773,6 +793,9 @@ def create_overviews(
         >>> ops.create_overviews('cells.parquet', levels=[4, 7])
         [(4, 'cells_r4.parquet'), (7, 'cells_r7.parquet')]
     """
+    input_parquet = _path_str(input_parquet)
+    output_dir = _opt_path_str(output_dir)
+
     from geoparquet_io.core.process.overview import create_overviews as _create_overviews
 
     return _create_overviews(
@@ -1965,7 +1988,7 @@ def from_bigquery(
     *,
     sql: str | None = None,
     project: str | None = None,
-    credentials_file: str | None = None,
+    credentials_file: str | Path | None = None,
     where: str | None = None,
     bbox: str | None = None,
     bbox_mode: str = "auto",
@@ -2056,6 +2079,8 @@ def from_bigquery(
         ...     project='myproject',
         ... )
     """
+    credentials_file = _opt_path_str(credentials_file)
+
     from geoparquet_io.core.column_selection import join_column_list
     from geoparquet_io.core.extract_bigquery import extract_bigquery
 
@@ -2119,7 +2144,7 @@ read_bigquery = _deprecated_alias(from_bigquery, old="ops.read_bigquery", new="o
 
 def convert_to_geojson(
     table: pa.Table,
-    output_path: str | None = None,
+    output_path: str | Path | None = None,
     rs: bool = True,
     precision: int = 7,
     write_bbox: bool = False,
@@ -2144,6 +2169,8 @@ def convert_to_geojson(
     Returns:
         Output path if writing to file, None if streaming to stdout
     """
+    output_path = _opt_path_str(output_path)
+
     from pathlib import Path
 
     from geoparquet_io.core.geojson_stream import (
@@ -2212,7 +2239,7 @@ def _file_round_trip(
 
 def _table_to_temp_parquet_and_convert(
     table: pa.Table,
-    output_path: str,
+    output_path: str | Path,
     writer_func,
     prefix: str,
     **writer_kwargs,
@@ -2235,6 +2262,8 @@ def _table_to_temp_parquet_and_convert(
     Raises:
         TypeError: If table is not a PyArrow Table
     """
+    output_path = _path_str(output_path)
+
     from pathlib import Path
 
     if not isinstance(table, pa.Table):
@@ -2268,7 +2297,7 @@ def _table_to_temp_parquet_and_convert(
 
 def convert_to_geopackage(
     table: pa.Table,
-    output_path: str,
+    output_path: str | Path,
     overwrite: bool = False,
     layer_name: str | None = None,
     bbox: str | tuple[float, float, float, float] | None = None,
@@ -2315,7 +2344,7 @@ def convert_to_geopackage(
 
 def convert_to_flatgeobuf(
     table: pa.Table,
-    output_path: str,
+    output_path: str | Path,
     bbox: str | tuple[float, float, float, float] | None = None,
     geometry: str | None = None,
     where: str | None = None,
@@ -2355,7 +2384,7 @@ def convert_to_flatgeobuf(
 
 def convert_to_csv(
     table: pa.Table,
-    output_path: str,
+    output_path: str | Path,
     include_wkt: bool = True,
     include_bbox: bool = True,
     bbox: str | tuple[float, float, float, float] | None = None,
@@ -2402,7 +2431,7 @@ def convert_to_csv(
 
 def convert_to_shapefile(
     table: pa.Table,
-    output_path: str,
+    output_path: str | Path,
     overwrite: bool = False,
     encoding: str = "UTF-8",
 ) -> str:
@@ -2595,7 +2624,7 @@ def from_wfs(
 def from_wfs_layers(
     service_url: str,
     typenames: list[str],
-    output_dir: str,
+    output_dir: str | Path,
     version: str = "auto",
     bbox: tuple[float, float, float, float] | None = None,
     limit: int | None = None,
@@ -2758,7 +2787,7 @@ def from_carto(
     )
 
 
-def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
+def get_row_group_geo_stats(parquet_file: str | Path) -> list[dict]:
     """
     Get per-row-group geo_bbox statistics from a GeoParquet file.
 
@@ -2776,6 +2805,8 @@ def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
         List of dicts with per-row-group bbox statistics.
         Empty list if no geo stats are available.
     """
+    parquet_file = _path_str(parquet_file)
+
     from geoparquet_io.core.bbox_structure import check_bbox_structure
     from geoparquet_io.core.duckdb_metadata import get_file_metadata, get_row_group_bbox_stats
     from geoparquet_io.core.metadata_utils import (
@@ -2799,7 +2830,7 @@ def get_row_group_geo_stats(parquet_file: str) -> list[dict]:
 
 
 def preview_bbox_filter(
-    parquet_file: str,
+    parquet_file: str | Path,
     bbox: Sequence[float],
     geometry_column: str | None = None,
 ) -> BboxFilterPreview:
@@ -2843,12 +2874,14 @@ def preview_bbox_filter(
         ... else:
         ...     print(f"no estimate: {preview.reason}")
     """
+    parquet_file = _path_str(parquet_file)
+
     from geoparquet_io.core.preview import preview_bbox_filter as _preview_bbox_filter
 
     return _preview_bbox_filter(parquet_file, bbox, geometry_column=geometry_column)
 
 
-def compression_stats(path: str) -> list[dict]:
+def compression_stats(path: str | Path) -> list[dict]:
     """
     Get per-column compression ratios for a Parquet file.
 
@@ -2878,7 +2911,7 @@ def compression_stats(path: str) -> list[dict]:
 
 
 def explain_analyze(
-    file_path: str,
+    file_path: str | Path,
     query: str | None = None,
 ) -> dict:
     """
@@ -2907,6 +2940,8 @@ def explain_analyze(
         ...     query="SELECT * FROM read_parquet({file}) WHERE id > 10"
         ... )
     """
+    file_path = _path_str(file_path)
+
     from geoparquet_io.core.benchmark import explain_analyze as _explain_analyze
 
     return _explain_analyze(
@@ -2916,8 +2951,8 @@ def explain_analyze(
 
 
 def create_pmtiles(
-    input_path: str,
-    output_path: str,
+    input_path: str | Path,
+    output_path: str | Path,
     *,
     layer: str | None = None,
     min_zoom: int | None = None,
@@ -2938,7 +2973,7 @@ def create_pmtiles(
     maximum_tile_bytes: int | None = None,
     force: bool = False,
     repair_geometry: bool = True,
-    temporary_directory: str | None = None,
+    temporary_directory: str | Path | None = None,
     chunks: str | None = None,
 ) -> None:
     """
@@ -2996,6 +3031,10 @@ def create_pmtiles(
         ...     bbox='-122.5,37.5,-122.0,38.0'
         ... )
     """
+    input_path = _path_str(input_path)
+    output_path = _path_str(output_path)
+    temporary_directory = _opt_path_str(temporary_directory)
+
     from geoparquet_io.core.pmtiles import create_pmtiles_from_geoparquet
 
     create_pmtiles_from_geoparquet(
@@ -3026,8 +3065,8 @@ def create_pmtiles(
 
 
 def create_pmtiles_pyramid(
-    input_path: str,
-    output_path: str,
+    input_path: str | Path,
+    output_path: str | Path,
     *,
     levels: str | list[int | str] | None = None,
     bands: str | None = None,
@@ -3035,13 +3074,13 @@ def create_pmtiles_pyramid(
     bytes_per_cell: float | None = None,
     layer_mode: str = "grouped",
     include_features: bool = False,
-    features_source: str | None = None,
+    features_source: str | Path | None = None,
     features_min_zoom: int | None = None,
     max_zoom: int | None = None,
     attribution: str | None = None,
     force: bool = False,
     verbose: bool = False,
-    temporary_directory: str | None = None,
+    temporary_directory: str | Path | None = None,
     memory_limit: str | None = None,
 ) -> None:
     """
@@ -3101,6 +3140,11 @@ def create_pmtiles_pyramid(
         ...     'alltime.parquet', 'alltime.pmtiles', bands='5:0,8:6,10:9'
         ... )
     """
+    input_path = _path_str(input_path)
+    output_path = _path_str(output_path)
+    features_source = _opt_path_str(features_source)
+    temporary_directory = _opt_path_str(temporary_directory)
+
     from geoparquet_io.core.pmtiles_pyramid import (
         create_pmtiles_pyramid as _create_pmtiles_pyramid,
     )
@@ -3179,7 +3223,7 @@ def simplify(
 
 
 def polygonize(
-    input_raster: str,
+    input_raster: str | Path,
     band: int = 1,
     values: list[float] | None = None,
     value_column: str = "value",
@@ -3215,6 +3259,8 @@ def polygonize(
     Returns:
         PyArrow Table with one feature per contiguous class region
     """
+    input_raster = _path_str(input_raster)
+
     from geoparquet_io.core.process.raster.polygonize import polygonize_raster
 
     return polygonize_raster(
@@ -3230,7 +3276,7 @@ def polygonize(
 
 
 def contour(
-    input_raster: str,
+    input_raster: str | Path,
     levels: list[float] | None = None,
     interval: float | None = None,
     base: float = 0.0,
@@ -3263,6 +3309,8 @@ def contour(
     Returns:
         PyArrow Table with one feature per contour band polygon
     """
+    input_raster = _path_str(input_raster)
+
     from geoparquet_io.core.process.raster.contour import contour_raster
 
     return contour_raster(

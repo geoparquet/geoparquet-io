@@ -399,6 +399,116 @@ def test_the_helper_refuses_a_field_set_both_ways():
         check_options_from_keywords("thing", CheckOptions(limit_rows=5), limit_rows=7)
 
 
+def test_the_collision_names_the_keyword_the_caller_wrote():
+    """``validate(sample_size=)`` sets ``spec_sample_size``; the error quotes what was typed."""
+    with pytest.raises(TypeError, match=r"validate\(\) got sample_size both"):
+        check_options_from_keywords(
+            "validate", CheckOptions(spec_sample_size=5), spec_sample_size=7
+        )
+
+
+def test_the_deprecation_points_at_the_caller_not_at_gpios_wrapper(buildings_test_file):
+    """Both doors: a path function (wrapped by ``_one_file_only``) and a ``Table`` method.
+
+    A fixed ``stacklevel`` is right for only one of them -- the wrapper adds a
+    frame -- so the five path-level checks blamed ``api/check.py`` for the
+    caller's keyword.
+    """
+    with fresh_deprecations() as caught:
+        check_api.check_spatial(buildings_test_file, limit_rows=11)
+        gpio.read(buildings_test_file).check_spatial(limit_rows=11)
+    blamed = {
+        w.filename
+        for w in caught
+        if w.category is DeprecationWarning and "gpio.CheckOptions" in str(w.message)
+    }
+    assert blamed == {__file__}
+
+
+def test_check_all_forwards_the_spec_sample_size(buildings_test_file, monkeypatch):
+    """``gpio check all`` honours ``--sample-size``'s owner; so must ``gpio.check_all``."""
+    from geoparquet_io.core import validate as validate_core
+
+    seen: dict = {}
+    real = validate_core.validate_geoparquet
+
+    def capture(path, **kwargs):
+        seen.update(kwargs)
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(validate_core, "validate_geoparquet", capture)
+    check_api.check_all(buildings_test_file, options=CheckOptions(spec_sample_size=5))
+    assert seen["sample_size"] == 5
+
+
+# ---------------------------------------------------------------------------
+# CheckOptions.remote: the check is reached the way the options ask
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def ambient_s3_seen(monkeypatch):
+    """Record the ambient S3 config a structure check runs under."""
+    from geoparquet_io.core import check_parquet_structure as core
+    from geoparquet_io.core.duckdb_utils import get_active_s3_config
+
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    seen: dict = {}
+    real = core.check_row_groups
+
+    def capture(path, **kwargs):
+        seen.update(get_active_s3_config())
+        return real(path, **kwargs)
+
+    monkeypatch.setattr(core, "check_row_groups", capture)
+    yield seen
+    # The scope is the check's, not the process's.
+    assert get_active_s3_config().get("profile") is None
+
+
+REMOTE_ASK = CheckOptions(remote=RemoteOptions(profile="prod", s3_region="us-west-1"))
+
+
+def test_a_path_checks_remote_options_are_the_ambient_s3_config(buildings_test_file, monkeypatch):
+    """``CheckOptions.remote`` is how the file is reached, not a field that is merely held."""
+    with ambient_s3_seen(monkeypatch) as seen:
+        check_api.check_row_groups(buildings_test_file, options=REMOTE_ASK)
+    assert seen["profile"] == "prod"
+    assert seen["s3_region"] == "us-west-1"
+
+
+def test_a_table_checks_remote_options_are_the_ambient_s3_config(buildings_test_file, monkeypatch):
+    """``Table.check_*`` calls ``__wrapped__``, so it activates in its own one place."""
+    with ambient_s3_seen(monkeypatch) as seen:
+        gpio.read(buildings_test_file).check_row_groups(options=REMOTE_ASK)
+    assert seen["profile"] == "prod"
+    assert seen["s3_region"] == "us-west-1"
+
+
+def test_table_fix_reaches_the_file_its_options_ask_for(buildings_test_file, tmp_path, monkeypatch):
+    from geoparquet_io.core.duckdb_utils import get_active_s3_config
+
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
+    seen: dict = {}
+    real = check_api._check_structure
+
+    def capture(path, profile=None):
+        seen.update(get_active_s3_config())
+        return real(path, profile)
+
+    monkeypatch.setattr(check_api, "_check_structure", capture)
+    gpio.read(buildings_test_file).fix(
+        options=CheckOptions(
+            checks=("spatial",),
+            fix_output=str(tmp_path / "fixed.parquet"),
+            remote=RemoteOptions(profile="prod"),
+        )
+    )
+    assert seen["profile"] == "prod"
+
+
 def test_a_keyword_left_at_its_default_is_not_asked_for():
     """So the declared defaults can stay, and default parity with the CLI holds."""
     with fresh_deprecations() as caught:

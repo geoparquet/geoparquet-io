@@ -9,8 +9,10 @@ pass/fail status and for the warnings and failures.
 from __future__ import annotations
 
 import functools
+import inspect
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
@@ -24,6 +26,9 @@ from geoparquet_io.core.check_options import (
 
 if TYPE_CHECKING:
     from geoparquet_io.core.check_parquet_structure import CheckProfile
+
+#: One of the path-level checks, kept as itself through ``_one_file_only``.
+_Check = TypeVar("_Check", bound=Callable[..., "CheckResult"])
 
 
 def _asked(value: Any, default: Any) -> Any:
@@ -39,8 +44,23 @@ def _asked(value: Any, default: Any) -> Any:
     return None if value == default else value
 
 
-#: One of the path-level checks, kept as itself through ``_one_file_only``.
-_Check = TypeVar("_Check", bound=Callable[..., "CheckResult"])
+@contextmanager
+def _reaching(options: CheckOptions | None) -> Iterator[None]:
+    """Run the block with *options*' ``remote`` as the ambient S3 config.
+
+    ``CheckOptions.remote`` is the one
+    :class:`~geoparquet_io.core.remote.RemoteOptions` that owns how the file is
+    reached (#1436), so a check handed one has to run inside its
+    :meth:`~geoparquet_io.core.remote.RemoteOptions.activate` scope or the
+    credentials are accepted and dropped. This is the API's
+    ``cli._shared.activate_remote``, less the root ``gpio`` group's layer, which
+    has no Python twin. Nothing asked for leaves any outer scope as it is.
+    """
+    if options is None or not options.remote:
+        yield
+        return
+    with options.remote.activate():
+        yield
 
 
 class CheckResult:
@@ -300,6 +320,12 @@ def _one_file_only(
     ``Table.check_*`` calls ``__wrapped__``: a Table read from a directory hands
     it to core, which measures the dataset.
 
+    The one place a path-level check activates its ``options.remote``
+    (:func:`_reaching`), so the "is it GeoParquet" probe reads the object store
+    the same way the check does. The options are read back off the call, as
+    ``duckdb_utils.uses_aws_profile`` reads a driver's, so a caller may pass
+    them positionally.
+
     Typed as ``(_Check) -> _Check`` so each check keeps its own signature: an
     untyped decorator makes every name it wraps ``Any`` to a type checker,
     which would leave the public ``check_*`` functions and ``validate``
@@ -308,13 +334,23 @@ def _one_file_only(
 
     def decorate(check: _Check) -> _Check:
         label = check.__name__.removeprefix("check_")
+        signature = inspect.signature(check)
+        # A check with no `options` is never bound: binding would answer a
+        # malformed call before the check itself does.
+        takes_options = "options" in signature.parameters
 
         @functools.wraps(check)
         def one_file_check(path: str | os.PathLike[str], *args: Any, **kwargs: Any) -> CheckResult:
             text = _one_file(path, command)
-            refused = _not_geoparquet(text, label, categorised) if gate else None
-            # Not `or`: a CheckResult is falsy when it did not pass.
-            return refused if refused is not None else check(text, *args, **kwargs)
+            asked = (
+                signature.bind_partial(text, *args, **kwargs).arguments.get("options")
+                if takes_options
+                else None
+            )
+            with _reaching(asked):
+                refused = _not_geoparquet(text, label, categorised) if gate else None
+                # Not `or`: a CheckResult is falsy when it did not pass.
+                return refused if refused is not None else check(text, *args, **kwargs)
 
         return cast("_Check", one_file_check)
 
@@ -413,7 +449,10 @@ def check_all(
             sample_size=check.resolved_random_sample_size(),
             limit_rows=check.resolved_limit_rows(),
         ),
-        "spec": _stage(validate, source, "Spec validation"),
+        # The same options the spatial stage got: ``gpio check all`` hands its
+        # spec stage `check.resolved_spec_sample_size()`, and dropping it here
+        # left the API sampling 1000 rows whatever was asked for.
+        "spec": _stage(validate, source, "Spec validation", options=check),
     }
     return CheckResult(results, check_type="all", source_path=source)
 
