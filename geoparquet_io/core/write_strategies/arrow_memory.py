@@ -18,7 +18,10 @@ from geoparquet_io.core.arrow_geo_metadata import (
     _normalize_arrow_large_types,
 )
 from geoparquet_io.core.compression import resolve_codec
-from geoparquet_io.core.duckdb_utils import _get_query_columns
+from geoparquet_io.core.duckdb_utils import (
+    _get_query_columns,
+    variant_export_guard,
+)
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata, write_arrow_table
@@ -96,7 +99,13 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
         if verbose:
             debug("Fetching query results as Arrow table...")
 
-        with scoped_write_memory_limit(con, memory_limit, verbose):
+        # `.arrow()` is the Arrow C export, so a VARIANT column DuckDB 1.5 has
+        # no Arrow type for stops here; the guard names it instead of letting
+        # the bare OSError out (#1370).
+        with (
+            scoped_write_memory_limit(con, memory_limit, verbose),
+            variant_export_guard(con, final_query, strategy=ArrowMemoryStrategy.name),
+        ):
             table = con.sql(final_query).arrow().read_all()
 
         table = _normalize_arrow_large_types(table)

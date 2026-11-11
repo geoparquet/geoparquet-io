@@ -41,6 +41,25 @@
 # +3: Table.write/create_pmtiles/create_pmtiles_pyramid forward exactly their signature.
 # +4 (#1087): Table-door call-parity cases for inspect meta, summary and stats (+3),
 # and one malformed block read alike by gpio inspect and Table.metadata (+1).
+# +6 (#1370): the VARIANT Arrow-export refusal -- the two strategies that export
+# the data, the error's type and the CLI message together, the automatic
+# 1.1-geoarrow route, a non-VARIANT Arrow failure, and the column lookup.
+# +1 (#1370): the empty-columns VariantExportError message stays grammatical.
+# +6 (#1146): every position of the unlocated rows through the streamed simplify
+# write -- the one writer left cutting its own row groups without asking the
+# layout owner. Six cells, about 1s together; nothing covered that writer.
+# +1 (#1146): the repair re-encodes at the caller's row-group size, not the
+# facade default -- an unthreaded size cost 87.5 MB against 9.4 MB peak, and no
+# output assertion can see it. Sub-second.
+# +48 (#1289): the planar-only export refusal is one policy asked by five
+# formats through four doors, so its cases are the matrix -- the two carriers,
+# the planar control, the overwrite, the glob, the CLI, ops and Table.write
+# (46) -- plus overview's planar-math warning and its planar control (2).
+# +7 (#1289 review): the edges of that refusal -- an attribute-only CSV
+# (`--no-wkt`) through the core writer and the CLI (2), a declaration naming a
+# column the schema lacks (1), a block key spelled in another case (1), the
+# keyword-only target (1), and the repair-opt-out sentence present for GeoJSON
+# and absent elsewhere (2).
 # +47 (#1438): the sites that still hand-rolled a WKB assumption, one fast case
 # each over the point fixture (4 strategies, sort hilbert x CLI/Table, check
 # --fix x CLI/Table), the measured geometry_types over the six encodings, the
@@ -57,7 +76,7 @@
 # request, plus 2 type-naming cases over an extension type).
 # +2: `sort str`, the sibling the Hilbert fix missed, on its CLI and Table
 # paths; its six-encoding matrix is `slow`.
-max_collected = 14759
+max_collected = 14828
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

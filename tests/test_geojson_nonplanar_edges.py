@@ -236,7 +236,7 @@ def test_pmtiles_missing_binary_keeps_existing_error_precedence(monkeypatch):
 
     guard = Mock()
     monkeypatch.setattr("geoparquet_io.core.pmtiles._check_tippecanoe", lambda: False)
-    monkeypatch.setattr("geoparquet_io.core.pmtiles.require_planar_geojson_file", guard)
+    monkeypatch.setattr("geoparquet_io.core.pmtiles.require_planar_export_file", guard)
     with pytest.raises(TippecanoeNotFoundError):
         create_pmtiles_from_geoparquet("missing.parquet", "out.pmtiles")
     guard.assert_not_called()
@@ -254,7 +254,7 @@ def test_pmtiles_preflight_receives_explicit_profile(monkeypatch):
 
     monkeypatch.setattr("geoparquet_io.core.pmtiles._check_tippecanoe", lambda: True)
     monkeypatch.setattr("geoparquet_io.core.pmtiles._run_pipeline", Mock())
-    monkeypatch.setattr("geoparquet_io.core.geojson_stream.collect_nonplanar_edges", collect)
+    monkeypatch.setattr("geoparquet_io.core.write_funnels.collect_nonplanar_edges", collect)
     create_pmtiles_from_geoparquet(
         "s3://fake-bucket/input.parquet", "out.pmtiles", profile="test-only"
     )
@@ -278,7 +278,7 @@ def test_glob_checks_more_than_the_first_file(tmp_path, suffix):
 def test_remote_glob_checks_each_matched_footer(monkeypatch):
     """DuckDB expands the remote glob under the caller's scoped profile."""
     from geoparquet_io.core.duckdb_utils import get_active_s3_config
-    from geoparquet_io.core.geojson_stream import require_planar_geojson_file
+    from geoparquet_io.core.geometry_repair import require_planar_export_file
 
     con = Mock()
     con.execute.return_value.fetchall.return_value = [
@@ -294,9 +294,14 @@ def test_remote_glob_checks_each_matched_footer(monkeypatch):
         seen.append((path, get_active_s3_config()))
         return {} if path.endswith("a.parquet") else {"geometry": "spherical"}
 
-    monkeypatch.setattr("geoparquet_io.core.geojson_stream.collect_nonplanar_edges", collect)
+    monkeypatch.setattr("geoparquet_io.core.write_funnels.collect_nonplanar_edges", collect)
     with pytest.raises(GeoParquetError, match="spherical"):
-        require_planar_geojson_file("s3://fake/*.parquet", "geometry", profile="test-only")
+        require_planar_export_file(
+            "s3://fake/*.parquet",
+            target="GeoJSON",
+            geometry_column="geometry",
+            profile="test-only",
+        )
     assert [path for path, _ in seen] == ["s3://fake/a.parquet", "s3://fake/b.parquet"]
     assert all(config["profile"] == "test-only" for _, config in seen)
     con.execute.assert_called_once_with(

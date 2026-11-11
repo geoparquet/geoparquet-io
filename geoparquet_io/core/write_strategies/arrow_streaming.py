@@ -29,6 +29,7 @@ from geoparquet_io.core.duckdb_utils import (
     describe_query,
     duckdb_type_is_geometry,
     query_schema,
+    variant_export_guard,
 )
 from geoparquet_io.core.edges import edges_of
 from geoparquet_io.core.geo_metadata import (
@@ -179,14 +180,24 @@ def _narrows_to_32_bit_binary(field_type: pa.DataType) -> bool:
 
 
 @contextmanager
-def _sized_reader(con, query: str, batch_size: int) -> Iterator[pa.RecordBatchReader]:
+def _sized_reader(
+    con, query: str, batch_size: int, *, geoparquet_version: str | None = None
+) -> Iterator[pa.RecordBatchReader]:
     """Stream ``query`` in ``batch_size``-row batches (see :func:`~geoparquet_io.core.parquet_writer.regroup`).
 
     On DuckDB 2.0 nothing else may run on ``con`` until the reader is drained or
     closed, so it is closed on the way out, failure included: the memory scope
     around it restores its settings on ``con`` next.
+
+    The reader is the Arrow C export, so a VARIANT column DuckDB 1.5 has no
+    Arrow type for stops here; the guard names it instead of letting the bare
+    ``OSError`` out (#1370). ``geoparquet_version`` is passed when the version
+    is what routed the write to this strategy.
     """
-    reader = con.sql(query).to_arrow_reader(batch_size=batch_size)
+    with variant_export_guard(
+        con, query, strategy=ArrowStreamingStrategy.name, geoparquet_version=geoparquet_version
+    ):
+        reader = con.sql(query).to_arrow_reader(batch_size=batch_size)
     try:
         yield pa.RecordBatchReader.from_batches(reader.schema, regroup(reader, batch_size))
     finally:
@@ -415,8 +426,16 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             if verbose:
                 debug(f"Executing query with batch size {batch_size:,}...")
 
-            # Nothing below queries `con` while the reader is open.
-            with _sized_reader(con, final_sql, batch_size) as reader:
+            # Nothing below queries `con` while the reader is open. The version
+            # travels so a VARIANT refusal can say that 1.1-geoarrow output is
+            # what routed this write here, not a --write-strategy the user typed
+            # (#1370).
+            with _sized_reader(
+                con,
+                final_sql,
+                batch_size,
+                geoparquet_version=geoparquet_version if geoarrow_native else None,
+            ) as reader:
                 schema = reader.schema
 
                 if verbose:

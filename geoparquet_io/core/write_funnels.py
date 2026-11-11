@@ -1830,7 +1830,14 @@ def write_parquet_with_metadata(
         # invalidated (#601) were excluded at collection rather than
         # re-attached. The fast path's deferred V2 geo repair rides along, so
         # both edits cost one footer patch (#1270).
-        _ensure_located_row_groups(actual_output, geometry_column, compression, compression_level)
+        ensure_located_row_groups(
+            actual_output,
+            geometry_column,
+            compression,
+            compression_level,
+            row_group_rows=row_group_rows,
+            row_group_size_mb=row_group_size_mb,
+        )
         # Layout precedes the final GEOGRAPHY retype and statistics patch.
         apply_nonplanar_edges(
             edges_to_restore,
@@ -1952,8 +1959,33 @@ def _auto_fix_vecorel_if_needed(
             _fix_vecorel_schema(output_path, non_nullable, compression_level=compression_level)
 
 
-def _ensure_located_row_groups(output, geometry_column, compression, compression_level) -> None:
-    """Apply the facade's spatial layout after a writer has chosen its groups."""
+def ensure_located_row_groups(
+    output: str,
+    geometry_column: str | None,
+    compression: str | None,
+    compression_level: int | None,
+    row_group_rows: int | None = None,
+    row_group_size_mb: float | None = None,
+) -> None:
+    """Apply the facade's spatial layout after a writer has chosen its groups.
+
+    The one place a finished file gets the #1146 guarantee: no row group holds
+    only unlocated geometry while the file has located rows. Both write funnels
+    call it, and so does every other writer that cuts its own row groups --
+    ``process simplify``'s streamed pass is one (its output is usually a sorted
+    file, whose NULL and EMPTY rows sit last, so an exact multiple of the group
+    size flushes them as a covering-less group of their own).
+
+    ``located_row_group_layout`` owns the layout, including the all-unlocated
+    exception; the rewrite is streamed one group at a time, and is skipped
+    entirely when the layout already holds.
+
+    The caller's row-group facts are passed on, not for the groups written --
+    ``_layout`` has the last word on those -- but for the *read*: the rewrite
+    sizes its input batches from them, so without them a 2,048-row file would
+    be re-read in ``DEFAULT_ROW_GROUP_ROWS``-row batches and the repair would
+    cost an order of magnitude more memory than the write it is repairing.
+    """
     if geometry_column is None:
         return
     with pq.ParquetFile(output) as pf:
@@ -1965,7 +1997,12 @@ def _ensure_located_row_groups(output, geometry_column, compression, compression
             output,
             output,
             {},
-            write=WriteOptions(compression=compression, compression_level=compression_level),
+            write=WriteOptions(
+                compression=compression,
+                compression_level=compression_level,
+                row_group_rows=row_group_rows,
+                row_group_size_mb=row_group_size_mb,
+            ),
             _layout=layout,
         )
 
@@ -1988,11 +2025,13 @@ def _write_table_with_strategy(strategy, **kwargs) -> None:
     with remote_write_context(destination, verbose=kwargs["verbose"]) as (local, _):
         kwargs["output_path"] = local
         strategy.write_from_table(**kwargs)
-        _ensure_located_row_groups(
+        ensure_located_row_groups(
             kwargs["output_path"],
             kwargs["geometry_column"],
             kwargs["compression"],
             kwargs["compression_level"],
+            row_group_rows=kwargs["row_group_rows"],
+            row_group_size_mb=kwargs["row_group_size_mb"],
         )
         # Layout precedes the final GEOGRAPHY retype and statistics patch.
         apply_nonplanar_edges(
@@ -2022,7 +2061,10 @@ def write_geoparquet_table(
     geo_bbox: list[float] | None = None,
     memory_limit: str | None = None,
     write_strategy: str | None = None,
-    input_crs: dict | None = None,
+    # `dict | str | None`, as `parquet_writer.resolve_input_crs` declares it: a
+    # caller whose source CRS is unknown passes the PARQUET_UNKNOWN_CRS marker,
+    # which is a string, and this function assigns that same marker below.
+    input_crs: dict | str | None = None,
     custom_metadata: dict | None = None,
 ) -> None:
     """
@@ -2181,7 +2223,14 @@ def write_geoparquet_table(
         # the GEOGRAPHY logical type, so the two never disagree (#1269).
         # A fallback rewrite keeps the groups just written: the count
         # write_arrow_table resolved, asked again of the same rows (silent).
-        _ensure_located_row_groups(actual_output, geometry_column, codec.name, codec.level)
+        ensure_located_row_groups(
+            actual_output,
+            geometry_column,
+            codec.name,
+            codec.level,
+            row_group_rows=row_group_rows,
+            row_group_size_mb=row_group_size_mb,
+        )
         # Layout precedes the final GEOGRAPHY retype and statistics patch.
         apply_nonplanar_edges(
             edges_by_col,
