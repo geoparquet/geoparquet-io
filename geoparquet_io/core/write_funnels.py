@@ -66,7 +66,6 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import (
-    _get_query_column_type,
     _get_query_columns,
     get_duckdb_connection,
     sql_path,
@@ -112,7 +111,6 @@ from geoparquet_io.core.geodesic_bbox import (
 )
 from geoparquet_io.core.geometry_detection import (
     BUILT_GEOMETRY_COLUMN,
-    GeometryRead,
     _detect_geometry_from_query,
     native_geometry_types_from_query,
     primary_geometry_column,
@@ -131,6 +129,7 @@ from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.parquet_writer import (
     _CARRIED_SCHEMA_METADATA_KEYS,
     WriteOptions,
+    geoarrow_output_version,
     geoparquet_copy_options,
     located_row_group_layout,
     note_duckdb_copy_rounding,
@@ -159,7 +158,10 @@ from geoparquet_io.core.write_strategies import (
     needs_metadata_rewrite,
 )
 from geoparquet_io.core.write_strategies.base import (
+    geoarrow_encoding_of,
     has_unknown_secondary,
+    query_geoarrow_encoding,
+    with_declared_primary_encoding,
     wrap_query_with_secondary_crs,
 )
 
@@ -1335,23 +1337,6 @@ def _fast_path_geo_decision(
     return carried, False
 
 
-def _query_geometry_is_already_native(con, query: str, geometry_column: str | None) -> bool:
-    """Whether the query's geometry column is already GeoArrow-native.
-
-    Only ``convert`` builds a ``geometry_info``, so the encoding witness the
-    1.1-geoarrow guard used to read is absent on every other write path (sort,
-    extract, partition, the ``add`` family). Ask the query instead: DESCRIBE
-    alone, no scan. The read kind is the owner's (``GeometryRead.kind``): a
-    GeoArrow coordinate struct (``STRUCT(x DOUBLE, y DOUBLE)[][]`` for a
-    polygon) is ``geoarrow``; GEOMETRY, BLOB, VARCHAR and any other nested
-    shape are not (#1176, #1367).
-    """
-    if not geometry_column:
-        return False
-    col_type = _get_query_column_type(con, query, geometry_column)
-    return GeometryRead.for_type(geometry_column, col_type).kind == "geoarrow"
-
-
 def _secondary_geo_columns(carried_geo_block: dict | None, geometry_info: dict | None):
     """The ``geo.columns`` entries the write's secondary CRS comes from."""
     return (carried_geo_block or {}).get("columns") or (geometry_info or {}).get("metadata")
@@ -1585,6 +1570,22 @@ def write_parquet_with_metadata(
         input_crs, input_file=input_file, geometry_column=geometry_column, verbose=verbose
     )
 
+    # The one native-encoding witness for this write, asked once: whether the
+    # rows reaching the writer carry a GeoArrow coordinate struct, and which of
+    # the six encodings it is. The facade says which version such an output can
+    # declare, the composer names the encoding from `geometry_info`, and the
+    # strategies below decode only what is not it (#1438).
+    geoarrow_encoding = query_geoarrow_encoding(
+        con, query, geometry_column, metadata=input_metadata, geometry_info=geometry_info
+    )
+    if geoarrow_encoding:
+        geoparquet_version = geoarrow_output_version(
+            geoparquet_version, geoarrow_encoding, geometry_column
+        )
+        geometry_info = with_declared_primary_encoding(
+            geometry_info, geometry_column, geoarrow_encoding
+        )
+
     effective_version = geoparquet_version
 
     # Check if we need to add/rewrite geo metadata
@@ -1767,12 +1768,12 @@ def write_parquet_with_metadata(
                     (geometry_info or {}).get("metadata", {}).get(primary, {}).get("encoding")
                 )
                 # `geometry_info` is convert's witness; on every other path it
-                # is None, so fall back to asking the query what the geometry
-                # column's type actually is (#1176).
+                # is the encoding the query itself was found to hold, above
+                # (#1176, #1438).
                 already_native = (
                     bool(input_encoding and input_encoding.lower() not in ("wkb", "wkt"))
                     if input_encoding
-                    else _query_geometry_is_already_native(con, query, geometry_column)
+                    else bool(geoarrow_encoding)
                 )
                 if not already_native and write_strategy != "streaming":
                     if verbose:
@@ -1829,7 +1830,14 @@ def write_parquet_with_metadata(
         # invalidated (#601) were excluded at collection rather than
         # re-attached. The fast path's deferred V2 geo repair rides along, so
         # both edits cost one footer patch (#1270).
-        _ensure_located_row_groups(actual_output, geometry_column, compression, compression_level)
+        ensure_located_row_groups(
+            actual_output,
+            geometry_column,
+            compression,
+            compression_level,
+            row_group_rows=row_group_rows,
+            row_group_size_mb=row_group_size_mb,
+        )
         # Layout precedes the final GEOGRAPHY retype and statistics patch.
         apply_nonplanar_edges(
             edges_to_restore,
@@ -1951,8 +1959,33 @@ def _auto_fix_vecorel_if_needed(
             _fix_vecorel_schema(output_path, non_nullable, compression_level=compression_level)
 
 
-def _ensure_located_row_groups(output, geometry_column, compression, compression_level) -> None:
-    """Apply the facade's spatial layout after a writer has chosen its groups."""
+def ensure_located_row_groups(
+    output: str,
+    geometry_column: str | None,
+    compression: str | None,
+    compression_level: int | None,
+    row_group_rows: int | None = None,
+    row_group_size_mb: float | None = None,
+) -> None:
+    """Apply the facade's spatial layout after a writer has chosen its groups.
+
+    The one place a finished file gets the #1146 guarantee: no row group holds
+    only unlocated geometry while the file has located rows. Both write funnels
+    call it, and so does every other writer that cuts its own row groups --
+    ``process simplify``'s streamed pass is one (its output is usually a sorted
+    file, whose NULL and EMPTY rows sit last, so an exact multiple of the group
+    size flushes them as a covering-less group of their own).
+
+    ``located_row_group_layout`` owns the layout, including the all-unlocated
+    exception; the rewrite is streamed one group at a time, and is skipped
+    entirely when the layout already holds.
+
+    The caller's row-group facts are passed on, not for the groups written --
+    ``_layout`` has the last word on those -- but for the *read*: the rewrite
+    sizes its input batches from them, so without them a 2,048-row file would
+    be re-read in ``DEFAULT_ROW_GROUP_ROWS``-row batches and the repair would
+    cost an order of magnitude more memory than the write it is repairing.
+    """
     if geometry_column is None:
         return
     with pq.ParquetFile(output) as pf:
@@ -1964,7 +1997,12 @@ def _ensure_located_row_groups(output, geometry_column, compression, compression
             output,
             output,
             {},
-            write=WriteOptions(compression=compression, compression_level=compression_level),
+            write=WriteOptions(
+                compression=compression,
+                compression_level=compression_level,
+                row_group_rows=row_group_rows,
+                row_group_size_mb=row_group_size_mb,
+            ),
             _layout=layout,
         )
 
@@ -1987,11 +2025,13 @@ def _write_table_with_strategy(strategy, **kwargs) -> None:
     with remote_write_context(destination, verbose=kwargs["verbose"]) as (local, _):
         kwargs["output_path"] = local
         strategy.write_from_table(**kwargs)
-        _ensure_located_row_groups(
+        ensure_located_row_groups(
             kwargs["output_path"],
             kwargs["geometry_column"],
             kwargs["compression"],
             kwargs["compression_level"],
+            row_group_rows=kwargs["row_group_rows"],
+            row_group_size_mb=kwargs["row_group_size_mb"],
         )
         # Layout precedes the final GEOGRAPHY retype and statistics patch.
         apply_nonplanar_edges(
@@ -2083,6 +2123,16 @@ def write_geoparquet_table(
     if geometry_column is None:
         geometry_column = primary_geometry_column(table, geo=geo_meta)
 
+    # The same native-encoding witness the query funnel asks (#1438): a version
+    # whose carrier is WKB bytes cannot hold a GeoArrow coordinate struct, and
+    # nothing in gpio re-encodes one. Auto mode resolved native data to
+    # 1.1-geoarrow above, so anything else here is an explicit request.
+    geoparquet_version = geoarrow_output_version(
+        geoparquet_version,
+        geoarrow_encoding_of(table.schema, geometry_column, geo_meta),
+        geometry_column,
+    )
+
     # Check if geometry column exists
     has_geometry = geometry_column in table.column_names
 
@@ -2173,7 +2223,14 @@ def write_geoparquet_table(
         # the GEOGRAPHY logical type, so the two never disagree (#1269).
         # A fallback rewrite keeps the groups just written: the count
         # write_arrow_table resolved, asked again of the same rows (silent).
-        _ensure_located_row_groups(actual_output, geometry_column, codec.name, codec.level)
+        ensure_located_row_groups(
+            actual_output,
+            geometry_column,
+            codec.name,
+            codec.level,
+            row_group_rows=row_group_rows,
+            row_group_size_mb=row_group_size_mb,
+        )
         # Layout precedes the final GEOGRAPHY retype and statistics patch.
         apply_nonplanar_edges(
             edges_by_col,

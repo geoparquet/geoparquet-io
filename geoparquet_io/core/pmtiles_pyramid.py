@@ -15,7 +15,8 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import atomic_write, handle_output_overwrite, scratch_dir
-from geoparquet_io.core.geojson_stream import require_planar_geojson_file
+from geoparquet_io.core.geojson_stream import GEOJSON_EXPORT
+from geoparquet_io.core.geometry_repair import require_planar_export_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, success, warn
 from geoparquet_io.core.pmtiles import (
     TippecanoeNotFoundError,
@@ -385,9 +386,9 @@ def create_pmtiles_pyramid(
     if not _check_tile_join():
         raise TileJoinNotFoundError()
 
-    require_planar_geojson_file(input_path)
+    require_planar_export_file(input_path, target=GEOJSON_EXPORT)
     if include_features and features_source:
-        require_planar_geojson_file(features_source)
+        require_planar_export_file(features_source, target=GEOJSON_EXPORT)
 
     info, plan = _detect_and_plan(
         input_path,

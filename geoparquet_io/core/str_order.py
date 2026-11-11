@@ -31,6 +31,7 @@ from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
     create_geometry_view,
     resolve_geometry_column,
+    resolve_geometry_read,
 )
 
 # These helpers are private to hilbert_order.py but are shared by convention
@@ -93,16 +94,24 @@ def _str_layout(row_count: int, tile_size: int) -> tuple[int, int, int]:
 
 def _str_order_query(
     source: str,
-    geometry_column: str,
+    key_expr: str,
     row_count: int,
     tile_size: int,
     output_expressions: list[str] | None = None,
     *,
     has_empty: bool = False,
 ) -> str:
-    """Build the STR leaf-packing query used by all input/output paths."""
+    """Build the STR leaf-packing query used by all input/output paths.
+
+    ``key_expr`` is the owner's read expression for the geometry column
+    (``geometry_detection.resolve_geometry_read(...).expr``), not the quoted
+    column: a GeoArrow coordinate struct is no argument to ``ST_IsEmpty`` or
+    ``ST_XMin``, and the owner hands those its representative point -- the
+    centre of the value's coordinate extent, which is the STR key -- instead of
+    dying on it (#1438).
+    """
     _, _, strip_size = _str_layout(row_count, tile_size)
-    geom = quote_identifier(geometry_column)
+    geom = key_expr
     suffix = uuid.uuid4().hex
     input_order = quote_identifier(f"__gpio_str_input_order_{suffix}")
     center_x = quote_identifier(f"__gpio_str_x_{suffix}")
@@ -161,10 +170,9 @@ def _str_order_query(
     return query
 
 
-def _str_row_counts(
-    con: duckdb.DuckDBPyConnection, source: str, geometry_column: str
-) -> tuple[int, int]:
-    geom = quote_identifier(geometry_column)
+def _str_row_counts(con: duckdb.DuckDBPyConnection, source: str, key_expr: str) -> tuple[int, int]:
+    """``(rows with a geometry to sort, all rows)``, counted through ``key_expr``."""
+    geom = key_expr
     result = fetch_one(
         con.execute(f"""
         SELECT count(*) FILTER (WHERE {geom} IS NOT NULL AND NOT ST_IsEmpty({geom})), count(*)
@@ -199,8 +207,11 @@ def str_order_table(
     try:
         registered = register_arrow(con, "__input_table", table)
         source = create_geometry_view(con, "__input_table", geom_col)
+        # The owner's read of the column as the view leaves it: GEOMETRY after
+        # a WKB decode, a coordinate struct when it is GeoArrow-native (#1438).
+        read = resolve_geometry_read(con, source, geom_col, relation=True)
 
-        row_count, total_count = _str_row_counts(con, source, geom_col)
+        row_count, total_count = _str_row_counts(con, source, read.expr)
         if row_count == 0:
             warn("All geometries are empty or null. Returning table without STR ordering.")
             return table
@@ -212,13 +223,17 @@ def str_order_table(
                 "These will be placed at the end of the sorted output."
             )
 
+        # A GeoArrow-native column goes out as itself: it never became a
+        # GEOMETRY to encode back, and ST_AsWKB has no reading of a coordinate
+        # struct (#1438).
+        selected_geom = geom if read.kind == "geoarrow" else as_wkb_sql(geom)
         output_expressions = [
-            f"{as_wkb_sql(geom)} AS {geom}" if column == geom_col else quote_identifier(column)
+            f"{selected_geom} AS {geom}" if column == geom_col else quote_identifier(column)
             for column in table.column_names
         ]
         query = _str_order_query(
             source,
-            geom_col,
+            read.expr,
             row_count,
             tile_size,
             output_expressions=output_expressions,
@@ -318,14 +333,17 @@ def _str_order_streaming(
         )
 
         source = create_geometry_view(con, source, geom_col)
-        row_count, total_count = _str_row_counts(con, source, geom_col)
+        # The owner's read expression for the STR key: a GeoArrow coordinate
+        # struct is no argument to ST_IsEmpty or ST_XMin (#1438).
+        key_expr = resolve_geometry_read(con, source, geom_col, relation=True).expr
+        row_count, total_count = _str_row_counts(con, source, key_expr)
         reordered = row_count > 0
         if not reordered:
             warn("All geometries are empty or null. Writing file without STR ordering.")
             query = f"SELECT * FROM {source}"
         else:
             query = _str_order_query(
-                source, geom_col, row_count, tile_size, has_empty=row_count < total_count
+                source, key_expr, row_count, tile_size, has_empty=row_count < total_count
             )
             if verbose:
                 _, strip_count, strip_size = _str_layout(row_count, tile_size)
@@ -376,7 +394,10 @@ def _str_order_file_based(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
     try:
         geometry_source = create_geometry_view(con, source, geometry_column)
-        row_count, total_count = _str_row_counts(con, geometry_source, geometry_column)
+        # The owner's read expression for the STR key: a GeoArrow coordinate
+        # struct is no argument to ST_IsEmpty or ST_XMin (#1438).
+        key_expr = resolve_geometry_read(con, geometry_source, geometry_column, relation=True).expr
+        row_count, total_count = _str_row_counts(con, geometry_source, key_expr)
         reordered = row_count > 0
         if not reordered:
             warn("All geometries are empty or null. Writing file without STR ordering.")
@@ -384,7 +405,7 @@ def _str_order_file_based(
         else:
             query = _str_order_query(
                 geometry_source,
-                geometry_column,
+                key_expr,
                 row_count,
                 tile_size,
                 has_empty=row_count < total_count,

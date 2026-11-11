@@ -682,6 +682,27 @@ def _apply_geoparquet_metadata(
             table, geometry_column, sanitized_carried_geo(table.schema.metadata) or carried_geo
         )
 
+    # The primary's own native encoding, for the composer's step 3: at
+    # 1.1-geoarrow the column passes through untouched, so the encoding it
+    # already holds is the one this write produces. Without it the block said
+    # `WKB` over a coordinate struct (#1438). A caller that named the encoding
+    # itself (the streaming writer, which knows what it converted to) has
+    # already answered, through `stats`/`encoding` rather than here.
+    from geoparquet_io.core.write_strategies.base import (
+        geoarrow_encoding_of,
+        with_declared_primary_encoding,
+    )
+
+    geometry_info = with_declared_primary_encoding(
+        geometry_info,
+        geometry_column,
+        geoarrow_encoding_of(
+            table.schema,
+            geometry_column,
+            sanitized_carried_geo(table.schema.metadata) or carried_geo,
+        ),
+    )
+
     # Step 1: Build the geo metadata, BEFORE the geometry columns are retyped.
     #
     # The 2.0 / parquet-geo-only native Parquet GEOMETRY types take each column's

@@ -181,6 +181,32 @@ attestation for each. The last command must print `0`. Any author link left in
 the body is a contributor missing from the release page's Contributors list, so
 re-run step 7 until it does.
 
+## 9. Verify the conda-forge feedstock
+
+geoparquet-io is also packaged on conda-forge
+(https://anaconda.org/conda-forge/geoparquet-io). The conda-forge bot opens its
+own version-bump pull request against
+[`conda-forge/geoparquet-io-feedstock`](https://github.com/conda-forge/geoparquet-io-feedstock)
+within a few hours of the PyPI publish — usually nothing to do, but nobody else
+checks it, so confirm it actually landed:
+
+```bash
+gh pr list --repo conda-forge/geoparquet-io-feedstock --state all \
+  --search "<version> in:title" --json number,title,state,mergedAt
+```
+
+- The bot's bump PR for `<version>` merged. If it's open and green, merge-wait
+  is fine; if it's stalled (a recipe `run` pin conflicts with the new version),
+  it needs a human to push it through — recipe-maintainers is `@hobu`.
+- The recipe's `run` dependencies in `recipe/recipe.yaml` on the feedstock
+  still match this release's `dependencies` in `pyproject.toml`. A dependency
+  added, removed, or re-pinned in this release that the bot's auto-generated
+  bump didn't pick up needs a follow-up pull request to the feedstock.
+
+This is a project-side check, not a gate the feedstock's own CI enforces on
+gpio — skipping it doesn't block anything today, but it's how the conda
+package quietly falls behind PyPI.
+
 ## If the publish fails after the tag is pushed
 
 The workflow creates the tag before it uploads, so a failed upload leaves a
