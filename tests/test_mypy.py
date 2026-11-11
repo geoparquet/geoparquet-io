@@ -128,6 +128,46 @@ import geoparquet_io as gpio
 wrong: str = gpio.read("in.parquet").num_rows
 """
 
+# The documented promise (docs/api/python-api.md, "Type Checking"): every path
+# argument on the published surface takes a `pathlib.Path` as happily as a
+# `str`. Runtime always accepted one; a bare `str` annotation made a type
+# checker reject it, so this consumer is the claim's test.
+_CONSUMER_PATHS = '''\
+"""Every published path argument, handed a pathlib.Path."""
+
+from pathlib import Path
+
+import geoparquet_io as gpio
+from geoparquet_io import Table, WriteOptions
+from geoparquet_io.api import ops
+
+
+def run(src: Path, dst: Path, out_dir: Path) -> None:
+    table: Table = gpio.read(src)
+    table.write(dst, WriteOptions(compression="zstd"))
+    gpio.check_all(dst)
+
+    ops.compression_stats(src)
+    ops.explain_analyze(src)
+    ops.get_row_group_geo_stats(src)
+    ops.preview_bbox_filter(src, (0.0, 0.0, 1.0, 1.0))
+    ops.create_overviews(src, output_dir=out_dir)
+    ops.create_overview_file(src, dst, output_dir=out_dir)
+    ops.create_pmtiles(src, dst, temporary_directory=out_dir)
+    ops.create_pmtiles_pyramid(src, dst, features_source=src, temporary_directory=out_dir)
+    ops.polygonize(src)
+    ops.contour(src)
+    ops.from_wfs_layers("https://example.com/wfs", ["layer"], out_dir)
+    ops.read_bigquery("project.dataset.table", credentials_file=src)
+
+    arrow = table.to_arrow()
+    ops.convert_to_geojson(arrow, dst)
+    ops.convert_to_geopackage(arrow, dst)
+    ops.convert_to_flatgeobuf(arrow, dst)
+    ops.convert_to_csv(arrow, dst)
+    ops.convert_to_shapefile(arrow, dst)
+'''
+
 
 def test_the_installed_package_ships_usable_types(tmp_path):
     """An outside caller type-checks against gpio: py.typed plus real annotations.
@@ -155,6 +195,28 @@ def test_the_installed_package_ships_usable_types(tmp_path):
     assert any("bad.py:" in line and "[assignment]" in line for line in output.splitlines()), (
         f"a wrong type against the public API should be caught:\n{output}"
     )
+
+
+def test_every_published_path_argument_accepts_pathlib_path(tmp_path):
+    """A consumer handing `pathlib.Path` to the published API checks clean.
+
+    Same outside-the-repo setup as the usability test: the installed package
+    and a bare mypy config, so only what ships is in play.
+    """
+    (tmp_path / "mypy.ini").write_text("[mypy]\npython_version = 3.11\n")
+    (tmp_path / "paths.py").write_text(_CONSUMER_PATHS)
+
+    result = subprocess.run(
+        [sys.executable, "-m", "mypy", "--no-incremental", "paths.py"],
+        capture_output=True,
+        text=True,
+        cwd=str(tmp_path),
+        timeout=_SUBPROCESS_TIMEOUT,
+    )
+    output = result.stdout + result.stderr
+
+    reported = [line for line in output.splitlines() if line.startswith("paths.py:")]
+    assert not reported, f"a Path should be as good as a str on every path argument:\n{output}"
 
 
 def test_the_lazy_root_declares_every_export_to_a_type_checker():

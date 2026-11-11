@@ -21,6 +21,8 @@ import inspect
 import os
 import warnings
 from contextlib import contextmanager
+from pathlib import Path
+from typing import get_type_hints
 
 import click
 import pytest
@@ -484,3 +486,95 @@ def test_the_new_spelling_alone_never_warns():
         built = remote_options_from_keywords("thing", RemoteOptions(profile="p"))
         assert deprecations(caught) == []
     assert built == RemoteOptions(profile="p")
+
+
+# ---------------------------------------------------------------------------
+# The whole object reaches the store, not just its profile
+# ---------------------------------------------------------------------------
+
+
+#: An ask no single keyword can carry: every field set, and an endpoint that is
+#: not AWS. Dropping any of it sends the object to the wrong store.
+MINIO = RemoteOptions(
+    profile="prod",
+    s3_endpoint="minio.example.com:9000",
+    s3_region="us-west-2",
+    s3_use_ssl=False,
+)
+
+
+@contextmanager
+def upload_seen(monkeypatch):
+    """Record what a remote ``Table.write`` hands :func:`core.upload.upload`."""
+    from geoparquet_io.core import upload as upload_module
+
+    seen: dict = {}
+
+    def fake_upload(source=None, destination=None, **kwargs):
+        seen["source"] = source
+        seen["destination"] = destination
+        seen.update(kwargs)
+
+    monkeypatch.setattr(upload_module, "upload", fake_upload)
+    yield seen
+
+
+def test_a_remote_geoparquet_write_hands_the_store_every_remote_option(places, monkeypatch):
+    """The endpoint, region and SSL flag decide which store is written to, not just who."""
+    with upload_seen(monkeypatch) as seen:
+        places.write("s3://bucket/out.parquet", remote=MINIO)
+    assert seen["remote"] == MINIO
+
+
+def test_a_remote_gdal_write_hands_the_store_every_remote_option(places, monkeypatch):
+    """The other remote destination: a format GDAL writes, staged then uploaded."""
+    from geoparquet_io.core import format_writers
+
+    def fake_writer(_source, output, **_kwargs):
+        Path(output).write_bytes(b"FGB")
+
+    monkeypatch.setattr(format_writers, "write_flatgeobuf", fake_writer)
+    with upload_seen(monkeypatch) as seen:
+        places.write("s3://bucket/out.fgb", remote=MINIO)
+    assert seen["remote"] == MINIO
+
+
+def test_the_remote_field_admits_the_none_a_caller_forwards():
+    """``__post_init__`` normalizes it, so the annotation must not forbid it."""
+    assert WriteOptions(remote=None).remote == RemoteOptions()
+    assert get_type_hints(WriteOptions)["remote"] == RemoteOptions | None
+    assert WriteOptions(remote=None).remote_access() == RemoteOptions()
+
+
+# ---------------------------------------------------------------------------
+# A deprecated keyword is named, and blamed, the way the caller wrote it
+# ---------------------------------------------------------------------------
+
+
+def test_the_deprecation_points_at_the_caller_not_at_the_generated_init(places, tmp_path):
+    """Both doors: ``WriteOptions(profile=)`` is one frame deeper than ``Table.write``.
+
+    ``WriteOptions(profile='p')`` reaches the warning through
+    ``__init__ -> __post_init__ -> remote_options_from_keywords``, while
+    ``Table.write(profile='p')`` calls the helper itself. A fixed
+    ``stacklevel`` is right for only one of them, and the dataclass path blamed
+    the generated ``__init__`` for the caller's keyword.
+    """
+    with fresh_deprecations() as caught:
+        WriteOptions(profile="prod")
+        places.write(tmp_path / "out.parquet", profile="prod")
+        blamed = {w.filename for w in caught if w.category is DeprecationWarning}
+    assert blamed == {__file__}
+
+
+def test_the_table_write_collision_names_the_keyword_the_caller_wrote(places, tmp_path):
+    """``Table.write(profile=)`` sets ``remote``; the error quotes what was typed."""
+    with fresh_deprecations():
+        with pytest.raises(TypeError, match=r"Table\.write\(\) got profile both"):
+            places.write(tmp_path / "out.parquet", WriteOptions(profile="a"), profile="b")
+
+
+def test_the_helper_collision_names_the_keyword_the_caller_wrote():
+    """``read_partition(aws_profile=)`` sets ``profile``; the error quotes what was typed."""
+    with pytest.raises(TypeError, match=r"read_partition\(\) got aws_profile both"):
+        remote_options_from_keywords("read_partition", RemoteOptions(profile="a"), aws_profile="b")

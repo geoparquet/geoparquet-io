@@ -41,12 +41,51 @@
 # +3: Table.write/create_pmtiles/create_pmtiles_pyramid forward exactly their signature.
 # +4 (#1087): Table-door call-parity cases for inspect meta, summary and stats (+3),
 # and one malformed block read alike by gpio inspect and Table.metadata (+1).
+# +6 (#1370): the VARIANT Arrow-export refusal -- the two strategies that export
+# the data, the error's type and the CLI message together, the automatic
+# 1.1-geoarrow route, a non-VARIANT Arrow failure, and the column lookup.
+# +1 (#1370): the empty-columns VariantExportError message stays grammatical.
+# +6 (#1146): every position of the unlocated rows through the streamed simplify
+# write -- the one writer left cutting its own row groups without asking the
+# layout owner. Six cells, about 1s together; nothing covered that writer.
+# +1 (#1146): the repair re-encodes at the caller's row-group size, not the
+# facade default -- an unthreaded size cost 87.5 MB against 9.4 MB peak, and no
+# output assertion can see it. Sub-second.
+# +48 (#1289): the planar-only export refusal is one policy asked by five
+# formats through four doors, so its cases are the matrix -- the two carriers,
+# the planar control, the overwrite, the glob, the CLI, ops and Table.write
+# (46) -- plus overview's planar-math warning and its planar control (2).
+# +7 (#1289 review): the edges of that refusal -- an attribute-only CSV
+# (`--no-wkt`) through the core writer and the CLI (2), a declaration naming a
+# column the schema lacks (1), a block key spelled in another case (1), the
+# keyword-only target (1), and the repair-opt-out sentence present for GeoJSON
+# and absent elsewhere (2).
+# +47 (#1438): the sites that still hand-rolled a WKB assumption, one fast case
+# each over the point fixture (4 strategies, sort hilbert x CLI/Table, check
+# --fix x CLI/Table), the measured geometry_types over the six encodings, the
+# output-version rule -- a 1.1/1.1-geoarrow request keeps the native encoding, a
+# WKB-only one is refused -- per version, per door and over the four convert
+# fixtures, and the type-naming rule's own cases (the Z/M suffixes it reads the
+# Arrow type for, and the guards that leave a measured answer alone). The
+# exhaustive six-encoding x four-strategy combinations are `slow`.
+# +17 (#1438 review): the native fixture matrix now runs over both carrier
+# shapes a GeoArrow column arrives in -- the bare coordinate struct and the same
+# struct resolved into its extension type, which is what gpio's own GeoArrow
+# output reads back as and which the witness read as "not GeoArrow" (+15 across
+# the strategies, the measured geometry_types, the WKB-only refusal and the 1.1
+# request, plus 2 type-naming cases over an extension type).
+# +2: `sort str`, the sibling the Hilbert fix missed, on its CLI and Table
+# paths; its six-encoding matrix is `slow`.
 # +41, the remote-access options object (#1436): the second per-concern object
 # gets the same construction-time guard the write concern has. The value itself
 # and its CLI spellings (13), the one-place layering of the root group's flags
 # over a command's own and the flags reaching the store (6), the deprecated
 # `profile` on WriteOptions forwarding without warning twice (7), the API's
 # `remote=` on every migrated entry point and the keyword migration path (15).
+# +6, its review fixes: the whole object reaches the store on both remote write
+# paths (2), `remote=None` is admitted and normalized (1), the deprecation
+# blames the caller through either door (1), and a collision names the keyword
+# the caller wrote (2).
 # +45, the check-options object (#1436): the third per-concern object gets the
 # same construction-time guard. The value itself and the one-owner defaults
 # (17), the CLI packer and no leaf taking a raw check flag (7), the API's
@@ -57,7 +96,7 @@
 # deprecation warning blames the caller and not gpio's own wrapper (1),
 # `check_all` forwards the spec sample size (1), and a collision names the
 # keyword the caller wrote (1).
-max_collected = 14785
+max_collected = 14926
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
@@ -181,6 +220,10 @@ slow_mark_sites = [
   "test_rewrite_memory_1268.py::test_hilbert_past_2_gib_attribute_column",
   "test_streaming.py::TestApplyGeoArrowExtensionType.test_real_overflow_succeeds",
   "test_streaming.py::TestStreamIO",
+  "test_table_write_geoarrow_encodings.py::test_check_all_fix_repairs_every_native_encoding",
+  "test_table_write_geoarrow_encodings.py::test_every_strategy_keeps_every_native_encoding",
+  "test_table_write_geoarrow_encodings.py::test_sort_hilbert_reads_every_native_encoding",
+  "test_table_write_geoarrow_encodings.py::test_sort_str_reads_every_native_encoding",
   "test_uncoded_crs_paths.py::test_pmtiles_create_lands_in_tokyo",
   "test_wfs.py::TestDuckDBNativeWFS",
   "test_wfs.py::TestGMLOnlyServerEndToEnd",

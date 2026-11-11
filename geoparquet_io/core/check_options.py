@@ -35,7 +35,7 @@ from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any
 
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
-from geoparquet_io.core.remote import RemoteOptions
+from geoparquet_io.core.remote import RemoteOptions, _caller_stacklevel
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -259,33 +259,17 @@ _SPELLINGS_BY_ENTRY_POINT: dict[str, dict[str, str]] = {
 }
 
 
-def _caller_stacklevel() -> int:
-    """Frames from :func:`_warn_deprecated_spellings` up to the code that called gpio.
+def _warn_deprecated_spellings(where: str, asked: Any) -> None:
+    """Warn once per process for each deprecated keyword *where* was given.
 
-    ``stacklevel`` is a count of frames, and the count differs by entry point:
+    The frame count comes from :func:`geoparquet_io.core.remote._caller_stacklevel`,
+    the one owner of that question: ``stacklevel`` differs by entry point --
     ``api/check.py``'s five path-level checks are wrapped by ``_one_file_only``,
     which puts a frame between the check and its caller, while ``Table``'s
-    methods are not. Either fixed number is wrong for the other half, and
-    ``gpio.check_all(sample_size=...)`` blamed ``api/check.py`` for the
-    caller's keyword. Counting frames until the first one outside
-    ``geoparquet_io`` is right for both doors, and stays right if another
-    wrapper is added.
+    methods are not -- and counting frames until the first one outside
+    ``geoparquet_io`` is right for both doors. A second copy here drifted from
+    the remote concern's and said the same thing twice.
     """
-    import sys
-
-    level = 1
-    frame: Any = sys._getframe(1)
-    while frame is not None:
-        name = frame.f_globals.get("__name__", "")
-        if name != "geoparquet_io" and not name.startswith("geoparquet_io."):
-            return level
-        level += 1
-        frame = frame.f_back
-    return level
-
-
-def _warn_deprecated_spellings(where: str, asked: Any) -> None:
-    """Warn once per process for each deprecated keyword *where* was given."""
     import warnings
 
     keywords = _SPELLINGS_BY_ENTRY_POINT.get(where, {})

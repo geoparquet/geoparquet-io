@@ -61,24 +61,22 @@ from geoparquet_io.core.duckdb_utils import (
     sql_path,
     uses_aws_profile,
 )
-from geoparquet_io.core.edges import is_nonplanar
+from geoparquet_io.core.edges import require_planar_export
 from geoparquet_io.core.exceptions import GeoParquetError
-from geoparquet_io.core.file_utils import (
-    get_all_parquet_files,
-    glob_matches,
-    has_glob_pattern,
-    resolve_file_url,
-)
+from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo,
     sanitized_carried_geo_of_file,
 )
-from geoparquet_io.core.geometry_repair import repair_geometry_sql
+from geoparquet_io.core.geometry_repair import (
+    repair_geometry_sql,
+    require_planar_export_file,
+)
 from geoparquet_io.core.logging_config import configure_verbose, debug, info, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import is_stdin
-from geoparquet_io.core.write_funnels import collect_nonplanar_edges, table_nonplanar_edges
+from geoparquet_io.core.write_funnels import table_nonplanar_edges
 
 # RFC 8142 record separator character
 RS = "\x1e"
@@ -88,58 +86,10 @@ RS = "\x1e"
 WGS84_CRS = "EPSG:4326"
 
 
-def _require_planar_geojson_edges(column: str, edges: str | None) -> None:
-    """Refuse an unsupported input contract before any planar export operation.
-
-    RFC 7946 section 3.1.1 gives GeoJSON Cartesian segments, not geodesics.
-    Skipping MakeValid still leaves planar precision reduction and, even with
-    both skipped, would silently change the meaning of the same coordinates.
-    The declaration decides this contract, including point-only or empty data.
-    """
-    if is_nonplanar(edges):
-        raise GeoParquetError(
-            f"GeoJSON export does not support non-planar edges. Column {column!r} "
-            f"declares {edges!r} edges. GeoJSON uses straight Cartesian segments. "
-            "Keep the data in GeoParquet, or use a geodesic-aware tool to densify "
-            "and cut the shapes into a planar representation before exporting. "
-            "Disabling geometry repair does not make this conversion safe."
-        )
-
-
-@uses_aws_profile
-def require_planar_geojson_file(
-    input_path: str,
-    geometry_column: str | None = None,
-    profile: str | None = None,
-) -> None:
-    """Check file edge declarations before GeoJSON or PMTiles preprocessing.
-
-    The column is the file's primary (the owner's answer, block included) for
-    direct GeoJSON and PMTiles alike, resolved under the same scoped profile
-    as the footer reads.
-    """
-    edges = {
-        column: algorithm
-        for path in _geojson_input_files(input_path)
-        for column, algorithm in collect_nonplanar_edges(path).items()
-    }
-    if not edges:
-        return
-    if geometry_column is None:
-        # The file's primary, block and typed columns both (#1367): the direct
-        # GeoJSON path and PMTiles ask the same question, of the first footer
-        # for a glob or a directory.
-        files = _geojson_input_files(input_path)
-        geometry_column = resolve_geometry_column(files[0] if files else input_path)
-    _require_planar_geojson_edges(geometry_column, edges.get(geometry_column))
-
-
-def _geojson_input_files(input_path: str) -> list[str]:
-    """Enumerate every footer so a planar-first glob cannot hide non-planar rows."""
-    if has_glob_pattern(input_path):
-        # Every match, not only `.parquet`: `*.pq` is a GeoParquet glob too.
-        return glob_matches(input_path)
-    return get_all_parquet_files(input_path)
+#: How the export refusal names this format, for RFC 7946 3.1.1's Cartesian
+#: segments. The refusal itself is ``edges.require_planar_export``, which
+#: GeoPackage, FlatGeobuf, Shapefile and CSV share (#1289).
+GEOJSON_EXPORT = "GeoJSON"
 
 
 def _encodes_utf8(stream: TextIO) -> bool:
@@ -803,7 +753,9 @@ def convert_to_geojson_stream(
         # The file's primary, with its `geo` block: a declared `footprint`
         # is the geometry even beside a `geometry` secondary (#1367).
         geometry_column = resolve_geometry_column(input_path, con=con)
-        require_planar_geojson_file(input_path, geometry_column)
+        require_planar_export_file(
+            input_path, target=GEOJSON_EXPORT, geometry_column=geometry_column
+        )
         debug(f"Using geometry column: {geometry_column}")
         if not keep_crs and not needs_reproject:
             _refuse_extent_outside_lonlat(input_path, geometry_column)
@@ -935,7 +887,7 @@ def _convert_from_stream(
     debug(f"Using geometry column: {geometry_column}")
 
     edges = table_nonplanar_edges(table, geometry_column, None).get(geometry_column)
-    _require_planar_geojson_edges(geometry_column, edges)
+    require_planar_export(GEOJSON_EXPORT, geometry_column, edges)
     _warn_on_explicit_null_crs(table, geometry_column)
     # --keep-crs writes the input coordinates, so the CRS is never resolved.
     source_crs = (

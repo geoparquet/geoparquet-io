@@ -109,6 +109,20 @@ Override the default strategy when needed:
 | Debugging output differences | `in-memory` to verify |
 | DuckDB issues with specific data | `streaming` |
 | Older tools can't read output | `disk-rewrite` |
+| Input holds a VARIANT column | `duckdb-kv` (default), on DuckDB 1.5 |
+
+### VARIANT columns on DuckDB 1.5
+
+`in-memory` and `streaming` hand the data to Arrow, and DuckDB 1.5 has no Arrow
+type for Parquet's `VARIANT` logical type, so a write of such a column on those
+strategies stops with a message naming the column. The default `duckdb-kv`
+strategy never crosses Arrow with the data and carries a `VARIANT` column
+through unchanged; DuckDB 2.0 exports it as the `arrow.parquet.variant`
+extension type, so every strategy works there.
+
+GeoParquet `1.1-geoarrow` output is written by the `streaming` strategy, so on
+DuckDB 1.5 it meets the same limit even when no `--write-strategy` was asked
+for.
 
 ## Memory Configuration
 

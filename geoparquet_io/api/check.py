@@ -27,6 +27,9 @@ from geoparquet_io.core.check_options import (
 if TYPE_CHECKING:
     from geoparquet_io.core.check_parquet_structure import CheckProfile
 
+#: One of the path-level checks, kept as itself through ``_one_file_only``.
+_Check = TypeVar("_Check", bound=Callable[..., "CheckResult"])
+
 
 def _asked(value: Any, default: Any) -> Any:
     """*value*, or None when it is still the signature's documented default.
@@ -39,10 +42,6 @@ def _asked(value: Any, default: Any) -> Any:
     ``s3_use_ssl=True`` (#1436).
     """
     return None if value == default else value
-
-
-#: One of the path-level checks, kept as itself through ``_one_file_only``.
-_Check = TypeVar("_Check", bound=Callable[..., "CheckResult"])
 
 
 @contextmanager

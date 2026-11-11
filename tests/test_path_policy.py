@@ -413,10 +413,10 @@ def test_partition_info_of_a_remote_glob_names_its_files(remote_parts):
     assert info["file_count"] == 2
 
 
-def test_the_geojson_sweep_reads_the_one_listing(remote_parts):
-    from geoparquet_io.core.geojson_stream import _geojson_input_files
+def test_the_export_sweep_reads_the_one_listing(remote_parts):
+    from geoparquet_io.core.geometry_repair import _export_input_files
 
-    assert _geojson_input_files(REMOTE_GLOB) == REMOTE_FILES
+    assert _export_input_files(REMOTE_GLOB) == REMOTE_FILES
 
 
 def test_check_of_a_remote_glob_checks_its_first_file(remote_parts):

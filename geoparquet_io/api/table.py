@@ -550,6 +550,10 @@ def _merge_write_options(options: object, arguments: dict[str, Any]) -> WriteOpt
     """``Table.write``'s one ``WriteOptions``: *options* with the write keywords merged in.
 
     *arguments* is the call's ``locals()``; a keyword left at None was not given.
+    The deprecated ``profile=`` is folded into ``remote=`` here rather than in
+    ``write`` itself, so the warning still names ``Table.write`` (the level is
+    counted, not fixed) and ``write`` keeps forwarding nothing but its own
+    signature.
     """
     if options is not None and not isinstance(options, WriteOptions):
         raise TypeError(
@@ -563,10 +567,28 @@ def _merge_write_options(options: object, arguments: dict[str, Any]) -> WriteOpt
         for f in dataclasses.fields(WriteOptions)
         if arguments[f.name] is not None
     }
+    # Both spellings still reach the store; naming the profile twice raises.
+    # `or None`: nothing asked for must not overwrite a `remote` in *options*.
+    wrote_profile = keywords.pop("profile", None)
+    remote = (
+        remote_options_from_keywords(
+            "Table.write", keywords.pop("remote", None), profile=wrote_profile
+        )
+        or None
+    )
+    if remote is not None:
+        keywords["remote"] = remote
+
     both = sorted(_asked_fields(base) & keywords.keys())
     if both:
+        # Named as the caller wrote it: `Table.write(profile=)` sets `remote`,
+        # and quoting the field sends them looking for a keyword their call
+        # does not have.
+        named = ", ".join(
+            "profile" if name == "remote" and wrote_profile is not None else name for name in both
+        )
         raise TypeError(
-            f"Table.write() got {', '.join(both)} both in options and as a keyword; "
+            f"Table.write() got {named} both in options and as a keyword; "
             "set each field in one place"
         )
     return dataclasses.replace(base, **keywords)
@@ -1331,13 +1353,9 @@ class Table:
             >>> table.write('output.dat', format='csv')    # Explicit format
             >>> table.write('out.parquet', gpio.WriteOptions(compression='GZIP'))
         """
-        # The deprecated `profile=` is folded into `remote=` here, so the
-        # warning names this method rather than `WriteOptions` (#1436). Both
-        # spellings still reach the store; naming the profile twice raises.
-        # `or None`: an empty value is "not asked", and must not overwrite a
-        # `remote` carried in `options`.
-        remote = remote_options_from_keywords("Table.write", remote, profile=profile) or None
-        profile = None
+        # The deprecated `profile=` is folded into `remote=` by the merge, so
+        # the warning names this method rather than `WriteOptions` (#1436) and
+        # nothing but this signature is forwarded.
         write = _merge_write_options(options, locals())
 
         # Above the format dispatch, so every format refuses a stale geometry
@@ -1388,7 +1406,7 @@ class Table:
         return self._write_format(
             path,
             detected_format,
-            profile=write.remote.profile,
+            remote=write.remote_access(),
             overwrite=overwrite,
             layer_name=layer_name,
             include_wkt=include_wkt,
@@ -1586,9 +1604,12 @@ class Table:
                 custom_metadata={"covering": carried_covering} if carried_covering else None,
             )
 
-            # Upload to remote if needed
+            # Upload to remote if needed. The whole `RemoteOptions` goes to the
+            # store, not just its profile: an endpoint, a region or `s3_use_ssl`
+            # read off it here and dropped sent a MinIO or source.coop object to
+            # AWS instead, silently (#1436 review).
             if is_remote:
-                upload(local_path, path_str, profile=write.remote.profile)
+                upload(local_path, path_str, remote=write.remote_access())
                 return PathLib(path)
 
             return local_path
@@ -1601,14 +1622,22 @@ class Table:
         self,
         path: str | Path,
         format: str,
-        profile: str | None,
+        remote: RemoteOptions,
         **format_options,
     ) -> Path:
-        """Write table to non-parquet format (handles local and cloud)."""
+        """Write table to non-parquet format (handles local and cloud).
+
+        *remote* travels whole to the upload, as it does on the GeoParquet path:
+        the GDAL writers only need the profile (they read the staged local
+        parquet), but the store the result is put in is decided by the endpoint,
+        the region and the SSL flag too (#1436 review).
+        """
         from pathlib import Path as PathLib
 
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload
+
+        profile = remote.profile
 
         # Check if destination is remote
         path_str = str(path)
@@ -1703,7 +1732,7 @@ class Table:
 
             # Upload to remote if needed
             if is_remote:
-                # profile= is passed explicitly to upload() below, so there is no
+                # remote= is passed explicitly to upload() below, so there is no
                 # AWS_PROFILE env mutation to leak into the host process.
                 # Special handling for shapefiles: zip all sidecars into .shp.zip
                 if format == "shapefile":
@@ -1717,7 +1746,7 @@ class Table:
                     upload(
                         source=zip_path,
                         destination=remote_zip_path,
-                        profile=profile,
+                        remote=remote,
                     )
 
                     # Return remote zip path (cleanup happens in finally)
@@ -1727,7 +1756,7 @@ class Table:
                     upload(
                         source=output_path,
                         destination=path_str,
-                        profile=profile,
+                        remote=remote,
                     )
                     # Return remote path, not local temp path
                     return PathLib(path_str)
