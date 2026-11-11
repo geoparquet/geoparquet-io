@@ -384,7 +384,7 @@ def _str_order_file_based(
     working_parquet, temp_file_created, temp_file = _prepare_working_file(
         input_parquet, add_bbox_flag, verbose
     )
-    validate_profile_for_urls(write.profile, input_parquet, output_parquet)
+    validate_profile_for_urls(write.remote_access().profile, input_parquet, output_parquet)
     show_remote_read_message(working_parquet, verbose)
 
     source = sql_path(resolve_file_url(working_parquet, verbose))

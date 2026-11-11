@@ -1463,19 +1463,25 @@ class TestTableUpload:
             assert call_args.kwargs["destination"] == "s3://test-bucket/test.parquet"
 
     def test_upload_with_s3_endpoint(self, sample_table):
-        """Test upload() with custom S3 endpoint."""
+        """Test upload() with custom S3 endpoint.
+
+        The endpoint travels as one ``RemoteOptions`` since #1436; the
+        deprecated per-keyword spelling still reaches it.
+        """
+        import geoparquet_io as gpio
+
         with patch("geoparquet_io.core.upload.upload") as mock_upload:
             mock_upload.return_value = None
 
             sample_table.upload(
                 "s3://test-bucket/test.parquet",
-                s3_endpoint="minio.example.com:9000",
-                s3_use_ssl=False,
+                remote=gpio.RemoteOptions(s3_endpoint="minio.example.com:9000", s3_use_ssl=False),
             )
 
             call_args = mock_upload.call_args
-            assert call_args.kwargs["s3_endpoint"] == "minio.example.com:9000"
-            assert call_args.kwargs["s3_use_ssl"] is False
+            assert call_args.kwargs["remote"] == gpio.RemoteOptions(
+                s3_endpoint="minio.example.com:9000", s3_use_ssl=False
+            )
 
     def test_upload_cleans_up_temp_file(self, sample_table):
         """Test that upload() cleans up temp file even on error."""

@@ -48,24 +48,24 @@ class TestGroupInvokedDirectly:
     primed ``ctx.obj``.
 
     The root ``cli`` group calls ``ctx.ensure_object(dict)``, so every real CLI
-    path arrives at ``_activate_s3`` with a dict. Invoking a group object
+    path arrives at ``activate_remote`` with a dict. Invoking a group object
     directly -- what tests and programmatic callers do -- skips the root, and
-    ``_activate_s3`` then hit ``None.get(...)``: ``process`` was the group with
-    no ``ensure_object`` of its own and four ``_activate_s3`` call sites
+    the helper then hit ``None.get(...)``: ``process`` was the group with
+    no ``ensure_object`` of its own and four activation call sites
     (#922 item 1). Making the helper enforce its own precondition covers every
     group, present and future, rather than the ten callbacks each remembering.
     """
 
-    def test_activate_s3_primes_an_unset_ctx_obj(self):
+    def test_activate_remote_primes_an_unset_ctx_obj(self):
         """The helper itself tolerates ``ctx.obj is None``."""
         import click
 
-        from geoparquet_io.cli._shared import _activate_s3
+        from geoparquet_io.cli._shared import activate_remote
 
         ctx = click.Context(click.Command("standalone"))
         assert ctx.obj is None
 
-        with _activate_s3(ctx):
+        with activate_remote(ctx):
             pass
 
         assert ctx.obj == {}

@@ -916,7 +916,7 @@ def partition_by_column(
             upload_if_remote(
                 actual_output,
                 output_folder,
-                profile=write.profile,
+                profile=write.remote.profile,
                 is_directory=True,
                 verbose=verbose,
             )

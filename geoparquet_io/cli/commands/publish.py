@@ -9,14 +9,16 @@ from pathlib import Path
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3, init_group_context
+from geoparquet_io.cli._shared import activate_remote, init_group_context
 from geoparquet_io.cli.decorators import (
-    aws_profile_option,
     dry_run_option,
     overwrite_option,
+    remote_options,
+    s3_endpoint_options,
     verbose_option,
 )
 from geoparquet_io.core.file_utils import get_all_parquet_files, handle_output_overwrite
+from geoparquet_io.core.remote import RemoteOptions
 from geoparquet_io.core.upload import check_credentials
 from geoparquet_io.core.upload import upload as upload_impl
 
@@ -206,7 +208,6 @@ def publish_stac(input, output, bucket, public_url, collection_id, item_id, over
 @publish.command(name="upload")
 @click.argument("source", type=click.Path(exists=True, path_type=Path))
 @click.argument("destination", type=str)
-@aws_profile_option
 @click.option("--pattern", help="Glob pattern for filtering files (e.g., '*.parquet', '**/*.json')")
 @click.option(
     "--max-files", default=4, show_default=True, help="Max parallel file uploads for directories"
@@ -219,38 +220,21 @@ def publish_stac(input, output, bucket, public_url, collection_id, item_id, over
 )
 @click.option("--chunk-size", type=int, help="Chunk size in bytes for multipart uploads")
 @click.option("--fail-fast", is_flag=True, help="Stop immediately on first error")
-@click.option(
-    "--s3-endpoint",
-    help="Custom S3-compatible endpoint (e.g., 'minio.example.com:9000')",
-    hidden=True,
-)
-@click.option(
-    "--s3-region",
-    help="S3 region (default: us-east-1 when using custom endpoint)",
-    hidden=True,
-)
-@click.option(
-    "--s3-no-ssl",
-    is_flag=True,
-    help="Disable SSL for S3 endpoint (use HTTP instead of HTTPS)",
-    hidden=True,
-)
+@s3_endpoint_options
 @verbose_option
 @dry_run_option
 @click.pass_context
+@remote_options
 def publish_upload(
     ctx,
     source,
     destination,
-    aws_profile,
+    remote,
     pattern,
     max_files,
     chunk_concurrency,
     chunk_size,
     fail_fast,
-    s3_endpoint,
-    s3_region,
-    s3_no_ssl,
     dry_run,
     verbose,
 ):
@@ -287,13 +271,7 @@ def publish_upload(
       # Stop on first error instead of continuing
       gpio publish upload output/ s3://bucket/dataset/ --fail-fast
     """
-    with _activate_s3(
-        ctx,
-        aws_profile=aws_profile,
-        s3_endpoint=s3_endpoint,
-        s3_region=s3_region,
-        s3_no_ssl=s3_no_ssl,
-    ) as s3_config:
+    with activate_remote(ctx, remote) as s3_config:
         # Check credentials before attempting upload
         creds_ok, hint = check_credentials(destination, s3_config.get("profile"))
         if not creds_ok:
@@ -302,14 +280,16 @@ def publish_upload(
         upload_impl(
             source=source,
             destination=destination,
-            profile=s3_config["profile"],
             pattern=pattern,
             max_files=max_files,
             chunk_concurrency=chunk_concurrency,
             chunk_size=chunk_size,
             fail_fast=fail_fast,
             dry_run=dry_run,
-            s3_endpoint=s3_config["s3_endpoint"],
-            s3_region=s3_config["s3_region"],
-            s3_use_ssl=s3_config["s3_use_ssl"],
+            remote=RemoteOptions(
+                profile=s3_config["profile"],
+                s3_endpoint=s3_config["s3_endpoint"],
+                s3_region=s3_config["s3_region"],
+                s3_use_ssl=s3_config["s3_use_ssl"],
+            ),
         )

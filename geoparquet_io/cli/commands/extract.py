@@ -8,7 +8,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 import click
 
 from geoparquet_io.cli._shared import (
-    _activate_s3,
+    activate_remote,
     create_default_group,
     init_group_context,
     prepare_output,
@@ -17,7 +17,6 @@ from geoparquet_io.cli.decorators import (
     ParquetInputCommand,
     SingleFileCommand,
     any_extension_option,
-    aws_profile_option,
     column_list_option,
     compression_options,
     dry_run_option,
@@ -27,6 +26,7 @@ from geoparquet_io.cli.decorators import (
     overwrite_option,
     pack_write_options,
     partition_input_options,
+    remote_options,
     repair_geometry_option,
     row_group_options,
     show_sql_option,
@@ -115,7 +115,7 @@ def extract(ctx):
 @dry_run_option
 @show_sql_option
 @verbose_option
-@aws_profile_option
+@remote_options
 @any_extension_option
 @click.pass_context
 @pack_write_options
@@ -139,7 +139,7 @@ def extract_geoparquet(
     dry_run,
     show_sql,
     verbose,
-    aws_profile,
+    remote,
     any_extension,
 ):
     """
@@ -211,7 +211,7 @@ def extract_geoparquet(
         \b
         # Remote file with spatial filter
         gpio extract s3://bucket/data.parquet output.parquet \\
-            --aws_profile my-aws \\
+            --aws-profile my-aws \\
             --bbox -122.5,37.5,-122.0,38.0
 
         \b
@@ -220,7 +220,7 @@ def extract_geoparquet(
     """
     prepare_output(output_file, any_extension)
 
-    with _activate_s3(ctx, aws_profile=aws_profile):
+    with activate_remote(ctx, remote):
         extract_impl(
             input_parquet=input_file,
             output_parquet=output_file,
@@ -333,7 +333,7 @@ def extract_geoparquet(
 @compression_options
 @row_group_options
 @any_extension_option
-@aws_profile_option
+@remote_options
 @show_sql_option
 @click.pass_context
 @pack_write_options
@@ -363,7 +363,7 @@ def extract_arcgis(
     repair_geometry,
     verbose,
     any_extension,
-    aws_profile,
+    remote,
     show_sql,
 ):
     """
@@ -429,7 +429,7 @@ def extract_arcgis(
     if not any_extension:
         validate_parquet_extension(output_file)
 
-    with _activate_s3(ctx, aws_profile=aws_profile):
+    with activate_remote(ctx, remote):
         convert_arcgis_to_geoparquet(
             service_url=service_url,
             output_file=output_file,
@@ -452,7 +452,7 @@ def extract_arcgis(
             timeout=timeout,
             **write.funnel_kwargs(),
             verbose=verbose,
-            profile=aws_profile,
+            profile=remote.profile,
             overwrite=overwrite,
             repair_geometry=repair_geometry,
         )
@@ -1132,7 +1132,7 @@ def extract_wfs_cmd(
 @repair_geometry_option
 @verbose_option
 @any_extension_option
-@aws_profile_option
+@remote_options
 @click.pass_context
 @pack_write_options
 def extract_carto_cmd(
@@ -1154,7 +1154,7 @@ def extract_carto_cmd(
     repair_geometry,
     verbose,
     any_extension,
-    aws_profile,
+    remote,
 ):
     """
     Extract Carto SQL API table to GeoParquet.
@@ -1209,7 +1209,7 @@ def extract_carto_cmd(
     # Validate .parquet extension
     validate_parquet_extension(output_file, any_extension)
 
-    with _activate_s3(ctx, aws_profile=aws_profile):
+    with activate_remote(ctx, remote):
         convert_carto_to_geoparquet(
             url=url,
             table_name=table_name,

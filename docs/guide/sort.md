@@ -37,7 +37,11 @@ The `sort` command reorders GeoParquet files for optimal performance and query e
     # With upload to S3
     gpio.read('https://example.com/data.parquet') \
         .sort_hilbert() \
-        .upload('s3://bucket/sorted.parquet', row_group_rows=49152, profile='prod')
+        .upload(
+            's3://bucket/sorted.parquet',
+            row_group_rows=49152,
+            remote=gpio.RemoteOptions(profile='prod'),
+        )
     ```
 
 Reorders rows using a [Hilbert space-filling curve](https://en.wikipedia.org/wiki/Hilbert_curve), which:

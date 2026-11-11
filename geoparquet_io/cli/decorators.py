@@ -29,6 +29,7 @@ from geoparquet_io.core.parquet_writer import (
     WriteOptions,
 )
 from geoparquet_io.core.process.aggregate.options import AggregateOptions
+from geoparquet_io.core.remote import RemoteOptions
 
 
 class ErrorBoundaryGroup(click.Group):
@@ -697,6 +698,82 @@ def aws_profile_option(func):
         help="AWS profile name for S3 operations",
         hidden=True,
     )(func)
+
+
+def s3_endpoint_options(func):
+    """Add the hidden per-command ``--s3-endpoint``/``--s3-region``/``--s3-no-ssl`` trio.
+
+    One definition, shared: a command that lets the caller point at an
+    S3-compatible store must spell these three exactly as the root ``gpio``
+    group does, or the same setting reads as two different features. The root
+    group's values travel in ``ctx.obj``; these override them for one command
+    (``cli._shared.activate_remote``).
+    """
+    func = click.option(
+        "--s3-no-ssl",
+        is_flag=True,
+        help="Disable SSL for S3 endpoint (use HTTP instead of HTTPS)",
+        hidden=True,
+    )(func)
+    func = click.option(
+        "--s3-region",
+        help="S3 region (default: us-east-1 when using custom endpoint)",
+        hidden=True,
+    )(func)
+    return click.option(
+        "--s3-endpoint",
+        help="Custom S3-compatible endpoint (e.g., 'minio.example.com:9000')",
+        hidden=True,
+    )(func)
+
+
+#: The Click parameters a command's remote-access flags arrive as; the packer takes
+#: them. ``profile`` is deliberately absent: ``gpio check --profile`` is a row-group
+#: size band and ``gpio benchmark --profile`` turns profiling on, and neither is a
+#: credential (see :meth:`RemoteOptions.from_cli`).
+REMOTE_OPTION_PARAMS = (
+    "aws_profile",
+    "s3_endpoint",
+    "s3_region",
+    "s3_no_ssl",
+)
+
+
+def pack_remote_options(func):
+    """Hand a command one ``remote`` (a ``RemoteOptions``) instead of its remote flags.
+
+    The remote-access twin of :func:`pack_write_options` (#1436). Each command
+    took ``aws_profile`` (and sometimes the ``s3_*`` trio) by name, forwarded
+    them by name into ``_activate_s3``, and then read the resolved values back
+    out of a dict -- four chances for a credential to be accepted and dropped.
+    The command now receives one value and passes it on whole:
+    ``with activate_remote(ctx, remote) as config:``.
+
+    Put it directly above the ``def``, below every Click option decorator. It
+    composes with the other packers in any order: each pops only its own
+    parameters and passes the rest through.
+
+    The root group's ``--aws-profile``/``--s3-*`` are *not* merged here -- they
+    arrive in ``ctx.obj``, and ``cli._shared.activate_remote`` is the one place
+    that layers the command's flags over them.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        params = {name: kwargs.pop(name) for name in REMOTE_OPTION_PARAMS if name in kwargs}
+        return func(*args, remote=RemoteOptions.from_cli(**params), **kwargs)
+
+    return wrapper
+
+
+def remote_options(func):
+    """Declare ``--aws-profile`` and hand the command one packed ``remote``.
+
+    The decorator a command that only needs an AWS profile applies; one that
+    also points at an S3-compatible store adds :func:`s3_endpoint_options`
+    above it.
+    """
+    return aws_profile_option(pack_remote_options(func))
 
 
 def bbox_option(func):

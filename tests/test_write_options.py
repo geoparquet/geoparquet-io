@@ -30,10 +30,11 @@ FUNNEL_FIELDS = (
     "geoparquet_version",
     "memory_limit",
 )
-FIELDS = (*FUNNEL_FIELDS, "write_strategy")
+FIELDS = (*FUNNEL_FIELDS, "write_strategy", "remote")
 
 
-def test_the_fields_are_the_funnel_keywords_and_the_strategy():
+def test_the_fields_are_the_funnel_keywords_the_strategy_and_the_remote_concern():
+    """``remote`` joined them in #1436; ``profile`` stays as its deprecated mirror."""
     assert tuple(f.name for f in dataclasses.fields(WriteOptions)) == FIELDS
 
 
@@ -44,7 +45,10 @@ def test_every_field_defaults_to_not_asked():
     ``compression="ZSTD"``: a `.csv` "written with ZSTD" was not refused, and the
     same codec set in the options and as a keyword raised no conflict.
     """
-    assert all(getattr(WriteOptions(), name) is None for name in FIELDS)
+    unset = WriteOptions()
+    assert all(getattr(unset, name) is None for name in FIELDS if name != "remote")
+    # `remote` is an empty RemoteOptions, not None: its own fields are the asks.
+    assert not unset.remote
 
 
 def test_it_is_frozen_and_keyword_only():
@@ -103,7 +107,7 @@ def test_pick_reads_the_fields_by_name_and_ignores_the_rest():
         "input_parquet": "in.parquet",
     }
     options = WriteOptions.pick(values)
-    assert options == WriteOptions(**{k: values[k] for k in FIELDS})
+    assert options == WriteOptions(**{k: values[k] for k in FIELDS if k in values})
     assert options.funnel_kwargs() == {k: values[k] for k in FUNNEL_FIELDS if values[k] is not None}
 
 

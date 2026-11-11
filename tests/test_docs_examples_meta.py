@@ -61,7 +61,11 @@ DOCS_ROOT = GUIDE_DIR.parent
 # no gpio command writes that declaration onto the seeded sample data, and
 # hand-building one inline would drown the two-line example it illustrates.
 # tests/test_skip_planar_repair_spherical_edges.py runs the real thing.
-MAX_SKIPPED_BLOCKS = 255
+# 255 -> 256: the `RemoteOptions` CLI example in remote-files.md (#1436). It
+# names an AWS profile, an S3-compatible endpoint and a bucket, so it needs
+# cloud credentials; its Python twin is runnable, because building the value is
+# the half of the pair that has no store in it.
+MAX_SKIPPED_BLOCKS = 256
 MIN_EXECUTED_BLOCKS = 217
 
 #: Looks like a command rather than prose or sample output.

@@ -76,7 +76,17 @@
 # request, plus 2 type-naming cases over an extension type).
 # +2: `sort str`, the sibling the Hilbert fix missed, on its CLI and Table
 # paths; its six-encoding matrix is `slow`.
-max_collected = 14828
+# +41, the remote-access options object (#1436): the second per-concern object
+# gets the same construction-time guard the write concern has. The value itself
+# and its CLI spellings (13), the one-place layering of the root group's flags
+# over a command's own and the flags reaching the store (6), the deprecated
+# `profile` on WriteOptions forwarding without warning twice (7), the API's
+# `remote=` on every migrated entry point and the keyword migration path (15).
+# +6, its review fixes: the whole object reaches the store on both remote write
+# paths (2), `remote=None` is admitted and normalized (1), the deprecation
+# blames the caller through either door (1), and a collision names the keyword
+# the caller wrote (2).
+max_collected = 14875
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

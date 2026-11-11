@@ -81,7 +81,7 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 
 
 def uses_aws_profile(func: _F) -> _F:
-    """Run ``func`` with its ``profile`` (or ``write.profile``) as the ambient AWS profile.
+    """Run ``func`` with its ``profile`` (or ``remote``/``write.remote``) as the ambient profile.
 
     The profile goes into :func:`s3_config_scope`, which DuckDB's
     ``credential_chain`` secret and the obstore store read explicitly. Nothing is
@@ -97,15 +97,20 @@ def uses_aws_profile(func: _F) -> _F:
     (``contextvars.copy_context().run``) if a worker opens an S3 connection.
     """
     signature = inspect.signature(func)
-    if "profile" not in signature.parameters and "write" not in signature.parameters:
-        raise TypeError(f"{func.__qualname__} has no 'profile' or 'write' parameter")
+    if not {"profile", "remote", "write"} & set(signature.parameters):
+        raise TypeError(f"{func.__qualname__} has no 'profile', 'remote' or 'write' parameter")
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         arguments = signature.bind_partial(*args, **kwargs).arguments
-        # A driver that takes the write options (parquet_writer.WriteOptions)
-        # carries the profile there instead of in a parameter of its own.
-        profile = arguments.get("profile") or getattr(arguments.get("write"), "profile", None)
+        # A driver that takes the remote options (remote.RemoteOptions), or the
+        # write options (parquet_writer.WriteOptions, which carries one since
+        # #1436), finds the profile there rather than in a parameter of its own.
+        profile = (
+            arguments.get("profile")
+            or getattr(arguments.get("remote"), "profile", None)
+            or getattr(getattr(arguments.get("write"), "remote", None), "profile", None)
+        )
         if not profile or not _any_s3_url(arguments.values()):
             return func(*args, **kwargs)
         with s3_config_scope({"profile": profile, "profile_from_env": False}):
