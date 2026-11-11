@@ -46,25 +46,27 @@ The older per-keyword spellings (`profile=`, `aws_profile=`, `s3_endpoint=`, `s3
 
 ### Tiling a remote file
 
-`gpio pmtiles create` and `gpio pmtiles pyramid` tile through a pipeline of child `gpio` processes, and a child process inherits none of the parent's resolved settings. The options are therefore re-stated on each child's command line as the root group's own flags, so one `--aws-profile` (or one `remote=`) reaches the parent's own reads of the input *and* every child in the pipeline ([#1452](https://github.com/geoparquet/geoparquet-io/issues/1452)):
+`gpio pmtiles create` and `gpio pmtiles pyramid` tile through a pipeline of child `gpio` processes, and a child process inherits none of the parent's resolved settings. The options are therefore re-stated on each child's command line as the root group's own flags, so one `--aws-profile` (or one `remote=`) reaches the parent's own reads of the input *and* every child in the pipeline ([#1452](https://github.com/geoparquet/geoparquet-io/issues/1452)).
+
+The input below is local so the example runs anywhere; the remote run is the same command with `s3://bucket/buildings.parquet` in its place, and the option is what carries your credentials to the input and through the pipeline:
 
 === "CLI"
 
-    <!-- doctest: skip="needs cloud credentials and tippecanoe" -->
+    <!-- doctest: needs-tippecanoe -->
     ```bash
-    gpio pmtiles create s3://bucket/buildings.parquet buildings.pmtiles \
+    gpio pmtiles create buildings.parquet buildings.pmtiles \
       --aws-profile prod --max-zoom 14
     ```
 
 === "Python"
 
-    <!-- doctest: skip="needs cloud credentials and tippecanoe" -->
+    <!-- doctest: needs-tippecanoe -->
     ```python
     import geoparquet_io as gpio
     from geoparquet_io.api import ops
 
     ops.create_pmtiles(
-        's3://bucket/buildings.parquet',
+        'buildings.parquet',
         'buildings.pmtiles',
         max_zoom=14,
         remote=gpio.RemoteOptions(profile='prod'),
