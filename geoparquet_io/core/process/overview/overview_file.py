@@ -364,6 +364,11 @@ def write_overview_file(
         geometry_column = primary_geometry_column(schema)
         # Staged beside the output and moved into place (file_utils.atomic_write).
         with atomic_write(output_path) as staged:
+            # The one writer cutting its own groups that does *not* call
+            # write_funnels.ensure_located_row_groups (CLAUDE.md, the write
+            # facade): this footer declares a row-group range per level, so a
+            # #1146 fold would falsify those boundaries -- and its inputs are
+            # aggregated rollups, always located, so there is nothing to fold.
             # OVERVIEWS_SPEC 4.5: no dictionary encoding on the geometry.
             with open_parquet_writer(
                 staged,
