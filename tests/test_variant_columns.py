@@ -254,3 +254,113 @@ class TestVariantThroughArrowSchemaProbes:
         finally:
             con.close()
         assert isinstance(metadata, dict)
+
+
+class TestArrowExportRefusal:
+    """#1370: the strategies that export the *data* name the column and the way out.
+
+    #1362 rescued the LIMIT-0 schema probe, so the default duckdb-kv strategy
+    round-trips a VARIANT column on both DuckDB versions (``TestExtractRoundTrip``
+    above). ``streaming`` and ``in-memory`` hand the data itself to Arrow, and on
+    1.5 that raised a bare ``OSError: Not implemented Error: Unsupported Arrow
+    type VARIANT`` -- an unhandled traceback naming neither the column nor a way
+    out. DuckDB 2.0 exports VARIANT for real, so the same writes work there;
+    these pin "nobody sees a raw OSError" on both, and the message only where
+    the export is genuinely missing.
+    """
+
+    needs_15 = pytest.mark.skipif(
+        _arrow_can_export_variant(),
+        reason="this DuckDB exports VARIANT over Arrow; there is nothing to refuse",
+    )
+
+    @pytest.mark.parametrize("strategy", ["streaming", "in-memory"])
+    def test_an_arrow_strategy_names_the_variant_column(self, variant_file, strategy, tmp_path):
+        from geoparquet_io.core.exceptions import VariantExportError
+
+        out = tmp_path / "out.parquet"
+        if _arrow_can_export_variant():
+            extract(variant_file, str(out))
+            assert out.exists()
+            return
+
+        with pytest.raises(VariantExportError) as excinfo:
+            extract(variant_file, str(out), write_strategy=strategy)
+
+        message = str(excinfo.value)
+        assert "properties" in message
+        assert "VARIANT" in message
+        assert strategy in message
+        # Both ways out, named: the strategy that works here, and the DuckDB
+        # that exports VARIANT for real.
+        assert "duckdb-kv" in message
+        assert "2.0" in message
+
+    @needs_15
+    def test_the_refusal_is_a_gpio_error_the_cli_translates(self, variant_file, tmp_path):
+        """``error_boundary`` claims ``GeoParquetError``; an OSError is a traceback."""
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        out = tmp_path / "out.parquet"
+        with pytest.raises(GeoParquetError):
+            extract(variant_file, str(out), write_strategy="streaming")
+
+        cli_out = tmp_path / "cli.parquet"
+        result = CliRunner().invoke(
+            cli,
+            ["extract", "geoparquet", variant_file, str(cli_out), "--write-strategy", "streaming"],
+        )
+        assert result.exit_code != 0
+        assert not isinstance(result.exception, OSError)
+        assert "properties" in result.output
+
+    def test_the_automatic_geoarrow_route_says_which_version_needs_it(self, variant_file, tmp_path):
+        """1.1-geoarrow picks the streaming strategy itself, so name the version too."""
+        from geoparquet_io.core.exceptions import VariantExportError
+
+        out = tmp_path / "out.parquet"
+        if _arrow_can_export_variant():
+            extract(variant_file, str(out), geoparquet_version="1.1-geoarrow")
+            assert out.exists()
+            return
+
+        with pytest.raises(VariantExportError) as excinfo:
+            extract(variant_file, str(out), geoparquet_version="1.1-geoarrow")
+
+        assert "1.1-geoarrow" in str(excinfo.value)
+
+    @needs_15
+    def test_a_non_variant_arrow_failure_is_not_claimed(self):
+        """The guard re-raises anything else untouched, as the probe's check does."""
+        from geoparquet_io.core.duckdb_utils import variant_export_guard
+
+        with (
+            pytest.raises(OSError, match="unrelated arrow failure"),
+            variant_export_guard(None, "SELECT 1", strategy="streaming"),
+        ):
+            raise OSError("some unrelated arrow failure")
+
+    def test_variant_columns_names_only_the_variant_ones(self):
+        from geoparquet_io.core.duckdb_utils import variant_columns
+
+        con = get_duckdb_connection(load_spatial=False)
+        try:
+            found = variant_columns(
+                con,
+                "SELECT 1 AS id, {'variant_id': 7} AS attrs, '1'::JSON::VARIANT AS props, "
+                "['1'::JSON::VARIANT] AS many",
+            )
+        finally:
+            con.close()
+        assert found == ["props", "many"]
+
+    def test_empty_columns_message_stays_grammatical(self):
+        """No column name to give still reads as one sentence, not "Columns a column hold"."""
+        from geoparquet_io.core.exceptions import VariantExportError
+
+        message = str(VariantExportError([], "streaming", None, "1.5.6"))
+        assert "Columns a column hold" not in message
+        assert message.startswith("A column holds VARIANT values")
