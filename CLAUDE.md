@@ -304,7 +304,7 @@ copies or compatibility wrappers. The guard set is in ADR-0008 and
 | Geo block decoding | `geoparquet_io/core/geo_metadata.py` | `read_raw_geo`, `sanitized_carried_geo`, `declared_version` |
 | Geo block composition and covering | `geoparquet_io/core/geo_metadata.py`, `geoparquet_io/core/bbox_structure.py` | `compose_geo_block`, `GeoBlockOptions`, `build_bbox_covering`, `bbox_struct_child_names_match`, `covering_bbox_refs` |
 | Geometry statistics and bounds | `geoparquet_io/core/geo_metadata.py` | `geometry_stats_of`, `bounds_of`, `geometry_types_of`, `merged_geometry_stats`, `bbox_xy` |
-| Non-planar edges | `geoparquet_io/core/edges.py` | `detect_edges`, `edges_for_version`, `carry_edges`, `representative_point_sql`, `geoarrow_type_edges` |
+| Non-planar edges | `geoparquet_io/core/edges.py`, `geoparquet_io/core/geometry_repair.py` | `detect_edges`, `edges_for_version`, `carry_edges`, `representative_point_sql`, `geoarrow_type_edges`, `require_planar_export`, `require_planar_export_file` |
 | Geometry identity and read expressions | `geoparquet_io/core/geometry_detection.py` | `primary_geometry_column`, `resolve_geometry_column`, `resolve_geometry_read`, `require_geometry_column`, `create_geometry_view` |
 | CRS | `geoparquet_io/core/crs_utils.py` | `crs_of`, `is_geographic`, `is_projected`, `crs_equal`, `projjson_for_label`, `load_crs` |
 | Memory ceilings and byte sizes | `geoparquet_io/core/memory_limits.py`, `geoparquet_io/core/sizing.py` | `open_bounded_connection`, `scoped_write_memory_limit`, `parse_size_string`, `format_size`, `format_memory_limit`, `mb_to_bytes` |

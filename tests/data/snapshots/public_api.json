@@ -373,6 +373,7 @@
     "representative_point_sql",
     "requested_edges",
     "requests_planar",
+    "require_planar_export",
     "set_edges",
     "state_edges",
     "strip_edges",

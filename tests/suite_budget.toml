@@ -51,7 +51,16 @@
 # +1 (#1146): the repair re-encodes at the caller's row-group size, not the
 # facade default -- an unthreaded size cost 87.5 MB against 9.4 MB peak, and no
 # output assertion can see it. Sub-second.
-max_collected = 14707
+# +48 (#1289): the planar-only export refusal is one policy asked by five
+# formats through four doors, so its cases are the matrix -- the two carriers,
+# the planar control, the overwrite, the glob, the CLI, ops and Table.write
+# (46) -- plus overview's planar-math warning and its planar control (2).
+# +7 (#1289 review): the edges of that refusal -- an attribute-only CSV
+# (`--no-wkt`) through the core writer and the CLI (2), a declaration naming a
+# column the schema lacks (1), a block key spelled in another case (1), the
+# keyword-only target (1), and the repair-opt-out sentence present for GeoJSON
+# and absent elsewhere (2).
+max_collected = 14762
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

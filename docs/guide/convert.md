@@ -153,6 +153,32 @@ Convert GeoParquet to other formats with automatic format detection:
     table.write('output.dat', format='csv')
     ```
 
+### Non-planar Edges Are Not Exportable
+
+Every format gpio exports to — GeoPackage, FlatGeobuf, Shapefile, CSV and
+GeoJSON — gives the segment between two vertices straight Cartesian
+interpretation, and none of them has a place to record anything else. Exporting
+a geometry column that declares non-planar edges (`edges: spherical` or an
+ellipsoidal algorithm in the `geo` block, a native Parquet `GEOGRAPHY` type, or
+a GeoArrow edge type) would therefore drop the declaration and silently change
+what the coordinates mean: a ring around the pole stops being the polar region
+and becomes a degenerate collinear one.
+
+gpio refuses the export instead, before any output is written or overwritten.
+The check reads every file of a glob or directory input, so a planar first file
+cannot hide a later declaration, and it applies to the CLI, `Table.write()`,
+`Table.to_geojson()` and the `ops.convert_to_*` functions alike. An explicit
+`edges: planar` in the `geo` block, or an `edges` value gpio does not
+recognize, is no declaration it can honor and exports as before. So does
+`gpio convert csv --no-wkt`, which leaves the geometry column out of the CSV
+altogether: an attribute-only export carries no coordinates, so there is no
+edge interpretation for it to lose.
+
+Keep non-planar data in GeoParquet, or first use a geodesic-aware tool to
+densify and cut the shapes into a planar representation; gpio does not yet
+provide that conversion. Removing the declaration on its own changes the
+geometry's meaning rather than preserving it.
+
 ### Format-Specific Options
 
 GeoPackage, FlatGeobuf and Shapefile layers cannot hold nested columns, so
