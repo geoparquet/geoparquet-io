@@ -13,11 +13,6 @@ import click
 from click.core import ParameterSource
 
 from geoparquet_io.cli.exception_handler import click_error_for, error_boundary, error_text
-from geoparquet_io.core.check_options import (
-    DEFAULT_SPATIAL_LIMIT_ROWS,
-    DEFAULT_SPATIAL_SAMPLE_PAIRS,
-    CheckOptions,
-)
 from geoparquet_io.core.compression import (
     ACCEPTED_CODEC_NAMES,
     ALLOWED_CODECS,
@@ -1225,8 +1220,16 @@ def spatial_sample_options(func):
 
     Both defaults come from ``core.check_options``, the one owner of the
     numbers, so the Click default and the Python API's resolved default cannot
-    drift apart.
+    drift apart. Fetched inside the function, as ``check_profile_option`` fetches
+    ``CheckProfile``: ``core.check_options`` reaches ``check_bbox_values`` and
+    duckdb behind it, and importing this module is how ``gpio --help`` picks a
+    command.
     """
+    from geoparquet_io.core.check_options import (
+        DEFAULT_SPATIAL_LIMIT_ROWS,
+        DEFAULT_SPATIAL_SAMPLE_PAIRS,
+    )
+
     func = click.option(
         "--limit-rows",
         default=DEFAULT_SPATIAL_LIMIT_ROWS,
@@ -1258,6 +1261,8 @@ def pack_check_options(func):
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        from geoparquet_io.core.check_options import CheckOptions
+
         params = {name: kwargs.pop(name) for name in CHECK_OPTION_PARAMS if name in kwargs}
         return func(*args, check=CheckOptions.from_cli(**params), **kwargs)
 

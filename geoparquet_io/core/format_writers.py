@@ -53,6 +53,7 @@ from geoparquet_io.core.geometry_detection import (
     require_geometry_column,
     resolve_geometry_read,
 )
+from geoparquet_io.core.geometry_repair import require_planar_export_file
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import (
@@ -439,6 +440,13 @@ def write_gdal_format(
 
     validate_profile_for_urls(profile, input_path)
 
+    # GeoPackage, FlatGeobuf and Shapefile geometry is planar (OGC SFS): there
+    # is nowhere in any of them to say that a segment is a geodesic, so the
+    # declaration would be dropped and the same coordinates would mean a
+    # different shape. Refused before anything is written, as GeoJSON is
+    # (#1289).
+    require_planar_export_file(input_path, target=str(config["description"]), profile=profile)
+
     handle_output_overwrite(output_path, overwrite, remove=False)
 
     validate_output_path(output_path, verbose)
@@ -627,9 +635,17 @@ def write_csv(
     if is_remote_url(output_path):
         raise InvalidParameterError("output_path", ERROR_REMOTE_OUTPUT.format(format="CSV"))
 
+    validate_profile_for_urls(profile, input_path)
+
+    # The geometry leaves as WKT, which says no more about edge interpolation
+    # than GeoJSON does, so a non-planar column is refused here too (#1289).
+    # `--no-wkt` leaves the geometry column out of the SELECT entirely, so that
+    # export carries no coordinates and no edge interpretation to lose.
+    if include_wkt:
+        require_planar_export_file(input_path, target="CSV", profile=profile)
+
     handle_output_overwrite(output_path, overwrite, remove=False)
 
-    validate_profile_for_urls(profile, input_path)
     validate_output_path(output_path, verbose)
 
     progress(f"Converting to CSV: {output_path}")

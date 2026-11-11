@@ -177,8 +177,9 @@ Its fields are the band (`profile`), the sample bounds (`sample_rows`,
 `all_rows`, `random_sample_size`, `limit_rows`, `spec_sample_size`), the repair
 selection (`fix`, `checks`, `fix_output`, `no_backup`, `overwrite`) and
 `remote`, the one [`gpio.RemoteOptions`](remote-files.md) that owns how the file
-is reached. Each field defaults to `None`, "not asked", and the object then
-answers with the same default the matching CLI flag declares.
+is reached — it is activated for the check's duration, so a profile set there
+is the one the read uses. Each field defaults to `None`, "not asked", and the
+object then answers with the same default the matching CLI flag declares.
 
 `--verbose`, `--strict`, `--all-files` and `--sample-files` are *not* check
 options: the first two are output and exit-status policy, and the last two

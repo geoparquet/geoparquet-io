@@ -486,12 +486,40 @@ def remote_options_from_keywords(
     fields_asked = {_KEYWORD_FIELDS[name]: value for name, value in asked.items()}
     both = sorted(fields_asked.keys() & base.asked())
     if both:
+        # Named as the caller wrote it: `read_partition(aws_profile=)` sets
+        # `profile`, and quoting the field sends them looking for a keyword
+        # their call does not have.
+        named = ", ".join(sorted(name for name in asked if _KEYWORD_FIELDS[name] in both))
         raise TypeError(
-            f"{where}() got {', '.join(both)} both in remote= and as a keyword; "
-            "set each field in one place"
+            f"{where}() got {named} both in remote= and as a keyword; set each field in one place"
         )
     _warn_deprecated_spellings(where, asked)
     return base.merge(RemoteOptions.pick(fields_asked))
+
+
+def _caller_stacklevel() -> int:
+    """Frames from :func:`_warn_deprecated_spellings` up to the code that called gpio.
+
+    ``stacklevel`` is a count of frames, and the count differs by entry point:
+    ``Table.write`` and ``gpio.convert`` call
+    :func:`remote_options_from_keywords` themselves, while
+    ``WriteOptions(profile=...)`` reaches it through the dataclass's generated
+    ``__init__`` and ``__post_init__`` -- two frames further down, so a fixed
+    level blamed ``<string>``, the generated ``__init__``, for the caller's
+    keyword. Counting frames until the first one outside ``geoparquet_io`` is
+    right for every door, and stays right if another is added.
+    """
+    import sys
+
+    level = 1
+    frame: Any = sys._getframe(1)
+    while frame is not None:
+        name = frame.f_globals.get("__name__", "")
+        if name != "geoparquet_io" and not name.startswith("geoparquet_io."):
+            return level
+        level += 1
+        frame = frame.f_back
+    return level
 
 
 def _warn_deprecated_spellings(where: str, asked: Iterable[str]) -> None:
@@ -501,6 +529,7 @@ def _warn_deprecated_spellings(where: str, asked: Iterable[str]) -> None:
     old keyword: ``gpio.read_partition(aws_profile=...)`` becomes
     ``remote=gpio.RemoteOptions(profile=...)``.
     """
+    stacklevel = _caller_stacklevel()
     for name in sorted(asked):
         key = f"{where}.{name}"
         if key in _warned_spellings:
@@ -511,7 +540,7 @@ def _warn_deprecated_spellings(where: str, asked: Iterable[str]) -> None:
             f"minor release; pass "
             f"remote=gpio.RemoteOptions({_KEYWORD_FIELDS[name]}=...) instead",
             DeprecationWarning,
-            stacklevel=4,
+            stacklevel=stacklevel,
         )
 
 

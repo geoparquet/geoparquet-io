@@ -551,6 +551,10 @@ def _merge_write_options(options: object, arguments: dict[str, Any]) -> WriteOpt
     """``Table.write``'s one ``WriteOptions``: *options* with the write keywords merged in.
 
     *arguments* is the call's ``locals()``; a keyword left at None was not given.
+    The deprecated ``profile=`` is folded into ``remote=`` here rather than in
+    ``write`` itself, so the warning still names ``Table.write`` (the level is
+    counted, not fixed) and ``write`` keeps forwarding nothing but its own
+    signature.
     """
     if options is not None and not isinstance(options, WriteOptions):
         raise TypeError(
@@ -564,10 +568,28 @@ def _merge_write_options(options: object, arguments: dict[str, Any]) -> WriteOpt
         for f in dataclasses.fields(WriteOptions)
         if arguments[f.name] is not None
     }
+    # Both spellings still reach the store; naming the profile twice raises.
+    # `or None`: nothing asked for must not overwrite a `remote` in *options*.
+    wrote_profile = keywords.pop("profile", None)
+    remote = (
+        remote_options_from_keywords(
+            "Table.write", keywords.pop("remote", None), profile=wrote_profile
+        )
+        or None
+    )
+    if remote is not None:
+        keywords["remote"] = remote
+
     both = sorted(_asked_fields(base) & keywords.keys())
     if both:
+        # Named as the caller wrote it: `Table.write(profile=)` sets `remote`,
+        # and quoting the field sends them looking for a keyword their call
+        # does not have.
+        named = ", ".join(
+            "profile" if name == "remote" and wrote_profile is not None else name for name in both
+        )
         raise TypeError(
-            f"Table.write() got {', '.join(both)} both in options and as a keyword; "
+            f"Table.write() got {named} both in options and as a keyword; "
             "set each field in one place"
         )
     return dataclasses.replace(base, **keywords)
@@ -1332,13 +1354,9 @@ class Table:
             >>> table.write('output.dat', format='csv')    # Explicit format
             >>> table.write('out.parquet', gpio.WriteOptions(compression='GZIP'))
         """
-        # The deprecated `profile=` is folded into `remote=` here, so the
-        # warning names this method rather than `WriteOptions` (#1436). Both
-        # spellings still reach the store; naming the profile twice raises.
-        # `or None`: an empty value is "not asked", and must not overwrite a
-        # `remote` carried in `options`.
-        remote = remote_options_from_keywords("Table.write", remote, profile=profile) or None
-        profile = None
+        # The deprecated `profile=` is folded into `remote=` by the merge, so
+        # the warning names this method rather than `WriteOptions` (#1436) and
+        # nothing but this signature is forwarded.
         write = _merge_write_options(options, locals())
 
         # Above the format dispatch, so every format refuses a stale geometry
@@ -1389,7 +1407,7 @@ class Table:
         return self._write_format(
             path,
             detected_format,
-            profile=write.remote.profile,
+            remote=write.remote_access(),
             overwrite=overwrite,
             layer_name=layer_name,
             include_wkt=include_wkt,
@@ -1587,9 +1605,12 @@ class Table:
                 custom_metadata={"covering": carried_covering} if carried_covering else None,
             )
 
-            # Upload to remote if needed
+            # Upload to remote if needed. The whole `RemoteOptions` goes to the
+            # store, not just its profile: an endpoint, a region or `s3_use_ssl`
+            # read off it here and dropped sent a MinIO or source.coop object to
+            # AWS instead, silently (#1436 review).
             if is_remote:
-                upload(local_path, path_str, profile=write.remote.profile)
+                upload(local_path, path_str, remote=write.remote_access())
                 return PathLib(path)
 
             return local_path
@@ -1602,14 +1623,22 @@ class Table:
         self,
         path: str | Path,
         format: str,
-        profile: str | None,
+        remote: RemoteOptions,
         **format_options,
     ) -> Path:
-        """Write table to non-parquet format (handles local and cloud)."""
+        """Write table to non-parquet format (handles local and cloud).
+
+        *remote* travels whole to the upload, as it does on the GeoParquet path:
+        the GDAL writers only need the profile (they read the staged local
+        parquet), but the store the result is put in is decided by the endpoint,
+        the region and the SSL flag too (#1436 review).
+        """
         from pathlib import Path as PathLib
 
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload
+
+        profile = remote.profile
 
         # Check if destination is remote
         path_str = str(path)
@@ -1704,7 +1733,7 @@ class Table:
 
             # Upload to remote if needed
             if is_remote:
-                # profile= is passed explicitly to upload() below, so there is no
+                # remote= is passed explicitly to upload() below, so there is no
                 # AWS_PROFILE env mutation to leak into the host process.
                 # Special handling for shapefiles: zip all sidecars into .shp.zip
                 if format == "shapefile":
@@ -1718,7 +1747,7 @@ class Table:
                     upload(
                         source=zip_path,
                         destination=remote_zip_path,
-                        profile=profile,
+                        remote=remote,
                     )
 
                     # Return remote zip path (cleanup happens in finally)
@@ -1728,7 +1757,7 @@ class Table:
                     upload(
                         source=output_path,
                         destination=path_str,
-                        profile=profile,
+                        remote=remote,
                     )
                     # Return remote path, not local temp path
                     return PathLib(path_str)
@@ -3207,15 +3236,27 @@ class Table:
             return self._with_temp_file(func, *args, **kwargs)
         return self._check_file(func, *args, **kwargs)[0]
 
-    def _run_check(self, check: Callable[..., CheckResult], **kwargs: Any) -> CheckResult:
+    def _run_check(
+        self,
+        check: Callable[..., CheckResult],
+        *,
+        reach: CheckOptions | None = None,
+        **kwargs: Any,
+    ) -> CheckResult:
         """Run a path-level check from ``api/check.py`` through :meth:`_check_file`.
 
         Without the path functions' one-file refusal: a Table read from a
         directory hands it to core, which measures the dataset, as before #1090.
-        """
-        from geoparquet_io.api.check import CheckResult
 
-        result, source = self._check_file(getattr(check, "__wrapped__", check), **kwargs)
+        *reach* is the ``CheckOptions`` whose ``remote`` says how to reach the
+        file. Calling ``__wrapped__`` steps around the path function's own
+        activation, so this is the one place a ``Table`` check activates it
+        (#1436); a method with no options to pass leaves it unset.
+        """
+        from geoparquet_io.api.check import CheckResult, _reaching
+
+        with _reaching(reach):
+            result, source = self._check_file(getattr(check, "__wrapped__", check), **kwargs)
         return CheckResult(result.to_dict(), check_type=result.check_type, source_path=source)
 
     def _with_temp_io_files(self, func, **kwargs) -> pa.Table:
@@ -3335,6 +3376,7 @@ class Table:
         )
         return self._run_check(
             check._check_spatial_order,
+            reach=asked,
             sample_size=asked.resolved_random_sample_size(),
             limit_rows=asked.resolved_limit_rows(),
         )
@@ -3440,7 +3482,7 @@ class Table:
             sample_rows=None if sample_rows == DEFAULT_BBOX_SAMPLE_ROWS else sample_rows,
             all_rows=_asked_true(all_rows),
         )
-        return self._run_check(check.check_bbox, options=asked)
+        return self._run_check(check.check_bbox, reach=asked, options=asked)
 
     def check_row_groups(
         self,
@@ -3473,7 +3515,7 @@ class Table:
         from geoparquet_io.core.check_options import check_options_from_keywords
 
         asked = check_options_from_keywords("Table.check_row_groups", options, profile=profile)
-        return self._run_check(check.check_row_groups, options=asked)
+        return self._run_check(check.check_row_groups, reach=asked, options=asked)
 
     def check_bloom_filters(self) -> CheckResult:
         """
@@ -3652,16 +3694,19 @@ class Table:
             }
             apply_all_fixes(path, target, plan, verbose=verbose)
 
-        if output is not None:
-            self._run_on_one_file(repair, os.fspath(output))
-            return read(output)
-        target = scratch_path(prefix="gpio_fix_")
-        try:
-            self._run_on_one_file(repair, target)
-            # Read with pyarrow, not read(): the Table must not be a view of a scratch file.
-            return Table(pq.read_table(target), geometry_column=self._geometry_column)
-        finally:
-            unlink_released_file(Path(target))
+        # One activation for the whole repair: the checks, the rewrite and the
+        # read-back all reach the store the way ``plan_options.remote`` asks.
+        with check._reaching(plan_options):
+            if output is not None:
+                self._run_on_one_file(repair, os.fspath(output))
+                return read(output)
+            target = scratch_path(prefix="gpio_fix_")
+            try:
+                self._run_on_one_file(repair, target)
+                # Read with pyarrow, not read(): the Table must not be a view of a scratch file.
+                return Table(pq.read_table(target), geometry_column=self._geometry_column)
+            finally:
+                unlink_released_file(Path(target))
 
     def add_admin_divisions(
         self,

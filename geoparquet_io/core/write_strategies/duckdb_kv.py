@@ -57,8 +57,10 @@ from geoparquet_io.core.parquet_writer import (
 from geoparquet_io.core.remote import is_remote_url, upload_if_remote
 from geoparquet_io.core.write_strategies.base import (
     BaseWriteStrategy,
+    geoarrow_encoding_of,
     resolve_geometry_columns,
     type_crs_for,
+    with_declared_primary_encoding,
     wrap_query_with_secondary_crs,
     written_block_encoding,
 )
@@ -129,29 +131,6 @@ def _plain_wkb_for_secondary_columns(
     return _canonicalize_wkb_columns(
         table, sorted(secondaries), verbose, native_columns={geometry_column}
     )
-
-
-def _with_declared_primary_encoding(
-    table, geometry_column: str, geometry_info: dict | None
-) -> dict | None:
-    """``geometry_info`` naming the encoding the table declares for its primary.
-
-    At 1.1-geoarrow the primary passes through untouched, so the encoding this
-    write produces is the one the table's ``geo`` key declares. The composer
-    reads it from ``geometry_info`` -- convert's witness -- because the carried
-    block reaching it has its step keys stripped; without it the block said
-    ``WKB`` over a coordinate struct. The list depth alone cannot say it:
-    ``multipoint`` and ``linestring`` are both ``STRUCT(x, y)[]``.
-    """
-    declared = (sanitized_carried_geo(table.schema.metadata).get("columns") or {}).get(
-        geometry_column
-    )
-    encoding = declared.get("encoding") if isinstance(declared, dict) else None
-    if not encoding:
-        return geometry_info
-    info = geometry_info or {"secondary": [], "metadata": {}}
-    metadata = {**(info.get("metadata") or {}), geometry_column: {"encoding": encoding}}
-    return {**info, "primary": geometry_column, "metadata": metadata}
 
 
 def _table_query_with_native_geometry(
@@ -598,7 +577,15 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         )
 
         if effective_version == "1.1-geoarrow":
-            geometry_info = _with_declared_primary_encoding(table, geometry_column, geometry_info)
+            # The encoding the table's own block declares for the primary, which
+            # passes through untouched at this version (#1437, #1438).
+            geometry_info = with_declared_primary_encoding(
+                geometry_info,
+                geometry_column,
+                geoarrow_encoding_of(
+                    table.schema, geometry_column, sanitized_carried_geo(table.schema.metadata)
+                ),
+            )
 
         if effective_version in ("1.0", "1.1"):
             table = _plain_wkb_for_secondary_columns(
