@@ -899,7 +899,8 @@ write keyword merges into it, and setting one field both ways is a `TypeError`.
 Every field defaults to `None`, "not asked": the write resolves an unset
 `compression` to ZSTD and an unset `write_strategy` to auto (`duckdb-kv` here).
 A field set to anything else, ZSTD included, counts as asked: a non-Parquet
-format refuses it.
+format refuses it. `memory_limit` caps the write's DuckDB work on every
+strategy.
 
 **`RemoteOptions`**
 
@@ -919,8 +920,8 @@ gpio.read('data.parquet').write('s3://bucket/data.parquet', remote=remote)
 The older per-keyword spellings (`profile=`, `aws_profile=`, `s3_endpoint=`,
 `s3_region=`, `s3_use_ssl=`) still work and still reach the store, warn once per
 process, and will be removed in the next minor release. Naming a field both ways
-raises `TypeError`.
-`memory_limit` caps the write's DuckDB work on every strategy.
+raises `TypeError`. Every field travels to the store together, so an endpoint
+and a region reach the upload as well as the read.
 
 === "CLI"
 

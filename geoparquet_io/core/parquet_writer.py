@@ -1374,7 +1374,11 @@ class WriteOptions:
         remote: How the destination's object store is reached, as one
             :class:`gpio.RemoteOptions <geoparquet_io.core.remote.RemoteOptions>`
             (profile, S3 endpoint, region, SSL). Not a layout field: it does not
-            change the written bytes.
+            change the written bytes. ``None`` is accepted -- a caller that
+            forwards its own ``remote=`` by name passes it -- and normalized to
+            an empty ``RemoteOptions()`` by ``__post_init__``, so a reader that
+            wants the value without restating that takes
+            :meth:`remote_access`.
         geoparquet_version: Output version; None preserves or auto-detects.
         memory_limit: DuckDB memory cap for the write's DuckDB work, on every
             strategy (e.g. ``"2GB"``); None takes gpio's default.
@@ -1391,7 +1395,7 @@ class WriteOptions:
     geoparquet_version: str | None = None
     memory_limit: str | None = None
     write_strategy: str | None = None
-    remote: RemoteOptions = RemoteOptions()
+    remote: RemoteOptions | None = RemoteOptions()
 
     def __post_init__(self) -> None:
         """Reconcile the deprecated ``profile`` field with ``remote`` (#1436).
@@ -1425,6 +1429,16 @@ class WriteOptions:
                 f"remote=RemoteOptions(profile={self.remote.profile!r}); "
                 "set the AWS profile in one place"
             )
+
+    def remote_access(self) -> RemoteOptions:
+        """``remote``, never None: how the destination's object store is reached.
+
+        The field's annotation admits ``None`` because a caller may forward its
+        own ``remote=`` by name, and ``__post_init__`` turns that into an empty
+        ``RemoteOptions()``. Readers go through here rather than restating the
+        normalization.
+        """
+        return self.remote if self.remote is not None else RemoteOptions()
 
     @classmethod
     def pick(cls, values: Mapping[str, Any]) -> WriteOptions:
