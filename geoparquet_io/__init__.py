@@ -12,6 +12,8 @@ on first access, exactly as the old eager ``__init__`` did on every import.
 ``geoparquet_io.cli.main.cli``; the console entry point uses that module too.
 """
 
+from typing import TYPE_CHECKING
+
 # The one eager import the lazy root keeps: ``geoparquet_io.core`` installs the
 # geoarrow srid-compat shim on import (#1276), and the shim must be in place
 # before any pyarrow read in the process — ``pq.read_table`` segfaults on a
@@ -21,18 +23,58 @@ on first access, exactly as the old eager ``__init__`` did on every import.
 # and tests/test_embeddable_imports.py that it still pulls no click or duckdb.
 import geoparquet_io.core  # noqa: F401
 
+# The lazy ``__getattr__`` below is invisible to a type checker, which resolves
+# every attribute it serves to ``Any`` — so without this block the py.typed
+# marker would promise types that ``gpio.read(...)`` never delivers. These
+# imports run only under a type checker (``TYPE_CHECKING`` is False at run
+# time), so the package stays as lazy as #1307 made it. They list the same names
+# as ``_LAZY_EXPORTS``, which tests/test_mypy.py checks.
+if TYPE_CHECKING:
+    from geoparquet_io.api import (
+        InvalidParameterError,
+        Table,
+        convert,
+        extract_arcgis,
+        from_bigquery,
+        list_layers,
+        ops,
+        pipe,
+        read,
+        read_bigquery,
+        read_partition,
+    )
+    from geoparquet_io.api.check import (
+        CheckResult,
+        check_all,
+        check_bbox,
+        check_bloom_filters,
+        check_compression,
+        check_optimization,
+        check_row_groups,
+        check_spatial,
+        check_spatial_pushdown,
+        validate,
+    )
+    from geoparquet_io.api.stac import generate_stac, validate_stac
+    from geoparquet_io.core.check_options import CheckOptions
+    from geoparquet_io.core.exceptions import GeoParquetError
+    from geoparquet_io.core.parquet_writer import WriteOptions
+    from geoparquet_io.core.remote import RemoteOptions
+
 #: name -> "module:attribute" it is imported from, on first access.
 _LAZY_EXPORTS = {
     "InvalidParameterError": "geoparquet_io.api:InvalidParameterError",
     "Table": "geoparquet_io.api:Table",
     "convert": "geoparquet_io.api:convert",
     "extract_arcgis": "geoparquet_io.api:extract_arcgis",
+    "from_bigquery": "geoparquet_io.api:from_bigquery",
     "list_layers": "geoparquet_io.api:list_layers",
     "ops": "geoparquet_io.api:ops",
     "pipe": "geoparquet_io.api:pipe",
     "read": "geoparquet_io.api:read",
     "read_bigquery": "geoparquet_io.api:read_bigquery",
     "read_partition": "geoparquet_io.api:read_partition",
+    "CheckOptions": "geoparquet_io.core.check_options:CheckOptions",
     "CheckResult": "geoparquet_io.api.check:CheckResult",
     "check_all": "geoparquet_io.api.check:check_all",
     "check_bbox": "geoparquet_io.api.check:check_bbox",
@@ -46,6 +88,7 @@ _LAZY_EXPORTS = {
     "generate_stac": "geoparquet_io.api.stac:generate_stac",
     "validate_stac": "geoparquet_io.api.stac:validate_stac",
     "GeoParquetError": "geoparquet_io.core.exceptions:GeoParquetError",
+    "RemoteOptions": "geoparquet_io.core.remote:RemoteOptions",
     "WriteOptions": "geoparquet_io.core.parquet_writer:WriteOptions",
 }
 
@@ -53,14 +96,19 @@ __all__ = [
     "cli",
     "read",
     "read_partition",
+    "from_bigquery",
+    # The deprecated spelling of `from_bigquery` (#1436), importable until the
+    # next minor release.
     "read_bigquery",
     "convert",
     "extract_arcgis",
     "list_layers",
     "Table",
+    "RemoteOptions",
     "WriteOptions",
     "pipe",
     "ops",
+    "CheckOptions",
     "CheckResult",
     "check_all",
     "check_bbox",

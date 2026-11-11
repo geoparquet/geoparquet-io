@@ -981,7 +981,7 @@ class TestInMemoryAndWrappers:
 
         src = tmp_path / "by_region.parquet"
         _write_admin_region_aggregate(src)
-        result = Table(pq.read_table(src)).overview("country", scheme="admin")
+        result = Table(pq.read_table(src)).create_overviews("country", scheme="admin")
         assert "admin_code" in result.column_names
         assert result.geometry_column == "geometry"
 
@@ -1431,7 +1431,7 @@ def test_table_overview_api(tmp_path):
     _write_points_geoparquet(src, _GOLD_POINTS)
     aggregate_by_a5(str(src), str(base), resolution=7, options=AggregateOptions(metric="sum:area"))
 
-    result = Table(pq.read_table(base)).overview(5)
+    result = Table(pq.read_table(base)).create_overviews(5)
     assert "a5_cell" in result.column_names
     assert "count" in result.column_names
     assert "sum_area" in result.column_names

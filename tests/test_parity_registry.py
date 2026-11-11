@@ -50,12 +50,53 @@ def test_every_leaf_is_covered_or_exempt_on_every_axis():
         for axis in sorted(set(axes) - set(reg.AXES))
     ]
     problems += [f"CASES_BY_ID names unknown leaf {c!r}" for c in sorted(set(CASES_BY_ID) - leaves)]
+    problems += [
+        f"TWIN_NAMES names unknown leaf {leaf!r}" for leaf in sorted(set(reg.TWIN_NAMES) - leaves)
+    ]
     for leaf, names in sorted(reg.TWIN_NAMES.items()):
         resolved = {label.split(".", 1)[1] for label, _fn in reg.api_twins(leaf)}
         problems += [
             f"TWIN_NAMES[{leaf!r}]: {n!r} resolves to nothing" for n in names if n not in resolved
         ]
     assert not problems, "Parity census:\n" + "\n".join(f"  {p}" for p in problems)
+
+
+def test_table_and_ops_twins_share_one_name():
+    """#1436 decision 4, point 1: a `Table` method and its `ops` function carry one name.
+
+    Strict, and not an allowlist of pairs: for every leaf whose API has both legs,
+    the names they resolve under must be the same set, and a name only one leg
+    has must be a `TWIN_NAMES` entry carrying its reason. A twin collapsed to one
+    canonical name therefore needs no entry at all, a new mismatch fails until it
+    is either collapsed or reasoned, and an entry whose name stops resolving
+    fails in the census above.
+    """
+    problems = []
+    for leaf in sorted(reg.cli_leaves()):
+        reasons = reg.TWIN_NAMES.get(leaf, {})
+        problems += [
+            f"{leaf}: {name!r} is on one API leg only, with no TWIN_NAMES reason -- "
+            f"give both legs one name (with a deprecated alias for the old one), or "
+            f"record why they differ"
+            for name in sorted(reg.unpaired_twin_names(leaf) - set(reasons))
+        ]
+    assert not problems, "Twin-name census:\n" + "\n".join(f"  {p}" for p in problems)
+
+
+def test_deprecated_aliases_are_recorded():
+    """Every alias the API marks is in `DEPRECATED_ALIASES`, and nothing else is.
+
+    The resolver skips an alias, so an unrecorded one would quietly remove a name
+    from the census. Set equality both ways: an alias removed on schedule has to
+    lose its entry, and its canonical name must still be a live callable.
+    """
+    live = reg.live_deprecated_aliases()
+    assert set(live) == set(reg.DEPRECATED_ALIASES), (
+        "DEPRECATED_ALIASES drifted from the aliases the API marks.\n"
+        f"  unrecorded: {sorted(set(live) - set(reg.DEPRECATED_ALIASES))}\n"
+        f"  recorded but gone: {sorted(set(reg.DEPRECATED_ALIASES) - set(live))}"
+    )
+    assert {name: target for name, (target, _r) in reg.DEPRECATED_ALIASES.items()} == live
 
 
 def _group_problems(leaves: set[str], cases: set[str], exempt: dict, recorded: dict) -> list[str]:
@@ -108,6 +149,12 @@ def test_every_registry_entry_has_a_reason():
     tables = {
         "EXEMPT": {
             (leaf, axis): r for leaf, axes in reg.EXEMPT.items() for axis, r in axes.items()
+        },
+        "TWIN_NAMES": {
+            (leaf, name): r for leaf, names in reg.TWIN_NAMES.items() for name, r in names.items()
+        },
+        "DEPRECATED_ALIASES": {
+            name: reason for name, (_target, reason) in reg.DEPRECATED_ALIASES.items()
         },
         "ONE_SIDED": reg.ONE_SIDED,
         "ONE_SIDED_CLASSES": reg.ONE_SIDED_CLASSES,

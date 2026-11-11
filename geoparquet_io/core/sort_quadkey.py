@@ -323,7 +323,7 @@ def _sort_by_quadkey_streaming(
             resolution,
             verbose,
             use_centroid,
-            write.profile,
+            write.remote.profile,
             missing_error=missing_error,
         )
 

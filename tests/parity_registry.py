@@ -8,9 +8,12 @@ reads it; `tests/test_cli_api_default_parity.py` (declared defaults) and
 
 To register a new twin, case or exemption:
 
-* a twin whose name the resolver cannot derive -> `TWIN_NAMES`
+* a twin whose name the resolver cannot derive, or whose two API legs are
+  spelled differently -> `TWIN_NAMES`, with its reason
 * a leaf that lacks a twin, a functional twin or a call case -> `EXEMPT`
 * a parameter only one side has, outside `ONE_SIDED_CLASSES` -> `ONE_SIDED`
+* an old API name kept alive by `api._deprecation.deprecated_alias` ->
+  `DEPRECATED_ALIASES`
 
 Every check is a set equality, so an entry made stale by a fix fails too.
 Not a test module: nothing here is collected.
@@ -26,6 +29,7 @@ import click
 
 import geoparquet_io
 from geoparquet_io.api import ops
+from geoparquet_io.api._deprecation import alias_target
 from geoparquet_io.api.table import Table
 from geoparquet_io.cli import decorators
 from geoparquet_io.cli.main import cli
@@ -36,43 +40,162 @@ from tests.conftest import walk_cli_commands
 # Twin resolution
 # --------------------------------------------------------------------------
 
-#: Twins whose names the resolver cannot derive from the command path.
-TWIN_NAMES: dict[str, list[str]] = {
-    "extract wfs": ["from_wfs", "from_wfs_layers"],
-    "extract arcgis": ["from_arcgis"],
-    "extract carto": ["from_carto"],
-    "extract bigquery": ["read_bigquery", "from_bigquery"],
-    "extract geoparquet": ["extract"],
-    "pmtiles create": ["create_pmtiles"],
-    "pmtiles pyramid": ["create_pmtiles_pyramid"],
-    "process overview": ["create_overviews", "overview"],
-    "publish upload": ["upload"],
-    "publish stac": ["generate_stac"],
-    "inspect meta": ["metadata"],
-    "inspect layers": ["list_layers"],
-    "benchmark explain": ["explain_analyze"],
-    "convert reproject": ["reproject"],
-    # `Table.fix` applies the fixes `--fix` does, selected by its `checks=` (#1078).
-    # Not `Table.check`: it runs the structure checks only; `gpio.check_all` is the twin.
-    "check all": ["fix"],
-    "check bbox": ["fix"],
-    "check compression": ["fix"],
-    # `Table.check_spatial` still resolves by name, but it is spatial order alone;
-    # `gpio.check_spatial` adds the pushdown block `check spatial` judges, and is the twin.
-    "check spatial": ["fix"],
-    "check spec": ["validate"],
-    "check stac": ["validate_stac"],
-    "check row-group": ["check_row_groups", "fix"],
-    "check optimization": ["check_optimization"],
-    "inspect summary": ["info"],
-    "convert geoparquet": ["write", "convert"],
-    # `gpio partition <index>` is two operations behind one command: a single
-    # file, and a *directory* walked with --min-size, which has its own `ops`
-    # twin (#811).
-    "partition a5": ["partition_by_a5", "sub_partition_by_a5"],
-    "partition h3": ["partition_by_h3", "sub_partition_by_h3"],
-    "partition s2": ["partition_by_s2", "sub_partition_by_s2"],
-    "partition quadkey": ["partition_by_quadkey", "sub_partition_by_quadkey"],
+_SUB_PARTITION = (
+    "`gpio partition <index>` is two operations behind one command: a single file, and a "
+    "*directory* walked with --min-size, which has its own `ops` twin and no `Table` one, "
+    "because a directory of files is not a table (#811)."
+)
+_PARTITION_FIRST = (
+    "Listed ahead of its sub-partition sibling, which is the one thing the order here "
+    "decides: the single-file operation is the leaf's primary twin, and the one-sided "
+    "parameter census reads a shared keyword (`output_dir`) off the first twin to declare it."
+)
+_FIX_IS_THE_REPAIR = (
+    "`Table.fix` applies the fixes `--fix` does, selected by its `checks=` (#1078), and is "
+    "`Table`-side only: the functional leg's repair is the CLI's own `--fix`."
+)
+
+#: The one CLI-path -> API-name bridge, and the only place a naming exception
+#: lives. A name is listed here when the resolver cannot derive it from the
+#: command path, or when the operation's two API legs (`ops`/root `gpio` and
+#: `Table`) spell it differently -- and every name carries the one line that
+#: says why, because #1436 decision 4 is "zero *unexplained* exceptions, not
+#: zero exceptions". `test_table_and_ops_twins_share_one_name` fails on an
+#: unpaired name with no entry here; `test_every_registry_entry_has_a_reason`
+#: fails on an entry with a blank one.
+TWIN_NAMES: dict[str, dict[str, str]] = {
+    "extract wfs": {
+        "from_wfs": "A service reader is `from_<service>` on both legs; the resolver derives "
+        "`wfs` and `extract_wfs`, never the `from_` prefix.",
+        "from_wfs_layers": "`ops`-side only: it writes every layer of a service to a "
+        "directory, so there is no single table to hand back.",
+    },
+    "extract arcgis": {
+        "from_arcgis": "A service reader is `from_<service>`, which the resolver cannot "
+        "derive; the root also exports it as `gpio.extract_arcgis`."
+    },
+    "extract carto": {
+        "from_carto": "A service reader is `from_<service>`, which the resolver cannot derive."
+    },
+    "extract bigquery": {
+        "from_bigquery": "A service reader is `from_<service>`, which the resolver cannot "
+        "derive. One name on both legs since #1436: `ops.read_bigquery` is now the "
+        "deprecated alias recorded in DEPRECATED_ALIASES."
+    },
+    "extract geoparquet": {
+        "extract": "The operation is `extract`; `geoparquet` is the CLI's way of saying "
+        "which format the leaf reads, and the API reads only GeoParquet."
+    },
+    "pmtiles pyramid": {
+        "create_pmtiles_pyramid": "The API names the whole operation, where the CLI splits "
+        "it into the `pmtiles` group and the `pyramid` leaf."
+    },
+    "process overview": {
+        "create_overviews": "The API names the whole operation, as `create_pmtiles` does. "
+        "One name on both legs since #1436, with the Table method rolling up the one level "
+        "it can hold in memory and the `ops` function writing a sibling per level; "
+        "`Table.overview` is now the deprecated alias recorded in DEPRECATED_ALIASES."
+    },
+    "publish stac": {
+        "generate_stac": "The STAC writer is a root function, `gpio.generate_stac` (#1065); "
+        "the leaf name `stac` is the artefact, not the verb."
+    },
+    "inspect meta": {
+        "metadata": "`meta` is the CLI's abbreviation; the method spells it out as "
+        "`Table.metadata`."
+    },
+    "inspect layers": {
+        "list_layers": "A root function, `gpio.list_layers` (#1065), and a verb where the "
+        "leaf is a plural noun."
+    },
+    "benchmark explain": {
+        "explain_analyze": "The API names the DuckDB statement it runs, `EXPLAIN ANALYZE`, "
+        "where the CLI leaf is the short `explain`."
+    },
+    "check all": {
+        "check_all": "`check all`'s functional leg is the root `gpio.check_all`, and there "
+        "is no `Table.check_all`: `Table.check` runs the structure checks only.",
+        "fix": _FIX_IS_THE_REPAIR,
+    },
+    "check bbox": {"fix": _FIX_IS_THE_REPAIR},
+    "check compression": {"fix": _FIX_IS_THE_REPAIR},
+    "check spatial": {
+        "fix": _FIX_IS_THE_REPAIR
+        + " `Table.check_spatial` resolves by name but judges spatial order alone; "
+        "`gpio.check_spatial` adds the pushdown block `check spatial` reports, and is the twin."
+    },
+    "check spec": {
+        "validate": "The spec check is `validate` on both legs: the CLI groups it under "
+        "`check`, the API names the GeoParquet specification it validates against."
+    },
+    "check stac": {
+        "validate_stac": "A root function, `gpio.validate_stac` (#1065), named for what it "
+        "validates rather than for the `check` group it sits in."
+    },
+    "check row-group": {
+        "check_row_groups": "Plural on both legs -- a file has many row groups -- where the "
+        "CLI leaf is the singular `row-group`.",
+        "fix": _FIX_IS_THE_REPAIR,
+    },
+    "inspect summary": {
+        "info": "`Table.info` is the method-side name for the summary, as `DataFrame.info` "
+        "is in the wider Python data ecosystem."
+    },
+    "convert geoparquet": {
+        "convert": "The root `gpio.convert` reads any supported format into a Table; "
+        "`geoparquet` in the leaf name is the *output* format, which the API takes as read.",
+        "write": "`Table.write` is the fluent chain's terminal step and serves every output "
+        "format, so the Table leg of `convert geoparquet` is a write, not a convert.",
+    },
+    "convert geojson": {
+        "convert_to_geojson": "Deliberate, not drift: `ops.convert_to_geojson` is named with "
+        "its sibling converters (csv, flatgeobuf, geopackage, shapefile), none of which has "
+        "a `Table` method at all.",
+        "to_geojson": "Deliberate, not drift: GeoJSON is the one format with a dedicated "
+        "method because it can also stream to stdout, and `Table.to_geojson` is named for "
+        "the `to_<format>` convention the Python data ecosystem reads it by.",
+    },
+    "partition a5": {
+        "partition_by_a5": _PARTITION_FIRST,
+        "sub_partition_by_a5": _SUB_PARTITION,
+    },
+    "partition h3": {
+        "partition_by_h3": _PARTITION_FIRST,
+        "sub_partition_by_h3": _SUB_PARTITION,
+    },
+    "partition s2": {
+        "partition_by_s2": _PARTITION_FIRST,
+        "sub_partition_by_s2": _SUB_PARTITION,
+    },
+    "partition quadkey": {
+        "partition_by_quadkey": _PARTITION_FIRST,
+        "sub_partition_by_quadkey": _SUB_PARTITION,
+    },
+}
+
+#: An old API name kept alive by `api._deprecation.deprecated_alias`: the
+#: canonical name it forwards to, and why the old one existed. `api_twins` skips
+#: an alias, so the census above compares canonical names only -- and this is
+#: what keeps the skipped names visible. `test_deprecated_aliases_are_recorded`
+#: asserts it is exactly the set of aliases the API marks, so an alias that is
+#: removed on schedule has to lose its entry too.
+DEPRECATED_ALIASES: dict[str, tuple[str, str]] = {
+    "ops.read_bigquery": (
+        "ops.from_bigquery",
+        "BigQuery was the one service reader spelled `read_*` while every other -- and "
+        "`Table.from_bigquery` itself -- was `from_*` (#1436 decision 4).",
+    ),
+    "gpio.read_bigquery": (
+        "ops.from_bigquery",
+        "The root re-export of `ops.read_bigquery` -- the same alias object, so it warns once "
+        "for both spellings of the import, naming the `ops` function it forwards to. The "
+        "canonical root name is `gpio.from_bigquery`.",
+    ),
+    "Table.overview": (
+        "Table.create_overviews",
+        "`process overview` was the one twin whose `Table` method and `ops` function were "
+        "named differently (#1436 decision 4).",
+    ),
 }
 
 
@@ -91,7 +214,7 @@ def _candidate_names(leaf: str) -> list[str]:
     group = parts[0] if len(parts) > 1 else ""
     name = parts[-1]
     out = [
-        *TWIN_NAMES.get(leaf, []),
+        *TWIN_NAMES.get(leaf, {}),
         "_".join(parts),
         name,
         f"{group}_by_{name}" if group else "",
@@ -118,12 +241,20 @@ _CONTAINERS: tuple[tuple[str, Callable[[str], object]], ...] = (
 
 
 def api_twins(leaf: str) -> list[tuple[str, Callable]]:
-    """``[(label, callable)]`` for a leaf's `ops.*`, `Table.*` and root `gpio.*` twins."""
+    """``[(label, callable)]`` for a leaf's `ops.*`, `Table.*` and root `gpio.*` twins.
+
+    A deprecated alias is skipped: it is the *old* spelling of a twin the census
+    already sees under its canonical name, and counting it would make every
+    collapsed name read as a live mismatch again. `DEPRECATED_ALIASES` records
+    the ones being skipped.
+    """
     found: list[tuple[str, Callable]] = []
     seen: set[int] = set()
     for cand in _candidate_names(leaf):
         for prefix, lookup in _CONTAINERS:
             fn = lookup(cand)
+            if alias_target(fn) is not None:
+                continue
             identity = id(getattr(fn, "__func__", fn))
             if inspect.isroutine(fn) and identity not in seen:
                 seen.add(identity)
@@ -134,6 +265,42 @@ def api_twins(leaf: str) -> list[tuple[str, Callable]]:
 def is_functional(label: str) -> bool:
     """The functional leg of the API: an `ops.*` function or a root `gpio.*` one."""
     return label.startswith(("ops.", "gpio."))
+
+
+def _names(twins: list[tuple[str, Callable]], functional: bool) -> set[str]:
+    return {label.split(".", 1)[1] for label, _fn in twins if is_functional(label) is functional}
+
+
+def unpaired_twin_names(leaf: str) -> set[str]:
+    """The names a leaf's two API legs do *not* share.
+
+    #1436 decision 4, point 1: a `Table` method and its `ops` function carry one
+    name. Only a leaf with both legs is compared -- a leaf with one is the
+    `api_twin`/`ops_twin` axis's business, and `EXEMPT` records it -- so what
+    comes back is the symmetric difference of the functional leg's names and the
+    `Table` leg's. Each one needs a `TWIN_NAMES` entry saying why.
+    """
+    twins = api_twins(leaf)
+    functional, table = _names(twins, True), _names(twins, False)
+    if not functional or not table:
+        return set()
+    return functional ^ table
+
+
+def live_deprecated_aliases() -> dict[str, str]:
+    """``"<container>.<old name>" -> canonical name`` for every alias the API marks."""
+    found: dict[str, str] = {}
+    containers: tuple[tuple[str, object, list[str]], ...] = (
+        ("ops", ops, dir(ops)),
+        ("Table", Table, dir(Table)),
+        ("gpio", geoparquet_io, list(geoparquet_io.__all__)),
+    )
+    for prefix, container, names in containers:
+        for name in names:
+            target = alias_target(getattr(container, name, None))
+            if target is not None:
+                found[f"{prefix}.{name}"] = target
+    return found
 
 
 # --------------------------------------------------------------------------
@@ -566,6 +733,18 @@ ONE_SIDED_CLASSES: dict[str, str] = {
         "A `Table.write` parameter: the API twin writes a Table itself (`Table.write` "
         "serves every format; `Table.upload` writes before it uploads)."
     ),
+    "remote_access": (
+        "How an object store is reached, as one `gpio.RemoteOptions` (#1436). The CLI "
+        "packs its `--aws-profile`/`--s3-*` flags into one value with "
+        "`decorators.pack_remote_options`, so no leaf declares `remote` as a flag; the "
+        "API takes that value by name, beside the deprecated per-keyword spellings."
+    ),
+    "check_options": (
+        "What a check looks at and what its fix writes, as one `gpio.CheckOptions` "
+        "(#1436). The CLI packs its band, sample-bound and repair flags into one value "
+        "with `decorators.pack_check_options`; the API takes that value as `options=`, "
+        "beside the deprecated per-keyword spellings."
+    ),
 }
 
 
@@ -606,6 +785,12 @@ def _cli_class(leaf: str, param: click.Parameter, twins: list[tuple[str, Callabl
 def _api_class(name: str, fn: Callable) -> str | None:
     if inspect.signature(fn).parameters[name].default is inspect.Parameter.empty:
         return "operand"
+    # Before the `Table.write` check: `remote` is on `Table.write` too, but it is
+    # the remote-access concern wherever it appears, not a write setting (#1436).
+    if name == "remote":
+        return "remote_access"
+    if name == "options" and fn.__name__ != "write":
+        return "check_options"
     if name in _TABLE_WRITE:
         return "write_on_api"
     return None

@@ -28,8 +28,12 @@ The `gpio publish upload` command uploads files and directories to cloud object 
 
     <!-- doctest: skip="needs cloud credentials" -->
     ```python
-    # Upload to S3
-    table.upload("s3://bucket/path/data.parquet", profile="my-profile")
+    # Upload to S3. The AWS profile, the endpoint, the region and the SSL flag
+    # travel as one gpio.RemoteOptions (see "Remote Files").
+    table.upload(
+        "s3://bucket/path/data.parquet",
+        remote=gpio.RemoteOptions(profile="my-profile"),
+    )
     ```
 
 ## Supported Destinations

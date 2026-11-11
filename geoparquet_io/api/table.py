@@ -15,11 +15,12 @@ from __future__ import annotations
 import dataclasses
 import os
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from geoparquet_io.api._deprecation import deprecated_alias as _deprecated_alias
 from geoparquet_io.core.add.kdtree import (
     DEFAULT_KDTREE_TARGET_ROWS,
     ITERATIONS_CONFLICT,
@@ -27,6 +28,11 @@ from geoparquet_io.core.add.kdtree import (
 )
 from geoparquet_io.core.add.stac_metadata import DEFAULT_STAC_GEOPARQUET_VERSION
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
+from geoparquet_io.core.check_options import (
+    DEFAULT_SPATIAL_LIMIT_ROWS,
+    DEFAULT_SPATIAL_SAMPLE_PAIRS,
+    CheckOptions,
+)
 from geoparquet_io.core.check_parquet_structure import CheckProfile
 from geoparquet_io.core.edges import edges_of, state_edges
 from geoparquet_io.core.file_utils import get_all_parquet_files, scratch_path, unlink_released_file
@@ -36,6 +42,7 @@ from geoparquet_io.core.index_ops import get_index_spec, validate_partition_argu
 from geoparquet_io.core.logging_config import warn
 from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.process.aggregate.grid_common import BUCKET_POINT_GEOMETRY
+from geoparquet_io.core.remote import RemoteOptions, remote_options_from_keywords
 from geoparquet_io.core.str_order import DEFAULT_STR_TILE_SIZE
 from geoparquet_io.core.wfs import DEFAULT_WFS_PAGE_SIZE
 from geoparquet_io.core.write_funnels import write_geoparquet_table
@@ -206,6 +213,7 @@ def read_partition(
     *,
     hive_input: bool | None = None,
     allow_schema_diff: bool = False,
+    remote: RemoteOptions | None = None,
     s3_endpoint: str | None = None,
     s3_region: str | None = None,
     s3_use_ssl: bool = True,
@@ -224,10 +232,18 @@ def read_partition(
         hive_input: Explicitly enable/disable hive partitioning. None = auto-detect.
         allow_schema_diff: If True, allow merging schemas across files with
                            different columns (uses DuckDB union_by_name)
-        s3_endpoint: Custom S3 endpoint (e.g., 'data.source.coop')
-        s3_region: S3 region for custom endpoints
-        s3_use_ssl: Whether to use SSL (default: True)
-        aws_profile: AWS profile name for S3 operations
+        remote: How the dataset's object store is reached, as one
+                :class:`gpio.RemoteOptions` (AWS profile, S3 endpoint, region,
+                SSL). The same object the writers and ``Table.upload`` take.
+        s3_endpoint: **Deprecated** (#1436), removed in the next minor release:
+                use ``remote=gpio.RemoteOptions(s3_endpoint=...)``.
+        s3_region: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(s3_region=...)``.
+        s3_use_ssl: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(s3_use_ssl=...)``. ``True`` is this
+                signature's default, so only ``False`` counts as asked for.
+        aws_profile: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(profile=...)``.
 
     Returns:
         Table containing all partition data combined
@@ -236,6 +252,9 @@ def read_partition(
         >>> import geoparquet_io as gpio
         >>> table = gpio.read_partition('partitioned_output/')
         >>> table = gpio.read_partition('data/quadkey=*/*.parquet')
+        >>> table = gpio.read_partition(
+        ...     's3://bucket/dataset/', remote=gpio.RemoteOptions(profile='my-aws')
+        ... )
     """
     from geoparquet_io.core.duckdb_utils import (
         _wrap_query_with_wkb_conversion,
@@ -246,14 +265,17 @@ def read_partition(
     )
     from geoparquet_io.core.geometry_detection import primary_geometry_column
     from geoparquet_io.core.partition.reader import build_read_parquet_expr
-    from geoparquet_io.core.remote import needs_httpfs, resolve_s3_config
+    from geoparquet_io.core.remote import needs_httpfs
 
-    s3_config = resolve_s3_config(
+    remote = remote_options_from_keywords(
+        "read_partition",
+        remote,
+        aws_profile=aws_profile,
         s3_endpoint=s3_endpoint,
         s3_region=s3_region,
-        s3_no_ssl=not s3_use_ssl,
-        aws_profile=aws_profile,
+        s3_use_ssl=s3_use_ssl,
     )
+    s3_config = remote.resolved()
     path_str = str(path)
     expr = build_read_parquet_expr(
         path_str,
@@ -290,6 +312,7 @@ def convert(
     delimiter: str | None = None,
     skip_invalid: bool = False,
     profile: str | None = None,
+    remote: RemoteOptions | None = None,
     layer: str | None = None,
     repair_geometry: bool = True,
     linearize_curves: bool = True,
@@ -322,7 +345,12 @@ def convert(
                longitude column (auto-detected if not specified)
         delimiter: For CSV: field delimiter (auto-detected if not specified)
         skip_invalid: Skip invalid geometries instead of erroring
-        profile: AWS profile name for S3 authentication (default: None)
+        profile: **Deprecated** (#1436), removed in the next minor release: use
+               ``remote=gpio.RemoteOptions(profile=...)``. Still honoured, with
+               a warning once per process.
+        remote: How the source's object store is reached, as one
+               :class:`gpio.RemoteOptions` (AWS profile, S3 endpoint, region,
+               SSL).
         layer: Layer name for multi-layer formats (GeoPackage, FileGDB). If not specified,
                reads the first/default layer.
         linearize_curves: Stroke curved geometries (CircularString..MultiSurface) into
@@ -345,30 +373,37 @@ def convert(
         >>> import geoparquet_io as gpio
         >>> gpio.convert('data.gpkg').sort_hilbert().write('out.parquet')
         >>> gpio.convert('data.csv', lat_column='lat', lon_column='lon').write('out.parquet')
-        >>> gpio.convert('s3://bucket/data.gpkg', profile='my-aws').write('out.parquet')
+        >>> gpio.convert(
+        ...     's3://bucket/data.gpkg', remote=gpio.RemoteOptions(profile='my-aws')
+        ... ).write('out.parquet')
         >>> gpio.convert('multilayer.gpkg', layer='buildings').write('buildings.parquet')
         >>> gpio.convert('ehak.shp', encoding='ISO-8859-1').write('ehak.parquet')
         >>> gpio.convert('etak_3d.shp', force_2d=True).write('etak.parquet')
     """
     from geoparquet_io.core.convert import read_spatial_to_arrow
 
-    arrow_table, detected_crs, geom_col = read_spatial_to_arrow(
-        str(path),
-        verbose=False,
-        wkt_column=wkt_column,
-        lat_column=lat_column,
-        lon_column=lon_column,
-        delimiter=delimiter,
-        skip_invalid=skip_invalid,
-        profile=profile,
-        geometry_column=geometry_column,
-        layer=layer,
-        repair_geometry=repair_geometry,
-        linearize_curves=linearize_curves,
-        max_angle_deg=max_angle_deg,
-        encoding=encoding,
-        force_2d=force_2d,
-    )
+    remote = remote_options_from_keywords("convert", remote, profile=profile)
+    # The endpoint and region reach DuckDB through the ambient S3 config, the
+    # same channel `gpio convert` activates them on; the profile is also passed
+    # explicitly because `read_spatial_to_arrow` hands it to GDAL (#1436).
+    with remote.activate():
+        arrow_table, detected_crs, geom_col = read_spatial_to_arrow(
+            str(path),
+            verbose=False,
+            wkt_column=wkt_column,
+            lat_column=lat_column,
+            lon_column=lon_column,
+            delimiter=delimiter,
+            skip_invalid=skip_invalid,
+            profile=remote.profile,
+            geometry_column=geometry_column,
+            layer=layer,
+            repair_geometry=repair_geometry,
+            linearize_curves=linearize_curves,
+            max_angle_deg=max_angle_deg,
+            encoding=encoding,
+            force_2d=force_2d,
+        )
 
     return Table(arrow_table, geometry_column=geom_col, crs=detected_crs)
 
@@ -487,16 +522,28 @@ def extract_arcgis(
     return Table(arrow_table, geometry_column=_surviving_geometry_column(None, arrow_table))
 
 
+def _asked_true(flag: bool) -> bool | None:
+    """A boolean keyword's value, or None when it is still its ``False`` default.
+
+    The deprecated flags keep their declared ``False``, so the CLI flag and the
+    Python parameter still declare the same default (#1436).
+    """
+    return flag or None
+
+
 def _asked_fields(write: WriteOptions) -> set[str]:
     """The fields of *write* a caller asked for: every one that is not None.
 
     ``write_strategy="auto"`` is the documented spelling of None, so it is not asked.
+    ``remote`` is never None -- an empty ``RemoteOptions()`` is its "not asked"
+    (#1436) -- so it is asked for exactly when something in it is.
     """
     return {
         f.name
         for f in dataclasses.fields(write)
         if getattr(write, f.name) is not None
         and not (f.name == "write_strategy" and write.write_strategy == "auto")
+        and not (f.name == "remote" and not write.remote)
     }
 
 
@@ -504,6 +551,10 @@ def _merge_write_options(options: object, arguments: dict[str, Any]) -> WriteOpt
     """``Table.write``'s one ``WriteOptions``: *options* with the write keywords merged in.
 
     *arguments* is the call's ``locals()``; a keyword left at None was not given.
+    The deprecated ``profile=`` is folded into ``remote=`` here rather than in
+    ``write`` itself, so the warning still names ``Table.write`` (the level is
+    counted, not fixed) and ``write`` keeps forwarding nothing but its own
+    signature.
     """
     if options is not None and not isinstance(options, WriteOptions):
         raise TypeError(
@@ -517,10 +568,28 @@ def _merge_write_options(options: object, arguments: dict[str, Any]) -> WriteOpt
         for f in dataclasses.fields(WriteOptions)
         if arguments[f.name] is not None
     }
+    # Both spellings still reach the store; naming the profile twice raises.
+    # `or None`: nothing asked for must not overwrite a `remote` in *options*.
+    wrote_profile = keywords.pop("profile", None)
+    remote = (
+        remote_options_from_keywords(
+            "Table.write", keywords.pop("remote", None), profile=wrote_profile
+        )
+        or None
+    )
+    if remote is not None:
+        keywords["remote"] = remote
+
     both = sorted(_asked_fields(base) & keywords.keys())
     if both:
+        # Named as the caller wrote it: `Table.write(profile=)` sets `remote`,
+        # and quoting the field sends them looking for a keyword their call
+        # does not have.
+        named = ", ".join(
+            "profile" if name == "remote" and wrote_profile is not None else name for name in both
+        )
         raise TypeError(
-            f"Table.write() got {', '.join(both)} both in options and as a keyword; "
+            f"Table.write() got {named} both in options and as a keyword; "
             "set each field in one place"
         )
     return dataclasses.replace(base, **keywords)
@@ -601,7 +670,9 @@ class Table:
         operation that changes the CRS (reproject) passes ``crs=`` explicitly
         so the hint never mislabels transformed coordinates.
         """
-        hint = self._crs_hint if crs is Table._KEEP_CRS_HINT else crs
+        # The sentinel default widens `crs` to `object`; past the identity test
+        # only the declared CRS shapes remain, which the cast states.
+        hint = self._crs_hint if crs is Table._KEEP_CRS_HINT else cast("dict | str | None", crs)
         derived = Table(table, geometry_column=geometry_column, crs=hint)
         derived._auto_version_hint = self._auto_version_hint
         # `_source_path` is deliberately not carried: a derived table is
@@ -962,12 +1033,14 @@ class Table:
     @property
     def num_rows(self) -> int:
         """Get number of rows in the table."""
-        return self._table.num_rows
+        rows: int = self._table.num_rows
+        return rows
 
     @property
     def column_names(self) -> list[str]:
         """Get list of column names."""
-        return self._table.column_names
+        names: list[str] = self._table.column_names
+        return names
 
     @property
     def crs(self) -> dict | str | None:
@@ -987,7 +1060,7 @@ class Table:
         """
         from geoparquet_io.core.crs_utils import crs_of
 
-        embedded = crs_of(self._table, geometry_column=self._geometry_column)
+        embedded: dict | str | None = crs_of(self._table, geometry_column=self._geometry_column)
         if embedded is not None:
             return embedded
         return self._crs_hint
@@ -1098,7 +1171,8 @@ class Table:
         """
         from geoparquet_io.core.geo_metadata import geo_info_from_metadata
 
-        return geo_info_from_metadata(self._table.schema.metadata)["version"]
+        version: str | None = geo_info_from_metadata(self._table.schema.metadata)["version"]
+        return version
 
     def info(self, verbose: bool = True) -> dict | None:
         """
@@ -1180,6 +1254,7 @@ class Table:
         write_strategy: str | None = None,
         memory_limit: str | None = None,
         profile: str | None = None,
+        remote: RemoteOptions | None = None,
         verbose: bool = False,
         # Format-specific options
         overwrite: bool = False,
@@ -1231,7 +1306,13 @@ class Table:
                 duckdb-kv and disk-rewrite strategies write the table through
                 DuckDB; in-memory and streaming write it with pyarrow alone).
                 Default: gpio's ceiling-based default
-            profile: AWS profile for S3 operations
+            profile: **Deprecated** (#1436), removed in the next minor release:
+                use ``remote=gpio.RemoteOptions(profile=...)``. Still honoured,
+                with a warning once per process.
+            remote: How the destination's object store is reached, as one
+                :class:`gpio.RemoteOptions` (AWS profile, S3 endpoint, region,
+                SSL). The same object ``gpio publish upload`` and
+                ``Table.upload`` take, so one value serves the whole chain.
             overwrite: Overwrite existing file (GeoPackage, Shapefile)
             layer_name: Layer name for GeoPackage (default: the output file stem)
             include_wkt: Include WKT geometry column for CSV (default: True)
@@ -1273,6 +1354,9 @@ class Table:
             >>> table.write('output.dat', format='csv')    # Explicit format
             >>> table.write('out.parquet', gpio.WriteOptions(compression='GZIP'))
         """
+        # The deprecated `profile=` is folded into `remote=` by the merge, so
+        # the warning names this method rather than `WriteOptions` (#1436) and
+        # nothing but this signature is forwarded.
         write = _merge_write_options(options, locals())
 
         # Above the format dispatch, so every format refuses a stale geometry
@@ -1310,7 +1394,7 @@ class Table:
 
         # Same principle again: a GeoParquet knob on another format used to be
         # dropped without a word, so `.csv` "written with GZIP" was not (#761).
-        ignored = _asked_fields(write) - {"profile"}
+        ignored = _asked_fields(write) - {"profile", "remote"}
         if ignored:
             from geoparquet_io.core.exceptions import InvalidParameterError
 
@@ -1323,7 +1407,7 @@ class Table:
         return self._write_format(
             path,
             detected_format,
-            profile=write.profile,
+            remote=write.remote_access(),
             overwrite=overwrite,
             layer_name=layer_name,
             include_wkt=include_wkt,
@@ -1477,12 +1561,13 @@ class Table:
             # Forward the input CRS so a non-default CRS survives the write (otherwise
             # the geometry silently defaults to OGC:CRS84). write_from_table expects a
             # PROJJSON dict, so normalise a string identifier (e.g. "EPSG:3857").
-            input_crs = self.crs
-            if isinstance(input_crs, str):
+            carried_crs = self.crs
+            input_crs: dict | str | None = carried_crs if isinstance(carried_crs, dict) else None
+            if isinstance(carried_crs, str):
                 from geoparquet_io.core.crs_utils import projjson_for_label
 
-                input_crs = projjson_for_label(input_crs)
-            elif input_crs is None:
+                input_crs = projjson_for_label(carried_crs)
+            elif carried_crs is None:
                 # `self.crs` is None for an unknown CRS and for the default
                 # alike. Unknown has to be said on the way out (`crs: null`,
                 # a `srid:0` type), or it is written as OGC:CRS84 (#1276).
@@ -1520,9 +1605,12 @@ class Table:
                 custom_metadata={"covering": carried_covering} if carried_covering else None,
             )
 
-            # Upload to remote if needed
+            # Upload to remote if needed. The whole `RemoteOptions` goes to the
+            # store, not just its profile: an endpoint, a region or `s3_use_ssl`
+            # read off it here and dropped sent a MinIO or source.coop object to
+            # AWS instead, silently (#1436 review).
             if is_remote:
-                upload(local_path, path_str, profile=write.profile)
+                upload(local_path, path_str, remote=write.remote_access())
                 return PathLib(path)
 
             return local_path
@@ -1535,14 +1623,22 @@ class Table:
         self,
         path: str | Path,
         format: str,
-        profile: str | None,
+        remote: RemoteOptions,
         **format_options,
     ) -> Path:
-        """Write table to non-parquet format (handles local and cloud)."""
+        """Write table to non-parquet format (handles local and cloud).
+
+        *remote* travels whole to the upload, as it does on the GeoParquet path:
+        the GDAL writers only need the profile (they read the staged local
+        parquet), but the store the result is put in is decided by the endpoint,
+        the region and the SSL flag too (#1436 review).
+        """
         from pathlib import Path as PathLib
 
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload
+
+        profile = remote.profile
 
         # Check if destination is remote
         path_str = str(path)
@@ -1564,7 +1660,7 @@ class Table:
 
             # Row filters (#1308) apply to the formats whose writers filter
             # in-query: GeoPackage, FlatGeobuf and CSV.
-            filter_options = {
+            filter_options: dict[str, Any] = {
                 key: format_options.get(key)
                 for key in ("bbox", "geometry", "where")
                 if format_options.get(key) is not None
@@ -1637,7 +1733,7 @@ class Table:
 
             # Upload to remote if needed
             if is_remote:
-                # profile= is passed explicitly to upload() below, so there is no
+                # remote= is passed explicitly to upload() below, so there is no
                 # AWS_PROFILE env mutation to leak into the host process.
                 # Special handling for shapefiles: zip all sidecars into .shp.zip
                 if format == "shapefile":
@@ -1651,7 +1747,7 @@ class Table:
                     upload(
                         source=zip_path,
                         destination=remote_zip_path,
-                        profile=profile,
+                        remote=remote,
                     )
 
                     # Return remote zip path (cleanup happens in finally)
@@ -1661,7 +1757,7 @@ class Table:
                     upload(
                         source=output_path,
                         destination=path_str,
-                        profile=profile,
+                        remote=remote,
                     )
                     # Return remote path, not local temp path
                     return PathLib(path_str)
@@ -2114,7 +2210,7 @@ class Table:
             result, BUILT_GEOMETRY_COLUMN if out_geometry != "none" else None
         )
 
-    def overview(
+    def create_overviews(
         self,
         level: int | str,
         cell_column: str | None = None,
@@ -2123,6 +2219,11 @@ class Table:
     ) -> Table:
         """
         Roll an aggregate table up to a coarser overview level.
+
+        The method-side spelling of `gpio process overview`, named as its `ops`
+        twin is (#1436): `ops.create_overviews` writes one GeoParquet sibling
+        per coarser level, where this returns the one rolled-up level a Table
+        can hold in memory.
 
         The table must be a `process aggregate` output (carrying an
         ``a5_cell``/``h3_cell``/``admin_code`` column plus ``count``). Counts,
@@ -2152,6 +2253,13 @@ class Table:
         )
         has_geometry = BUILT_GEOMETRY_COLUMN in result.column_names
         return self._wrap_geographic(result, BUILT_GEOMETRY_COLUMN if has_geometry else None)
+
+    #: The pre-#1436 spelling. `process overview` was the one twin whose Table
+    #: method and `ops` function were named differently; this keeps the old name
+    #: working, warning once per process, for one minor release.
+    overview = _deprecated_alias(
+        create_overviews, old="Table.overview", new="Table.create_overviews"
+    )
 
     def add_s2(
         self,
@@ -2652,6 +2760,7 @@ class Table:
         row_group_size_mb: float | None = None,
         row_group_rows: int | None = None,
         geoparquet_version: str | None = None,
+        remote: RemoteOptions | None = None,
         profile: str | None = None,
         s3_endpoint: str | None = None,
         s3_region: str | None = None,
@@ -2679,10 +2788,19 @@ class Table:
             geoparquet_version: GeoParquet version (1.0, 1.1, 1.1-geoarrow, 2.0, or None to preserve).
                 1.1-geoarrow converts geometry from any input to native GeoArrow nested-coordinate
                 encoding and omits the bbox column; columns with incompatible mixed types fall back to WKB.
-            profile: AWS profile name for S3
-            s3_endpoint: Custom S3-compatible endpoint (e.g., "minio.example.com:9000")
-            s3_region: S3 region (default: us-east-1 when using custom endpoint)
-            s3_use_ssl: Whether to use HTTPS for S3 endpoint (default: True)
+            remote: How the destination's object store is reached, as one
+                :class:`gpio.RemoteOptions` (AWS profile, S3 endpoint, region,
+                SSL). The same object ``gpio publish upload`` builds from its
+                flags and ``Table.write`` takes.
+            profile: **Deprecated** (#1436), removed in the next minor release:
+                use ``remote=gpio.RemoteOptions(profile=...)``.
+            s3_endpoint: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(s3_endpoint=...)``.
+            s3_region: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(s3_region=...)``.
+            s3_use_ssl: **Deprecated** (#1436): use
+                ``remote=gpio.RemoteOptions(s3_use_ssl=...)``. ``True`` is this
+                signature's default, so only ``False`` counts as asked for.
             chunk_concurrency: Max concurrent chunks per file upload (default: 12)
             dry_run: Write the file and print what would be uploaded (source,
                 size, destination, target key) without uploading. Mirrors
@@ -2696,8 +2814,9 @@ class Table:
         Example:
             >>> gpio.read('data.parquet').sort_hilbert().upload(
             ...     's3://bucket/data.parquet',
-            ...     s3_endpoint='minio.example.com:9000',
-            ...     s3_use_ssl=False,
+            ...     remote=gpio.RemoteOptions(
+            ...         s3_endpoint='minio.example.com:9000', s3_use_ssl=False
+            ...     ),
             ... )
         """
         from pathlib import Path
@@ -2706,6 +2825,15 @@ class Table:
         from geoparquet_io.core.file_utils import is_partition_path, scratch_dir
         from geoparquet_io.core.remote import is_remote_url
         from geoparquet_io.core.upload import upload as do_upload
+
+        remote = remote_options_from_keywords(
+            "Table.upload",
+            remote,
+            profile=profile,
+            s3_endpoint=s3_endpoint,
+            s3_region=s3_region,
+            s3_use_ssl=s3_use_ssl,
+        )
 
         # A destination ending in '/' names the object after a local source file only.
         if destination.endswith("/"):
@@ -2737,10 +2865,7 @@ class Table:
             do_upload(
                 source=temp_path,
                 destination=destination,
-                profile=profile,
-                s3_endpoint=s3_endpoint,
-                s3_region=s3_region,
-                s3_use_ssl=s3_use_ssl,
+                remote=remote,
                 chunk_concurrency=chunk_concurrency,
                 dry_run=dry_run,
             )
@@ -3111,15 +3236,27 @@ class Table:
             return self._with_temp_file(func, *args, **kwargs)
         return self._check_file(func, *args, **kwargs)[0]
 
-    def _run_check(self, check: Callable[..., CheckResult], **kwargs: Any) -> CheckResult:
+    def _run_check(
+        self,
+        check: Callable[..., CheckResult],
+        *,
+        reach: CheckOptions | None = None,
+        **kwargs: Any,
+    ) -> CheckResult:
         """Run a path-level check from ``api/check.py`` through :meth:`_check_file`.
 
         Without the path functions' one-file refusal: a Table read from a
         directory hands it to core, which measures the dataset, as before #1090.
-        """
-        from geoparquet_io.api.check import CheckResult
 
-        result, source = self._check_file(getattr(check, "__wrapped__", check), **kwargs)
+        *reach* is the ``CheckOptions`` whose ``remote`` says how to reach the
+        file. Calling ``__wrapped__`` steps around the path function's own
+        activation, so this is the one place a ``Table`` check activates it
+        (#1436); a method with no options to pass leaves it unset.
+        """
+        from geoparquet_io.api.check import CheckResult, _reaching
+
+        with _reaching(reach):
+            result, source = self._check_file(getattr(check, "__wrapped__", check), **kwargs)
         return CheckResult(result.to_dict(), check_type=result.check_type, source_path=source)
 
     def _with_temp_io_files(self, func, **kwargs) -> pa.Table:
@@ -3192,7 +3329,12 @@ class Table:
 
         return self._run_check(check._check_structure)
 
-    def check_spatial(self, sample_size: int = 100, limit_rows: int = 500000) -> CheckResult:
+    def check_spatial(
+        self,
+        sample_size: int = DEFAULT_SPATIAL_SAMPLE_PAIRS,
+        limit_rows: int = DEFAULT_SPATIAL_LIMIT_ROWS,
+        options: CheckOptions | None = None,
+    ) -> CheckResult:
         """
         Check if data is spatially ordered.
 
@@ -3203,9 +3345,12 @@ class Table:
         readiness, so for its answer run ``gpio.check_spatial(path)`` on the file.
 
         Args:
-            sample_size: Number of random pairs to sample (default: 100)
-            limit_rows: Maximum rows to analyze (default: 500000, matching
-                `gpio check spatial --limit-rows`)
+            options: What to look at, as one :class:`gpio.CheckOptions` -- the
+                same value ``gpio check spatial`` builds from its flags.
+            sample_size: **Deprecated** (#1436), removed in the next minor
+                release: use ``options=gpio.CheckOptions(random_sample_size=...)``.
+            limit_rows: **Deprecated** (#1436): use
+                ``options=gpio.CheckOptions(limit_rows=...)``.
 
         Returns:
             CheckResult with spatial ordering analysis
@@ -3219,9 +3364,21 @@ class Table:
             ...     print("Consider using sort_hilbert()")
         """
         from geoparquet_io.api import check
+        from geoparquet_io.core.check_options import check_options_from_keywords
 
+        asked = check_options_from_keywords(
+            "Table.check_spatial",
+            options,
+            random_sample_size=(
+                None if sample_size == DEFAULT_SPATIAL_SAMPLE_PAIRS else sample_size
+            ),
+            limit_rows=None if limit_rows == DEFAULT_SPATIAL_LIMIT_ROWS else limit_rows,
+        )
         return self._run_check(
-            check._check_spatial_order, sample_size=sample_size, limit_rows=limit_rows
+            check._check_spatial_order,
+            reach=asked,
+            sample_size=asked.resolved_random_sample_size(),
+            limit_rows=asked.resolved_limit_rows(),
         )
 
     def check_spatial_pushdown(self) -> CheckResult:
@@ -3278,6 +3435,7 @@ class Table:
         self,
         sample_rows: int = DEFAULT_BBOX_SAMPLE_ROWS,
         all_rows: bool = False,
+        options: CheckOptions | None = None,
     ) -> CheckResult:
         """
         Check bbox structure, metadata, and whether the values cover the geometry.
@@ -3298,10 +3456,13 @@ class Table:
         ``CheckResult.prospective``.
 
         Args:
-            sample_rows: Rows compared against their geometry, mirroring
-                ``gpio check bbox --sample-rows``. 0 skips that comparison and
-                checks structure and metadata only.
-            all_rows: Compare every row, mirroring ``--all-rows``
+            options: What to look at, as one :class:`gpio.CheckOptions` -- the
+                same value ``gpio check bbox`` builds from its flags.
+            sample_rows: **Deprecated** (#1436), removed in the next minor
+                release: use ``options=gpio.CheckOptions(sample_rows=...)``.
+                0 skips the comparison and checks structure and metadata only.
+            all_rows: **Deprecated** (#1436): use
+                ``options=gpio.CheckOptions(all_rows=True)``.
 
         Returns:
             CheckResult with bbox analysis
@@ -3313,10 +3474,21 @@ class Table:
             ...     table = table.add_bbox()
         """
         from geoparquet_io.api import check
+        from geoparquet_io.core.check_options import check_options_from_keywords
 
-        return self._run_check(check.check_bbox, sample_rows=sample_rows, all_rows=all_rows)
+        asked = check_options_from_keywords(
+            "Table.check_bbox",
+            options,
+            sample_rows=None if sample_rows == DEFAULT_BBOX_SAMPLE_ROWS else sample_rows,
+            all_rows=_asked_true(all_rows),
+        )
+        return self._run_check(check.check_bbox, reach=asked, options=asked)
 
-    def check_row_groups(self, profile: CheckProfile | None = None) -> CheckResult:
+    def check_row_groups(
+        self,
+        profile: CheckProfile | None = None,
+        options: CheckOptions | None = None,
+    ) -> CheckResult:
         """
         Check row group optimization.
 
@@ -3325,6 +3497,11 @@ class Table:
 
         Measured on the source file when this Table was read from one; see
         ``CheckResult.prospective``.
+
+        Args:
+            options: What to look at, as one :class:`gpio.CheckOptions`.
+            profile: **Deprecated** (#1436), removed in the next minor release:
+                use ``options=gpio.CheckOptions(profile=...)``.
 
         Returns:
             CheckResult with row group analysis
@@ -3335,8 +3512,10 @@ class Table:
             >>> print(result.recommendations())
         """
         from geoparquet_io.api import check
+        from geoparquet_io.core.check_options import check_options_from_keywords
 
-        return self._run_check(check.check_row_groups, profile=profile)
+        asked = check_options_from_keywords("Table.check_row_groups", options, profile=profile)
+        return self._run_check(check.check_row_groups, reach=asked, options=asked)
 
     def check_bloom_filters(self) -> CheckResult:
         """
@@ -3414,6 +3593,7 @@ class Table:
         checks: list[str] | None = None,
         output: str | Path | None = None,
         *,
+        options: CheckOptions | None = None,
         overwrite: bool = False,
         verbose: bool = False,
     ) -> Table:
@@ -3431,13 +3611,23 @@ class Table:
         applies both whenever that one is needed.
 
         Args:
-            checks: The checks whose fixes to apply, from ``"bbox"``,
-                ``"covering"``, ``"compression"``, ``"row_groups"`` and
-                ``"spatial"``. None (default) applies them all.
-            output: Write the repaired file here and return a Table read from
-                it. None (default) repairs into a scratch file and returns the
-                rows in memory. Refused when it is this Table's source.
-            overwrite: Replace an existing ``output``. Without it an existing
+            options: Which repairs to apply and where to write them, as one
+                :class:`gpio.CheckOptions` -- the same value ``gpio check``
+                builds from ``--fix``/``--fix-output``/``--overwrite``. Its
+                ``checks``, ``fix_output`` and ``overwrite`` are what the three
+                keywords below set.
+            checks: **Deprecated** (#1436), removed in the next minor release:
+                use ``options=gpio.CheckOptions(checks=...)``. The checks whose
+                fixes to apply, from ``"bbox"``, ``"covering"``,
+                ``"compression"``, ``"row_groups"`` and ``"spatial"``. None
+                (default) applies them all.
+            output: **Deprecated** (#1436): use
+                ``options=gpio.CheckOptions(fix_output=...)``. Write the
+                repaired file here and return a Table read from it. None
+                (default) repairs into a scratch file and returns the rows in
+                memory. Refused when it is this Table's source.
+            overwrite: **Deprecated** (#1436): use
+                ``options=gpio.CheckOptions(overwrite=True)``. Replace an existing ``output``. Without it an existing
                 file is refused, as ``--fix-output`` refuses one without
                 ``--overwrite``. A remote ``output`` is not looked up (gpio
                 does not stat an object store), so an existing remote object
@@ -3461,14 +3651,25 @@ class Table:
 
         from geoparquet_io.api import check
         from geoparquet_io.core.check_fixes import apply_all_fixes
+        from geoparquet_io.core.check_options import FIXABLE_CHECKS, check_options_from_keywords
         from geoparquet_io.core.exceptions import InvalidParameterError
         from geoparquet_io.core.file_utils import handle_output_overwrite, is_same_file_path
 
-        fixable = ("bbox", "covering", "compression", "row_groups", "spatial")
-        wanted = set(fixable if checks is None else [checks] if isinstance(checks, str) else checks)
-        unknown = sorted(wanted - set(fixable))
+        plan_options = check_options_from_keywords(
+            "Table.fix",
+            options,
+            checks=checks,
+            fix_output=None if output is None else os.fspath(output),
+            overwrite=_asked_true(overwrite),
+        )
+        output = plan_options.fix_output
+        overwrite = bool(plan_options.overwrite)
+        wanted = set(plan_options.resolved_checks())
+        unknown = sorted(wanted - set(FIXABLE_CHECKS))
         if unknown:
-            raise InvalidParameterError("checks", f"unknown {unknown}; choose from {list(fixable)}")
+            raise InvalidParameterError(
+                "checks", f"unknown {unknown}; choose from {list(FIXABLE_CHECKS)}"
+            )
         if output is not None and is_same_file_path(os.fspath(output), self._source_path):
             raise InvalidParameterError(
                 "output",
@@ -3493,16 +3694,19 @@ class Table:
             }
             apply_all_fixes(path, target, plan, verbose=verbose)
 
-        if output is not None:
-            self._run_on_one_file(repair, os.fspath(output))
-            return read(output)
-        target = scratch_path(prefix="gpio_fix_")
-        try:
-            self._run_on_one_file(repair, target)
-            # Read with pyarrow, not read(): the Table must not be a view of a scratch file.
-            return Table(pq.read_table(target), geometry_column=self._geometry_column)
-        finally:
-            unlink_released_file(Path(target))
+        # One activation for the whole repair: the checks, the rewrite and the
+        # read-back all reach the store the way ``plan_options.remote`` asks.
+        with check._reaching(plan_options):
+            if output is not None:
+                self._run_on_one_file(repair, os.fspath(output))
+                return read(output)
+            target = scratch_path(prefix="gpio_fix_")
+            try:
+                self._run_on_one_file(repair, target)
+                # Read with pyarrow, not read(): the Table must not be a view of a scratch file.
+                return Table(pq.read_table(target), geometry_column=self._geometry_column)
+            finally:
+                unlink_released_file(Path(target))
 
     def add_admin_divisions(
         self,

@@ -145,7 +145,7 @@ def upload_directory(input_dir: str, s3_bucket: str, profile: str = None):
         destination = f"s3://{s3_bucket}/{input_file.name}"
 
         gpio.read(input_file) \
-            .upload(destination, profile=profile)
+            .upload(destination, remote=gpio.RemoteOptions(profile=profile))
 
         print(f"Uploaded {input_file.name}")
 

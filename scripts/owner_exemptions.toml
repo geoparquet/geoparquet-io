@@ -427,7 +427,7 @@ reason = "permanent: the same keyword-argument list forwarded to one callee (API
 block = "api.ops:from_wfs|api.table:Table.from_wfs"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
-block = "api.ops:read_bigquery|api.table:Table.from_bigquery"
+block = "api.ops:from_bigquery|api.table:Table.from_bigquery"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "api.table:Table.contour|core.process.raster.contour:contour_file"

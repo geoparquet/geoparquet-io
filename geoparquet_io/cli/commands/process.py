@@ -8,7 +8,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 import click
 import duckdb
 
-from geoparquet_io.cli._shared import _activate_s3
+from geoparquet_io.cli._shared import activate_remote
 from geoparquet_io.cli.decorators import (
     aggregate_memory_option,
     breakdown_metric_option,
@@ -174,7 +174,7 @@ def process_overview(
 
         gpio process overview cells.parquet --max-tile-kb 300
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         if (cell_detail is not None or explicit_gsd is not None) and not overview_out:
             raise click.ClickException(
                 "--cell-detail and --gsd size the levels of a single overview "
@@ -264,7 +264,7 @@ def process_aggregate_a5(
         gpio process aggregate a5 fields.parquet cells.csv-like.parquet \\
             --resolution 8 --out-geometry none
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         try:
             aggregate_by_a5_impl(
                 input_parquet,
@@ -327,7 +327,7 @@ def process_aggregate_h3(
         gpio process aggregate h3 fields.parquet cells.parquet \\
             --resolution 8 --out-geometry none
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         try:
             aggregate_by_h3_impl(
                 input_parquet,
@@ -419,7 +419,7 @@ def process_aggregate_admin(
         gpio process aggregate admin buildings.parquet by_country.parquet \\
             --level country --bucket-point bbox
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         try:
             aggregate_by_admin_impl(
                 input_parquet,
@@ -545,7 +545,7 @@ def process_simplify(
             "--simplify-boundary/--no-simplify-boundary only applies with --coverage."
         )
     # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         try:
             simplify_file_impl(
                 input_parquet,
@@ -639,7 +639,7 @@ def process_polygonize(
 
     value_list = _parse_float_csv(values, "--values")
     # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         try:
             polygonize_file(
                 input_raster,
@@ -738,7 +738,7 @@ def process_contour(
 
     level_list = _parse_float_csv(levels, "--levels")
     # Parsed here, once: the core takes MB as a number (HANDOFFS row 78).
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         try:
             contour_file(
                 input_raster,

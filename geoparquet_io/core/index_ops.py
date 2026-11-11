@@ -62,6 +62,7 @@ from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import preview_partition
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
+    RemoteOptions,
     needs_httpfs,
     validate_profile_for_urls,
 )
@@ -325,7 +326,7 @@ def add_index_column(
     handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
     if not spec.multiple_files:
         require_single_file(input_parquet, f"add {spec.name}")
-    validate_profile_for_urls(write.profile, input_parquet, output_parquet)
+    validate_profile_for_urls(write.remote_access().profile, input_parquet, output_parquet)
     geom_col = require_geometry_column(
         primary_geometry_column(input_parquet, verbose=verbose), input_parquet
     )
@@ -519,7 +520,7 @@ def ensure_index_column(
             column_name,
             resolution,
             verbose=verbose,
-            write=WriteOptions(profile=profile),
+            write=WriteOptions(remote=RemoteOptions(profile=profile)),
             use_centroid=use_centroid,
             allow_schema_diff=allow_schema_diff,
             hive_input=hive_input,
@@ -681,7 +682,7 @@ def partition_index(
                 min_resolution=spec.min_resolution,
                 max_resolution=spec.max_resolution,
                 verbose=verbose,
-                profile=write.profile,
+                profile=write.remote_access().profile,
             )
             if spec.prefix_partition:
                 partition_resolution = resolution
@@ -707,7 +708,13 @@ def partition_index(
 
     try:
         working_parquet, column_name, temp_file = ensure_index_column(
-            spec, actual_input, column_name, resolution, verbose, use_centroid, write.profile
+            spec,
+            actual_input,
+            column_name,
+            resolution,
+            verbose,
+            use_centroid,
+            write.remote_access().profile,
         )
 
         if preview:

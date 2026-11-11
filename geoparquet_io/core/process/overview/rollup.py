@@ -220,8 +220,8 @@ def rollup_table(
     """Roll an in-memory aggregate Arrow table up to ``level``.
 
     In-memory counterpart of one `gpio process overview` level, backing
-    ``Table.overview``. Returns a new Arrow table. ``memory_limit`` bounds the
-    DuckDB work (default: half the process's memory ceiling, #1179).
+    ``Table.create_overviews``. Returns a new Arrow table. ``memory_limit``
+    bounds the DuckDB work (default: half the process's memory ceiling, #1179).
     """
     con = open_bounded_connection(load_spatial=True, load_httpfs=True, memory_limit=memory_limit)
     try:

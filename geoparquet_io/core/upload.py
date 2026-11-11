@@ -22,12 +22,14 @@ from geoparquet_io.core.exceptions import (
 )
 from geoparquet_io.core.logging_config import error, progress, success
 from geoparquet_io.core.remote import (
+    RemoteOptions,
     canonical_store_url,
     is_account_first_azure_url,
     is_azure_url,
     is_gcs_url,
     is_http_url,
     is_s3_url,
+    remote_options_from_keywords,
 )
 from geoparquet_io.core.sizing import bytes_to_mb
 
@@ -702,22 +704,29 @@ def upload(
     s3_endpoint: str | None = None,
     s3_region: str | None = None,
     s3_use_ssl: bool = True,
+    remote: RemoteOptions | None = None,
 ) -> None:
     """Upload file(s) to remote object storage using obstore.
 
     Args:
         source: Local file or directory path
         destination: Object store URL (e.g., s3://bucket/prefix/)
-        profile: AWS profile name (only used for S3)
+        profile: **Deprecated** (#1436), removed in the next minor release: use
+            ``remote=RemoteOptions(profile=...)``.
         pattern: Optional glob pattern for filtering files (e.g., "*.parquet")
         max_files: Max number of files to upload in parallel (for directories)
         chunk_concurrency: Max concurrent chunks per file (passed to obstore)
         chunk_size: Chunk size in bytes for multipart uploads (optional)
         fail_fast: If True, stop on first error; otherwise continue and report at end
         dry_run: If True, show what would be uploaded without actually uploading
-        s3_endpoint: Custom S3-compatible endpoint (e.g., "minio.example.com:9000")
-        s3_region: S3 region (default: us-east-1 when using custom endpoint)
-        s3_use_ssl: Whether to use HTTPS for S3 endpoint (default: True)
+        s3_endpoint: **Deprecated** (#1436): use
+            ``remote=RemoteOptions(s3_endpoint=...)``.
+        s3_region: **Deprecated** (#1436): use ``remote=RemoteOptions(s3_region=...)``.
+        s3_use_ssl: **Deprecated** (#1436): use
+            ``remote=RemoteOptions(s3_use_ssl=...)``.
+        remote: How the destination's object store is reached, as one
+            :class:`~geoparquet_io.core.remote.RemoteOptions` -- the value
+            ``gpio publish upload`` builds from its flags.
 
     Raises:
         RemoteAccessError: If a directory upload left any file out of the
@@ -726,10 +735,8 @@ def upload(
 
     Examples:
         # Single file
-        upload(Path("data.parquet"), "s3://bucket/data.parquet", profile="source-coop")
-
-        # Directory (all files)
-        upload(Path("output/"), "s3://bucket/dataset/", profile="source-coop")
+        upload(Path("data.parquet"), "s3://bucket/data.parquet",
+               remote=RemoteOptions(profile="source-coop"))
 
         # Directory (only parquet)
         upload(Path("output/"), "s3://bucket/dataset/", pattern="*.parquet")
@@ -738,10 +745,22 @@ def upload(
         upload(
             Path("data.parquet"),
             "s3://bucket/data.parquet",
-            s3_endpoint="minio.example.com:9000",
-            s3_use_ssl=False,
+            remote=RemoteOptions(s3_endpoint="minio.example.com:9000", s3_use_ssl=False),
         )
     """
+    asked = remote_options_from_keywords(
+        "upload",
+        remote,
+        profile=profile,
+        s3_endpoint=s3_endpoint,
+        s3_region=s3_region,
+        s3_use_ssl=s3_use_ssl,
+    )
+    profile = asked.profile
+    s3_endpoint = asked.s3_endpoint
+    s3_region = asked.s3_region
+    s3_use_ssl = True if asked.s3_use_ssl is None else asked.s3_use_ssl
+
     if s3_endpoint is None:
         profile, s3_endpoint, s3_region, s3_use_ssl = _with_active_s3_config(
             profile, s3_region, s3_use_ssl

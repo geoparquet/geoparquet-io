@@ -528,7 +528,7 @@ def _hilbert_order_file_based(
         input_parquet, add_bbox_flag, verbose
     )
 
-    validate_profile_for_urls(write.profile, input_parquet, output_parquet)
+    validate_profile_for_urls(write.remote.profile, input_parquet, output_parquet)
     show_remote_read_message(working_parquet, verbose)
 
     working_url = resolve_file_url(working_parquet, verbose)

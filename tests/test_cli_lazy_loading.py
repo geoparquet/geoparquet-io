@@ -8,10 +8,19 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    "args,groups",
-    [(["--help"], []), (["inspect", "--help"], ["inspect"]), (["extract", "--help"], ["extract"])],
+    "args,groups,absent",
+    [
+        # Picking a command must not pay for a database driver. A Click option's
+        # default reached for ``core.check_options`` at ``cli/decorators.py``'s
+        # module scope, and ``check_bbox_values`` behind it imports duckdb
+        # (#1436). A group's own help does load its core modules, so duckdb is
+        # asked about only for the root help.
+        (["--help"], [], ["duckdb"]),
+        (["inspect", "--help"], ["inspect"], []),
+        (["extract", "--help"], ["extract"], []),
+    ],
 )
-def test_cold_help_import_count(args, groups):
+def test_cold_help_import_count(args, groups, absent):
     code = """
 import json
 import sys
@@ -24,7 +33,9 @@ print(json.dumps(sorted(name.removeprefix(prefix) for name in sys.modules if nam
 assert "geoparquet_io.core.wfs" not in sys.modules
 assert "botocore" not in sys.modules
 assert "obstore" not in sys.modules
-""".replace("ARGS", repr(args))
+for module in ABSENT:
+    assert module not in sys.modules, module
+""".replace("ARGS", repr(args)).replace("ABSENT", repr(absent))
     result = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
     )

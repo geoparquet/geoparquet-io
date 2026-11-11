@@ -150,8 +150,8 @@ Filter features by a rectangular bounding box. The bbox is specified as `xmin,ym
     gpio extract https://data.source.coop/fiboa/data/si/si-2024.parquet slovenia_subset.parquet \
       --bbox 450000,50000,500000,100000
 
-    # Extract from S3 building dataset (WGS84 coordinates)
-    gpio extract s3://us-west-2.opendata.source.coop/vida/google-microsoft-osm-open-buildings/geoparquet/by_country_s2/country_iso=AGO/2017612633061982208.parquet angola_subset.parquet \
+    # Extract from a source.coop building dataset (WGS84 coordinates)
+    gpio extract https://data.source.coop/vida/google-microsoft-osm-open-buildings/geoparquet/by_country_s2/country_iso=AGO/2017612633061982208.parquet angola_subset.parquet \
       --bbox 13.0,-9.0,14.0,-8.0
     ```
 
@@ -172,6 +172,15 @@ Filter features by a rectangular bounding box. The bbox is specified as `xmin,ym
 
 !!! note "Remote file support"
     S3, GCS, Azure, and HTTPS URLs are supported via DuckDB's httpfs extension. A URL is used exactly as you paste it — gpio takes it as already percent-encoded and never re-encodes it. See the [Remote Files guide](remote-files.md) for credential configuration.
+
+!!! note "Dotted S3 bucket names on DuckDB 1.5.x"
+    An `s3://` URL whose bucket name contains dots, like
+    `s3://us-west-2.opendata.source.coop/...`, fails on DuckDB 1.5.x with an
+    SSL certificate error — the dotted name breaks virtual-host-style
+    addressing (DuckDB 2.0 handles it). The `https://data.source.coop/...`
+    form above reaches the same file over plain HTTPS and sidesteps the
+    problem entirely, which is why it's used here instead of the `s3://`
+    path ([#1365](https://github.com/geoparquet/geoparquet-io/issues/1365)).
 
 **Across the antimeridian**: a longitude bbox with `xmin > xmax` wraps the
 antimeridian (RFC 7946 5.2), so `170,-10,-170,10` keeps features on both sides
@@ -534,7 +543,7 @@ Combine column selection, spatial filtering, and WHERE clauses:
       --where '"crop:name" = '\''wheat'\'' AND area > 10000'
 
     # Extract buildings in area with specific attributes
-    gpio extract s3://us-west-2.opendata.source.coop/vida/google-microsoft-osm-open-buildings/geoparquet/by_country_s2/country_iso=AGO/2017612633061982208.parquet large_buildings.parquet \
+    gpio extract https://data.source.coop/vida/google-microsoft-osm-open-buildings/geoparquet/by_country_s2/country_iso=AGO/2017612633061982208.parquet large_buildings.parquet \
       --bbox 13.0,-9.0,14.0,-8.0 \
       --where "area_in_meters > 1000"
     ```
@@ -2288,13 +2297,13 @@ features too, which writes the layer's remaining columns with zero rows.
 A **blank entry** in the list — `--include-cols id,,name`, or `--include-cols '   '` —
 is a usage error and is rejected before anything is opened or contacted. That
 holds for the Python API too (`ops.from_carto`, `ops.from_arcgis`,
-`ops.read_bigquery`, `ops.extract`, `ops.create_pmtiles`), which never goes
+`ops.from_bigquery`, `ops.extract`, `ops.create_pmtiles`), which never goes
 through the CLI's option parsing. A **wholly empty** value is not a blank entry:
 `--include-cols ""` means "option not given", so `--include-cols "$COLS"` keeps
 working when `COLS` is unset.
 
 That last rule is about the *string* option. The Python API's list arguments —
-`ops.read_bigquery(columns=[...])` and `gpio.Table.from_bigquery(columns=[...])`
+`ops.from_bigquery(columns=[...])` and `gpio.Table.from_bigquery(columns=[...])`
 — have their own "unset", which is `None` or `[]`. A list holding a blank entry,
 including `[""]` on its own, is a mistake and raises rather than quietly
 selecting every column.

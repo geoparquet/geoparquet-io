@@ -168,7 +168,7 @@ def test_api_write_to_s3_passes_profile_without_touching_env(buildings_test_file
         gpio.read(buildings_test_file).write(S3_DEST, profile="write-profile")
 
     assert len(seen) == 1, "upload should have been invoked for the remote write"
-    assert seen[0]["kwargs"].get("profile") == "write-profile", (
+    assert seen[0]["kwargs"]["remote"].profile == "write-profile", (
         "the profile must reach upload() as an explicit argument"
     )
     assert seen[0]["env_profile"] == "original-profile", (
@@ -187,7 +187,7 @@ def test_api_write_to_s3_leaves_unset_aws_profile_unset(buildings_test_file, mon
         gpio.read(buildings_test_file).write(S3_DEST, profile="write-profile")
 
     assert len(seen) == 1
-    assert seen[0]["kwargs"].get("profile") == "write-profile"
+    assert seen[0]["kwargs"]["remote"].profile == "write-profile"
     assert seen[0]["env_profile"] is None
     assert "AWS_PROFILE" not in os.environ
 
@@ -199,10 +199,12 @@ def test_api_upload_to_s3_passes_profile_without_touching_env(buildings_test_fil
     monkeypatch.setenv("AWS_PROFILE", "original-profile")
     seen: list = []
     with patch("geoparquet_io.core.upload.upload", side_effect=_recording_upload(seen)):
-        gpio.read(buildings_test_file).upload(S3_DEST, profile="upload-profile")
+        gpio.read(buildings_test_file).upload(
+            S3_DEST, remote=gpio.RemoteOptions(profile="upload-profile")
+        )
 
     assert len(seen) == 1
-    assert seen[0]["kwargs"].get("profile") == "upload-profile"
+    assert seen[0]["kwargs"]["remote"].profile == "upload-profile"
     assert seen[0]["env_profile"] == "original-profile"
     assert os.environ.get("AWS_PROFILE") == "original-profile"
 
@@ -217,7 +219,7 @@ def test_api_write_non_parquet_to_s3_does_not_leak_profile(buildings_test_file, 
         gpio.read(buildings_test_file).write("s3://fake-bucket/out.fgb", profile="fgb-profile")
 
     assert len(seen) == 1
-    assert seen[0]["kwargs"].get("profile") == "fgb-profile"
+    assert seen[0]["kwargs"]["remote"].profile == "fgb-profile"
     assert seen[0]["env_profile"] == "original-profile"
     assert os.environ.get("AWS_PROFILE") == "original-profile"
 

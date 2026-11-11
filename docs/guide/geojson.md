@@ -31,6 +31,10 @@ input. A planar exported geometry can still be written when a secondary column
 declares non-planar edges. An explicit `edges: planar` in the geo block takes
 precedence over a GeoArrow or native edge type, matching GeoParquet writes.
 
+The same refusal covers GeoPackage, FlatGeobuf, Shapefile and CSV output, which
+say no more about edge interpolation than GeoJSON does — see
+[Non-planar Edges Are Not Exportable](convert.md#non-planar-edges-are-not-exportable).
+
 Keep non-planar data in GeoParquet, or first use a geodesic-aware tool to densify
 and cut the shapes into a planar representation. gpio does not yet provide that
 conversion. Removing the edge declaration alone changes the geometry's meaning.
