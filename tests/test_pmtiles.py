@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from geoparquet_io.core.remote import RemoteOptions
+
 
 def has_tippecanoe():
     """Check if tippecanoe is available."""
@@ -66,7 +68,7 @@ class TestBuildGpioCommands:
             include_cols=None,
             precision=6,
             verbose=False,
-            profile=None,
+            remote=None,
             src_crs=None,
         )
 
@@ -88,7 +90,7 @@ class TestBuildGpioCommands:
             include_cols="name,type",
             precision=5,
             verbose=True,
-            profile="my-profile",
+            remote=RemoteOptions(profile="my-profile"),
             src_crs=None,
         )
 
@@ -104,7 +106,9 @@ class TestBuildGpioCommands:
         assert "--include-cols" in extract_cmd
         assert "name,type" in extract_cmd
         assert "--verbose" in extract_cmd
-        assert "--profile" in extract_cmd
+        # The root group's flag, which every child leaf accepts; the per-command
+        # `--profile` this used to pass is not an option any of them has (#1452).
+        assert "--aws-profile" in extract_cmd
         assert "my-profile" in extract_cmd
 
         convert_cmd = commands[1]
@@ -123,7 +127,7 @@ class TestBuildGpioCommands:
             include_cols=None,
             precision=6,
             verbose=True,
-            profile="my-profile",
+            remote=RemoteOptions(profile="my-profile"),
             src_crs="EPSG:3857",
         )
 
@@ -154,7 +158,7 @@ class TestBuildGpioCommands:
             include_cols="name,height",
             precision=6,
             verbose=False,
-            profile=None,
+            remote=None,
             src_crs="EPSG:3857",
         )
 

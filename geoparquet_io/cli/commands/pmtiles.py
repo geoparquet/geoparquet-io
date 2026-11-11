@@ -7,6 +7,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 
 import click
 
+from geoparquet_io.cli._shared import activate_remote, resolved_remote_options
 from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     column_list_option,
@@ -124,7 +125,9 @@ def pmtiles(ctx):
 @repair_geometry_option
 @verbose_option
 @remote_options
+@click.pass_context
 def pmtiles_create(
+    ctx,
     input_file,
     output_file,
     layer,
@@ -172,32 +175,39 @@ def pmtiles_create(
     """
     from geoparquet_io.core.pmtiles import create_pmtiles_from_geoparquet
 
+    # This command's own flags over the root group's, resolved once. The scope
+    # below makes them the ambient config for this process's reads of the input,
+    # and the same value is re-stated on the argv of the child `gpio` runs the
+    # tiling pipeline pipes through, which inherit no ambient config of their
+    # own. Before #1452 the leaf did neither.
+    remote = resolved_remote_options(ctx, remote)
     try:
-        create_pmtiles_from_geoparquet(
-            input_path=input_file,
-            output_path=output_file,
-            layer=layer,
-            min_zoom=min_zoom,
-            max_zoom=max_zoom,
-            bbox=bbox,
-            where=where,
-            include_cols=include_cols,
-            precision=precision,
-            verbose=verbose,
-            profile=remote.profile,
-            src_crs=src_crs,
-            attribution=attribution,
-            layer_by_column=layer_by_column,
-            simplify_only_low_zooms=simplify_only_low_zooms,
-            no_simplification_of_shared_nodes=no_simplification_of_shared_nodes,
-            no_tile_size_limit=no_tile_size_limit,
-            drop_densest_as_needed=drop_densest_as_needed,
-            maximum_tile_bytes=maximum_tile_bytes,
-            force=force,
-            repair_geometry=repair_geometry,
-            temporary_directory=temporary_directory,
-            chunks=chunks,
-        )
+        with activate_remote(ctx, remote):
+            create_pmtiles_from_geoparquet(
+                input_path=input_file,
+                output_path=output_file,
+                layer=layer,
+                min_zoom=min_zoom,
+                max_zoom=max_zoom,
+                bbox=bbox,
+                where=where,
+                include_cols=include_cols,
+                precision=precision,
+                verbose=verbose,
+                remote=remote,
+                src_crs=src_crs,
+                attribution=attribution,
+                layer_by_column=layer_by_column,
+                simplify_only_low_zooms=simplify_only_low_zooms,
+                no_simplification_of_shared_nodes=no_simplification_of_shared_nodes,
+                no_tile_size_limit=no_tile_size_limit,
+                drop_densest_as_needed=drop_densest_as_needed,
+                maximum_tile_bytes=maximum_tile_bytes,
+                force=force,
+                repair_geometry=repair_geometry,
+                temporary_directory=temporary_directory,
+                chunks=chunks,
+            )
         click.echo(click.style(f"✓ Created {output_file}", fg="green"))
     except GeoParquetError:
         raise  # the error boundary answers it (and logs the traceback for --verbose)
@@ -286,7 +296,9 @@ def pmtiles_create(
     "cap when lower. The tippecanoe runs are separate processes and are not bounded by it."
 )
 @verbose_option
+@click.pass_context
 def pmtiles_pyramid(
+    ctx,
     input_parquet,
     output_pmtiles,
     levels,
@@ -330,25 +342,32 @@ def pmtiles_pyramid(
     """
     from geoparquet_io.core.pmtiles_pyramid import create_pmtiles_pyramid
 
+    # The aggregate it plans against, and the features source, may both be
+    # remote: the band probe and the overview rollups read them with DuckDB, and
+    # the per-band tiling pipes through child `gpio` runs that need the options
+    # on their argv. The root group's flags reached neither before #1452.
+    remote = resolved_remote_options(ctx)
     try:
-        create_pmtiles_pyramid(
-            input_parquet,
-            output_pmtiles,
-            levels=levels,
-            bands=bands,
-            max_tile_kb=max_tile_kb,
-            bytes_per_cell=bytes_per_cell,
-            layer_mode=layer_mode,
-            include_features=include_features,
-            features_source=features_source,
-            features_min_zoom=features_min_zoom,
-            max_zoom=max_zoom,
-            attribution=attribution,
-            force=force,
-            verbose=verbose,
-            temporary_directory=temporary_directory,
-            memory_limit=write_memory,
-        )
+        with activate_remote(ctx, remote):
+            create_pmtiles_pyramid(
+                input_parquet,
+                output_pmtiles,
+                levels=levels,
+                bands=bands,
+                max_tile_kb=max_tile_kb,
+                bytes_per_cell=bytes_per_cell,
+                layer_mode=layer_mode,
+                include_features=include_features,
+                features_source=features_source,
+                features_min_zoom=features_min_zoom,
+                max_zoom=max_zoom,
+                attribution=attribution,
+                force=force,
+                verbose=verbose,
+                temporary_directory=temporary_directory,
+                memory_limit=write_memory,
+                remote=remote,
+            )
         click.echo(click.style(f"✓ Created {output_pmtiles}", fg="green"))
     except GeoParquetError:
         raise  # the error boundary answers it (and logs the traceback for --verbose)

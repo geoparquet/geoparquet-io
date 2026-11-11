@@ -926,9 +926,10 @@ format refuses it.
 `profile`, `s3_endpoint`, `s3_region`, `s3_use_ssl` -- the same one every CLI
 command builds from `--aws-profile` and `--s3-*`
 ([#1436](https://github.com/geoparquet/geoparquet-io/issues/1436)). Pass it as
-`remote=` to `gpio.read_partition`, `gpio.convert`, `Table.write` and
-`Table.upload`. Every field defaults to `None`, "not asked", which falls back to
-the AWS environment variables and then to gpio's defaults.
+`remote=` to `gpio.read_partition`, `gpio.convert`, `Table.write`,
+`Table.upload`, `ops.create_pmtiles` and `ops.create_pmtiles_pyramid`. Every
+field defaults to `None`, "not asked", which falls back to the AWS environment
+variables and then to gpio's defaults.
 
 ```python
 remote = gpio.RemoteOptions(profile='prod', s3_region='us-west-2')
@@ -2202,8 +2203,8 @@ The return value is a dict with `processed`, `skipped`, `errors`, `candidates`
 | `ops.from_wfs_layers(service_url, typenames, output_dir, parallel_layers=1, max_workers=1, page_size=100000, ...)` | Fetch multiple WFS layers to directory |
 | `ops.create_overviews(input_parquet, levels=None, max_tile_kb=500, bytes_per_cell=None, cell_column=None, scheme=None, output_dir=None, force=False, ...)` | Build coarser overview levels from an aggregate file; an unset ZSTD level resolves to the process default 9 |
 | `ops.create_overview_file(input_parquet, overview_out, levels=None, cell_detail=None, explicit_gsd=None, output_dir=None, force=False, ...)` | Assemble the overview ladder into one levelled GeoParquet (tylertoo overviews format) |
-| `ops.create_pmtiles(input_path, output_path, layer=None, min_zoom=None, max_zoom=None, bbox=None, where=None, include_cols=None, chunks=None, temporary_directory=None, ...)` | Stream a GeoParquet file into a PMTiles archive (requires tippecanoe; `chunks` also tile-join) |
-| `ops.create_pmtiles_pyramid(input_path, output_path, levels=None, max_tile_kb=500, layer_mode='grouped', include_features=False, features_source=None, max_zoom=None, temporary_directory=None, memory_limit=None, ...)` | Build a zoom-banded multi-level PMTiles archive from an aggregate file (requires tippecanoe + tile-join) |
+| `ops.create_pmtiles(input_path, output_path, layer=None, min_zoom=None, max_zoom=None, bbox=None, where=None, include_cols=None, chunks=None, temporary_directory=None, remote=None, ...)` | Stream a GeoParquet file into a PMTiles archive (requires tippecanoe; `chunks` also tile-join). `remote` is the `gpio.RemoteOptions` for a remote `input_path`, and reaches the child `gpio` runs too |
+| `ops.create_pmtiles_pyramid(input_path, output_path, levels=None, max_tile_kb=500, layer_mode='grouped', include_features=False, features_source=None, max_zoom=None, temporary_directory=None, memory_limit=None, remote=None, ...)` | Build a zoom-banded multi-level PMTiles archive from an aggregate file (requires tippecanoe + tile-join); `remote` reaches `input_path` and `features_source` |
 | `ops.partition_by_h3(table, output_dir, resolution=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_h3_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by H3 cell |
 | `ops.partition_by_a5(table, output_dir, resolution=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_a5_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by A5 cell |
 | `ops.partition_by_s2(table, output_dir, level=None, auto=False, target_rows=100000, max_partitions=10000, compression='ZSTD', hive=False, keep_s2_column=None, overwrite=False, geometry_column=None)` | Partition into a directory by S2 cell |

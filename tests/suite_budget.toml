@@ -102,7 +102,15 @@
 # census reads, the kept signature, warning once per process, the canonical
 # name staying silent, and the alias handing core the call the canonical name
 # does, plus the root keeping both BigQuery spellings (11).
-max_collected = 14939
+# +14, activating the remote config on every leaf that can reach a store
+# (#1452): the structural census of leaves whose call path never enters
+# `activate_remote` and the guard that it sees a delegated one (2), the root
+# flags reaching the core call of each of the six leaves that never activated
+# (6), `pmtiles create` layering its own profile over the root one (1), the
+# child `gpio` argv carrying every option as a flag the root group declares (3),
+# `ops.create_pmtiles(remote=)` with the old keyword folded in (1), and the
+# parity census now requiring `remote=` on a path-taking twin (1).
+max_collected = 14953
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

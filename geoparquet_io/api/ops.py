@@ -51,6 +51,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from geoparquet_io.core.preview import BboxFilterPreview
+    from geoparquet_io.core.remote import RemoteOptions
 
 
 def _path_str(value: str | Path) -> str:
@@ -2963,6 +2964,7 @@ def create_pmtiles(
     precision: int = 6,
     verbose: bool = False,
     profile: str | None = None,
+    remote: RemoteOptions | None = None,
     src_crs: str | None = None,
     attribution: str | None = None,
     layer_by_column: str | None = None,
@@ -2993,7 +2995,14 @@ def create_pmtiles(
         include_cols: Comma-separated list of columns to include
         precision: Coordinate decimal precision (default: 6)
         verbose: Enable verbose output
-        profile: AWS profile name for S3 files
+        profile: **Deprecated** (#1436), removed in the next minor release: use
+            ``remote=gpio.RemoteOptions(profile=...)``. Still honoured, with a
+            warning once per process.
+        remote: How the object store holding ``input_path`` is reached, as one
+            :class:`gpio.RemoteOptions` (AWS profile, S3 endpoint, region, SSL).
+            Made the ambient config for this process's reads and re-stated on the
+            argv of the child ``gpio`` runs the tiling pipeline pipes through,
+            which inherit none of it (#1452).
         src_crs: Source CRS for reprojection to WGS84
         attribution: Attribution HTML for the tiles
         layer_by_column: Split tiles into layers grouped by the values of this column
@@ -3030,38 +3039,49 @@ def create_pmtiles(
         ...     max_zoom=14,
         ...     bbox='-122.5,37.5,-122.0,38.0'
         ... )
+        >>> ops.create_pmtiles(
+        ...     's3://bucket/data.parquet',
+        ...     'tiles.pmtiles',
+        ...     remote=gpio.RemoteOptions(profile='my-aws'),
+        ... )
     """
     input_path = _path_str(input_path)
     output_path = _path_str(output_path)
     temporary_directory = _opt_path_str(temporary_directory)
 
     from geoparquet_io.core.pmtiles import create_pmtiles_from_geoparquet
+    from geoparquet_io.core.remote import remote_options_from_keywords
 
-    create_pmtiles_from_geoparquet(
-        input_path=input_path,
-        output_path=output_path,
-        layer=layer,
-        min_zoom=min_zoom,
-        max_zoom=max_zoom,
-        bbox=bbox,
-        where=where,
-        include_cols=include_cols,
-        precision=precision,
-        verbose=verbose,
-        profile=profile,
-        src_crs=src_crs,
-        attribution=attribution,
-        layer_by_column=layer_by_column,
-        simplify_only_low_zooms=simplify_only_low_zooms,
-        no_simplification_of_shared_nodes=no_simplification_of_shared_nodes,
-        no_tile_size_limit=no_tile_size_limit,
-        drop_densest_as_needed=drop_densest_as_needed,
-        maximum_tile_bytes=maximum_tile_bytes,
-        force=force,
-        repair_geometry=repair_geometry,
-        temporary_directory=temporary_directory,
-        chunks=chunks,
-    )
+    remote = remote_options_from_keywords("create_pmtiles", remote, profile=profile)
+    # Activated here, as `gpio.convert` does: the endpoint and region reach this
+    # process's own DuckDB reads of the input through the ambient config, and the
+    # options travel into core as well, for the child `gpio` argv (#1452).
+    with remote.activate():
+        create_pmtiles_from_geoparquet(
+            input_path=input_path,
+            output_path=output_path,
+            layer=layer,
+            min_zoom=min_zoom,
+            max_zoom=max_zoom,
+            bbox=bbox,
+            where=where,
+            include_cols=include_cols,
+            precision=precision,
+            verbose=verbose,
+            remote=remote,
+            src_crs=src_crs,
+            attribution=attribution,
+            layer_by_column=layer_by_column,
+            simplify_only_low_zooms=simplify_only_low_zooms,
+            no_simplification_of_shared_nodes=no_simplification_of_shared_nodes,
+            no_tile_size_limit=no_tile_size_limit,
+            drop_densest_as_needed=drop_densest_as_needed,
+            maximum_tile_bytes=maximum_tile_bytes,
+            force=force,
+            repair_geometry=repair_geometry,
+            temporary_directory=temporary_directory,
+            chunks=chunks,
+        )
 
 
 def create_pmtiles_pyramid(
@@ -3082,6 +3102,7 @@ def create_pmtiles_pyramid(
     verbose: bool = False,
     temporary_directory: str | Path | None = None,
     memory_limit: str | None = None,
+    remote: RemoteOptions | None = None,
 ) -> None:
     """
     Create a banded multi-level PMTiles pyramid from an aggregate file.
@@ -3120,6 +3141,9 @@ def create_pmtiles_pyramid(
             the intermediate band archives; defaults to the OS temp directory
         memory_limit: DuckDB memory limit for band planning and the overview
             rollups (e.g. "2GB"); default: half the memory ceiling (#1191)
+        remote: How the object store holding input_path (and features_source) is
+            reached, as one :class:`gpio.RemoteOptions` (AWS profile, S3
+            endpoint, region, SSL)
 
     Raises:
         TippecanoeNotFoundError: If tippecanoe is not in PATH
@@ -3148,25 +3172,32 @@ def create_pmtiles_pyramid(
     from geoparquet_io.core.pmtiles_pyramid import (
         create_pmtiles_pyramid as _create_pmtiles_pyramid,
     )
+    from geoparquet_io.core.remote import remote_options_from_keywords
 
-    _create_pmtiles_pyramid(
-        input_path,
-        output_path,
-        levels=levels,
-        bands=bands,
-        max_tile_kb=max_tile_kb,
-        bytes_per_cell=bytes_per_cell,
-        layer_mode=layer_mode,
-        include_features=include_features,
-        features_source=features_source,
-        features_min_zoom=features_min_zoom,
-        max_zoom=max_zoom,
-        attribution=attribution,
-        force=force,
-        verbose=verbose,
-        temporary_directory=temporary_directory,
-        memory_limit=memory_limit,
-    )
+    # No deprecated keyword to fold: this entry point never took a bare
+    # `profile=`. The helper is still the one place "no options asked" becomes
+    # an empty ``RemoteOptions``.
+    remote = remote_options_from_keywords("create_pmtiles_pyramid", remote)
+    with remote.activate():
+        _create_pmtiles_pyramid(
+            input_path,
+            output_path,
+            levels=levels,
+            bands=bands,
+            max_tile_kb=max_tile_kb,
+            bytes_per_cell=bytes_per_cell,
+            layer_mode=layer_mode,
+            include_features=include_features,
+            features_source=features_source,
+            features_min_zoom=features_min_zoom,
+            max_zoom=max_zoom,
+            attribution=attribution,
+            force=force,
+            verbose=verbose,
+            temporary_directory=temporary_directory,
+            memory_limit=memory_limit,
+            remote=remote,
+        )
 
 
 def simplify(

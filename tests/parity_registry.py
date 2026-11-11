@@ -12,6 +12,8 @@ To register a new twin, case or exemption:
   spelled differently -> `TWIN_NAMES`, with its reason
 * a leaf that lacks a twin, a functional twin or a call case -> `EXEMPT`
 * a parameter only one side has, outside `ONE_SIDED_CLASSES` -> `ONE_SIDED`
+* a path-taking twin of a leaf with remote flags that cannot take `remote=` ->
+  `API_REMOTE_EXEMPT`
 * an old API name kept alive by `api._deprecation.deprecated_alias` ->
   `DEPRECATED_ALIASES`
 
@@ -747,6 +749,14 @@ ONE_SIDED_CLASSES: dict[str, str] = {
     ),
 }
 
+#: `(leaf, twin label)` for a twin that addresses an object store by path, whose
+#: CLI side packs the remote flags, and that still does not take `remote=` --
+#: with the reason it is allowed to stand. `ONE_SIDED_CLASSES["remote_access"]`
+#: only ever *excused* an API-side `remote`; nothing required one, so the
+#: migration could leave a leaf behind (#1452). Empty, and kept so a future
+#: exception has a home with its reason attached rather than a silent gap.
+API_REMOTE_EXEMPT: dict[tuple[str, str], str] = {}
+
 
 def _returns_table(fn: Callable) -> bool:
     return "Table" in str(inspect.signature(fn).return_annotation)
@@ -816,6 +826,45 @@ def one_sided(side: str) -> set[tuple[str, str, str]]:
             (leaf, side, name)
             for name, fn in api.items()
             if name not in cli_names and _api_class(name, fn) is None
+        }
+    return out
+
+
+def _hands_a_table_on(label: str, fn: Callable) -> bool:
+    """Whether this twin hands an in-memory table on instead of addressing a store.
+
+    The derived excuse for the remote census below (#1452). A twin that takes a
+    ``pa.Table``, is a ``Table`` method (its operand *is* the table), or returns
+    a ``Table`` never opens the object store itself: the read happened in
+    ``gpio.read(..., remote=...)`` and the write happens in
+    ``Table.write(remote=...)``, each of which takes the options. A twin whose
+    operand is a *path* does the I/O itself and must take them too.
+    """
+    if label.startswith("Table.") or _returns_table(fn):
+        return True
+    return any(
+        "pa.Table" in str(parameter.annotation)
+        for parameter in inspect.signature(fn).parameters.values()
+    )
+
+
+def api_twins_missing_remote() -> set[tuple[str, str]]:
+    """``(leaf, twin label)`` for a path-taking twin of a leaf that declares remote flags.
+
+    The census the RemoteOptions migration lacked (#1452): `ONE_SIDED_CLASSES`
+    excuses an API-side ``remote``, so a leaf whose CLI packs ``--aws-profile``
+    into one and whose API twin still takes a bare ``profile=`` -- or nothing at
+    all -- passed every check. `gpio pmtiles create` was that leaf.
+    """
+    flags = set(decorators.REMOTE_OPTION_PARAMS)
+    out: set[tuple[str, str]] = set()
+    for leaf, cmd in _commands().items():
+        if not {p.name for p in cmd.params} & flags:
+            continue
+        out |= {
+            (leaf, label)
+            for label, fn in api_twins(leaf)
+            if not _hands_a_table_on(label, fn) and "remote" not in _params(fn)
         }
     return out
 

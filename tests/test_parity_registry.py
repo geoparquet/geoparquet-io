@@ -158,6 +158,7 @@ def test_every_registry_entry_has_a_reason():
         },
         "ONE_SIDED": reg.ONE_SIDED,
         "ONE_SIDED_CLASSES": reg.ONE_SIDED_CLASSES,
+        "API_REMOTE_EXEMPT": reg.API_REMOTE_EXEMPT,
         "KNOWN_DIVERGENCES": reg.KNOWN_DIVERGENCES,
         "KNOWN_PARITY_GAPS": reg.KNOWN_PARITY_GAPS,
         "GROUPS_WITHOUT_A_CALL_CASE": reg.GROUPS_WITHOUT_A_CALL_CASE,
@@ -186,6 +187,26 @@ def test_no_unrecorded_cli_only_parameter():
     actual = reg.one_sided("cli")
     recorded = {key for key in reg.ONE_SIDED if key[1] == "cli"}
     assert actual == recorded, _diff_message("CLI", actual, recorded)
+
+
+def test_a_leaf_with_remote_flags_has_an_api_side_that_takes_them():
+    """#1452: the census required nothing of a remote-flagged leaf's API twin.
+
+    `ONE_SIDED_CLASSES["remote_access"]` excuses an API-side `remote`, so a twin
+    that takes a bare `profile=` -- or no remote option at all -- while its CLI
+    side packs `--aws-profile` into a `RemoteOptions` was invisible here. A twin
+    that hands an in-memory Table on is excused by derivation; one whose operand
+    is a path does the store I/O itself and must take `remote=`.
+    """
+    actual = reg.api_twins_missing_remote()
+    assert actual == set(reg.API_REMOTE_EXEMPT), (
+        "Path-taking API twins of leaves that declare remote flags drifted from "
+        "API_REMOTE_EXEMPT (tests/parity_registry.py).\n"
+        f"New -- add `remote: gpio.RemoteOptions | None = None`, or record a reason:\n"
+        f"{sorted(actual - set(reg.API_REMOTE_EXEMPT))}\n"
+        f"Stale -- now takes it; delete the entry:\n"
+        f"{sorted(set(reg.API_REMOTE_EXEMPT) - actual)}"
+    )
 
 
 def test_no_unrecorded_api_only_parameter():
