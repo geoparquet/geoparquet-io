@@ -33,6 +33,7 @@ from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
     require_geometry_column,
     resolve_geometry_column,
+    resolve_geometry_read,
 )
 
 if TYPE_CHECKING:
@@ -104,6 +105,27 @@ def _require_planar_geojson_edges(column: str, edges: str | None) -> None:
             "and cut the shapes into a planar representation before exporting. "
             "Disabling geometry repair does not make this conversion safe."
         )
+
+
+def _require_serializable_geometry(con, source_ref: str, column: str | None) -> None:
+    """Refuse a GeoArrow-native column before any ``ST_`` function is handed it.
+
+    Every expression the writer builds -- ``ST_AsGeoJSON``, the
+    ``ST_IsValid``/``ST_MakeValid`` repair, ``ST_ReducePrecision``, the bbox
+    members -- takes a real GEOMETRY, and a GeoArrow coordinate struct is not
+    one: DuckDB has no reading of it and gpio does not re-encode it as WKB
+    (see ``docs/guide/convert.md``). The owner's read kind says so off the
+    source's types alone, so the answer is this sentence rather than a binder
+    error from inside the query (#1451), as the GDAL writers already do.
+    """
+    if not column:
+        return
+    if resolve_geometry_read(con, source_ref, column, relation=True).kind != "geoarrow":
+        return
+    raise GeoParquetError(
+        f"Geometry column '{column}' uses a GeoArrow-native (nested) encoding, which the "
+        "GeoJSON writer cannot read. Re-encode it as WKB first."
+    )
 
 
 @uses_aws_profile
@@ -816,6 +838,7 @@ def convert_to_geojson_stream(
         # key, such as the one DuckDB writes for zero rows -- is decoded once,
         # here, so the repair and serialization chain below sees GEOMETRY (#1359).
         source_ref = create_geometry_view(con, source_ref, geometry_column, "__gpio_geojson_source")
+        _require_serializable_geometry(con, source_ref, geometry_column)
 
         count = _maybe_native_feature_collection(
             con,
@@ -966,6 +989,7 @@ def _convert_from_stream(
             if geometry_column
             else "input_stream"
         )
+        _require_serializable_geometry(con, source_ref, geometry_column)
 
         count = _maybe_native_feature_collection(
             con,

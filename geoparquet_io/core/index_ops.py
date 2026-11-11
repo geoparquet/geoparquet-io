@@ -47,6 +47,7 @@ from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
     require_geometry_column,
     resolve_geometry_column,
+    resolve_geometry_read,
 )
 from geoparquet_io.core.geometry_repair import nonplanar_edges_of_arrow_table
 from geoparquet_io.core.logging_config import (
@@ -61,6 +62,7 @@ from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.partition.common import preview_partition
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
+    needs_httpfs,
     validate_profile_for_urls,
 )
 from geoparquet_io.core.streaming import (
@@ -190,10 +192,38 @@ def index_point(geom_sql, source_crs=None, bbox_col=None, edges=None) -> str:
     return representative_point_sql(transform_geom_sql(geom_sql, source_crs), edges)
 
 
-def index_expression(spec, geom_col, resolution, source_crs=None, bbox_col=None, edges=None):
-    """The one cell expression: ``spec.expression`` keyed from :func:`index_point`."""
-    point = index_point(quote_identifier(geom_col), source_crs, bbox_col, edges)
+def index_expression(spec, geom_sql, resolution, source_crs=None, bbox_col=None, edges=None):
+    """The one cell expression: ``spec.expression`` keyed from :func:`index_point`.
+
+    ``geom_sql`` is the owner's read expression for the geometry column
+    (``geometry_detection.resolve_geometry_read(...).expr``, see
+    :func:`index_geometry_sql`), not the quoted column: a GeoArrow coordinate
+    struct is no argument to ``ST_Centroid``, so every ``add``, ``sort
+    quadkey`` and ``partition`` over a native input died with a binder error,
+    and the owner hands those paths its representative point -- the centre of
+    the value's coordinate extent, which is the cell key -- instead (#1451).
+    ``None`` when a ``bbox_col`` keys the cell, which reads no geometry.
+    """
+    point = index_point(geom_sql, source_crs, bbox_col, edges)
     return spec.expression(f"ST_X({point})", f"ST_Y({point})", resolution)
+
+
+def index_geometry_sql(source, geom_col, con=None, *, input_path=None):
+    """The owner's read expression for ``geom_col`` over the SQL ``source``.
+
+    ``source`` is anything a ``FROM`` takes (a ``read_parquet(...)`` call, a
+    registered relation, a view). With no ``con``, one is opened on
+    ``input_path`` just to describe the source, because the connection that
+    runs the query is the write funnel's own and the expression has to be
+    settled before it exists.
+    """
+    if con is not None:
+        return resolve_geometry_read(con, source, geom_col, relation=True).expr
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_path))
+    try:
+        return resolve_geometry_read(con, source, geom_col, relation=True).expr
+    finally:
+        con.close()
 
 
 def file_key_inputs(spec, input_parquet, geom_col, source_crs, use_centroid=False, verbose=False):
@@ -244,9 +274,15 @@ def add_index_table(spec, table, column_name, resolution, geometry_column=None, 
         registered = register_arrow(con, "__input_table", table)
         other_cols = [quote_identifier(c) for c in table.column_names if c != geom_col]
         source = create_geometry_view(con, "__input_table", geom_col, "__input_view")
+        # The owner's read of the column as the view leaves it: GEOMETRY after a
+        # WKB decode, a coordinate struct when it is GeoArrow-native (#1451).
+        read = resolve_geometry_read(con, source, geom_col, relation=True)
+        # A native column goes out as itself: it never became a GEOMETRY to
+        # encode back, and ST_AsWKB has no reading of a coordinate struct.
+        selected_geom = read.quoted if read.kind == "geoarrow" else as_wkb_sql(read.quoted)
         columns = other_cols + [
-            f"{as_wkb_sql(quote_identifier(geom_col))} AS {quote_identifier(geom_col)}",
-            f"{index_expression(spec, geom_col, resolution, source_crs, bbox_col, edges)} AS {quote_identifier(column_name)}",
+            f"{selected_geom} AS {quote_identifier(geom_col)}",
+            f"{index_expression(spec, read.expr, resolution, source_crs, bbox_col, edges)} AS {quote_identifier(column_name)}",
         ]
         result = con.sql(f"SELECT {', '.join(columns)} FROM {source}").arrow().read_all()
         if table.schema.metadata:
@@ -311,11 +347,14 @@ def add_index_column(
         method = "bbox midpoint" if bbox_col else "geometry centroid"
         description += f"\n-- Calculation method: {method}"
     source = _index_from_clause(input_path, allow_schema_diff, hive_input)
+    # A bbox midpoint keys the cell off the covering column alone, so the
+    # geometry is read only when it is the key.
+    geom_sql = None if bbox_col else index_geometry_sql(source, geom_col, input_path=input_parquet)
     add_computed_column(
         input_parquet,
         output_parquet,
         column_name,
-        index_expression(spec, geom_col, resolution, source_crs, bbox_col, edges),
+        index_expression(spec, geom_sql, resolution, source_crs, bbox_col, edges),
         dry_run=dry_run,
         verbose=verbose,
         custom_metadata={"covering": {spec.name: {"column": column_name, spec.unit: resolution}}},
@@ -375,10 +414,11 @@ def add_index_streaming(
         bbox_col = table_bbox_column(
             spec, schema.empty_table(), source_crs, use_centroid, column_edges
         )
+        geom_sql = None if bbox_col else index_geometry_sql(source, geom_col, con)
         return computed_column_query(
             source,
             column_name,
-            index_expression(spec, geom_col, resolution, source_crs, bbox_col, column_edges),
+            index_expression(spec, geom_sql, resolution, source_crs, bbox_col, column_edges),
         )
 
     execute_transform(

@@ -49,6 +49,7 @@ from geoparquet_io.core.geometry_detection import (
     primary_geometry_column,
     require_geometry_column,
     resolve_geometry_column,
+    resolve_geometry_read,
 )
 from geoparquet_io.core.geometry_repair import warn_planar_math, warn_planar_math_for_file
 from geoparquet_io.core.index_ops import (
@@ -67,7 +68,6 @@ from geoparquet_io.core.process.aggregate.common import (
     aggregate_source_relation,
     build_breakdown_pivot,
     build_metric_select,
-    geometry_to_geom_expr,
     parse_breakdown_metric,
     resolve_metric_column_types,
     validate_agg_columns,
@@ -311,6 +311,16 @@ def _validate_point_column(con, relation: str, bucket_point: str) -> None:
     )
 
 
+def _keying_point_expr(con: duckdb.DuckDBPyConnection, relation: str, column: str) -> str:
+    """The owner's read of ``column`` for a cell key: a value's keying point.
+
+    ``GeometryRead.expr``, which hands a GeoArrow coordinate struct its
+    representative point rather than itself (#1451); a malformed WKB value is
+    NULL, so it lands in the unassigned bucket instead of aborting the run.
+    """
+    return resolve_geometry_read(con, relation, column, relation=True).expr
+
+
 def bucket_point_expr(
     con: duckdb.DuckDBPyConnection,
     relation: str,
@@ -330,11 +340,17 @@ def bucket_point_expr(
     SELECT so Parquet projection pushdown never reads its column chunks (#567).
     The bbox/point column is validated against ``relation`` so a typo fails with
     a clear error instead of a late binder error.
+
+    A column is read as a *key*, not as a shape (``GeometryRead.expr``, not
+    ``geometry_to_geom_expr``'s ``shape_expr``): a GeoArrow coordinate struct is
+    no argument to ``ST_Centroid``, so a native input died with a binder error
+    here exactly as it did in the ``add`` driver, and the owner's read of one is
+    the representative point this expression wants anyway (#1451).
     """
     _validate_bucket_point_args(bucket_point, bbox_column)
     if bucket_point == BUCKET_POINT_GEOMETRY:
         geom_col = require_geometry_column(geom_col, "the input")
-        geom_expr = geometry_to_geom_expr(con, relation, geom_col)
+        geom_expr = _keying_point_expr(con, relation, geom_col)
         return index_point(geom_expr, source_crs, edges=(edges or {}).get(geom_col)), ()
     excluded = (geom_col,) if geom_col else ()
     if bucket_point == BUCKET_POINT_BBOX:
@@ -349,7 +365,7 @@ def bucket_point_expr(
     # Any other value names an existing (point) geometry column. The point is a
     # no-op for points and keeps non-point columns keyable rather than erroring.
     _validate_point_column(con, relation, bucket_point)
-    point_expr = geometry_to_geom_expr(con, relation, bucket_point)
+    point_expr = _keying_point_expr(con, relation, bucket_point)
     return index_point(point_expr, source_crs, edges=(edges or {}).get(bucket_point)), excluded
 
 
