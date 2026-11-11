@@ -80,7 +80,7 @@ from geoparquet_io.core.pmtiles import (
     create_pmtiles_from_geoparquet,
     resolve_scratch_directory,
 )
-from geoparquet_io.core.remote import is_remote_url, needs_httpfs
+from geoparquet_io.core.remote import RemoteOptions, is_remote_url, needs_httpfs
 from geoparquet_io.core.tile_join import (
     TileJoinNotFoundError,
     _build_tile_join_command,
@@ -336,7 +336,7 @@ def create_pmtiles_chunked(
     attribution: str | None,
     force: bool,
     verbose: bool,
-    profile: str | None,
+    remote: RemoteOptions | None,
     tiling: dict[str, Any],
 ) -> None:
     """Tile ``input_path`` in an ``NxM`` grid of chunks and join them into ``output_path``.
@@ -345,6 +345,10 @@ def create_pmtiles_chunked(
     (zooms, simplification, size cap, repair, src_crs, layer_by_column,
     precision, temporary_directory). See the module docstring for why the
     input is split on disk first and what makes a part resumable.
+
+    ``remote`` reaches the store holding ``input_path``: ``@uses_aws_profile``
+    scopes its profile, and the split below reads the input with DuckDB. The
+    chunks it writes are local, so the per-chunk tiling needs none of it.
     """
     nx, ny = parse_chunks(chunks)
     layer_by_column = tiling.get("layer_by_column")

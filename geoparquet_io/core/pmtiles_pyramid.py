@@ -37,6 +37,7 @@ from geoparquet_io.core.process.overview.run import (
     parse_levels,
     plan_bands,
 )
+from geoparquet_io.core.remote import RemoteOptions
 from geoparquet_io.core.tile_join import (
     TileJoinNotFoundError,
     _build_tile_join_command,
@@ -300,6 +301,7 @@ def create_pmtiles_pyramid(
     verbose: bool = False,
     temporary_directory: str | None = None,
     memory_limit: str | None = None,
+    remote: RemoteOptions | None = None,
 ) -> None:
     """Create a banded multi-level PMTiles archive from an aggregate file.
 
@@ -340,6 +342,11 @@ def create_pmtiles_pyramid(
             rollups (e.g. ``"2GB"``); ``None`` takes gpio's default, half the
             memory ceiling (#1191). The tippecanoe runs are separate processes
             and are not bounded by it.
+        remote: How the object store holding ``input_path`` (and
+            ``features_source``) is reached, as one
+            :class:`~geoparquet_io.core.remote.RemoteOptions`. Forwarded to each
+            band's ``create_pmtiles_from_geoparquet``, which re-states it on the
+            argv of its child ``gpio`` runs (#1452).
 
     Raises:
         TippecanoeNotFoundError: tippecanoe missing from PATH.
@@ -422,6 +429,7 @@ def create_pmtiles_pyramid(
                 force=True,
                 verbose=verbose,
                 temporary_directory=scratch,
+                remote=remote,
             )
             band_files.append(band_file)
 
@@ -446,6 +454,7 @@ def create_pmtiles_pyramid(
                 force=True,
                 verbose=verbose,
                 temporary_directory=scratch,
+                remote=remote,
             )
             band_files.append(features_file)
 

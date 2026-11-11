@@ -148,8 +148,10 @@ def add(ctx):
 @verbose_option
 @any_extension_option
 @show_sql_option
+@click.pass_context
 @pack_write_options
 def add_admin_divisions(
+    ctx,
     input_parquet,
     output_parquet,
     dataset,
@@ -286,21 +288,25 @@ def add_admin_divisions(
         # Use all available levels for the dataset (shared with the Python API)
         level_list = default_admin_levels(dataset)
 
-    add_admin_divisions_multi(
-        input_parquet,
-        output_parquet,
-        dataset_name=dataset,
-        levels=level_list,
-        dataset_source=None,  # No custom sources for now
-        add_bbox_flag=add_bbox,
-        dry_run=dry_run,
-        verbose=verbose,
-        **write.funnel_kwargs(),
-        overwrite=overwrite,
-        prefix=prefix,
-        no_cache=no_cache,
-        vecorel=vecorel,
-    )
+    # The input and the output may both be remote (S3, GCS, Azure), so the root
+    # group's --aws-profile/--s3-* have to be the ambient config for the read and
+    # the write: the leaf accepted them and never activated them (#1452).
+    with activate_remote(ctx):
+        add_admin_divisions_multi(
+            input_parquet,
+            output_parquet,
+            dataset_name=dataset,
+            levels=level_list,
+            dataset_source=None,  # No custom sources for now
+            add_bbox_flag=add_bbox,
+            dry_run=dry_run,
+            verbose=verbose,
+            **write.funnel_kwargs(),
+            overwrite=overwrite,
+            prefix=prefix,
+            no_cache=no_cache,
+            vecorel=vecorel,
+        )
 
 
 @add.command(name="geometry-metrics", cls=SingleFileCommand)
@@ -318,8 +324,10 @@ def add_admin_divisions(
 @verbose_option
 @any_extension_option
 @show_sql_option
+@click.pass_context
 @pack_write_options
 def add_geometry_metrics_cmd(
+    ctx,
     input_parquet,
     output_parquet,
     no_vecorel,
@@ -367,17 +375,20 @@ def add_geometry_metrics_cmd(
 
     from geoparquet_io.core.add.geometry_metrics import add_geometry_metrics
 
-    add_geometry_metrics(
-        input_parquet,
-        output_parquet,
-        vecorel=not no_vecorel,
-        dry_run=dry_run,
-        verbose=verbose,
-        **write.funnel_kwargs(),
-        profile=None,
-        overwrite=overwrite,
-        show_sql=show_sql,
-    )
+    # Remote in, remote out, as every other `gpio add` leaf: the root group's
+    # remote flags have to be ambient for both (#1452).
+    with activate_remote(ctx):
+        add_geometry_metrics(
+            input_parquet,
+            output_parquet,
+            vecorel=not no_vecorel,
+            dry_run=dry_run,
+            verbose=verbose,
+            **write.funnel_kwargs(),
+            profile=None,
+            overwrite=overwrite,
+            show_sql=show_sql,
+        )
 
 
 @add.command(name="bbox", cls=SingleFileCommand)

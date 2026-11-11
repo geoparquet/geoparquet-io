@@ -288,6 +288,15 @@ _CLI_SPELLINGS = {
     "s3_no_ssl": "s3_use_ssl",
 }
 
+#: ``RemoteOptions`` field -> the root ``gpio`` flag that takes its value, for
+#: :meth:`RemoteOptions.cli_args`. ``s3_use_ssl`` is absent: its flag is the
+#: valueless negation ``--s3-no-ssl``, appended separately.
+_ROOT_FLAGS = {
+    "profile": "--aws-profile",
+    "s3_endpoint": "--s3-endpoint",
+    "s3_region": "--s3-region",
+}
+
 #: One warning per deprecated spelling per process, keyed ``"<entry point>.<keyword>"``.
 _warned_spellings: set[str] = set()
 
@@ -377,6 +386,27 @@ class RemoteOptions:
     def __bool__(self) -> bool:
         """Whether anything was asked for at all."""
         return bool(self.asked())
+
+    def cli_args(self) -> list[str]:
+        """These options as root ``gpio`` flags, to re-state on a child process's argv.
+
+        The ambient config is process-local, so a child ``gpio`` run reads none
+        of it. A pipeline that pipes through children (``core.pmtiles``) has to
+        spell the options out again, and it spells them as the *root* group's
+        own flags: those are the four every leaf accepts, where a per-command
+        ``--aws-profile`` is declared by only some of them and a per-command
+        ``--s3-endpoint`` by one (#1452).
+
+        Nothing asked for gives no flags, so a local run's argv is unchanged.
+        """
+        args: list[str] = []
+        for field, flag in _ROOT_FLAGS.items():
+            value = getattr(self, field)
+            if value is not None:
+                args += [flag, value]
+        if self.s3_use_ssl is False:
+            args.append("--s3-no-ssl")
+        return args
 
     def resolved(self) -> dict:
         """The S3 config dict :func:`resolve_s3_config` builds from these options.

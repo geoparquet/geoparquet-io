@@ -40,9 +40,38 @@ Those four settings are one concern, so they travel as one value ([#1436](https:
     # gpio.read('data.parquet').upload('s3://bucket/data.parquet', remote=remote)
     ```
 
-Its fields are `profile`, `s3_endpoint`, `s3_region` and `s3_use_ssl`. Each defaults to `None`, meaning "not asked": the value then falls back to the AWS environment variables and finally to gpio's defaults. It is frozen and keyword-only, like [`gpio.WriteOptions`](write-strategies.md), and one object serves a whole chain — `gpio.read_partition(..., remote=...)`, `gpio.convert(..., remote=...)`, `Table.write(..., remote=...)` and `Table.upload(..., remote=...)`.
+Its fields are `profile`, `s3_endpoint`, `s3_region` and `s3_use_ssl`. Each defaults to `None`, meaning "not asked": the value then falls back to the AWS environment variables and finally to gpio's defaults. It is frozen and keyword-only, like [`gpio.WriteOptions`](write-strategies.md), and one object serves a whole chain — `gpio.read_partition(..., remote=...)`, `gpio.convert(..., remote=...)`, `Table.write(..., remote=...)`, `Table.upload(..., remote=...)`, `ops.create_pmtiles(..., remote=...)` and `ops.create_pmtiles_pyramid(..., remote=...)`.
 
 The older per-keyword spellings (`profile=`, `aws_profile=`, `s3_endpoint=`, `s3_region=`, `s3_use_ssl=`) still work and still reach the store. Each warns once per process and will be removed in the next minor release; naming a field both ways raises `TypeError`.
+
+### Tiling a remote file
+
+`gpio pmtiles create` and `gpio pmtiles pyramid` tile through a pipeline of child `gpio` processes, and a child process inherits none of the parent's resolved settings. The options are therefore re-stated on each child's command line as the root group's own flags, so one `--aws-profile` (or one `remote=`) reaches the parent's own reads of the input *and* every child in the pipeline ([#1452](https://github.com/geoparquet/geoparquet-io/issues/1452)):
+
+=== "CLI"
+
+    <!-- doctest: skip="needs cloud credentials and tippecanoe" -->
+    ```bash
+    gpio pmtiles create s3://bucket/buildings.parquet buildings.pmtiles \
+      --aws-profile prod --max-zoom 14
+    ```
+
+=== "Python"
+
+    <!-- doctest: skip="needs cloud credentials and tippecanoe" -->
+    ```python
+    import geoparquet_io as gpio
+    from geoparquet_io.api import ops
+
+    ops.create_pmtiles(
+        's3://bucket/buildings.parquet',
+        'buildings.pmtiles',
+        max_zoom=14,
+        remote=gpio.RemoteOptions(profile='prod'),
+    )
+    ```
+
+A command's own `--aws-profile` beats the root group's; `--s3-endpoint`, `--s3-region` and `--s3-no-ssl` are root flags and travel the same way.
 
 ### URLs are taken as-is
 

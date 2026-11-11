@@ -185,7 +185,7 @@ def _run(tmp_path, out, **overrides):
         attribution=None,
         force=False,
         verbose=False,
-        profile=None,
+        remote=None,
         tiling={"max_zoom": 12, "min_zoom": None, "temporary_directory": str(tmp_path)},
     )
     kwargs.update(overrides)
@@ -253,7 +253,7 @@ def _defaults(tmp_path):
         attribution=None,
         force=False,
         verbose=False,
-        profile=None,
+        remote=None,
         tiling={"max_zoom": 12, "temporary_directory": str(tmp_path)},
     )
 

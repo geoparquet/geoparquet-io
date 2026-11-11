@@ -30,6 +30,7 @@ from geoparquet_io.cli._shared import (
     activate_remote,
     create_default_group,
     init_group_context,
+    resolved_remote_options,
 )
 from geoparquet_io.cli.decorators import (
     ParquetInputCommand,
@@ -1012,6 +1013,10 @@ def check_all(
                         input_path=source_file,
                         output_path=output_pmtiles,
                         verbose=verbose,
+                        # The scope around this loop is this process's; the
+                        # tiling pipeline's child `gpio` runs inherit none of
+                        # it and need the options on their argv (#1452).
+                        remote=resolved_remote_options(ctx),
                     )
                     click.echo(click.style(f"{PASS_GLYPH} Generated {output_pmtiles}", fg="green"))
                 except Exception as e:

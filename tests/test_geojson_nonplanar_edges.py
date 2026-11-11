@@ -15,6 +15,7 @@ from geoparquet_io.cli.main import cli
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.geojson_stream import convert_to_geojson
 from geoparquet_io.core.pmtiles import create_pmtiles_from_geoparquet
+from geoparquet_io.core.remote import RemoteOptions
 
 CAP = "POLYGON((0 80,90 80,180 80,-90 80,0 80))"
 
@@ -256,7 +257,9 @@ def test_pmtiles_preflight_receives_explicit_profile(monkeypatch):
     monkeypatch.setattr("geoparquet_io.core.pmtiles._run_pipeline", Mock())
     monkeypatch.setattr("geoparquet_io.core.geojson_stream.collect_nonplanar_edges", collect)
     create_pmtiles_from_geoparquet(
-        "s3://fake-bucket/input.parquet", "out.pmtiles", profile="test-only"
+        "s3://fake-bucket/input.parquet",
+        "out.pmtiles",
+        remote=RemoteOptions(profile="test-only"),
     )
     assert seen == [
         ("s3://fake-bucket/input.parquet", {"profile": "test-only", "profile_from_env": False})

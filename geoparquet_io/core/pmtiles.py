@@ -20,6 +20,7 @@ from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geojson_stream import require_planar_geojson_file
 from geoparquet_io.core.logging_config import debug, success
+from geoparquet_io.core.remote import RemoteOptions, remote_options_from_keywords
 from geoparquet_io.core.streaming import is_stdin
 
 
@@ -115,7 +116,7 @@ def _build_gpio_commands(
     include_cols: str | None,
     precision: int,
     verbose: bool,
-    profile: str | None,
+    remote: RemoteOptions | None,
     src_crs: str | None,
     repair_geometry: bool = True,
 ) -> list[list[str]]:
@@ -128,8 +129,16 @@ def _build_gpio_commands(
     geometry by default — so the geometry tippecanoe receives is valid (issue
     #506). When ``repair_geometry`` is False we propagate ``--no-repair-geometry``
     to that final step so opt-out reaches the pipeline.
+
+    Every command in the chain carries *remote* as the root ``gpio`` group's own
+    flags (:meth:`RemoteOptions.cli_args`), straight after the executable. A
+    child process inherits none of this one's ambient S3 config, and the per-leaf
+    ``--profile`` the chain used to pass is not an option any of these three
+    declares -- it made ``gpio pmtiles create --aws-profile`` on an S3 input fail
+    with "No such option: --profile" (#1452).
     """
     gpio_exe = _get_gpio_executable()
+    base = [gpio_exe, *(remote.cli_args() if remote else [])]
 
     needs_reproject = src_crs is not None
     needs_extract = bbox or where or include_cols
@@ -140,7 +149,7 @@ def _build_gpio_commands(
         if needs_reproject:
             assert src_crs is not None  # Type narrowing for mypy
             reproject_cmd = [
-                gpio_exe,
+                *base,
                 "convert",
                 "reproject",
                 input_path,
@@ -152,15 +161,13 @@ def _build_gpio_commands(
             ]
             if verbose:
                 reproject_cmd.append("--verbose")
-            if profile:
-                reproject_cmd.extend(["--profile", profile])
             commands.append(reproject_cmd)
             next_input = "-"
         else:
             next_input = input_path
 
         if needs_extract:
-            extract_cmd = [gpio_exe, "extract", "geoparquet", next_input]
+            extract_cmd = [*base, "extract", "geoparquet", next_input]
 
             if bbox:
                 extract_cmd.extend(["--bbox", bbox])
@@ -170,18 +177,14 @@ def _build_gpio_commands(
                 extract_cmd.extend(["--include-cols", include_cols])
             if verbose:
                 extract_cmd.append("--verbose")
-            if profile and not needs_reproject:
-                extract_cmd.extend(["--profile", profile])
 
             commands.append(extract_cmd)
             next_input = "-"
 
-        convert_cmd = [gpio_exe, "convert", "geojson", next_input, "--precision", str(precision)]
+        convert_cmd = [*base, "convert", "geojson", next_input, "--precision", str(precision)]
 
         if verbose:
             convert_cmd.append("--verbose")
-        if profile:
-            convert_cmd.extend(["--profile", profile])
         if not repair_geometry:
             convert_cmd.append("--no-repair-geometry")
 
@@ -189,12 +192,10 @@ def _build_gpio_commands(
 
         return commands
 
-    convert_cmd = [gpio_exe, "convert", "geojson", input_path, "--precision", str(precision)]
+    convert_cmd = [*base, "convert", "geojson", input_path, "--precision", str(precision)]
 
     if verbose:
         convert_cmd.append("--verbose")
-    if profile:
-        convert_cmd.extend(["--profile", profile])
     if not repair_geometry:
         convert_cmd.append("--no-repair-geometry")
 
@@ -608,6 +609,7 @@ def create_pmtiles_from_geoparquet(
     precision: int = 6,
     verbose: bool = False,
     profile: str | None = None,
+    remote: RemoteOptions | None = None,
     src_crs: str | None = None,
     attribution: str | None = None,
     layer_by_column: str | None = None,
@@ -641,7 +643,12 @@ def create_pmtiles_from_geoparquet(
         include_cols: Comma-separated list of columns to include
         precision: Coordinate decimal precision (default: 6)
         verbose: Enable verbose output
-        profile: AWS profile name for S3 files
+        profile: **Deprecated** (#1436): use ``remote=RemoteOptions(profile=...)``.
+            Still honoured, with a warning once per process.
+        remote: How the object store holding ``input_path`` is reached, as one
+            :class:`~geoparquet_io.core.remote.RemoteOptions`. Re-stated on the
+            argv of every child ``gpio`` run in the pipeline, which inherits no
+            ambient S3 config of its own (#1452).
         src_crs: Source CRS for reprojection to WGS84
         attribution: Attribution HTML for the tiles
         layer_by_column: Split tiles into layers grouped by values of this column
@@ -674,6 +681,7 @@ def create_pmtiles_from_geoparquet(
         ValueError: If paths contain shell metacharacters or the user supplied an invalid layer_by_column
         RuntimeError: If any subprocess fails
     """
+    remote = remote_options_from_keywords("create_pmtiles_from_geoparquet", remote, profile=profile)
     _validate_path(input_path)
     _validate_path(output_path)
     if is_stdin(input_path):
@@ -703,7 +711,7 @@ def create_pmtiles_from_geoparquet(
 
     # Check the source before an extract/reproject child can lose its edge
     # declaration, and before tippecanoe can create or overwrite an archive.
-    require_planar_geojson_file(input_path, profile=profile)
+    require_planar_geojson_file(input_path, profile=remote.profile)
 
     if chunks:
         # Deferred: pmtiles_chunks tiles each chunk through this function.
@@ -720,7 +728,7 @@ def create_pmtiles_from_geoparquet(
             attribution=attribution,
             force=force,
             verbose=verbose,
-            profile=profile,
+            remote=remote,
             tiling={
                 "min_zoom": min_zoom,
                 "max_zoom": max_zoom,
@@ -754,7 +762,7 @@ def create_pmtiles_from_geoparquet(
         include_cols_with_layer_by_column,
         precision,
         verbose,
-        profile,
+        remote,
         src_crs,
         repair_geometry=repair_geometry,
     )

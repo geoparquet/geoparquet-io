@@ -752,29 +752,32 @@ def extract_bigquery_cmd(
 
     prepare_output(output_file, any_extension)
 
-    extract_bigquery(
-        table_id=table_id,
-        output_parquet=output_file,
-        sql=sql,
-        project=project,
-        credentials_file=credentials_file,
-        where=where,
-        bbox=bbox,
-        bbox_mode=bbox_mode,
-        bbox_threshold=bbox_threshold,
-        limit=limit,
-        include_cols=include_cols,
-        exclude_cols=exclude_cols,
-        geography_column=geography_column,
-        geometry_format=geometry_format,
-        edges=edges,
-        dry_run=dry_run,
-        show_sql=show_sql,
-        verbose=verbose,
-        **write.funnel_kwargs(),
-        overwrite=overwrite,
-        repair_geometry=repair_geometry,
-    )
+    # The output may be remote, and the activation its sibling service readers
+    # (`extract arcgis`, `extract carto`) do was missing here (#1452).
+    with activate_remote(ctx):
+        extract_bigquery(
+            table_id=table_id,
+            output_parquet=output_file,
+            sql=sql,
+            project=project,
+            credentials_file=credentials_file,
+            where=where,
+            bbox=bbox,
+            bbox_mode=bbox_mode,
+            bbox_threshold=bbox_threshold,
+            limit=limit,
+            include_cols=include_cols,
+            exclude_cols=exclude_cols,
+            geography_column=geography_column,
+            geometry_format=geometry_format,
+            edges=edges,
+            dry_run=dry_run,
+            show_sql=show_sql,
+            verbose=verbose,
+            **write.funnel_kwargs(),
+            overwrite=overwrite,
+            repair_geometry=repair_geometry,
+        )
 
 
 def _deprecated_version_callback(ctx, param, value):
@@ -895,8 +898,10 @@ def _deprecated_version_callback(ctx, param, value):
 @overwrite_option
 @verbose_option
 @any_extension_option
+@click.pass_context
 @pack_write_options
 def extract_wfs_cmd(
+    ctx,
     service_url,
     typename,
     output_file,
@@ -1032,55 +1037,59 @@ def extract_wfs_cmd(
         # Single layer mode: validate .parquet extension
         validate_parquet_extension(output_file, any_extension)
 
-    if is_multi_layer:
-        # Multi-layer parallel extraction
-        convert_wfs_layers_to_directory(
-            service_url=service_url,
-            typenames=typenames,
-            output_dir=output_file,
-            parallel_layers=parallel_layers,
-            max_workers=workers,
-            page_size=page_size,
-            version=wfs_version,
-            bbox=bbox or None,
-            bbox_mode=bbox_mode,
-            output_crs=output_crs,
-            limit=limit,
-            axis_order=axis_order,
-            strict_crs=strict_crs,
-            skip_hilbert=skip_hilbert,
-            skip_bbox=skip_bbox,
-            **write.funnel_kwargs(),
-            overwrite=overwrite,
-            verbose=verbose,
-            auto_tile=auto_tile,
-            sort_by=sort_by,
-            repair_geometry=repair_geometry,
-        )
-    else:
-        # Single layer extraction
-        convert_wfs_to_geoparquet(
-            service_url=service_url,
-            typename=typenames[0],
-            output_file=output_file,
-            version=wfs_version,
-            bbox=bbox or None,
-            bbox_mode=bbox_mode,
-            output_crs=output_crs,
-            limit=limit,
-            max_workers=workers,
-            page_size=page_size,
-            axis_order=axis_order,
-            strict_crs=strict_crs,
-            skip_hilbert=skip_hilbert,
-            skip_bbox=skip_bbox,
-            **write.funnel_kwargs(),
-            overwrite=overwrite,
-            verbose=verbose,
-            auto_tile=auto_tile,
-            sort_by=sort_by,
-            repair_geometry=repair_geometry,
-        )
+    # The layer listing above is an HTTP read of the service, not of a store; the
+    # extraction below writes GeoParquet, and that output may be remote. The
+    # root group's remote flags were accepted and never activated (#1452).
+    with activate_remote(ctx):
+        if is_multi_layer:
+            # Multi-layer parallel extraction
+            convert_wfs_layers_to_directory(
+                service_url=service_url,
+                typenames=typenames,
+                output_dir=output_file,
+                parallel_layers=parallel_layers,
+                max_workers=workers,
+                page_size=page_size,
+                version=wfs_version,
+                bbox=bbox or None,
+                bbox_mode=bbox_mode,
+                output_crs=output_crs,
+                limit=limit,
+                axis_order=axis_order,
+                strict_crs=strict_crs,
+                skip_hilbert=skip_hilbert,
+                skip_bbox=skip_bbox,
+                **write.funnel_kwargs(),
+                overwrite=overwrite,
+                verbose=verbose,
+                auto_tile=auto_tile,
+                sort_by=sort_by,
+                repair_geometry=repair_geometry,
+            )
+        else:
+            # Single layer extraction
+            convert_wfs_to_geoparquet(
+                service_url=service_url,
+                typename=typenames[0],
+                output_file=output_file,
+                version=wfs_version,
+                bbox=bbox or None,
+                bbox_mode=bbox_mode,
+                output_crs=output_crs,
+                limit=limit,
+                max_workers=workers,
+                page_size=page_size,
+                axis_order=axis_order,
+                strict_crs=strict_crs,
+                skip_hilbert=skip_hilbert,
+                skip_bbox=skip_bbox,
+                **write.funnel_kwargs(),
+                overwrite=overwrite,
+                verbose=verbose,
+                auto_tile=auto_tile,
+                sort_by=sort_by,
+                repair_geometry=repair_geometry,
+            )
 
 
 @extract.command(name="carto")

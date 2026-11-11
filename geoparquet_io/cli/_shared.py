@@ -68,15 +68,27 @@ def root_remote_options(ctx):
     return RemoteOptions.from_cli(**{key: ctx.obj.get(key) for key in _ROOT_REMOTE_KEYS})
 
 
-@contextmanager
-def activate_remote(ctx, remote=None):
-    """Activate the root group's remote access with *remote*'s own asks on top.
+def resolved_remote_options(ctx, remote=None):
+    """The one ``RemoteOptions`` a command acts on: the root group's, with its own on top.
 
     The one place the two layers meet (#1436): the root ``gpio`` group's
     ``--aws-profile``/``--s3-endpoint``/``--s3-region``/``--s3-no-ssl`` are the
     base, and the ``RemoteOptions`` a command's own flags were packed into
-    (``cli.decorators.pack_remote_options``) wins field by field. A command
-    with no remote flags of its own passes nothing.
+    (``cli.decorators.pack_remote_options``) wins field by field. A command with
+    no remote flags of its own passes nothing.
+
+    :func:`activate_remote` is the usual way in and makes this the ambient S3
+    config. A command calls this directly only when it needs the merged value
+    *itself* as well -- ``gpio pmtiles create`` re-states it on the argv of the
+    child ``gpio`` processes its tiling pipeline pipes through, which read no
+    ambient config of their own (#1452).
+    """
+    return root_remote_options(ctx).merge(remote)
+
+
+@contextmanager
+def activate_remote(ctx, remote=None):
+    """Activate the root group's remote access with *remote*'s own asks on top.
 
     Yields the resolved S3 config dict, for a caller that has to hand the
     individual values to a non-DuckDB client (obstore, in ``upload``).
@@ -84,7 +96,7 @@ def activate_remote(ctx, remote=None):
     The profile travels in the ambient S3 config, never in ``os.environ``, so
     DuckDB and obstore read it explicitly and nothing leaks past the scope (#1055).
     """
-    with root_remote_options(ctx).merge(remote).activate() as config:
+    with resolved_remote_options(ctx, remote).activate() as config:
         yield config
 
 
