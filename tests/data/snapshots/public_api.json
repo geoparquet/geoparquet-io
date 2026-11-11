@@ -703,6 +703,7 @@
     "apply_nonplanar_edges",
     "collect_nonplanar_edges",
     "declared_nonplanar_edges",
+    "ensure_located_row_groups",
     "extract_preserved_kv_metadata",
     "open_parquet_writer",
     "read_preserved_kv_metadata",

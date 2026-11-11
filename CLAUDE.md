@@ -125,7 +125,11 @@ geoparquet_io/
    auto-mode output version (`resolve_output_geoparquet_version`), and whether a
    `geo` key is written at all (`apply_output_kv_metadata`). A new write path
    calls those; it must not re-derive a row-group number, re-implement auto
-   version detection, or copy a table's schema metadata through verbatim.
+   version detection, or copy a table's schema metadata through verbatim. A
+   path that cuts its own row groups also calls
+   `write_funnels.ensure_located_row_groups` once the file is written, so no
+   group holds only null or empty geometry while the file has located rows
+   (#1146) — both funnels and `process simplify`'s streamed pass do.
 6. **One memory policy**: `core/memory_limits.py` owns the cgroup-aware memory
    ceiling and the share of it DuckDB gets (`default_memory_limit`, 50%).
    `get_duckdb_connection` applies that default to every connection, so work
@@ -295,7 +299,7 @@ copies or compatibility wrappers. The guard set is in ADR-0008 and
 
 | Concept | Owner module | Public entry points |
 |---|---|---|
-| Final Parquet write policy | `geoparquet_io/core/parquet_writer.py`, `geoparquet_io/core/write_funnels.py`, `geoparquet_io/core/compression.py` | `WriteOptions`, `resolve_output_geoparquet_version`, `resolve_row_group_rows`, `resolve_codec`, `write_parquet_with_metadata`, `write_geoparquet_table` |
+| Final Parquet write policy | `geoparquet_io/core/parquet_writer.py`, `geoparquet_io/core/write_funnels.py`, `geoparquet_io/core/compression.py` | `WriteOptions`, `resolve_output_geoparquet_version`, `resolve_row_group_rows`, `resolve_codec`, `write_parquet_with_metadata`, `write_geoparquet_table`, `located_row_group_layout`, `ensure_located_row_groups` |
 | Footer patch or rewrite | `geoparquet_io/core/parquet_footer.py` | `patch_or_rewrite` |
 | Geo block decoding | `geoparquet_io/core/geo_metadata.py` | `read_raw_geo`, `sanitized_carried_geo`, `declared_version` |
 | Geo block composition and covering | `geoparquet_io/core/geo_metadata.py`, `geoparquet_io/core/bbox_structure.py` | `compose_geo_block`, `GeoBlockOptions`, `build_bbox_covering`, `bbox_struct_child_names_match`, `covering_bbox_refs` |

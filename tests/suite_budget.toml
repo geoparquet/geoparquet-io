@@ -45,7 +45,13 @@
 # the data, the error's type and the CLI message together, the automatic
 # 1.1-geoarrow route, a non-VARIANT Arrow failure, and the column lookup.
 # +1 (#1370): the empty-columns VariantExportError message stays grammatical.
-max_collected = 14700
+# +6 (#1146): every position of the unlocated rows through the streamed simplify
+# write -- the one writer left cutting its own row groups without asking the
+# layout owner. Six cells, about 1s together; nothing covered that writer.
+# +1 (#1146): the repair re-encodes at the caller's row-group size, not the
+# facade default -- an unthreaded size cost 87.5 MB against 9.4 MB peak, and no
+# output assertion can see it. Sub-second.
+max_collected = 14707
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
