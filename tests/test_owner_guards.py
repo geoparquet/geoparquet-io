@@ -4932,11 +4932,12 @@ def _g2_tree(tmp_path: Path, files: dict[str, str], exemptions: str = "") -> Pat
     return repo
 
 
-def test_g12_g2_flags_a_second_is_geographic_crs(tmp_path):
-    repo = _g2_tree(tmp_path, {"extract2.py": "def is_geographic_crs(crs):\n    return True\n"})
-    result = _run_owner_defs("--repo", str(repo))
-    assert result.returncode == 1, result.stdout
-    assert "is_geographic_crs" in result.stdout
+def test_g12_g2_flags_second_policy_owners(tmp_path):
+    for name in ("is_geographic_crs", "warn_deprecated"):
+        repo = _g2_tree(tmp_path / name, {"extract2.py": f"def {name}(value):\n    return True\n"})
+        result = _run_owner_defs("--repo", str(repo))
+        assert result.returncode == 1, result.stdout
+        assert name in result.stdout
 
 
 def test_g12_g2_flags_the_schema_rule_in_a_nested_module_but_not_the_owner(tmp_path):

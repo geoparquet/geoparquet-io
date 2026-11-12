@@ -258,6 +258,9 @@
     "warn_null_crs_once",
     "warn_srid0_crs_once"
   ],
+  "geoparquet_io.core.deprecation": [
+    "warn_deprecated"
+  ],
   "geoparquet_io.core.duckdb_metadata": [
     "aggregate_native_geo_stats",
     "count_kv_key",

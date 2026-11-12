@@ -241,6 +241,7 @@ reason = "permanent: constant geometry filter, not a spatial join"
 # underscore on either side is ignored (_is_geographic_crs is an
 # is_geographic*), and [G2.known_copies] adds renamed copies by exact name.
 [G2.owners]
+"warn_deprecated" = ["geoparquet_io/core/deprecation.py"]
 "run_sort" = ["geoparquet_io/core/sort_common.py"]
 "advised_output_version" = ["geoparquet_io/core/sort_common.py"]
 "is_geographic*" = ["geoparquet_io/core/crs_utils.py"]

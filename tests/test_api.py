@@ -1138,6 +1138,7 @@ PUBLIC_API_MODULES = (
     "geoparquet_io.api.ops",
     "geoparquet_io.api.table",
     "geoparquet_io.core.sort_common",
+    "geoparquet_io.core.deprecation",
     "geoparquet_io.core.parquet_writer",
     "geoparquet_io.core.write_funnels",
     "geoparquet_io.core.compression",

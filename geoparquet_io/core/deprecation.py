@@ -23,9 +23,9 @@ def _caller_stacklevel() -> int:
 
 
 def warn_deprecated(replacements: Mapping[str, tuple[str, str]]) -> None:
-    """Warn once per spelling/replacement, in field order, outside gpio frames.
+    """Warn once per spelling/replacement, in sorted field order, outside gpio frames.
 
-    Mapping keys preserve field order when an entry point renames a keyword;
+    Mapping keys define the sorted field order when an entry point renames a keyword;
     values are the deprecated spelling and its replacement instruction.
     A ledger is required even under a caller's ``always`` warning filter.
     """
