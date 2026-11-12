@@ -505,21 +505,23 @@ class AdminDataset(ABC):
                 # Get read options
                 query = f"SELECT * FROM {self.table_reference(source)}"
 
-                # Write to cache, bounded like every other gpio write (#1156):
-                # the source is a multi-GB remote dataset and this COPY used to
-                # run at DuckDB's own 80%-of-RAM default.
-                # A download cache, not an output: DuckDB's fast ZSTD 3, named
-                # through the owner (#1335) rather than left to DuckDB's SNAPPY.
-                cache_codec = resolve_codec("ZSTD", 3, context="write")
-                with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
-                    con.execute(
-                        f"COPY ({query}) TO {sql_path(cache_path)} "
-                        f"(FORMAT PARQUET, {', '.join(cache_codec.duckdb_copy_options())})"
-                    )
+                self._copy_to_cache(con, query, cache_path)
             finally:
                 con.close()
 
         return cache_path
+
+    def _copy_to_cache(self, con: duckdb.DuckDBPyConnection, query: str, cache_path: Path) -> None:
+        """Publish only complete downloads, with the shared write memory and codec policy."""
+        cache_codec = resolve_codec("ZSTD", 3, context="write")
+        with (
+            atomic_write(str(cache_path)) as staged,
+            scoped_write_memory_limit(con, self.memory_limit, self.verbose),
+        ):
+            con.execute(
+                f"COPY ({query}) TO {sql_path(staged)} "
+                f"(FORMAT PARQUET, {', '.join(cache_codec.duckdb_copy_options())})"
+            )
 
     @abstractmethod
     def get_dataset_name(self) -> str:
@@ -1161,20 +1163,7 @@ class OvertureAdminDataset(AdminDataset):
                         continue
 
                     query = self._build_level_cache_query(level, source)
-                    # Bounded like every other gpio write (#1156): the remote
-                    # scan + simplification of the ~4.5GB Overture dataset used
-                    # to run at DuckDB's own 80%-of-RAM default.
-                    with (
-                        atomic_write(str(cache_path)) as staged,
-                        scoped_write_memory_limit(con, self.memory_limit, self.verbose),
-                    ):
-                        # A download cache, not an output: DuckDB's fast ZSTD 3,
-                        # named explicitly rather than left to DuckDB's default.
-                        cache_codec = resolve_codec("ZSTD", 3, context="write")
-                        con.execute(
-                            f"COPY ({query}) TO {sql_path(staged)} "
-                            f"(FORMAT PARQUET, {', '.join(cache_codec.duckdb_copy_options())})"
-                        )
+                    self._copy_to_cache(con, query, cache_path)
                     info(f"Cached {level} dataset at: {cache_path}")
             finally:
                 con.close()

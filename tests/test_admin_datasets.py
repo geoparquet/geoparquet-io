@@ -3,8 +3,10 @@ Tests for admin dataset abstraction layer.
 """
 
 import os
+import re
 import tempfile
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1468,6 +1470,29 @@ class TestDownloadToCache:
             con.close()
         assert count > 0
 
+    def test_failed_copy_never_publishes_partial_cache(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from geoparquet_io.core import admin_datasets
+
+        dataset = GAULAdminDataset()
+        cache_path = tmp_path / "gaul.parquet"
+        con = MagicMock()
+
+        def interrupted(query):
+            destination = Path(re.search(r" TO '([^']+)'", query)[1])
+            destination.write_bytes(b"partial")
+            raise OSError("interrupted")
+
+        con.execute.side_effect = interrupted
+        monkeypatch.setattr(admin_datasets, "get_duckdb_connection", lambda **kwargs: con)
+        monkeypatch.setattr(admin_datasets, "scoped_write_memory_limit", lambda *a: nullcontext())
+        with pytest.raises(OSError, match="interrupted"):
+            dataset._download_to_cache(cache_path)
+        assert not cache_path.exists()
+        assert not list(tmp_path.glob(".gpio-stage-*"))
+        con.close.assert_called_once()
+
     def test_download_to_cache_with_read_options(self, tmp_path):
         """Non-empty read_parquet options (e.g. Overture's hive_partitioning) build the options branch."""
         dataset = GAULAdminDataset()
@@ -1716,12 +1741,23 @@ class TestDownloadPerLevelCachesHousekeeping:
         mock_con.execute.assert_not_called()
         mock_con.close.assert_called_once()
 
+    def test_requested_level_retry_preserves_completed_cache(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from geoparquet_io.core import admin_datasets
+
+        monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
+        mock_con = MagicMock()
+        monkeypatch.setattr(admin_datasets, "get_duckdb_connection", lambda **kwargs: mock_con)
+        dataset = OvertureAdminDataset()
+        monkeypatch.setattr(dataset, "get_version", lambda: "test")
+        monkeypatch.setattr(dataset, "get_default_source", lambda: "s3://stub/divisions")
+        fresh = {
+            level: dataset.get_cached_path_for_level(level)
+            for level in dataset.get_available_levels()
+        }
         # A cold country request must not fetch region too (#1149). A failed
         # region COPY must leave neither a published partial nor discard country.
-        import re
-
-        for path in fresh.values():
-            path.unlink()
         copies = []
         fail_region = False
 
@@ -1734,8 +1770,6 @@ class TestDownloadPerLevelCachesHousekeeping:
             destination.write_bytes(b"partial" if fail_region else b"complete")
             if fail_region:
                 raise OSError("object store interrupted")
-
-        from contextlib import nullcontext
 
         monkeypatch.setattr(admin_datasets, "scoped_write_memory_limit", lambda *a: nullcontext())
         mock_con.execute.side_effect = copy

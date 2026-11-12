@@ -815,7 +815,7 @@ def _format_explain_table(parsed: dict) -> str:
         name = f"{indent}{op['name']}"
         lines.append(f"{name:<35} {op['timing']:<12.6f} {op['cardinality']:<12}")
 
-        if duckdb_capabilities().is_v2 and "row_groups" in op:
+        if "row_groups" in op:
             scanned, total = op["row_groups"]
             lines.append(f"  {indent}  Row groups: {scanned}/{total}")
 

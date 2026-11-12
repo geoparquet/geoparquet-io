@@ -261,16 +261,11 @@ class TestFormatExplainOutput:
         assert "Filter pushdown" in output
         assert "Row groups:" not in output
 
-        from tests.test_duckdb_capabilities import pretend_duckdb_version
-
         parsed["operators"][1]["row_groups"] = (4, 102)
-        with pretend_duckdb_version("2.0.0"):
-            output = format_explain_output(parsed, output_format="table")
-            assert "      Row groups: 4/102" in output
-            parsed["operators"][1]["row_groups"] = (0, 0)
-            assert "      Row groups: 0/0" in format_explain_output(parsed, output_format="table")
-        with pretend_duckdb_version("1.5.0"):
-            assert "Row groups:" not in format_explain_output(parsed, output_format="table")
+        output = format_explain_output(parsed, output_format="table")
+        assert "      Row groups: 4/102" in output
+        parsed["operators"][1]["row_groups"] = (0, 0)
+        assert "      Row groups: 0/0" in format_explain_output(parsed, output_format="table")
 
     def test_format_json_output(self):
         """Test JSON formatting of explain results."""
