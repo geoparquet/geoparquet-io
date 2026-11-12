@@ -652,6 +652,7 @@ class TestStreamIO:
         from tests.test_str_order import _point_table
 
         table = _point_table([(0, 1, 2)]).append_column("bbox", pa.array(["keep"]))
+        table = table.replace_schema_metadata({**table.schema.metadata, b"source": b"survey"})
         source = io.BytesIO()
         with ipc.new_stream(source, table.schema) as writer:
             writer.write_table(table)
@@ -661,6 +662,7 @@ class TestStreamIO:
         monkeypatch.setattr(sys, "stdout", mock.Mock(buffer=output, isatty=lambda: False))
         str_order("-", "-", add_bbox_flag=True)
         result = ipc.open_stream(output.getvalue()).read_all()
+        assert result.schema.metadata[b"source"] == b"survey"
         assert "bbox_1" in result.column_names
         geo = json.loads(result.schema.metadata[b"geo"])
         assert geo["columns"]["geometry"]["covering"]["bbox"]["xmin"] == ["bbox_1", "xmin"]

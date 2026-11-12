@@ -377,7 +377,7 @@ def _write_stream_output(
                     custom_metadata=custom_metadata,
                 ),
             )
-            table = with_geo_block(table, block)
+            table = with_geo_block(table.replace_schema_metadata(original_metadata), block)
         else:
             original_metadata = compose_carried_geo(original_metadata, table.schema, version)
             table = apply_metadata_to_table(table, original_metadata)
