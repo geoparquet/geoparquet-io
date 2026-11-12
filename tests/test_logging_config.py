@@ -346,3 +346,24 @@ def test_every_log_level_sanitizes_url_and_query_credentials(caplog):
                 emit(message)
     assert len(caplog.records) == len(messages) * 6
     assert all("SORTSECRET" not in record.getMessage() for record in caplog.records)
+
+
+def test_cli_handler_redacts_third_party_arguments_and_tracebacks(capsys):
+    handler = DynamicStreamHandler()
+    handler.setFormatter(CLIFormatter(use_colors=False))
+    record = logging.LogRecord(
+        "httpx", logging.WARNING, "", 0, "GET %s", ("https://u:pa'ss@h/x",), None
+    )
+    handler.handle(record)
+    try:
+        raise ValueError("https://u:SECRET/other@h/x?token=HIDDEN")
+    except ValueError:
+        import sys
+
+        record = logging.LogRecord("httpcore", logging.ERROR, "", 0, "failed", (), sys.exc_info())
+        handler.handle(record)
+    output = capsys.readouterr().err
+    assert "pa'ss" not in output
+    assert "SECRET" not in output
+    assert "HIDDEN" not in output
+    assert "ValueError" in output

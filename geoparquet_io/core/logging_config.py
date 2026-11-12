@@ -110,6 +110,19 @@ class CLIFormatter(logging.Formatter):
         return message
 
 
+class _CredentialFilter(logging.Filter):
+    """Sanitize fully interpolated records, including exception chains."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = clean_error_text(record.getMessage())
+        record.args = ()
+        if record.exc_info:
+            record.exc_text = logging.Formatter().formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = clean_error_text(record.exc_text)
+        return True
+
+
 class DynamicStreamHandler(logging.StreamHandler):
     """
     A StreamHandler that works correctly with Click's CliRunner and piping.
@@ -124,6 +137,7 @@ class DynamicStreamHandler(logging.StreamHandler):
     def __init__(self):
         # Initialize with None stream - we'll handle output dynamically
         super().__init__(stream=None)
+        self.addFilter(_CredentialFilter())
 
     def emit(self, record):
         try:
@@ -157,6 +171,15 @@ def setup_cli_logging(
     handler.setFormatter(CLIFormatter(show_timestamps=show_timestamps, use_colors=use_colors))
 
     level = logging.DEBUG if verbose else logging.INFO
+
+    root = logging.getLogger()
+    for existing in list(root.handlers):
+        if isinstance(existing, DynamicStreamHandler):
+            root.removeHandler(existing)
+    third_party = DynamicStreamHandler()
+    third_party.setFormatter(handler.formatter)
+    third_party.addFilter(lambda record: not record.name.startswith("geoparquet_io"))
+    root.addHandler(third_party)
 
     logger.setLevel(level)
     logger.handlers.clear()

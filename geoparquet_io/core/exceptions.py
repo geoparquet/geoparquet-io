@@ -25,17 +25,25 @@ import socket
 import xml.etree.ElementTree  # nosec B405 -- only classifies ParseError; never parses XML
 from collections.abc import Sequence
 from typing import NamedTuple, TypeGuard
-from urllib.parse import urlsplit, urlunsplit
 
 
 def _url_without_credentials(url: str) -> str:
-    """Strip URL credentials without shortening the path an error must name."""
-    try:
-        parsed = urlsplit(url)
-    except ValueError:
-        return "[invalid URL]"
-    netloc = parsed.netloc.rpartition("@")[2]
-    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    """Remove URL secrets from diagnostic text, including malformed URLs.
+
+    URL parsers treat an unescaped slash as a path delimiter, even in a leaked
+    password. Diagnostics deliberately over-redact through the last @ in the
+    whitespace-delimited URL token; quotes cannot delimit an untrusted secret.
+    """
+
+    def scrub(match: re.Match) -> str:
+        token = match.group(0)
+        start = token.index("://") + 3
+        authority = token[start:]
+        if "@" in authority:
+            token = token[:start] + authority.rpartition("@")[2]
+        return re.split(r"[?#]", token, maxsplit=1)[0]
+
+    return _URL_IN_TEXT.sub(scrub, url)
 
 
 def sanitize_url_for_logging(url: str) -> str:
@@ -69,7 +77,7 @@ def sanitize_url_for_logging(url: str) -> str:
 #: A URL embedded in free text. Quotes are excluded from the body because
 #: DuckDB writes URLs inside single quotes -- ``HTTP GET error on '<url>'`` --
 #: and the closing quote is not part of the URL.
-_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"<>]+")
+_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s<>]+")
 
 #: A complete ANSI escape sequence, removed whole so no readable tail is left
 #: behind when the introducing ESC goes.
@@ -91,10 +99,6 @@ _CREDENTIAL_PAIR = re.compile(
 )
 
 
-#: ``scheme://user:password@host`` userinfo. The password is replaced.
-_URL_USERINFO = re.compile(r"(://[^/\s:@'\"]+:)[^/\s@'\"]+@")
-
-
 def redact_credentials(text: str) -> str:
     """Replace credential values in free text, leaving everything else intact.
 
@@ -105,7 +109,7 @@ def redact_credentials(text: str) -> str:
     """
     if not text:
         return text
-    text = _URL_USERINFO.sub(r"\1***@", text)
+    text = _url_without_credentials(text)
     return _CREDENTIAL_PAIR.sub(lambda m: f"{m.group(1)}***", text)
 
 
@@ -130,7 +134,6 @@ def clean_error_text(text: str) -> str:
     """
     if not text:
         return text
-    text = _URL_IN_TEXT.sub(lambda m: _url_without_credentials(m.group(0)), text)
     text = redact_credentials(text)
     text = _ANSI_ESCAPE.sub("", text)
     return _CONTROL_CHARS.sub("", text)
