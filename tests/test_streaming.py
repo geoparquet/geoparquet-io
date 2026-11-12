@@ -639,6 +639,28 @@ class TestStreamIO:
                 geom = explicit or "geometry"
                 assert actual["columns"][geom]["covering"]["bbox"]["xmin"] == ["bbox_1", "xmin"]
 
+        malformed = pa.table({"id": [1, 2, 3], "geometry": [wkb, b"malformed", b""]})
+        pq.write_table(malformed, source)
+        monkeypatch.setattr("geoparquet_io.core.stream_io.read_arrow_stream", lambda: malformed)
+        for transform in (hilbert_order, str_order):
+            for stdin in (False, True):
+                for stdout in (False, True):
+                    captured.clear()
+                    transform(
+                        "-" if stdin else str(source), "-" if stdout else str(dest), overwrite=True
+                    )
+                    result = captured[0] if stdout else pq.read_table(dest)
+                    assert dict(
+                        zip(result["id"].to_pylist(), result["geometry"].to_pylist(), strict=True)
+                    ) == {
+                        1: wkb,
+                        2: b"malformed",
+                        3: b"",
+                    }, (transform.__name__, stdin, stdout)
+                    assert result["id"].to_pylist()[0] == 1
+
+        pq.write_table(table, source)
+
         from geoparquet_io.api import ops
         from geoparquet_io.api.table import Table
 

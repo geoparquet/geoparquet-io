@@ -88,6 +88,7 @@ def open_input(
     verbose: bool = False,
     *,
     stream_output: bool = False,
+    preserve_wkb: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """
     Open input source (file or stream) and prepare for DuckDB processing.
@@ -100,6 +101,7 @@ def open_input(
         con: Optional existing DuckDB connection (one will be created if None)
         verbose: Whether to print verbose output
         stream_output: Carry native field descriptions for an IPC producer
+        preserve_wkb: Keep stream WKB as stored bytes for operations such as sorting
 
     Yields:
         Tuple of (source_reference, original_metadata, is_streaming, connection)
@@ -113,7 +115,7 @@ def open_input(
             result = con.execute(f"SELECT * FROM {source}")
     """
     if is_stdin(path):
-        yield from _open_stdin_input(con, verbose)
+        yield from _open_stdin_input(con, verbose, preserve_wkb=preserve_wkb)
     else:
         yield from _open_file_input(path, con, verbose, stream_output=stream_output)
 
@@ -121,6 +123,8 @@ def open_input(
 def _open_stdin_input(
     con: duckdb.DuckDBPyConnection | None,
     verbose: bool,
+    *,
+    preserve_wkb: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """Handle streaming input from stdin."""
     import geoarrow.pyarrow  # noqa: F401 - register IPC field types before reading
@@ -140,7 +144,7 @@ def _open_stdin_input(
         geom_col = primary_geometry_column(table, geo=sanitized_carried_geo(metadata))
         source_ref = (
             create_geometry_view(con, "input_stream", geom_col, "input_stream_geom")
-            if geom_col
+            if geom_col and not preserve_wkb
             else "input_stream"
         )
 
@@ -248,6 +252,8 @@ def write_output(
     geoparquet_version: str | None = None,
     extra_kv_metadata: dict[str, str] | None = None,
     memory_limit: str | None = None,
+    *,
+    preserve_wkb: bool = False,
 ) -> pa.Table | None:
     """
     Execute query and write result to file or stream.
@@ -290,7 +296,14 @@ def write_output(
                 "--write-memory is ignored when streaming to stdout "
                 "(it only applies to file outputs)."
             )
-        return _write_stream_output(con, query, original_metadata, geometry_column, custom_metadata)
+        return _write_stream_output(
+            con,
+            query,
+            original_metadata,
+            geometry_column,
+            custom_metadata,
+            preserve_wkb=preserve_wkb,
+        )
     else:
         _write_file_output(
             con,
@@ -307,6 +320,7 @@ def write_output(
             geoparquet_version,
             extra_kv_metadata,
             memory_limit,
+            geometry_column=geometry_column,
         )
         return None
 
@@ -317,6 +331,8 @@ def _write_stream_output(
     original_metadata: dict | None,
     geometry_column: str | None,
     custom_metadata: dict | None = None,
+    *,
+    preserve_wkb: bool = False,
 ) -> pa.Table:
     """Write output as Arrow IPC stream to stdout.
 
@@ -349,7 +365,9 @@ def _write_stream_output(
             crs = "srid:0"
         entry = columns.get(name)
         edges = declared_edges(entry)
-        table = apply_geoarrow_extension_type(table, name, crs, edges=edges)
+        table = apply_geoarrow_extension_type(
+            table, name, crs, edges=edges, preserve_wkb=preserve_wkb
+        )
 
     # Apply metadata to output table, the way the file path does (#722):
     # first drop entries for columns a projection removed -- a dropped secondary
@@ -399,6 +417,8 @@ def _write_file_output(
     geoparquet_version: str | None,
     extra_kv_metadata: dict[str, str] | None = None,
     memory_limit: str | None = None,
+    *,
+    geometry_column: str | None = None,
 ) -> None:
     """Write output to Parquet file.
 
@@ -410,6 +430,7 @@ def _write_file_output(
         query,
         output_path,
         original_metadata=original_metadata,
+        geometry_info={"primary": geometry_column} if geometry_column else None,
         compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_size_mb,

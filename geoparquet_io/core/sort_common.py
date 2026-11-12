@@ -168,7 +168,9 @@ def run_sort(
                 working_input, temp_file = prepare_input(working_input, verbose)
                 stack.callback(unlink_released_file, temp_file)
             context = (
-                open_input(working_input, verbose=verbose, stream_output=stream_output)
+                open_input(
+                    working_input, verbose=verbose, stream_output=stream_output, preserve_wkb=True
+                )
                 if streaming
                 else _file_source(
                     working_input,
@@ -183,6 +185,10 @@ def run_sort(
             else:
                 source, metadata, con, working = opened
             described = describe_query(con, f"SELECT * FROM {source}")
+            primary = (
+                primary_geometry_column(described, geo=sanitized_carried_geo(metadata))
+                or geometry_column
+            )
             custom_metadata = None
             if add_bbox_flag:
                 bbox_query, _, _, custom_metadata = prepare_streaming_bbox(
@@ -194,10 +200,7 @@ def run_sort(
                     geoparquet_version=write.geoparquet_version,
                     metadata=metadata,
                     # Added bbox follows the primary, independently of the sort key.
-                    geometry_column=primary_geometry_column(
-                        described, geo=sanitized_carried_geo(metadata)
-                    )
-                    or geometry_column,
+                    geometry_column=primary,
                 )
                 source = f"({bbox_query})"
             key = (
@@ -218,7 +221,8 @@ def run_sort(
                     query,
                     output_path,
                     original_metadata=metadata,
-                    geometry_column=geometry_column,
+                    geometry_column=primary,
+                    preserve_wkb=True,
                     verbose=verbose,
                     custom_metadata=custom_metadata,
                     **write.funnel_kwargs(),
@@ -231,6 +235,7 @@ def run_sort(
                     original_metadata=metadata,
                     verbose=verbose,
                     input_file=input_path,
+                    geometry_info={"primary": primary} if primary else None,
                     custom_metadata=custom_metadata,
                     invalidate_derived_stats=is_partition_path(input_path),
                     **write.funnel_kwargs(),

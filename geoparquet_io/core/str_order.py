@@ -261,7 +261,6 @@ def str_order(
 
 
 def _str_query(con, source, geom_col, tile_size, verbose, working):
-    source = create_geometry_view(con, source, geom_col)
     key_expr = resolve_geometry_read(con, source, geom_col, relation=True).expr
     row_count, total_count = _str_row_counts(con, source, key_expr)
     if not row_count:

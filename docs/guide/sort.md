@@ -186,6 +186,10 @@ reports lower row-group bbox overlap and fewer candidate row groups than
 Hilbert on its 30-million-row POI dataset. Results depend on the dataset, so
 Hilbert remains a good general default.
 
+For metadata-free WKB inputs, Hilbert and STR also treat malformed and zero-length
+WKB as NULL sort keys. GeoParquet 1.1 files and Arrow streams retain the original
+WKB bytes for those rows.
+
 Like Hilbert sorting, STR places empty and NULL geometries at the end and can
 write GeoParquet 2.0 native row-group statistics or add a bbox covering:
 
