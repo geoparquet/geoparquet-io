@@ -686,7 +686,8 @@ def _detected(check_results):
     return {"file_type": bbox.get("file_type"), "geo_version": bbox.get("version")}
 
 
-def test_fresh_fix_outputs_inherit_private_input_mode(places_test_file, tmp_path, monkeypatch):
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
+def test_fresh_fix_outputs_inherit_private_input_mode(places_test_file, tmp_path):
     import stat
 
     from geoparquet_io.core.check_fixes import (
@@ -719,6 +720,10 @@ def test_fresh_fix_outputs_inherit_private_input_mode(places_test_file, tmp_path
         output = tmp_path / f"{name}.parquet"
         fix(output)
         assert stat.S_IMODE(output.stat().st_mode) == 0o600, name
+
+
+def test_permission_copy_failure_never_publishes(places_test_file, tmp_path, monkeypatch):
+    source = Path(places_test_file)
 
     def denied(*args, **kwargs):
         raise PermissionError("Cannot preserve private input permissions")
