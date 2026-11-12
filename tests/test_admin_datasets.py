@@ -1854,10 +1854,11 @@ def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, m
             cache_path = dataset.get_cached_path_for_level("country")
             cache_path.touch()
             extent = (0, 0, 0, 0)
-            assert (
-                "ST_SimplifyPreserveTopology"
-                in dataset._source_for_join("country", False, extent)[1]
-            )
+            inline_source, inline_relation = dataset._source_for_join("country", False, extent)
+            assert "ST_SimplifyPreserveTopology" in inline_relation
+            assert dataset._is_prefiltered_source(inline_source)
+            assert "is_land" not in dataset.get_subtype_filter(["country"], inline_source)
+            assert "is_land" not in con.sql(f"SELECT * FROM {inline_relation}").columns
             cache_path.unlink()
             con.execute(
                 f"COPY ({dataset._build_level_cache_query('country', str(source))}) "

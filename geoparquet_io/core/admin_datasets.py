@@ -980,7 +980,7 @@ class OvertureAdminDataset(AdminDataset):
     def _is_prefiltered_source(self, source: str | None) -> bool:
         """Whether ``source`` already holds exactly the rows a level selects.
 
-        True for the per-level caches this class produces —
+        True for the bounded inline relations and per-level caches this class produces —
         :meth:`_build_level_cache_query` bakes every filter in, and the cache
         projects only ``bbox``/``country``/``subtype`` (no ``is_land``), so the
         full predicate could not even bind against it — and for a user-supplied
@@ -990,7 +990,7 @@ class OvertureAdminDataset(AdminDataset):
             return True
         if source is None:
             return False
-        return Path(source).parent == get_cache_dir()
+        return source.startswith("(SELECT ") or Path(source).parent == get_cache_dir()
 
     def get_subtype_filter(self, levels: list[str], source: str | None = None) -> str | None:
         """The row filter that selects the requested admin levels.
@@ -1106,10 +1106,6 @@ class OvertureAdminDataset(AdminDataset):
             _overture_country_code_sql() + " AS country" if col == "country" else col
             for col in config["cols"]
         )
-        # The bounded inline relation is still filtered as a raw source by the
-        # join, so retain is_land for that predicate (global caches omit it).
-        if extent is not None:
-            cols += ", is_land"
         where = f"WHERE {_overture_level_predicate(level)}"
         if extent is not None:
             where += f" AND {_admin_bbox_predicate('bbox', extent)}"
@@ -1148,7 +1144,8 @@ class OvertureAdminDataset(AdminDataset):
                 # A global cache key must never hold only one command's extent.
                 # Read the bounded relation directly, retaining cache simplification.
                 source = self.get_default_source()
-                return source, f"({self._build_level_cache_query(level, source, extent)})"
+                relation = f"({self._build_level_cache_query(level, source, extent)})"
+                return relation, relation
         return super()._source_for_join(level, no_cache, extent)
 
     def _download_per_level_caches(self, levels: Iterable[str] | None = None) -> None:

@@ -812,8 +812,9 @@ The `--vecorel` flag:
 
 !!! note "Overture: per-level cache and simplified boundaries"
     The Overture dataset uses a **per-level cache**: country and region
-    boundaries are downloaded and cached as separate files rather than one
-    combined file.
+    boundaries are cached as separate files by `process aggregate` and `overview`.
+    `add admin-divisions` reuses an existing level cache; otherwise it reads
+    remote boundaries within the input's extent without populating the cache.
 
     The country level covers **dependent territories** as well as sovereign
     states, each attributed to its own ISO 3166-1 alpha-2 code — `GF` for
@@ -833,10 +834,10 @@ The `--vecorel` flag:
 
 ### Caching
 
-Admin datasets (GAUL, Overture) are automatically cached locally on first use:
+Caching depends on the dataset:
 
-- **First run**: Downloads and caches the full dataset (~5-50MB depending on dataset)
-- **Subsequent runs**: Uses cached version (instant startup)
+- **GAUL**: Downloads and caches the full dataset on first use; subsequent runs use the cache.
+- **Overture**: Reuses existing per-level caches. A cold level is read remotely within the input's extent on every run, without writing a cache. Only `process aggregate` and `overview` populate these caches.
 - **Cache location**: `~/.geoparquet-io/cache/admin/`
 - **Warning**: Shown if cache is older than 6 months
 
@@ -860,7 +861,7 @@ Admin datasets (GAUL, Overture) are automatically cached locally on first use:
     import geoparquet_io as gpio
     from geoparquet_io.core.admin_datasets import get_cache_dir, clear_cache
 
-    # Default: uses cached datasets automatically
+    # Reuses cached Overture levels, or reads the input extent remotely
     gpio.read('input.parquet').add_admin_divisions(
         dataset='overture',
         levels=['country', 'region']

@@ -225,11 +225,12 @@ def add_admin_divisions(
 
     \b
     **Caching:**
-    Admin datasets (GAUL, Overture) are cached locally on first use to speed up
-    subsequent runs. Cache location: ~/.geoparquet-io/cache/admin/
+    Cache location: ~/.geoparquet-io/cache/admin/
 
-    - First run: Downloads and caches the full dataset (~5-50MB depending on dataset)
-    - Subsequent runs: Uses cached version (instant startup)
+    - GAUL: Downloads and caches the full dataset on first use; later runs reuse it
+    - Overture: Reuses existing level caches; cold levels are read remotely within
+      the input extent on every run without writing a cache. Only process aggregate
+      and overview populate these caches
     - Warning shown if cache is older than 6 months
     - Use --no-cache to skip cache or --clear-cache to delete cached data
 
