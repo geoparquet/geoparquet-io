@@ -477,7 +477,7 @@ def test_str_order_streaming_uses_the_streams_own_primary_column(tmp_path, monke
     assert result.column_names == ["id", "footprint"]
 
 
-def test_str_order_file_write_preserves_the_in_memory_ordering(tmp_path):
+def test_str_order_file_write_preserves_the_in_memory_ordering(tmp_path, monkeypatch):
     """The written row order is str_order_table's order - the write does not reshuffle.
 
     The tile size the file path uses is ``--row-group-size`` as the write facade
@@ -490,6 +490,12 @@ def test_str_order_file_write_preserves_the_in_memory_ordering(tmp_path):
     20 is one -- is passed through rather than rounded: pyarrow honours it
     exactly, so rounding could only change the output on the writer that obeyed.
     """
+    from geoparquet_io.core import sort_common
+
+    single_file = mock.Mock(wraps=sort_common.require_single_file)
+    stream_output = mock.Mock(wraps=sort_common.should_stream_output)
+    monkeypatch.setattr(sort_common, "require_single_file", single_file)
+    monkeypatch.setattr(sort_common, "should_stream_output", stream_output)
     source = tmp_path / "order-source.parquet"
     output = tmp_path / "order-str.parquet"
     table = _point_table(_SPREAD_POINTS)
@@ -497,6 +503,8 @@ def test_str_order_file_write_preserves_the_in_memory_ordering(tmp_path):
 
     str_order(str(source), str(output), row_group_rows=20, geoparquet_version="1.1")
 
+    single_file.assert_called_once()
+    stream_output.assert_called_once()
     written = pq.read_table(output)
     expected = str_order_table(table, tile_size=resolve_row_group_rows(20, None))
     assert written["id"].to_pylist() == expected["id"].to_pylist()

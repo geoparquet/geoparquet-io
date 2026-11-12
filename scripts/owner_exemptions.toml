@@ -242,7 +242,6 @@ reason = "permanent: constant geometry filter, not a spatial join"
 # is_geographic*), and [G2.known_copies] adds renamed copies by exact name.
 [G2.owners]
 "run_sort" = ["geoparquet_io/core/sort_common.py"]
-"prepare_working_file" = ["geoparquet_io/core/sort_common.py"]
 "advised_output_version" = ["geoparquet_io/core/sort_common.py"]
 "is_geographic*" = ["geoparquet_io/core/crs_utils.py"]
 "*crs_equal*" = ["geoparquet_io/core/crs_utils.py"]

@@ -719,7 +719,6 @@
   ],
   "geoparquet_io.core.sort_common": [
     "advised_output_version",
-    "prepare_working_file",
     "run_sort"
   ],
   "geoparquet_io.core.write_funnels": [

@@ -300,7 +300,7 @@ copies or compatibility wrappers. The guard set is in ADR-0008 and
 | Concept | Owner module | Public entry points |
 |---|---|---|
 | Final Parquet write policy | `geoparquet_io/core/parquet_writer.py`, `geoparquet_io/core/write_funnels.py`, `geoparquet_io/core/compression.py` | `WriteOptions`, `resolve_output_geoparquet_version`, `resolve_row_group_rows`, `resolve_codec`, `write_parquet_with_metadata`, `write_geoparquet_table`, `located_row_group_layout`, `ensure_located_row_groups` |
-| Spatial sort orchestration | `geoparquet_io/core/sort_common.py` | `run_sort`, `advised_output_version`, `prepare_working_file` |
+| Spatial sort orchestration | `geoparquet_io/core/sort_common.py` | `run_sort`, `advised_output_version` |
 | Footer patch or rewrite | `geoparquet_io/core/parquet_footer.py` | `patch_or_rewrite` |
 | Geo block decoding | `geoparquet_io/core/geo_metadata.py` | `read_raw_geo`, `sanitized_carried_geo`, `declared_version` |
 | Geo block composition and covering | `geoparquet_io/core/geo_metadata.py`, `geoparquet_io/core/bbox_structure.py` | `compose_geo_block`, `GeoBlockOptions`, `build_bbox_covering`, `bbox_struct_child_names_match`, `covering_bbox_refs` |

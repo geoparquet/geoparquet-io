@@ -87,11 +87,11 @@ def advised_output_version(
     )
 
 
-def prepare_working_file(input_parquet, add_bbox_flag, verbose):
+def _prepare_working_file(input_parquet, add_bbox_flag, verbose):
     """Prepare working file, adding bbox if needed.
 
     Returns:
-        tuple: (working_parquet, temp_file_created, temp_file_path_or_none)
+        tuple: (working_parquet, temp_file_path_or_none)
     """
     import shutil
 
@@ -103,7 +103,7 @@ def prepare_working_file(input_parquet, add_bbox_flag, verbose):
         shutil.copy2(input_parquet, temp_file)
         add_bbox(temp_file, "bbox", verbose)
         success("Added bbox column for optimized processing")
-        return temp_file, True, temp_file
+        return temp_file, temp_file
 
     if bbox_advice["needs_warning"]:
         warn(f"\nWarning: {bbox_advice['message']}")
@@ -111,13 +111,12 @@ def prepare_working_file(input_parquet, add_bbox_flag, verbose):
             for suggestion in bbox_advice["suggestions"]:
                 info(f"Tip: {suggestion}")
 
-    return input_parquet, False, None
+    return input_parquet, None
 
 
 @contextmanager
-def _file_source(input_path, output_path, add_bbox_flag, verbose, write, command):
-    require_single_file(input_path, command)
-    working, _, temp_file = prepare_working_file(input_path, add_bbox_flag, verbose)
+def _file_source(input_path, output_path, add_bbox_flag, verbose, write):
+    working, temp_file = _prepare_working_file(input_path, add_bbox_flag, verbose)
     try:
         validate_profile_for_urls(write.remote_access().profile, input_path, output_path)
         show_remote_read_message(working, verbose)
@@ -157,17 +156,18 @@ def run_sort(
             f"{label.split()[0]} sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
             "Consider using --geoparquet-version 2.0 to enable native geo_bbox row group statistics."
         )
-    streaming = is_stdin(input_path) or should_stream_output(output_path)
-    if not should_stream_output(output_path):
+    stream_output = should_stream_output(output_path)
+    streaming = is_stdin(input_path) or stream_output
+    if not stream_output:
         handle_output_overwrite(output_path, overwrite, input_path, remove=False)
     if not is_stdin(input_path):
         require_single_file(input_path, command)
-    if should_stream_output(output_path):
+    if stream_output:
         verbose = False
     context = (
-        open_input(input_path, verbose=verbose, stream_output=should_stream_output(output_path))
+        open_input(input_path, verbose=verbose, stream_output=stream_output)
         if streaming
-        else _file_source(input_path, output_path, add_bbox_flag, verbose, write, command)
+        else _file_source(input_path, output_path, add_bbox_flag, verbose, write)
     )
     try:
         with context as opened:
@@ -218,7 +218,7 @@ def run_sort(
                     input_file=input_path,
                     **write.funnel_kwargs(),
                 )
-            if not should_stream_output(output_path):
+            if not stream_output:
                 if reordered:
                     success(f"Successfully reordered data using {label} to: {output_path}")
                 else:
