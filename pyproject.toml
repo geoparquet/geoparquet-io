@@ -606,6 +606,7 @@ layers = [
     # whole stack below; nothing below may import it.
     "geoparquet_io.core.common",
     # The two write funnels; the only module that needs both geo-block builders.
+    "geoparquet_io.core.write_funnels",
     # The geo block for an Arrow table / for a written file. Independent by
     # construction (#1010): neither reaches the other.
     "geoparquet_io.core.arrow_geo_metadata | geoparquet_io.core.derive_geo_from_file",

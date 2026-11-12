@@ -294,28 +294,28 @@ def test_assembled_geo_block_keeps_geo_prefixed_sidecars():
     }
 
 
-@pytest.mark.parametrize("strategy", list(WriteStrategy))
-def test_generated_geo_wins_over_an_explicit_extra(strategy, tmp_path):
+def test_generated_geo_wins_over_an_explicit_extra(tmp_path):
     """All writers describe the geometry they write, even with an explicit extra."""
     out = tmp_path / "out.parquet"
     explicit = json.dumps({**STALE_GEO, "version": "1.1.0", "note": "explicit"})
 
-    WriteStrategyFactory.get_strategy(strategy).write_from_table(
-        table=_carried_table(),
-        output_path=str(out),
-        geometry_column="geometry",
-        geoparquet_version="1.1",
-        compression="ZSTD",
-        compression_level=None,
-        row_group_size_mb=None,
-        row_group_rows=None,
-        verbose=False,
-        extra_kv_metadata={"geo": explicit},
-    )
+    for strategy in WriteStrategy:
+        WriteStrategyFactory.get_strategy(strategy).write_from_table(
+            table=_carried_table(),
+            output_path=str(out),
+            geometry_column="geometry",
+            geoparquet_version="1.1",
+            compression="ZSTD",
+            compression_level=None,
+            row_group_size_mb=None,
+            row_group_rows=None,
+            verbose=False,
+            extra_kv_metadata={"geo": explicit},
+        )
 
-    footer = _footer(out)
-    assert "note" not in json.loads(footer[b"geo"])
-    assert b"pandas" not in footer
+        footer = _footer(out)
+        assert "note" not in json.loads(footer[b"geo"])
+        assert b"pandas" not in footer
 
 
 @pytest.mark.parametrize("strategy", list(WriteStrategy))
