@@ -246,7 +246,7 @@ def success(message: str) -> None:
 
     Use for: Completed operations, passed validations, successful writes.
     """
-    logger.info(f"[SUCCESS]{message}")
+    logger.info(f"[SUCCESS]{clean_error_text(message)}")
 
 
 def warn(message: str) -> None:
@@ -276,7 +276,7 @@ def info(message: str) -> None:
 
     Use for: Informational details, tips, context about operations.
     """
-    logger.info(f"[INFO]{message}")
+    logger.info(f"[INFO]{clean_error_text(message)}")
 
 
 def debug(message: str) -> None:
@@ -285,7 +285,7 @@ def debug(message: str) -> None:
 
     Use for: Detailed diagnostic output, internal state, SQL queries.
     """
-    logger.debug(message)
+    logger.debug(clean_error_text(message))
 
 
 def progress(message: str) -> None:
@@ -294,4 +294,4 @@ def progress(message: str) -> None:
 
     Use for: Progress updates, status messages, general output.
     """
-    logger.info(message)
+    logger.info(clean_error_text(message))

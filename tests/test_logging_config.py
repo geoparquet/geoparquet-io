@@ -193,31 +193,20 @@ class TestHelperFunctions:
         logger.propagate = original_propagate
         logger.setLevel(original_level)
 
-    def test_success_logs_info_with_marker(self, caplog):
-        """success() should log at INFO level with SUCCESS marker."""
-        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            success("Operation completed")
-        assert "Operation completed" in caplog.text
-        assert "[SUCCESS]" in caplog.text
-
-    def test_warn_logs_warning(self, caplog):
-        """warn() should log at WARNING level."""
-        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-            warn("Something to note")
-        assert "Something to note" in caplog.text
-
-    def test_error_logs_error(self, caplog):
-        """error() should log at ERROR level."""
-        with caplog.at_level(logging.ERROR, logger="geoparquet_io"):
-            error("Something went wrong")
-        assert "Something went wrong" in caplog.text
-
-    def test_info_logs_info_with_marker(self, caplog):
-        """info() should log at INFO level with INFO marker."""
-        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            info("Informational message")
-        assert "Informational message" in caplog.text
-        assert "[INFO]" in caplog.text
+    def test_styled_helpers_preserve_level_message_and_marker(self, caplog):
+        cases = (
+            (success, logging.INFO, "Operation completed", "[SUCCESS]"),
+            (warn, logging.WARNING, "Something to note", ""),
+            (error, logging.ERROR, "Something went wrong", ""),
+            (info, logging.INFO, "Informational message", "[INFO]"),
+        )
+        for emit, level, message, marker in cases:
+            caplog.clear()
+            with caplog.at_level(level, logger="geoparquet_io"):
+                emit(message)
+            assert message in caplog.text
+            assert marker in caplog.text
+            assert [record.levelno for record in caplog.records] == [level]
 
     def test_debug_logs_at_debug_level(self, caplog):
         """debug() should log at DEBUG level."""
@@ -338,3 +327,22 @@ class TestCLIFormatterPlainMessage:
         assert result == "Plain message with no markers"
         # Should NOT have any ANSI color codes since no markers matched
         assert "\033[" not in result
+
+
+def test_every_log_level_sanitizes_url_and_query_credentials(caplog):
+    messages = [
+        "https://example.test/x?api_key=SORTSECRET",
+        "https://example.test/x?token=SORTSECRET",
+        "https://user:SORTSECRET@example.test/x",
+        "https://SORTSECRET@example.test/x",
+        "https://[invalid/x?token=SORTSECRET",
+        "https://SORTSECRET:SORTSECRET@example.test/x",
+        "https://example.test/x?X-Amz-Credential=SORTSECRET&X-Amz-Signature=SORTSECRET",
+        "SELECT * FROM 'https://example.test/x?token=SORTSECRET' WHERE api_key='SORTSECRET'",
+    ]
+    with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+        for emit in (debug, info, progress, success, warn, error):
+            for message in messages:
+                emit(message)
+    assert len(caplog.records) == len(messages) * 6
+    assert all("SORTSECRET" not in record.getMessage() for record in caplog.records)

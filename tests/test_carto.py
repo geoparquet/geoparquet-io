@@ -884,6 +884,9 @@ class TestCartoCli:
         runner = CliRunner()
         result = runner.invoke(cli, ["extract", "carto", "--help"])
         assert result.exit_code == 0
+        help_text = " ".join(result.output.split())
+        assert "GeoJSON GDAL read is not bounded by this timeout" in help_text
+        assert f"capped at {carto_module.STATUS_PROBE_TIMEOUT:g} seconds" in help_text
         assert "--where" in result.output
         assert "--bbox" in result.output
         assert "--limit" in result.output

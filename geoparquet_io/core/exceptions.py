@@ -28,6 +28,16 @@ from typing import NamedTuple, TypeGuard
 from urllib.parse import urlsplit, urlunsplit
 
 
+def _url_without_credentials(url: str) -> str:
+    """Strip URL credentials without shortening the path an error must name."""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return "[invalid URL]"
+    netloc = parsed.netloc.rpartition("@")[2]
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
 def sanitize_url_for_logging(url: str) -> str:
     """Remove credentials and query params from URL for safe logging.
 
@@ -44,9 +54,7 @@ def sanitize_url_for_logging(url: str) -> str:
     """
     if not url:
         return url
-    parsed = urlsplit(url)
-    netloc = parsed.netloc.rpartition("@")[2]
-    url = urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    url = _url_without_credentials(url)
     # Truncate very long paths but keep filename for debugging. A directory
     # URL ends in "/" and has no filename to keep: the elision would leave
     # `s3://bucket/datasets/.../`, which names nothing a user can act on --
@@ -109,9 +117,9 @@ def clean_error_text(text: str) -> str:
 
     * **Credentials in URLs.** DuckDB names the URL it failed on, query string and
       all -- ``HTTP GET error on 'https://bucket/x.parquet?X-Amz-Signature=...'``.
-      The query string (where a presigned URL's signature and an Azure SAS ``sig=``
-      ride) is removed; the rest of the URL is kept, because a gpio error that
-      names the destination on purpose must not elide it.
+      Userinfo and the query string (where a presigned URL's signature and an
+      Azure SAS ``sig=`` ride) are removed; the rest of the URL is kept, because
+      a gpio error that names the destination on purpose must not elide it.
     * **Echoed credential pairs.** ``api_key=...``, ``token: ...``,
       ``password=...``, ``user:pw@host`` in the text itself (a server body quoting
       the request) have their value replaced by ``***`` (:func:`redact_credentials`).
@@ -122,7 +130,7 @@ def clean_error_text(text: str) -> str:
     """
     if not text:
         return text
-    text = _URL_IN_TEXT.sub(lambda m: m.group(0).split("?")[0], text)
+    text = _URL_IN_TEXT.sub(lambda m: _url_without_credentials(m.group(0)), text)
     text = redact_credentials(text)
     text = _ANSI_ESCAPE.sub("", text)
     return _CONTROL_CHARS.sub("", text)

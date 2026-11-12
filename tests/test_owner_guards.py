@@ -6958,3 +6958,79 @@ def test_raw_parquet_copy_table_and_query_are_guarded(tmp_path, sql):
         )
         == 1
     )
+
+
+def _extractor_raw_reports(source):
+    """Logging helpers and gpio errors clean once; direct sinks must clean explicitly."""
+    violations = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import) and any(alias.name == "logging" for alias in node.names):
+            violations.append(node.lineno)
+        if isinstance(node, ast.ImportFrom) and (
+            node.module == "logging"
+            or (
+                node.module == "geoparquet_io.core.logging_config"
+                and any(alias.name in {"logger", "get_logger"} for alias in node.names)
+            )
+        ):
+            violations.append(node.lineno)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"print", "echo"}
+        ):
+            violations.append(node.lineno)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in {
+                "debug",
+                "info",
+                "warning",
+                "error",
+                "exception",
+                "log",
+                "critical",
+            }:
+                violations.append(node.lineno)
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+            call = node.exc
+            if isinstance(call.func, ast.Name) and call.func.id in {
+                "ValueError",
+                "RuntimeError",
+                "FileNotFoundError",
+            }:
+                for arg in call.args:
+                    if not isinstance(arg, ast.Constant) and not (
+                        isinstance(arg, ast.Call)
+                        and isinstance(arg.func, ast.Name)
+                        and arg.func.id == "clean_error_text"
+                    ):
+                        violations.append(node.lineno)
+    return violations
+
+
+def test_extractors_use_sanitizing_report_owners():
+    core = PACKAGE / "core"
+    for path in [core / name for name in ("wfs.py", "carto.py", "arcgis.py")] + list(
+        core.glob("extract*.py")
+    ):
+        assert not _extractor_raw_reports(path.read_text()), path
+    for unsafe in ('logger.debug(f"Fetching {url}")', 'raise ValueError(f"Bad query: {query}")'):
+        assert _extractor_raw_reports(unsafe)
+    assert not _extractor_raw_reports('debug(f"Fetching {url}")')
+    assert not _extractor_raw_reports('raise ValueError(clean_error_text(f"Bad {url}"))')
+    tree = ast.parse((core / "logging_config.py").read_text())
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name in {
+            "debug",
+            "info",
+            "progress",
+            "success",
+            "warn",
+            "error",
+        }:
+            assert any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "clean_error_text"
+                for call in ast.walk(node)
+            ), node.name
