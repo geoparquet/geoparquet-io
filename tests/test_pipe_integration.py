@@ -563,9 +563,19 @@ class TestStdinWithoutGeometryTypes:
             ["partition", "h3", "--resolution", "2", "--skip-analysis", "--force"],
             ["partition", "s2", "--level", "2", "--skip-analysis", "--force"],
             ["partition", "a5", "--resolution", "2", "--skip-analysis", "--force"],
+            [
+                "partition",
+                "admin",
+                "--dataset",
+                "overture",
+                "--levels",
+                "country",
+                "--skip-analysis",
+                "--force",
+            ],
         ],
     )
-    def test_sort_quadkey_from_stdin(self, tmp_path, command, carry_geo):
+    def test_sort_quadkey_from_stdin(self, tmp_path, command, carry_geo, monkeypatch):
         stream = _stream_without_geometry_types(tmp_path / "nogt.arrows")
         import pyarrow.ipc as ipc
 
@@ -584,25 +594,60 @@ class TestStdinWithoutGeometryTypes:
         output_file = str(
             tmp_path / ("output.geojson" if command == ["convert", "geojson"] else "output.parquet")
         )
-        with open(stream, "rb") as fh:
-            result = subprocess.run(
-                [
-                    "gpio",
-                    *command,
-                    "-",
-                    output_file,
-                    *(["name"] if command == ["sort", "column"] else []),
-                ],
-                stdin=fh,
-                capture_output=True,
-                text=True,
-                timeout=120,
+        if command[:2] == ["partition", "admin"]:
+            from click.testing import CliRunner
+
+            from geoparquet_io.cli.main import cli
+            from geoparquet_io.core.admin_datasets import AdminDatasetFactory, OvertureAdminDataset
+            from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+            from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+
+            admin = str(tmp_path / "admin.parquet")
+            with get_duckdb_connection(load_spatial=True, load_httpfs=False) as con:
+                write_parquet_with_metadata(
+                    con,
+                    "SELECT 'country' subtype, 'XX' country, NULL::VARCHAR region, "
+                    "ST_MakeEnvelope(-179, -89, 179, 89) geometry, "
+                    "{'xmin': -179.0, 'ymin': -89.0, 'xmax': 179.0, 'ymax': 89.0} bbox",
+                    admin,
+                )
+            monkeypatch.setattr(
+                AdminDatasetFactory,
+                "create",
+                staticmethod(lambda *a, **k: OvertureAdminDataset(source_path=admin)),
             )
+            invoked = CliRunner().invoke(
+                cli, [*command, "-", output_file], input=stream.read_bytes()
+            )
+            result = subprocess.CompletedProcess(
+                command, invoked.exit_code, stderr=invoked.output + repr(invoked.exception)
+            )
+        else:
+            with open(stream, "rb") as fh:
+                result = subprocess.run(
+                    [
+                        "gpio",
+                        *command,
+                        "-",
+                        output_file,
+                        *(["name"] if command == ["sort", "column"] else []),
+                    ],
+                    stdin=fh,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
 
         # These file-based paths also reject untyped WKB on the reference build.
         if not carry_geo and (
             command[:2] == ["convert", "reproject"]
-            or command[:2] in (["partition", "h3"], ["partition", "s2"], ["partition", "a5"])
+            or command[:2]
+            in (
+                ["partition", "h3"],
+                ["partition", "s2"],
+                ["partition", "a5"],
+                ["partition", "admin"],
+            )
         ):
             assert result.returncode != 0
             assert "BLOB" in result.stderr

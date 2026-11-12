@@ -365,6 +365,7 @@ class TestStreamIO:
         """Test open_input with a file path."""
         import pyarrow.parquet as pq
 
+        from geoparquet_io.core.memory_limits import open_bounded_connection
         from geoparquet_io.core.stream_io import open_input
 
         # Write test file
@@ -372,11 +373,23 @@ class TestStreamIO:
         table_with_meta = sample_geo_table.replace_schema_metadata(geo_metadata)
         pq.write_table(table_with_meta, str(test_file))
 
-        with open_input(str(test_file)) as (source, metadata, is_stream, con):
+        with (
+            mock.patch(
+                "geoparquet_io.core.memory_limits.open_bounded_connection",
+                wraps=open_bounded_connection,
+            ) as bounded,
+            open_input(str(test_file), stream_output=True) as (source, metadata, is_stream, con),
+        ):
             assert is_stream is False
             assert "read_parquet" in source
             assert metadata is not None
             assert con is not None
+            bounded.assert_called_once_with(
+                load_spatial=True, load_httpfs=False, preserve_insertion_order=True
+            )
+            assert con.execute("SELECT current_setting('preserve_insertion_order')").fetchall() == [
+                (True,)
+            ]
 
     def test_open_input_with_stdin(self, sample_geo_table, geo_metadata, monkeypatch):
         """Test open_input with stdin."""

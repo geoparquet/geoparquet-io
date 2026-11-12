@@ -153,7 +153,14 @@ def _open_file_input(
 
     created_connection = con is None
     if created_connection:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
+        if stream_output:
+            from geoparquet_io.core.memory_limits import open_bounded_connection
+
+            con = open_bounded_connection(
+                load_spatial=True, load_httpfs=needs_httpfs(path), preserve_insertion_order=True
+            )
+        else:
+            con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
 
     try:
         source = f"read_parquet({sql_path(raw_url)})"
