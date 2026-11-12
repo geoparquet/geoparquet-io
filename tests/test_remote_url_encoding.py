@@ -258,3 +258,45 @@ def test_partition_default_geography_uses_real_remote_schema(recording_http_serv
         columns.append(geo_block(next(out.rglob("*.parquet")))["columns"]["geometry"])
     assert columns[0]["edges"] == "spherical"
     assert columns[1] == columns[0]
+
+
+def test_partition_http_requests_do_not_grow_with_output_count(recording_http_server, tmp_path):
+    import geoarrow.pyarrow as ga
+    import pyarrow.parquet as pq
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+    from tests.native_geo_probes import write_native_geo_only
+
+    base, served, requests = recording_http_server
+    counts = []
+    wkb = bytes(ga.as_wkb(["POINT(1 2)"]).storage[0].as_py())
+    for parts in (2, 8):
+        write_native_geo_only(
+            served / "data.parquet",
+            [(i, f"g{i % parts}", wkb) for i in range(40)],
+            {"geometry": (2, ga.wkb())},
+        )
+        requests.clear()
+        output = tmp_path / f"parts-{parts}"
+        result = CliRunner().invoke(
+            cli,
+            [
+                "partition",
+                "string",
+                f"{base}/data.parquet",
+                str(output),
+                "--column",
+                "grp",
+                "--skip-analysis",
+                "--geoparquet-version",
+                "1.1",
+            ],
+        )
+        assert result.exit_code == 0, (result.output, result.exception)
+        outputs = list(output.rglob("*.parquet"))
+        assert len(outputs) == parts
+        assert sum(pq.read_metadata(path).num_rows for path in outputs) == 40
+        assert requests and all(path == "/data.parquet" for path in requests)
+        counts.append(len(requests))
+    assert counts[0] == counts[1], f"remote reads grew with partition count: {counts}"
