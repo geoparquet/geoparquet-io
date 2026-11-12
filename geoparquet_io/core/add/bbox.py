@@ -402,17 +402,20 @@ def prepare_streaming_bbox(
     geoparquet_version: str | None = None,
     metadata: dict | None = None,
     geometry_column: str | None = None,
+    *,
+    reuse_existing: bool = False,
 ) -> tuple[str, bool, str, dict | None]:
     """Build the add-bbox query for a streaming source.
 
     Returns ``(query, passed_through, bbox_column_name, custom_metadata)``. ``passed_through``
-    means the source already carries a usable bbox struct, so the query is a
+    means the requested column already carries a usable bbox struct, so the query is a
     plain copy and the caller must not claim anything about a column gpio did not
-    compute. The name comes back because a source column of the requested name
+    compute. Sort callers set ``reuse_existing`` to accept any existing covering.
+    The name comes back because a source column of the requested name
     that is *not* a bbox struct moves the computed one aside (#1176), and the
     caller declares the covering over the name actually written.
     """
-    if not force:
+    if reuse_existing and not force:
         declared = bbox_column_to_declare(
             query_schema(con, f"SELECT * FROM {source}"), sanitized_carried_geo(metadata)
         )

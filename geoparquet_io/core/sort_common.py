@@ -190,6 +190,7 @@ def run_sort(
                     con,
                     "bbox",
                     force=False,
+                    reuse_existing=True,
                     geoparquet_version=write.geoparquet_version,
                     metadata=metadata,
                     # Added bbox follows the primary, independently of the sort key.
