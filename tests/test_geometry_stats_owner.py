@@ -266,6 +266,24 @@ def test_wrapped_footer_bounds_fall_back_to_cartesian_scan(tmp_path, monkeypatch
         ],
     )
     assert bounds_of(path, "geometry") == [-170, 10, 178, 12]
+    table = pq.read_table(path).append_column(
+        "bbox",
+        pa.array(
+            [
+                {"xmin": 170.0, "ymin": 10.0, "xmax": -170.0, "ymax": 10.0},
+                {"xmin": 175.0, "ymin": 12.0, "xmax": 178.0, "ymax": 12.0},
+            ]
+        ),
+    )
+    pq.write_table(table, path)
+    chunks = [
+        {"xmin": 170, "ymin": 10, "xmax": -170, "ymax": 10},
+        {"xmin": 175, "ymin": 12, "xmax": 178, "ymax": 12},
+    ]
+    monkeypatch.setattr(footer, "get_row_group_bbox_stats", lambda *a, **kw: (chunks, None))
+    assert bounds_of(path, "geometry", bbox_column="bbox") == [-170, 10, 178, 12]
+    pq.write_table(table.slice(0, 1), path)
+    assert bounds_of(path, "geometry", bbox_column="bbox") == [-170, 10, 170, 10]
 
 
 def test_file_scan_bounds_working_memory_at_the_owner(tmp_path, monkeypatch):

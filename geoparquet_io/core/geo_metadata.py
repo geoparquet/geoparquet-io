@@ -2793,6 +2793,9 @@ def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
         )
         if footer is not None:
             return footer
+        # An incomplete or wrapped covering cannot establish Cartesian bounds.
+        # Measure the geometry rather than filtering inverted covering rows out.
+        kwargs["bbox_column"] = None
     # This aggregate retains only distinct types and four bounds. A small
     # analysis budget also caps parallel decompression buffers on large hosts.
     con = open_bounded_connection(memory_limit="256MB", load_httpfs=needs_httpfs(path))
