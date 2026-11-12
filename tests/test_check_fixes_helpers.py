@@ -32,33 +32,18 @@ class TestApplyBboxColumnFix:
 class TestApplyBboxMetadataFix:
     """Tests for _apply_bbox_metadata_fix function."""
 
-    def test_skip_for_v2_files(self):
-        """Test that bbox metadata is skipped for v2/parquet-geo-only files."""
-        bbox_result = {"needs_bbox_removal": True}
-        temp_files = contextlib.ExitStack()
-
-        current_file, fixes = _apply_bbox_metadata_fix(
-            bbox_result, "/some/file.parquet", "/some/file.parquet", temp_files, False, None
-        )
-
-        assert current_file == "/some/file.parquet"
-        assert fixes == []
-
     def test_no_metadata_needed(self):
-        """Test when no metadata fix is needed."""
-        bbox_result = {
-            "needs_bbox_removal": False,
-            "needs_bbox_metadata": False,
-            "needs_bbox_column": False,
-        }
-        temp_files = contextlib.ExitStack()
-
-        current_file, fixes = _apply_bbox_metadata_fix(
-            bbox_result, "/some/file.parquet", "/some/file.parquet", temp_files, False, None
-        )
-
-        assert current_file == "/some/file.parquet"
-        assert fixes == []
+        """Native files and files needing no metadata both bypass the metadata pass."""
+        for bbox_result in (
+            {"needs_bbox_removal": True},
+            {"needs_bbox_removal": False, "needs_bbox_metadata": False, "needs_bbox_column": False},
+        ):
+            with contextlib.ExitStack() as scratch:
+                current_file, fixes = _apply_bbox_metadata_fix(
+                    bbox_result, "/some/file.parquet", "/some/file.parquet", scratch, False, None
+                )
+            assert current_file == "/some/file.parquet"
+            assert fixes == []
 
 
 class TestApplySpatialOrderingFix:
