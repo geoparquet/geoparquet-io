@@ -513,6 +513,50 @@ class TestStreamIO:
         assert streamed.num_rows == sample_geo_table.num_rows
         assert b"geo" not in (streamed.schema.metadata or {})
 
+    def test_projected_secondary_custom_covering_matches_file(self, tmp_path, monkeypatch):
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.geo_metadata import build_bbox_covering
+        from geoparquet_io.core.stream_io import execute_transform
+
+        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+        table = pa.table({"id": [1], "geometry": [wkb], "secondary": [wkb]})
+        entry = {"encoding": "WKB", "geometry_types": ["Point"], "bbox": [1, 2, 1, 2]}
+        table = with_geo_block(
+            table,
+            {
+                "version": "1.1.0",
+                "primary_column": "geometry",
+                "columns": {"geometry": entry, "secondary": entry},
+            },
+        )
+        source = tmp_path / "source.parquet"
+        pq.write_table(table, source)
+        custom = {"covering": {"bbox": build_bbox_covering("computed")}}
+        for selected in ("*", "id, secondary", "id"):
+
+            def transform(ref, con, selected=selected):
+                return (
+                    f"SELECT {selected}, {{'xmin': 1.0::DOUBLE, 'ymin': 2.0::DOUBLE, "
+                    f"'xmax': 1.0::DOUBLE, 'ymax': 2.0::DOUBLE}} AS computed FROM {ref}"
+                )
+
+            dest = tmp_path / "output.parquet"
+            execute_transform(str(source), str(dest), transform, custom_metadata=custom)
+            captured = []
+            monkeypatch.setattr("geoparquet_io.core.stream_io.write_arrow_stream", captured.append)
+            execute_transform(str(source), "-", transform, custom_metadata=custom)
+            expected = read_raw_geo(pq.read_metadata(dest).metadata).value
+            actual = read_raw_geo(captured[0].schema.metadata).value
+            assert actual == expected, selected
+            if selected == "id, secondary":
+                assert actual["primary_column"] == "secondary"
+                assert (
+                    actual["columns"]["secondary"]["covering"]["bbox"] == custom["covering"]["bbox"]
+                )
+            elif selected == "id":
+                assert actual is None
+
     def test_execute_transform_dry_run(self, tmp_path, sample_geo_table, geo_metadata):
         """Test execute_transform with dry_run=True."""
         import pyarrow.parquet as pq

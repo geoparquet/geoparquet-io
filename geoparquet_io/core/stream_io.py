@@ -364,7 +364,9 @@ def _write_stream_output(
     # struct the spec forbids -- is no more writable here than there (#1172),
     # and a 1.0 input upgrades and declares its bbox column as a file does.
     if original_metadata:
-        original_metadata = prune_geo_metadata_to_columns(original_metadata, table.column_names)
+        original_metadata = prune_geo_metadata_to_columns(
+            original_metadata, table.column_names, repoint_primary=True
+        )
         original_metadata = backfill_derived_stats(original_metadata, table)
         # A stream takes no version option: auto mode, the facade's answer.
         version = resolve_output_geoparquet_version(None, original_metadata=original_metadata)
