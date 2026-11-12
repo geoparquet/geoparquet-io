@@ -372,7 +372,7 @@ def _write_stream_output(
             block = compose_geo_block(
                 ArrowTableSource(table.replace_schema_metadata(original_metadata)),
                 GeoBlockOptions(
-                    geometry_column=carried.get("primary_column") or geometry_column,
+                    geometry_column=primary_geometry_column(table, geo=carried) or geometry_column,
                     version=version,
                     custom_metadata=custom_metadata,
                 ),
