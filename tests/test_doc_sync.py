@@ -252,7 +252,7 @@ class TestUpdateMode:
         """Test that CLAUDE.md contains the generated section markers."""
         claude_md = PROJECT_ROOT / "CLAUDE.md"
         content = claude_md.read_text(encoding="utf-8")
-        for section_name in ["cli-commands", "test-markers"]:
+        for section_name in ["cli-commands", "test-markers", "core-modules"]:
             assert f"<!-- BEGIN GENERATED: {section_name} -->" in content, (
                 f"CLAUDE.md missing BEGIN marker for '{section_name}'"
             )
@@ -268,6 +268,9 @@ class TestUpdateMode:
         # Generate all sections and apply
         sections = {
             "cli-commands": self.mod.generate_cli_section(),
+            "core-modules": self.mod.generate_core_modules_section(
+                PROJECT_ROOT / "geoparquet_io" / "core"
+            ),
             "test-markers": self.mod.generate_markers_section(PROJECT_ROOT / "pyproject.toml"),
         }
 
@@ -282,6 +285,16 @@ class TestUpdateMode:
             assert f"<!-- BEGIN GENERATED: {name} -->" in updated
             assert f"<!-- END GENERATED: {name} -->" in updated
 
+    def test_core_modules_follow_source(self, tmp_path):
+        (tmp_path / "__init__.py").write_text("# ignored\n")
+        (tmp_path / "small.py").write_text('"""Small module."""\n')
+        (tmp_path / "large.py").write_text('"""Large module."""\n\nx = 1\n')
+        section = self.mod.generate_core_modules_section(tmp_path)
+        assert "| `large.py` | Large module. | 3 |" in section
+        assert "| `small.py` | Small module. | 1 |" in section
+        assert section.index("large.py") < section.index("small.py")
+        assert "__init__.py" not in section
+
     def test_update_is_idempotent(self):
         """Test that running update twice produces identical output."""
         claude_md = PROJECT_ROOT / "CLAUDE.md"
@@ -289,6 +302,9 @@ class TestUpdateMode:
 
         sections = {
             "cli-commands": self.mod.generate_cli_section(),
+            "core-modules": self.mod.generate_core_modules_section(
+                PROJECT_ROOT / "geoparquet_io" / "core"
+            ),
             "test-markers": self.mod.generate_markers_section(PROJECT_ROOT / "pyproject.toml"),
         }
 
@@ -300,6 +316,9 @@ class TestUpdateMode:
         # Second pass (regenerate sections and apply again)
         sections2 = {
             "cli-commands": self.mod.generate_cli_section(),
+            "core-modules": self.mod.generate_core_modules_section(
+                PROJECT_ROOT / "geoparquet_io" / "core"
+            ),
             "test-markers": self.mod.generate_markers_section(PROJECT_ROOT / "pyproject.toml"),
         }
 

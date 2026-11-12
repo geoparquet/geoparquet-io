@@ -85,21 +85,21 @@ geoparquet_io/
 
 | Module | Purpose | Lines |
 |--------|---------|-------|
-| `validate.py` | GeoParquet file validation against specification r... | 4251 |
-| `wfs.py` | WFS (Web Feature Service) to GeoParquet conversion... | 3483 |
-| `convert.py` |  | 2248 |
-| `inspect_utils.py` | Utilities for inspecting GeoParquet files. | 1756 |
-| `arcgis.py` | ArcGIS Feature Service to GeoParquet conversion. | 1642 |
-| `duckdb_metadata.py` | DuckDB-based Parquet metadata extraction. | 1547 |
-| `geo_metadata.py` | GeoParquet metadata handling functions. | 1531 |
-| `extract.py` | Extract columns and rows from GeoParquet files. | 1426 |
-| `crs_utils.py` | CRS (Coordinate Reference System) utilities for Ge... | 1360 |
-| `duckdb_utils.py` | DuckDB connection management utilities. | 1244 |
-| `admin_datasets.py` | Admin partition dataset abstraction layer. | 1219 |
-| `extract_bigquery.py` | BigQuery extraction to GeoParquet. | 1204 |
-| `write_funnels.py` | The write funnels: the two front doors every gpio ... | 1098 |
-| `common.py` | What is left of the old grab-bag after the split. | 749 |
-| ... | *49 more modules* | |
+| `validate.py` | GeoParquet file validation against specification... | 4795 |
+| `wfs.py` | WFS (Web Feature Service) to GeoParquet conversion.... | 3749 |
+| `convert.py` |  | 3502 |
+| `geo_metadata.py` | GeoParquet metadata handling functions. This module... | 3186 |
+| `duckdb_utils.py` | DuckDB connection management utilities. This module... | 3147 |
+| `write_funnels.py` | The write funnels: the two front doors every gpio... | 2373 |
+| `crs_utils.py` | CRS (Coordinate Reference System) utilities for... | 2311 |
+| `arcgis.py` | ArcGIS Feature Service to GeoParquet conversion.... | 1932 |
+| `inspect_utils.py` | Utilities for inspecting GeoParquet files. Provides... | 1791 |
+| `admin_datasets.py` | Admin partition dataset abstraction layer. This... | 1767 |
+| `extract_bigquery.py` | BigQuery extraction to GeoParquet. Uses DuckDB... | 1643 |
+| `parquet_writer.py` | The write facade: the decisions every gpio write... | 1537 |
+| `duckdb_metadata.py` | DuckDB-based Parquet metadata extraction. This... | 1406 |
+| `carto.py` | Carto SQL API to GeoParquet conversion. Extracts... | 1376 |
+| ... | *67 more modules* | |
 <!-- END GENERATED: core-modules -->
 
 <!-- freshness: last-verified: 2026-09-13, maps-to: geoparquet_io/core/common.py, geoparquet_io/core/parquet_writer.py, geoparquet_io/cli/decorators.py, pyproject.toml -->
