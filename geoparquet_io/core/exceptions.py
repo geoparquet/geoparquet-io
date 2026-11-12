@@ -35,7 +35,7 @@ def _url_without_credentials(url: str) -> str:
     whitespace-delimited URL token; quotes cannot delimit an untrusted secret.
     """
 
-    def scrub(match: re.Match) -> str:
+    def scrub(match: re.Match[str]) -> str:
         token = match.group(0)
         start = token.index("://") + 3
         authority = token[start:]
