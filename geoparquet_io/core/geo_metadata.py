@@ -2729,21 +2729,29 @@ def _footer_stats(
     path: str, geometry_column: str, bbox_column: str | None, *, need_bbox: bool
 ) -> GeometryStats | None:
     """Complete physical footer facts; never fold a subset of the row groups."""
-    from geoparquet_io.core.duckdb_metadata import (
-        get_file_metadata,
-        get_native_geo_stats_by_row_group,
-        get_row_group_bbox_stats,
-    )
     from geoparquet_io.core.file_utils import get_all_parquet_files, is_partition_path
 
     if is_partition_path(path):
         parts = [
-            _footer_stats(file, geometry_column, bbox_column, need_bbox=need_bbox)
+            _file_footer_stats(file, geometry_column, bbox_column, need_bbox=need_bbox)
             for file in get_all_parquet_files(path)
         ]
         if not parts or any(part is None for part in parts):
             return None
         return merged_geometry_stats(parts, geographic=False)
+
+    return _file_footer_stats(path, geometry_column, bbox_column, need_bbox=need_bbox)
+
+
+def _file_footer_stats(
+    path: str, geometry_column: str, bbox_column: str | None, *, need_bbox: bool
+) -> GeometryStats | None:
+    """Read one listed file's footer without classifying its path again."""
+    from geoparquet_io.core.duckdb_metadata import (
+        get_file_metadata,
+        get_native_geo_stats_by_row_group,
+        get_row_group_bbox_stats,
+    )
 
     groups = get_file_metadata(path)["num_row_groups"]
     if bbox_column is not None:

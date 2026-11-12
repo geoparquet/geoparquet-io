@@ -292,3 +292,25 @@ def test_file_scan_bounds_working_memory_at_the_owner(tmp_path, monkeypatch):
         assert threads == 1
         assert parse_size_string(limit) <= 256 * 1024 * 1024
         assert not preserve_order
+
+
+@pytest.mark.parametrize(
+    "source", ["s3://bucket/year=2024/data.parquet", "s3://bucket/year=*/data.parquet"]
+)
+def test_remote_hive_members_are_read_once(source, monkeypatch):
+    import geoparquet_io.core.duckdb_metadata as footer
+    import geoparquet_io.core.file_utils as files
+
+    member = "s3://bucket/year=2024/data.parquet"
+    expanded = []
+    monkeypatch.setattr(
+        files, "get_all_parquet_files", lambda path: expanded.append(path) or [member]
+    )
+    monkeypatch.setattr(footer, "get_file_metadata", lambda path: {"num_row_groups": 1})
+    monkeypatch.setattr(
+        footer,
+        "get_native_geo_stats_by_row_group",
+        lambda *args: [{"xmin": 1, "ymin": 2, "xmax": 3, "ymax": 4, "geometry_types": ["Point"]}],
+    )
+    assert geometry_stats_of(source, "geometry") == GeometryStats([1, 2, 3, 4], ["Point"])
+    assert expanded == [source]
