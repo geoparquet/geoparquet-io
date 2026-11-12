@@ -6,11 +6,10 @@ import duckdb
 
 from geoparquet_io.core.add.bbox import prepare_streaming_bbox
 from geoparquet_io.core.bbox_structure import get_bbox_advice
-from geoparquet_io.core.common import add_bbox, get_parquet_metadata
+from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     get_duckdb_connection,
-    query_schema,
     sql_path,
     uses_aws_profile,
 )
@@ -19,10 +18,9 @@ from geoparquet_io.core.file_utils import (
     handle_output_overwrite,
     is_partition_path,
     resolve_file_url,
-    scratch_path,
     unlink_released_file,
 )
-from geoparquet_io.core.geo_metadata import bbox_column_to_declare, sanitized_carried_geo
+from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import primary_geometry_column, resolve_geometry_column
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
@@ -93,57 +91,28 @@ def advised_output_version(
     )
 
 
-def _prepare_working_file(input_parquet, add_bbox_flag, verbose):
-    """Prepare working file, adding bbox if needed.
-
-    Returns:
-        tuple: (working_parquet, temp_file_path_or_none)
-    """
-    import shutil
-
-    bbox_advice = get_bbox_advice(input_parquet, "bounds_calculation", verbose)
-
-    if add_bbox_flag and not bbox_advice["has_bbox_column"]:
-        info("\nAdding bbox column to enable fast bounds calculation...")
-        temp_file = scratch_path()
-        shutil.copy2(input_parquet, temp_file)
-        add_bbox(temp_file, "bbox", verbose)
-        success("Added bbox column for optimized processing")
-        return temp_file, temp_file
-
-    if bbox_advice["needs_warning"]:
-        warn(f"\nWarning: {bbox_advice['message']}")
-        if not add_bbox_flag:
-            for suggestion in bbox_advice["suggestions"]:
-                info(f"Tip: {suggestion}")
-
-    return input_parquet, None
-
-
 @contextmanager
-def _file_source(input_path, add_bbox_flag, verbose, allow_schema_diff):
-    working, temp_file = (
-        _prepare_working_file(input_path, add_bbox_flag, verbose)
-        if allow_schema_diff is None or add_bbox_flag
-        else (input_path, None)
-    )
-    try:
-        show_remote_read_message(working, verbose)
-        source = (
-            sql_path(resolve_file_url(working, verbose))
-            if allow_schema_diff is None
-            else build_read_parquet_expr(
-                working, allow_schema_diff=allow_schema_diff, verbose=verbose
-            )
+def _file_source(input_path, verbose, allow_schema_diff):
+    if allow_schema_diff is None:
+        advice = get_bbox_advice(input_path, "bounds_calculation", verbose)
+        if advice["needs_warning"]:
+            warn(f"\nWarning: {advice['message']}")
+            for suggestion in advice["suggestions"]:
+                info(f"Tip: {suggestion}")
+    show_remote_read_message(input_path, verbose)
+    source = (
+        sql_path(resolve_file_url(input_path, verbose))
+        if allow_schema_diff is None
+        else build_read_parquet_expr(
+            input_path, allow_schema_diff=allow_schema_diff, verbose=verbose
         )
-        metadata, _ = get_parquet_metadata(working, verbose)
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working))
-        try:
-            yield source, metadata, con, working
-        finally:
-            con.close()
+    )
+    metadata, _ = get_parquet_metadata(input_path, verbose)
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(input_path))
+    try:
+        yield source, metadata, con, input_path
     finally:
-        unlink_released_file(temp_file)
+        con.close()
 
 
 @uses_aws_profile
@@ -203,7 +172,6 @@ def run_sort(
                 if streaming
                 else _file_source(
                     working_input,
-                    add_bbox_flag and not is_partition_path(working_input),
                     verbose,
                     allow_schema_diff,
                 )
@@ -216,15 +184,11 @@ def run_sort(
                 source, metadata, con, working = opened
             described = describe_query(con, f"SELECT * FROM {source}")
             custom_metadata = None
-            if add_bbox_flag and (streaming or is_partition_path(working_input)):
+            if add_bbox_flag:
                 bbox_query, _, _, custom_metadata = prepare_streaming_bbox(
                     source,
                     con,
-                    bbox_column_to_declare(
-                        query_schema(con, f"SELECT * FROM {source}"),
-                        sanitized_carried_geo(metadata),
-                    )
-                    or "bbox",
+                    "bbox",
                     force=False,
                     geoparquet_version=write.geoparquet_version,
                     metadata=metadata,

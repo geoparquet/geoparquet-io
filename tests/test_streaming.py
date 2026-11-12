@@ -600,6 +600,20 @@ class TestStreamIO:
                 read_raw_geo(captured[0].schema.metadata).value
                 == read_raw_geo(pq.read_metadata(dest).metadata).value
             ), (transform.__name__, "existing covering")
+        collision = table.append_column("bbox", pa.array(["keep"]))
+        pq.write_table(collision, source)
+        for transform, options in transforms[:8]:
+            if not options.get("add_bbox_flag"):
+                continue
+            captured.clear()
+            transform(str(source), str(dest), overwrite=True, **options)
+            transform(str(source), "-", **options)
+            assert "bbox_1" in pq.read_schema(dest).names
+            assert captured[0]["bbox"].to_pylist() == ["keep"]
+            assert (
+                read_raw_geo(captured[0].schema.metadata).value
+                == read_raw_geo(pq.read_metadata(dest).metadata).value
+            )
         pq.write_table(table, source)
 
         from geoparquet_io.api import ops

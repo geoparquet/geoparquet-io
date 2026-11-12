@@ -25,6 +25,7 @@ from geoparquet_io.core.geo_metadata import (
     ArrowTableSource,
     GeoBlockOptions,
     _bbox_claimed_by_another_column,
+    bbox_column_to_declare,
     bbox_struct_array,
     bbox_struct_sql,
     bbox_struct_type,
@@ -404,6 +405,13 @@ def prepare_streaming_bbox(
     that is *not* a bbox struct moves the computed one aside (#1176), and the
     caller declares the covering over the name actually written.
     """
+    if not force:
+        declared = bbox_column_to_declare(
+            query_schema(con, f"SELECT * FROM {source}"), sanitized_carried_geo(metadata)
+        )
+        if declared:
+            bbox_column_name = declared
+
     # Same guard as the file-based path (#728): a source that already carries a
     # bbox struct is passed through untouched rather than silently gaining a
     # second column named 'bbox_1'.
