@@ -161,6 +161,28 @@ def test_a_gpio_error_arrives_sanitized():
     # the destination a message names on purpose is not elided
     assert "https://h/a/b/c/d/e" in str(err)
 
+    import random
+
+    from geoparquet_io.core.exceptions import (
+        clean_error_text,
+        redact_credentials,
+        sanitize_url_for_logging,
+    )
+
+    rng = random.Random(1034)
+    alphabet = "abcXYZ019/:'\"@%+?&#=[]"
+    for _ in range(250):
+        secret = "SECRET" + "".join(rng.choices(alphabet, k=30)) + "END"
+        for url in (
+            f"https://user:{secret}@example.test/x",
+            f"https://[broken/file?token={secret}",
+            f"s3://bucket/x?signature={secret}",
+        ):
+            for clean in (clean_error_text, redact_credentials, sanitize_url_for_logging):
+                for text in (url, f'failed "{url}" next', f"failed '{url}' next"):
+                    assert secret not in clean(text)
+                    assert "SECRET" not in clean(text)
+
 
 @pytest.mark.parametrize(
     ("text", "kept"),
@@ -227,27 +249,3 @@ def test_a_path_or_url_named_forbidden_cannot_decide_the_verdict():
 )
 def test_one_not_parquet_predicate(exc):
     assert classify_failure(exc) == FailureClass(FailureKind.NOT_PARQUET)
-
-
-def test_hostile_url_credentials_never_reach_diagnostics():
-    import random
-
-    from geoparquet_io.core.exceptions import (
-        clean_error_text,
-        redact_credentials,
-        sanitize_url_for_logging,
-    )
-
-    rng = random.Random(1034)
-    alphabet = "abcXYZ019/:'\"@%+?&#=[]"
-    for _ in range(250):
-        secret = "SECRET" + "".join(rng.choices(alphabet, k=30)) + "END"
-        for url in (
-            f"https://user:{secret}@example.test/x",
-            f"https://[broken/file?token={secret}",
-            f"s3://bucket/x?signature={secret}",
-        ):
-            for clean in (clean_error_text, redact_credentials, sanitize_url_for_logging):
-                for text in (url, f'failed "{url}" next', f"failed '{url}' next"):
-                    assert secret not in clean(text)
-                    assert "SECRET" not in clean(text)

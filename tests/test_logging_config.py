@@ -145,12 +145,33 @@ class TestCLIFormatter:
 class TestSetupCliLogging:
     """Tests for the setup_cli_logging function."""
 
-    def test_setup_creates_handler(self):
+    def test_setup_creates_handler(self, capsys):
         """setup_cli_logging should configure the logger with a handler."""
         setup_cli_logging(verbose=False, show_timestamps=False)
         logger = get_logger()
         assert len(logger.handlers) == 1
         assert isinstance(logger.handlers[0].formatter, CLIFormatter)
+
+        handler = DynamicStreamHandler()
+        handler.setFormatter(CLIFormatter(use_colors=False))
+        record = logging.LogRecord(
+            "httpx", logging.WARNING, "", 0, "GET %s", ("https://u:pa'ss@h/x",), None
+        )
+        handler.handle(record)
+        try:
+            raise ValueError("https://u:SECRET/other@h/x?token=HIDDEN")
+        except ValueError:
+            import sys
+
+            record = logging.LogRecord(
+                "httpcore", logging.ERROR, "", 0, "failed", (), sys.exc_info()
+            )
+            handler.handle(record)
+        output = capsys.readouterr().err
+        assert "pa'ss" not in output
+        assert "SECRET" not in output
+        assert "HIDDEN" not in output
+        assert "ValueError" in output
 
     def test_verbose_sets_debug_level(self):
         """verbose=True should set logger to DEBUG level."""
@@ -346,24 +367,3 @@ def test_every_log_level_sanitizes_url_and_query_credentials(caplog):
                 emit(message)
     assert len(caplog.records) == len(messages) * 6
     assert all("SORTSECRET" not in record.getMessage() for record in caplog.records)
-
-
-def test_cli_handler_redacts_third_party_arguments_and_tracebacks(capsys):
-    handler = DynamicStreamHandler()
-    handler.setFormatter(CLIFormatter(use_colors=False))
-    record = logging.LogRecord(
-        "httpx", logging.WARNING, "", 0, "GET %s", ("https://u:pa'ss@h/x",), None
-    )
-    handler.handle(record)
-    try:
-        raise ValueError("https://u:SECRET/other@h/x?token=HIDDEN")
-    except ValueError:
-        import sys
-
-        record = logging.LogRecord("httpcore", logging.ERROR, "", 0, "failed", (), sys.exc_info())
-        handler.handle(record)
-    output = capsys.readouterr().err
-    assert "pa'ss" not in output
-    assert "SECRET" not in output
-    assert "HIDDEN" not in output
-    assert "ValueError" in output
