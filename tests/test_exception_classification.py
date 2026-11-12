@@ -170,17 +170,25 @@ def test_a_gpio_error_arrives_sanitized():
     )
 
     rng = random.Random(1034)
-    alphabet = "abcXYZ019/:'\"@%+?&#=[]"
+    alphabet = "".join(chr(i) for i in range(33, 127))
     for _ in range(250):
         secret = "SECRET" + "".join(rng.choices(alphabet, k=30)) + "END"
         for url in (
             f"https://user:{secret}@example.test/x",
             f"https://[broken/file?token={secret}",
             f"s3://bucket/x?signature={secret}",
+            f"https://h/x#{secret}",
         ):
             for clean in (clean_error_text, redact_credentials, sanitize_url_for_logging):
-                for text in (url, f'failed "{url}" next', f"failed '{url}' next"):
-                    assert secret not in clean(text)
+                for text in (
+                    url,
+                    f'failed "{url}" next',
+                    f"failed '{url}' next",
+                    f"failed <[{url}]> next",
+                ):
+                    cleaned = clean(text)
+                    assert all(secret[i : i + 4] not in cleaned for i in range(len(secret) - 3))
+                    assert secret not in cleaned
                     assert "SECRET" not in clean(text)
                     assert "END" not in clean(text)
 

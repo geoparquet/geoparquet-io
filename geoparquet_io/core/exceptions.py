@@ -35,20 +35,21 @@ def _url_without_credentials(url: str) -> str:
     whitespace-delimited URL token; quotes cannot delimit an untrusted secret.
     """
 
-    def scrub(match: re.Match[str]) -> str:
-        token = match.group(0)
+    parts = re.split(r"(\s+)", url)
+    for i, token in enumerate(parts):
+        if "://" not in token:
+            continue
         start = token.index("://") + 3
-        authority = token[start:]
-        if "@" in authority:
-            userinfo, _, host = authority.rpartition("@")
-            # An @ inside a query secret is indistinguishable from malformed
-            # userinfo. Retain neither candidate credential's trailing bytes.
-            if "?" in userinfo or "#" in userinfo:
-                return token[:start] + "[redacted]"
-            token = token[:start] + host
-        return re.split(r"[?#]", token, maxsplit=1)[0]
-
-    return _URL_IN_TEXT.sub(scrub, url)
+        last_at = token.rfind("@", start)
+        if last_at != -1:
+            # A query/fragment @ makes even the apparent hostname secret.
+            prefix = token[start:last_at]
+            if "?" in prefix or "#" in prefix:
+                token = token[:start] + "[redacted]"
+            else:
+                token = token[:start] + "[redacted]@" + token[last_at + 1 :]
+        parts[i] = token.split("?", 1)[0].split("#", 1)[0]
+    return "".join(parts)
 
 
 def sanitize_url_for_logging(url: str) -> str:
@@ -78,10 +79,6 @@ def sanitize_url_for_logging(url: str) -> str:
         return "/".join(parts[:4]) + "/..." + "/" + parts[-1]
     return url
 
-
-#: A diagnostic URL token. Quotes may be part of malformed credentials, so
-#: only whitespace and angle brackets bound the conservative redaction.
-_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s<>]+")
 
 #: A complete ANSI escape sequence, removed whole so no readable tail is left
 #: behind when the introducing ESC goes.
@@ -538,7 +535,7 @@ _NOT_PARQUET_TEXT = re.compile(
 #: A quoted run or a URL: user-chosen text inside a DuckDB message (the path, the
 #: layer, the SQL). Removed before :func:`_duckdb_io_verdict` reads the rest, so
 #: a file or table *named* "forbidden" cannot decide the verdict (#1020).
-_USER_TEXT_IN_MESSAGE = re.compile(r"'[^']*'|\"[^\"]*\"|" + _URL_IN_TEXT.pattern)
+_USER_TEXT_IN_MESSAGE = re.compile(r"'[^']*'|\"[^\"]*\"|" + r"\S*://\S*")
 _HTTP_STATUS_TEXT = re.compile(r"\(HTTP (\d{3})\)|\bHTTP(?: error)?[ :]+(\d{3})\b", re.IGNORECASE)
 
 
