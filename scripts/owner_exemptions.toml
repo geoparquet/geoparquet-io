@@ -517,8 +517,8 @@ reason = "Only names used dynamically remain; each line explains its dynamic dis
 
 [[G1.raw_parquet_copy]]
 path = "geoparquet_io/core/admin_datasets.py"
-count = 2
-reason = "permanent: cache Parquet staging; codec comes from resolve_codec"
+count = 1
+reason = "permanent: shared cache Parquet staging; codec comes from resolve_codec"
 
 [[G1.raw_parquet_copy]]
 path = "geoparquet_io/core/benchmark.py"
