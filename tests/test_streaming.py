@@ -548,6 +548,30 @@ class TestStreamIO:
         geo = json.loads(result.schema.metadata[b"geo"])
         assert geo["columns"]["geometry"]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
 
+    def test_sorts_stdout_ignores_local_dash(self, tmp_path):
+        import subprocess
+
+        import pyarrow.parquet as pq
+
+        from tests.test_str_order import _point_table
+
+        source = tmp_path / "input.parquet"
+        pq.write_table(_point_table([(0, 1, 2)]), source)
+        (tmp_path / "-").write_text("keep me")
+        for module, function, options in [
+            ("sort_by_column", "sort_by_column", ", columns='id'"),
+            ("sort_quadkey", "sort_by_quadkey", ""),
+        ]:
+            script = (
+                f"from geoparquet_io.core.{module} import {function}; "
+                f"{function}({str(source)!r}, '-' {options})"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", script], cwd=tmp_path, capture_output=True, check=True
+            )
+            assert ipc.open_stream(result.stdout).read_all().num_rows == 1
+        assert (tmp_path / "-").read_text() == "keep me"
+
     def test_streaming_bbox_native_multipolygon(self, tmp_path, monkeypatch):
         import geoarrow.pyarrow as ga
         import pyarrow.parquet as pq

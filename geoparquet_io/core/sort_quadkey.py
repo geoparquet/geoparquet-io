@@ -142,7 +142,8 @@ def sort_by_quadkey(
     configure_verbose(verbose)
     row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
 
-    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
+    if not should_stream_output(output_parquet):
+        handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
 
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)

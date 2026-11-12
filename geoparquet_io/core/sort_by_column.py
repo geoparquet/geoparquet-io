@@ -142,7 +142,8 @@ def sort_by_column(
     if not column_list:
         raise InvalidParameterError("columns", "at least one column name must be specified")
 
-    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
+    if not should_stream_output(output_parquet):
+        handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
 
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
