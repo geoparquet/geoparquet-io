@@ -1388,11 +1388,21 @@ def _written_geo_block(path: str, metadata: dict | None, options: GeoBlockOption
     """Compose output facts from the written file, without re-running the user's query."""
     schema = pq.read_schema(path)
     primary = options.geometry_column
-    stats = geometry_stats_of(path, primary)
     written = sanitized_carried_geo(schema.metadata)
+    names = {
+        primary,
+        *(written.get("columns") or {}),
+        *((options.geometry_info or {}).get("secondary") or []),
+    }
+    stats = {
+        name: {"bbox": measured.bbox, "geometry_types": measured.geometry_types}
+        for name in sorted(names)
+        if name in schema.names
+        for measured in [geometry_stats_of(path, name)]
+    }
     options = replace(
         options,
-        stats={primary: {"bbox": stats.bbox, "geometry_types": stats.geometry_types}},
+        stats=stats,
         encoding=(written.get("columns") or {}).get(primary, {}).get("encoding"),
     )
     return compose_geo_block(SchemaSource(schema, metadata), options)
@@ -1410,7 +1420,9 @@ def _write_strategy_output(strategy, kwargs: dict) -> dict | None:
     if defer_stats:
         kwargs["defer_stats"] = True
     strategy.write_from_query(**kwargs)
-    if not defer_stats:
+    if not defer_stats and (
+        version == "parquet-geo-only" or not (kwargs["geometry_info"] or {}).get("secondary")
+    ):
         return None
     return _written_geo_block(
         kwargs["output_path"],

@@ -389,3 +389,45 @@ def test_rewrite_evaluates_user_query_once_per_output_row(tmp_path):
             == _fresh_geo(out, tmp_path)["columns"]["geometry"]["bbox"]
         )
     assert counts == dict.fromkeys(counts, N_POINTS + 1)
+
+
+def test_every_strategy_rebuilds_secondary_statistics(tmp_path):
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+    from geoparquet_io.core.geo_metadata import geometry_stats_of
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+
+    source = _stale_source(tmp_path)
+    table = pq.read_table(source).append_column("other", _mixed_table().column("geometry"))
+    block = footer_geo(source)
+    block["columns"]["other"] = {
+        "encoding": "WKB",
+        "geometry_types": ["Point"],
+        "bbox": [0, 0, 0, 0],
+        "epoch": 2020.0,
+    }
+    from geoparquet_io.core.geo_metadata import with_geo_key
+
+    table = table.replace_schema_metadata(with_geo_key(None, block))
+    pq.write_table(table, source)
+    expected = geometry_stats_of(_mixed_table(), "geometry")
+    for strategy in ("duckdb-kv", "in-memory", "streaming", "disk-rewrite"):
+        con = get_duckdb_connection(load_spatial=True)
+        output = tmp_path / f"secondary-{strategy}.parquet"
+        try:
+            write_parquet_with_metadata(
+                con,
+                f"SELECT * FROM {sql_path(str(source))}",
+                str(output),
+                input_file=str(source),
+                original_metadata=pq.read_metadata(source).metadata,
+                write_strategy=strategy,
+                geoparquet_version="1.1",
+            )
+        finally:
+            con.close()
+        other = footer_geo(output)["columns"]["other"]
+        assert (other["bbox"], other["geometry_types"]) == (
+            expected.bbox,
+            expected.geometry_types,
+        ), strategy
+        assert other["epoch"] == 2020.0
