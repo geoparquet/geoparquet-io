@@ -205,3 +205,34 @@ class TestNonConformantGeoMetadata:
         assert not out.exists(), (
             f"an unreadable input left an output directory: {list(out.iterdir())}"
         )
+
+
+def test_partition_accepts_glob_without_a_parquet_suffix(places_test_file, tmp_path):
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+
+    source = tmp_path / "source"
+    source.mkdir()
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(places_test_file).append_column(
+        "grp", pa.array(["one"] * pq.read_metadata(places_test_file).num_rows)
+    )
+    pq.write_table(table, source / "data.parquet")
+    output = tmp_path / "parts"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "partition",
+            "string",
+            str(source / "data.par*"),
+            str(output),
+            "--column",
+            "grp",
+            "--skip-analysis",
+        ],
+    )
+    assert result.exit_code == 0, (result.output, result.exception)
+    assert list(output.rglob("*.parquet"))
