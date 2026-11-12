@@ -121,20 +121,21 @@ def generate_core_modules_section(core_dir: Path) -> str:
             continue
         source = path.read_text(encoding="utf-8")
         purpose = ast.get_docstring(ast.parse(source)) or ""
-        modules.append((len(source.splitlines()), path.name, truncate_text(purpose, 52)))
+        first_line = purpose.splitlines()[0] if purpose else ""
+        modules.append((len(source.splitlines()), path.name, first_line))
     modules.sort(key=lambda module: (-module[0], module[1]))
     lines = [
         "<!-- BEGIN GENERATED: core-modules -->",
         "### Core Modules",
         "",
-        "| Module | Purpose | Lines |",
-        "|--------|---------|-------|",
+        "| Module | Purpose |",
+        "|--------|---------|",
     ]
-    for count, name, purpose in modules[:14]:
+    for _, name, purpose in modules[:14]:
         purpose = purpose.replace("|", "\\|")
-        lines.append(f"| `{name}` | {purpose} | {count} |")
+        lines.append(f"| `{name}` | {purpose} |")
     if len(modules) > 14:
-        lines.append(f"| ... | *{len(modules) - 14} more modules* | |")
+        lines.append(f"| ... | *{len(modules) - 14} more modules* |")
     lines.append("<!-- END GENERATED: core-modules -->")
     return "\n".join(lines)
 

@@ -288,10 +288,15 @@ class TestUpdateMode:
     def test_core_modules_follow_source(self, tmp_path):
         (tmp_path / "__init__.py").write_text("# ignored\n")
         (tmp_path / "small.py").write_text('"""Small module."""\n')
-        (tmp_path / "large.py").write_text('"""Large module."""\n\nx = 1\n')
+        large = tmp_path / "large.py"
+        large.write_text('"""Large module.\n\nMore details.\n"""\n\nx = 1\n')
         section = self.mod.generate_core_modules_section(tmp_path)
-        assert "| `large.py` | Large module. | 3 |" in section
-        assert "| `small.py` | Small module. | 1 |" in section
+        assert "| `large.py` | Large module. |" in section
+        assert "| `small.py` | Small module. |" in section
+        assert "Lines" not in section
+        assert "More details" not in section
+        large.write_text(large.read_text() + "# another source line\n")
+        assert self.mod.generate_core_modules_section(tmp_path) == section
         assert section.index("large.py") < section.index("small.py")
         assert "__init__.py" not in section
 
