@@ -350,3 +350,42 @@ def test_native_fast_path_refreshes_carried_statistics_after_filtering(tmp_path,
     assert col["epoch"] == 2020.0
     assert col["bbox"] == fresh.bbox
     assert col["geometry_types"] == fresh.geometry_types
+
+
+def test_rewrite_evaluates_user_query_once_per_output_row(tmp_path):
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+    from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+
+    source = _stale_source(tmp_path)
+    counts = {}
+    calls = []
+    for strategy in ("duckdb-kv", "in-memory", "streaming", "disk-rewrite"):
+        calls.clear()
+        con = get_duckdb_connection(load_spatial=True, isolated=True)
+
+        def counted(value: bytes) -> bytes:
+            calls.append(value)
+            return value
+
+        try:
+            con.create_function("counted_geometry", counted, ["BLOB"], "BLOB")
+            query = f"SELECT id, ST_GeomFromWKB(counted_geometry(ST_AsWKB(geometry))) AS geometry FROM read_parquet({sql_path(str(source))})"
+            out = tmp_path / f"once-{strategy}.parquet"
+            write_parquet_with_metadata(
+                con,
+                query,
+                str(out),
+                input_file=str(source),
+                original_metadata=pq.read_metadata(source).metadata,
+                write_strategy=strategy,
+                geoparquet_version="1.1",
+            )
+            counts[strategy] = len(calls)
+        finally:
+            con.remove_function("counted_geometry")
+            con.close()
+        assert (
+            footer_geo(out)["columns"]["geometry"]["bbox"]
+            == _fresh_geo(out, tmp_path)["columns"]["geometry"]["bbox"]
+        )
+    assert counts == dict.fromkeys(counts, N_POINTS + 1)

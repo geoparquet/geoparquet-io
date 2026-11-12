@@ -34,6 +34,7 @@ import contextlib
 import copy
 import functools
 from collections.abc import Collection, Iterator, Mapping
+from dataclasses import replace
 from typing import Any
 
 import pyarrow as pa
@@ -99,6 +100,7 @@ from geoparquet_io.core.geo_metadata import (
     composes_a_covering,
     declared_write_metadata,
     geo_key_value,
+    geometry_stats_of,
     is_geoparquet_1x,
     may_hold_a_self_evident_bbox,
     prune_geo_metadata_to_columns,
@@ -1382,6 +1384,47 @@ def _unknown_secondary_needs_rewrite(
     )
 
 
+def _written_geo_block(path: str, metadata: dict | None, options: GeoBlockOptions) -> dict:
+    """Compose output facts from the written file, without re-running the user's query."""
+    schema = pq.read_schema(path)
+    primary = options.geometry_column
+    stats = geometry_stats_of(path, primary)
+    written = sanitized_carried_geo(schema.metadata)
+    options = replace(
+        options,
+        stats={primary: {"bbox": stats.bbox, "geometry_types": stats.geometry_types}},
+        encoding=(written.get("columns") or {}).get(primary, {}).get("encoding"),
+    )
+    return compose_geo_block(SchemaSource(schema, metadata), options)
+
+
+def _write_strategy_output(strategy, kwargs: dict) -> dict | None:
+    """Run the query once; finalize measured facts from the completed output."""
+    primary = kwargs["geometry_column"]
+    version = kwargs["geoparquet_version"]
+    defer_stats = (
+        primary is not None
+        and version not in ("parquet-geo-only", "1.1-geoarrow")
+        and strategy.name in ("duckdb-kv", "streaming")
+    )
+    if defer_stats:
+        kwargs["defer_stats"] = True
+    strategy.write_from_query(**kwargs)
+    if not defer_stats:
+        return None
+    return _written_geo_block(
+        kwargs["output_path"],
+        kwargs["original_metadata"],
+        GeoBlockOptions(
+            geometry_column=primary,
+            version=version,
+            custom_metadata=kwargs["custom_metadata"],
+            crs=kwargs["input_crs"],
+            geometry_info=kwargs["geometry_info"],
+        ),
+    )
+
+
 def write_parquet_with_metadata(
     con,
     query,
@@ -1853,7 +1896,7 @@ def write_parquet_with_metadata(
             if strategy_enum == WriteStrategy.DUCKDB_KV:
                 note_duckdb_copy_rounding(row_group_rows)
 
-            strategy.write_from_query(**write_kwargs)
+            pending_v2_geo = _write_strategy_output(strategy, write_kwargs)
 
         # Non-planar edges must survive every rewrite path (#588): DuckDB
         # regenerates geo metadata without `edges`, silently demoting geography

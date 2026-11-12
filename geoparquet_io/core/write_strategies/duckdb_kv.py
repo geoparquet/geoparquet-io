@@ -234,6 +234,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         verbose: bool,
         custom_metadata: dict | None = None,
         memory_limit: str | None = None,
+        defer_stats: bool = False,
         geometry_info: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
     ) -> None:
@@ -303,6 +304,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                         verbose,
                         geometry_info,
                         extra_kv_metadata=extra_kv_metadata,
+                        defer_stats=defer_stats,
                     )
 
                 if is_remote:
@@ -400,6 +402,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         verbose: bool,
         geometry_info: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
+        defer_stats: bool = False,
     ) -> None:
         """Write with geo metadata (v1.0, v1.1, v2.0)."""
 
@@ -414,9 +417,14 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 encoding=written_block_encoding(geoparquet_version),
                 crs=input_crs,
                 geometry_info=geometry_info,
-                measure_missing=lambda block: self._missing_stats(
-                    con, query, geometry_column, block, verbose
+                measure_missing=(
+                    None
+                    if defer_stats
+                    else lambda block: self._missing_stats(
+                        con, query, geometry_column, block, verbose
+                    )
                 ),
+                stats={geometry_column: {"geometry_types": []}} if defer_stats else None,
                 verbose=verbose,
             ),
         )

@@ -306,6 +306,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         geometry_info: dict | None = None,
         extra_kv_metadata: dict[str, str] | None = None,
         memory_limit: str | None = None,
+        defer_stats: bool = False,
     ) -> None:
         """Write query results to GeoParquet using streaming RecordBatch approach.
 
@@ -352,7 +353,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 query,
                 geometry_column,
                 verbose,
-                should_add_geo_metadata,
+                should_add_geo_metadata and not defer_stats,
                 need_bbox=use_native_geometry
                 or not _has_carried_bbox(original_metadata, geometry_column),
             )
@@ -413,7 +414,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 geometry_info,
                 geoarrow_encoding=geoarrow_encoding,
                 custom_metadata=custom_metadata,
-                measure_source=QuerySource(con, query),
+                measure_source=None if defer_stats else QuerySource(con, query),
             )
             native_crs = native_geometry_crs(
                 geoparquet_version, geo_meta, geometry_column, geometry_info
@@ -501,7 +502,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         geoarrow_encoding: str | None = None,
         custom_metadata: dict | None = None,
         *,
-        measure_source: QuerySource,
+        measure_source: QuerySource | None,
     ) -> dict:
         """Compose the geo block for query results, over the query's own schema.
 
@@ -526,7 +527,11 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 crs=input_crs,
                 stats={geometry_column: measured},
                 geometry_info=geometry_info,
-                measure_missing=lambda block: missing_geometry_types(measure_source, block),
+                measure_missing=(
+                    (lambda block: missing_geometry_types(measure_source, block))
+                    if measure_source is not None
+                    else None
+                ),
                 verbose=verbose,
             ),
         )

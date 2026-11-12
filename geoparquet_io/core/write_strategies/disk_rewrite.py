@@ -182,9 +182,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             with scoped_write_memory_limit(con, memory_limit, verbose):
                 if verbose:
                     debug("Computing bbox and geometry types via SQL...")
-                stats = geometry_stats_of(QuerySource(con, query), geometry_column)
-                bbox, geometry_types = stats.bbox, stats.geometry_types
-
                 final_query = wkb_export_query(con, query, geometry_column)
 
                 copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
@@ -214,6 +211,9 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                             f"{pf.metadata.num_row_groups} row groups"
                         )
 
+                stats = geometry_stats_of(temp_path, geometry_column)
+                bbox, geometry_types = stats.bbox, stats.geometry_types
+
                 # The composer declares a conventional bbox column the output
                 # carries (and drops a carried covering over an illegal struct)
                 # before the #954 gate, for every column, as every write path does.
@@ -230,9 +230,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                         crs=input_crs,
                         stats={geometry_column: measured},
                         geometry_info=geometry_info,
-                        measure_missing=lambda block: missing_geometry_types(
-                            QuerySource(con, query), block
-                        ),
+                        measure_missing=lambda block: missing_geometry_types(temp_path, block),
                         verbose=verbose,
                     ),
                 )
@@ -477,7 +475,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # The facade's rule, as on every other Arrow-side write: no serialized
         # descriptor of the input's schema, and under parquet-geo-only (no
         # `geo_meta`) no `geo` key either. A built block replaces the carried one
-        # before the merge, so the caller's extras still have the last word.
+        # before the merge; generated geo wins over a caller's explicit geo.
         metadata = dict(schema.metadata or {})
         if geo_meta is not None:
             metadata = with_geo_key(metadata, geo_meta)
