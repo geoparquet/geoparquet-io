@@ -2734,6 +2734,16 @@ def _footer_stats(
         get_native_geo_stats_by_row_group,
         get_row_group_bbox_stats,
     )
+    from geoparquet_io.core.file_utils import get_all_parquet_files, is_partition_path
+
+    if is_partition_path(path):
+        parts = [
+            _footer_stats(file, geometry_column, bbox_column, need_bbox=need_bbox)
+            for file in get_all_parquet_files(path)
+        ]
+        if not parts or any(part is None for part in parts):
+            return None
+        return merged_geometry_stats(parts, geographic=False)
 
     groups = get_file_metadata(path)["num_row_groups"]
     if bbox_column is not None:

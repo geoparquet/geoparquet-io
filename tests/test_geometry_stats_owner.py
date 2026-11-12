@@ -230,3 +230,13 @@ def test_types_and_bounds_share_query_geometry_evaluation(tmp_path):
         assert len(calls) <= len(geoms), f"{len(calls)} evaluations for {len(geoms)} rows"
     finally:
         con.close()
+
+
+def test_multifile_statistics_include_every_file(tmp_path):
+    for name, x, y in (("a", 1.0, 2.0), ("b", 30.0, 40.0)):
+        table = _table([_pt(x, y)]).append_column(
+            "bbox", pa.array([{"xmin": x, "ymin": y, "xmax": x, "ymax": y}])
+        )
+        pq.write_table(table, tmp_path / f"{name}.parquet")
+    for source in (str(tmp_path), str(tmp_path / "*.parquet")):
+        assert bounds_of(source, "geometry", bbox_column="bbox") == [1, 2, 30, 40]
