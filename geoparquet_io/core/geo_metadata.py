@@ -2759,6 +2759,9 @@ def _footer_stats(
         for c in chunks
     ):
         return None
+    # A wrapped spherical range cannot supply Cartesian min/max to this API.
+    if need_bbox and any(c["xmin"] > c["xmax"] for c in chunks):
+        return None
     if bbox_column is None and any(not c.get("geometry_types") for c in chunks):
         return None
     # Ordinary file scans measure Cartesian min/max; antimeridian wrapping is

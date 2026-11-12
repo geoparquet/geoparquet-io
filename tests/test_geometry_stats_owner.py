@@ -250,3 +250,19 @@ def test_bounds_keep_xy_contract_with_native_xyz_footer(tmp_path):
     pq.write_table(pa.table({"geometry": geometry}), path)
     assert geometry_stats_of(str(path), "geometry").bbox == [1, 2, 3, 4, 5, 6]
     assert bounds_of(str(path), "geometry") == [1, 2, 4, 5]
+
+
+def test_wrapped_footer_bounds_fall_back_to_cartesian_scan(tmp_path, monkeypatch):
+    import geoparquet_io.core.duckdb_metadata as footer
+
+    path = _file(tmp_path, [_line(170, 10, -170, 10), _line(175, 12, 178, 12)])
+    monkeypatch.setattr(footer, "get_file_metadata", lambda _: {"num_row_groups": 2})
+    monkeypatch.setattr(
+        footer,
+        "get_native_geo_stats_by_row_group",
+        lambda *args: [
+            {"xmin": 170, "ymin": 10, "xmax": -170, "ymax": 10, "geometry_types": ["LineString"]},
+            {"xmin": 175, "ymin": 12, "xmax": 178, "ymax": 12, "geometry_types": ["LineString"]},
+        ],
+    )
+    assert bounds_of(path, "geometry") == [-170, 10, 178, 12]
