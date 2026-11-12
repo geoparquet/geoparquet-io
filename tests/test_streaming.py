@@ -522,6 +522,97 @@ class TestStreamIO:
         # Output file should NOT be created in dry_run
         assert not output_file.exists()
 
+    def test_str_order_streaming_adds_bbox(self, tmp_path, monkeypatch, caplog):
+        """A requested bbox survives stdin dispatch (#776)."""
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.str_order import str_order
+        from tests.test_str_order import _point_table
+
+        table = _point_table([(index, index % 4, index // 4) for index in range(16)])
+        stream = io.BytesIO()
+        with ipc.RecordBatchStreamWriter(stream, table.schema) as writer:
+            writer.write_table(table)
+        stream.seek(0)
+        mock_stdin = mock.MagicMock()
+        mock_stdin.isatty.return_value = False
+        mock_stdin.buffer = stream
+        monkeypatch.setattr(sys, "stdin", mock_stdin)
+        output = tmp_path / "stream-bbox.parquet"
+
+        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
+            str_order("-", str(output), add_bbox_flag=True, geoparquet_version="1.1")
+
+        result = pq.read_table(output)
+        assert "bbox" in result.column_names
+        geo = json.loads(result.schema.metadata[b"geo"])
+        assert geo["columns"]["geometry"]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
+
+    def test_streaming_bbox_native_multipolygon(self, tmp_path, monkeypatch):
+        import geoarrow.pyarrow as ga
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.str_order import str_order
+
+        table = ga.as_geoarrow(
+            pa.array(["MULTIPOLYGON (((0 0, 4 0, 4 3, 0 0)))"]), type=ga.multipolygon()
+        )
+        table = pa.table({"geometry": table})
+        stream = io.BytesIO()
+        with ipc.new_stream(stream, table.schema) as writer:
+            writer.write_table(table)
+        stream.seek(0)
+        monkeypatch.setattr(sys, "stdin", mock.Mock(buffer=stream, isatty=lambda: False))
+        output = tmp_path / "native.parquet"
+        str_order("-", str(output), add_bbox_flag=True, geoparquet_version="1.1-geoarrow")
+        assert pq.read_table(output)["bbox"].to_pylist() == [
+            {"xmin": 0.0, "ymin": 0.0, "xmax": 4.0, "ymax": 3.0}
+        ]
+
+    def test_streaming_bbox_explicit_geometry(self, tmp_path, monkeypatch):
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.str_order import str_order
+        from tests.test_str_order import _point_table
+
+        table = (
+            _point_table([(0, 1, 2)])
+            .rename_columns(["id", "footprint"])
+            .replace_schema_metadata(None)
+        )
+        stream = io.BytesIO()
+        with ipc.new_stream(stream, table.schema) as writer:
+            writer.write_table(table)
+        stream.seek(0)
+        monkeypatch.setattr(sys, "stdin", mock.Mock(buffer=stream, isatty=lambda: False))
+        output = tmp_path / "explicit.parquet"
+        str_order("-", str(output), geometry_column="footprint", add_bbox_flag=True)
+        assert pq.read_table(output)["bbox"].to_pylist() == [
+            {"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}
+        ]
+
+    def test_hilbert_file_to_stdout_keeps_native_crs_and_edges(self, tmp_path, monkeypatch):
+        import geoarrow.pyarrow as ga
+
+        from geoparquet_io.core.crs_utils import crs_of
+        from geoparquet_io.core.edges import geoarrow_type_edges
+        from geoparquet_io.core.hilbert_order import hilbert_order
+        from tests.native_geo_probes import write_native_geo_only
+        from tests.test_str_order import _point_wkb
+
+        source = tmp_path / "geography.parquet"
+
+        native_type = ga.wkb().with_crs("EPSG:4269").with_edge_type(ga.EdgeType.SPHERICAL)
+        write_native_geo_only(
+            source, [(0, "point", _point_wkb(1, 2))], {"geometry": (2, native_type)}
+        )
+        output = io.BytesIO()
+        monkeypatch.setattr(sys, "stdout", mock.Mock(buffer=output, isatty=lambda: False))
+        hilbert_order(str(source), "-")
+        result = ipc.open_stream(output.getvalue()).read_all()
+        assert geoarrow_type_edges(result.schema.field("geometry").type) == "spherical"
+        assert "4269" in str(crs_of(result))
+
 
 class TestVersionExtraction:
     """The stream path's version witnesses, asked of the owner (#1367 concept 1)."""
