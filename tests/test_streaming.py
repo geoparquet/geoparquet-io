@@ -613,6 +613,23 @@ class TestStreamIO:
         ):
             assert "bbox" in sort().column_names
 
+        import struct
+
+        unsorted = pa.table(
+            {
+                "geometry": [struct.pack("<BIdd", 1, 1, x, x) for x in (3, 1, 2)],
+            }
+        ).replace_schema_metadata(table.schema.metadata)
+        stale = add_bbox_table(unsorted)
+        stale = stale.set_column(1, "bbox", stale["bbox"].take([1, 2, 0]))
+        for input_table in (unsorted, stale):
+            for result in (
+                ops.sort_column(input_table, "bbox", add_bbox=True),
+                Table(input_table).sort_column("bbox", add_bbox=True).to_arrow(),
+            ):
+                values = result["bbox"].to_pylist()
+                assert values == sorted(values, key=lambda b: tuple(b.values()))
+
         from click.testing import CliRunner
 
         from geoparquet_io.cli.main import cli

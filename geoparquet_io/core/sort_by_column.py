@@ -48,6 +48,9 @@ def sort_by_column_table(
     if not column_list:
         raise ValueError("At least one column name must be specified")
 
+    if add_bbox_flag:
+        table = add_bbox_table(table)
+
     # Validate columns exist
     column_list = resolve_columns_against_schema(column_list, table.column_names, "columns")
 
@@ -68,7 +71,7 @@ def sort_by_column_table(
             result = result.replace_schema_metadata(table.schema.metadata)
 
         result = registered.restore_edges(result)
-        return add_bbox_table(result) if add_bbox_flag else result
+        return result
     finally:
         con.close()
 
