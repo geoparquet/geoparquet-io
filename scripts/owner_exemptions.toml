@@ -508,7 +508,7 @@ reason = "permanent: ArcGIS REST requires a where clause, so extract arcgis defa
 [G4]
 whitelist = "scripts/vulture_whitelist.py"
 tests_whitelist = "scripts/vulture_whitelist_tests.py"
-reason = "Only names used dynamically remain; each line explains its dynamic dispatch. Package and tests are scanned separately so a test does not count as a production use. Delete a whitelist line when its dynamic use disappears."
+reason = "Only names used dynamically remain; each line explains its dynamic dispatch. Package and tests are scanned separately so a test does not count as a production use. Delete a whitelist line when its dynamic use disappears. The version registry TypedDict keys duckdb_param and rewrite_metadata are read by string lookup; vulture does not recognize those reads."
 
 # ---------------------------------------------------------------------------
 # G5: core/common.py (tests/test_common_split_guards.py)

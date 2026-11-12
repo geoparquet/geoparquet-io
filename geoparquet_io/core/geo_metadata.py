@@ -29,7 +29,7 @@ import reprlib
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache, lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from geoparquet_io.core.column_selection import fold
 from geoparquet_io.core.duckdb_utils import (
@@ -61,7 +61,14 @@ if TYPE_CHECKING:
 # GeoParquet Version Configuration
 # =============================================================================
 
-GEOPARQUET_VERSIONS = {
+
+class _GeoParquetVersion(TypedDict):
+    duckdb_param: str
+    metadata_version: str | None
+    rewrite_metadata: bool
+
+
+GEOPARQUET_VERSIONS: dict[str, _GeoParquetVersion] = {
     "1.0": {"duckdb_param": "V1", "metadata_version": "1.0.0", "rewrite_metadata": True},
     "1.1": {"duckdb_param": "V1", "metadata_version": "1.1.0", "rewrite_metadata": True},
     "1.1-geoarrow": {"duckdb_param": "V1", "metadata_version": "1.1.0", "rewrite_metadata": True},

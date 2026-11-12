@@ -631,9 +631,7 @@ def _apply_geoparquet_metadata(
     )
 
     version_config = GEOPARQUET_VERSIONS[effective_version]
-    assert isinstance(version_config, dict)
     metadata_version = version_config["metadata_version"]
-    assert metadata_version is None or isinstance(metadata_version, str)
     should_add_geo_metadata = effective_version != "parquet-geo-only"
 
     if verbose:

@@ -88,9 +88,9 @@ geoparquet_io/
 | `validate.py` | GeoParquet file validation against specification... | 4795 |
 | `wfs.py` | WFS (Web Feature Service) to GeoParquet conversion.... | 3749 |
 | `convert.py` |  | 3502 |
-| `geo_metadata.py` | GeoParquet metadata handling functions. This module... | 3186 |
+| `geo_metadata.py` | GeoParquet metadata handling functions. This module... | 3193 |
 | `duckdb_utils.py` | DuckDB connection management utilities. This module... | 3147 |
-| `write_funnels.py` | The write funnels: the two front doors every gpio... | 2373 |
+| `write_funnels.py` | The write funnels: the two front doors every gpio... | 2371 |
 | `crs_utils.py` | CRS (Coordinate Reference System) utilities for... | 2311 |
 | `arcgis.py` | ArcGIS Feature Service to GeoParquet conversion.... | 1932 |
 | `inspect_utils.py` | Utilities for inspecting GeoParquet files. Provides... | 1791 |
