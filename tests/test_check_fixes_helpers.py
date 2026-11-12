@@ -232,6 +232,9 @@ def test_fix_intermediates_stay_on_output_volume(tmp_path, monkeypatch):
     source.write_bytes(b"input")
     output = tmp_path / "destination" / "output.parquet"
     output.parent.mkdir()
+    target = tmp_path / "target-volume" / "output.parquet"
+    target.parent.mkdir()
+    output.symlink_to(target)
     staged = []
 
     def write_fix(current, destination, *args):
@@ -256,6 +259,7 @@ def test_fix_intermediates_stay_on_output_volume(tmp_path, monkeypatch):
     ):
         check_fixes.apply_all_fixes(str(source), str(output), checks)
     assert len(staged) == 6  # Adding bbox also adds its covering on that scratch.
-    assert all(path.parent.parent == output.parent for path in staged)
+    assert all(path.parent.parent == target.parent for path in staged)
+    assert output.is_symlink()
     assert all(not path.exists() for path in staged)
     assert source.read_bytes() == b"input"
