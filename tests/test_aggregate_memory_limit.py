@@ -22,7 +22,6 @@ connection when it is opened. These tests pin that:
 from __future__ import annotations
 
 import inspect
-import os
 
 import duckdb
 import pytest
@@ -283,17 +282,30 @@ class TestTheDefaultLimit:
 
 
 class TestThreadsAndOrdering:
-    @pytest.mark.skipif((os.cpu_count() or 1) <= 3, reason="needs more than 3 cores to shrink to 3")
-    def test_threads_shrink_with_a_small_limit(self, points_parquet, tmp_path, connection_spy):
-        """A small limit spread over many threads makes DuckDB raise instead of spill."""
-        expected = (2 * 1000**3) // memory_limits._BYTES_PER_THREAD
-        aggregate_by_a5(
-            str(points_parquet),
-            str(tmp_path / "out.parquet"),
-            resolution=5,
-            options=AggregateOptions(memory_limit="2GB"),
+    def test_threads_shrink_with_a_small_limit(self, monkeypatch):
+        """Client-side results need more headroom than spilling COPY statements."""
+        monkeypatch.setattr(memory_limits.os, "cpu_count", lambda: 64)
+        for ceiling_gib, expected in [(1, 1), (8, 1), (16, 2), (128, 16)]:
+            monkeypatch.setattr(
+                memory_limits, "memory_ceiling", lambda ceiling_gib=ceiling_gib: ceiling_gib * GIB
+            )
+            con = memory_limits.open_bounded_connection(load_spatial=False, load_httpfs=False)
+            try:
+                assert int(_setting(con, "threads")) == expected
+                assert _setting(con, "preserve_insertion_order") is False
+            finally:
+                con.close()
+        con = memory_limits.open_bounded_connection(
+            memory_limit="8GiB",
+            load_spatial=False,
+            load_httpfs=False,
+            preserve_insertion_order=True,
         )
-        assert connection_spy[0]["threads"] == expected
+        try:
+            assert int(_setting(con, "threads")) == 2
+            assert _setting(con, "preserve_insertion_order") is True
+        finally:
+            con.close()
 
     def test_a_generous_limit_keeps_every_thread(
         self, points_parquet, tmp_path, monkeypatch, connection_spy

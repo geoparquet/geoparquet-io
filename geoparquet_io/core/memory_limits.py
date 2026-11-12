@@ -252,15 +252,22 @@ def open_bounded_connection(
     share of the ceiling is half rather than DuckDB's 80% (the share's own
     rationale is on :data:`DEFAULT_MEMORY_FRACTION`).
 
-    ``preserve_insertion_order`` defaults off: every caller today takes its
-    output order from a GROUP BY, so buffering the scan to keep the input's
-    order buys nothing and costs the whole scan's width in memory. It is a
-    parameter rather than a constant because the setting is about ordering, not
-    memory, and a future caller that does need the input's order would
-    otherwise be silently reordered by a function whose name promises only a
-    memory bound.
+    Client-side materialization keeps the Arrow result outside DuckDB's buffer
+    manager. Budget 4 GiB per thread (the upper end of DuckDB's 1–4 GB guidance)
+    here: on a 64-core host the 1M-polygon ordered read peaked at 699 MB with
+    64 threads, 571 MB with 16, and 485 MB with 8. This is a concurrency budget,
+    not an RSS bound: the result itself and native allocations can exceed it.
+    Ordinary connections and scoped writes keep their existing spilling budget.
+
+    ``preserve_insertion_order`` defaults off for aggregate/overview queries,
+    whose order comes from GROUP BY. Eager file reads pass True to retain the
+    input order and byte-identical rewrites; disabling it can reorder rows.
     """
     limit, threads = _connection_limit(memory_limit)
+    if limit is not None:
+        # Ordered parallel scans retain buffers beside the eager Arrow result.
+        cap = max(1, cast(int, parse_size_string(limit)) // (4 * 1024**3))
+        threads = cap if cap < (os.cpu_count() or 1) else None
     con: duckdb.DuckDBPyConnection = get_duckdb_connection(
         load_spatial=load_spatial,
         load_httpfs=load_httpfs,
