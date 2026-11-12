@@ -330,3 +330,14 @@ def _cast_table_to_schema(table, target_schema, *, page_info: str | None = None)
             new_columns.append(null_array)
 
     return pa.table(dict(zip([f.name for f in target_schema], new_columns, strict=True)))
+
+
+def view_offset_type(typ):
+    """The offset twin for view layouts lacking take/if_else kernels, else None."""
+    import pyarrow as pa
+
+    if pa.types.is_binary_view(typ):
+        return pa.large_binary()
+    if pa.types.is_string_view(typ):
+        return pa.large_string()
+    return None

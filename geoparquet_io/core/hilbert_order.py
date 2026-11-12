@@ -6,6 +6,7 @@ from itertools import pairwise
 
 import pyarrow as pa
 
+from geoparquet_io.core.arrow_types import view_offset_type
 from geoparquet_io.core.bbox_structure import dataset_bounds
 from geoparquet_io.core.column_selection import unique_name
 from geoparquet_io.core.duckdb_utils import (
@@ -35,15 +36,6 @@ from geoparquet_io.core.sort_common import advised_output_version, run_sort
 # 32-bit offset addresses.
 _GATHER_BATCH_BYTES = 16 * BYTES_PER_MIB
 _GATHER_THREADS = 4
-
-
-def _view_twin(typ: pa.DataType) -> pa.DataType | None:
-    """The offset-based twin of a view layout pyarrow 25 cannot ``take``, else None."""
-    if pa.types.is_binary_view(typ):
-        return pa.large_binary()
-    if pa.types.is_string_view(typ):
-        return pa.large_string()
-    return None
 
 
 def _row_index_name(geom_col: str) -> str:
@@ -102,7 +94,7 @@ def _gather_column(column: pa.ChunkedArray, indices) -> pa.ChunkedArray:
     """
     np = load_module("numpy")
 
-    twin = _view_twin(column.type)
+    twin = view_offset_type(column.type)
     if twin is not None:
         gathered = _gather_column(column.cast(twin), indices)
         return pa.chunked_array([c.cast(column.type) for c in gathered.chunks], type=column.type)
