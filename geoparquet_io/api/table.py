@@ -2373,6 +2373,7 @@ class Table:
         self,
         column_name: str,
         descending: bool = False,
+        add_bbox: bool = False,
     ) -> Table:
         """
         Sort rows by the specified column.
@@ -2380,6 +2381,7 @@ class Table:
         Args:
             column_name: Column name to sort by
             descending: Sort in descending order (default: False)
+            add_bbox: Compute a bbox column
 
         Returns:
             New Table with rows sorted by the column
@@ -2390,6 +2392,7 @@ class Table:
             self._table,
             columns=column_name,
             descending=descending,
+            add_bbox_flag=add_bbox,
         )
         return self._wrap(result, self._geometry_column)
 
@@ -2399,6 +2402,7 @@ class Table:
         resolution: int = get_index_spec("quadkey").default_resolution,
         use_centroid: bool = False,
         remove_column: bool = False,
+        add_bbox: bool = False,
     ) -> Table:
         """
         Sort rows by quadkey column.
@@ -2410,6 +2414,7 @@ class Table:
             resolution: Quadkey resolution for auto-adding (0-23, default: 13)
             use_centroid: Use geometry centroid when auto-adding
             remove_column: Remove the quadkey column after sorting
+            add_bbox: Compute a bbox column
 
         Returns:
             New Table with rows sorted by quadkey
@@ -2422,6 +2427,7 @@ class Table:
             resolution=resolution,
             use_centroid=use_centroid,
             remove_quadkey_column=remove_column,
+            add_bbox_flag=add_bbox,
         )
         return self._wrap(result, self._geometry_column)
 

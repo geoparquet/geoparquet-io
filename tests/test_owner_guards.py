@@ -6960,6 +6960,27 @@ def test_raw_parquet_copy_table_and_query_are_guarded(tmp_path, sql):
     )
 
 
+def test_all_sort_commands_use_the_sort_owner():
+    """Sort leaves may build keys, but cannot grow a second I/O pipeline."""
+    for filename in ("hilbert_order.py", "str_order.py", "sort_by_column.py", "sort_quadkey.py"):
+        tree = ast.parse((PACKAGE / "core" / filename).read_text())
+        names = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "run_sort" in names, filename
+        assert not names & {
+            "open_input",
+            "write_output",
+            "execute_transform",
+            "write_parquet_with_metadata",
+            "handle_output_overwrite",
+            "should_stream_output",
+            "validate_profile_for_urls",
+        }, filename
+
+
 def _extractor_raw_reports(source):
     """Logging helpers and gpio errors clean once; direct sinks must clean explicitly."""
     violations = []

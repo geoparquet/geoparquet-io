@@ -905,6 +905,7 @@ def sort_column(
     table: pa.Table,
     column: str | list[str],
     descending: bool = False,
+    add_bbox: bool = False,
 ) -> pa.Table:
     """
     Sort table rows by the specified column(s).
@@ -913,6 +914,7 @@ def sort_column(
         table: Input PyArrow Table
         column: Column name or list of column names to sort by
         descending: Sort in descending order (default: False)
+        add_bbox: Compute a bbox column
 
     Returns:
         New table with rows sorted by the column(s)
@@ -921,6 +923,7 @@ def sort_column(
         table,
         columns=column,
         descending=descending,
+        add_bbox_flag=add_bbox,
     )
 
 
@@ -930,6 +933,7 @@ def sort_quadkey(
     resolution: int = index_ops.get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     remove_column: bool = False,
+    add_bbox: bool = False,
 ) -> pa.Table:
     """
     Sort table rows by quadkey column.
@@ -942,6 +946,7 @@ def sort_quadkey(
         resolution: Quadkey resolution for auto-adding (0-23, default: 13)
         use_centroid: Use geometry centroid when auto-adding
         remove_column: Remove the quadkey column after sorting
+        add_bbox: Compute a bbox column
 
     Returns:
         New table with rows sorted by quadkey
@@ -952,6 +957,7 @@ def sort_quadkey(
         resolution=resolution,
         use_centroid=use_centroid,
         remove_quadkey_column=remove_column,
+        add_bbox_flag=add_bbox,
     )
 
 

@@ -557,6 +557,80 @@ class TestStreamIO:
             elif selected == "id":
                 assert actual is None
 
+        from geoparquet_io.core.add.bbox import add_bbox_column
+        from geoparquet_io.core.extract import extract
+        from geoparquet_io.core.hilbert_order import hilbert_order
+        from geoparquet_io.core.sort_by_column import sort_by_column
+        from geoparquet_io.core.sort_quadkey import sort_by_quadkey
+        from geoparquet_io.core.str_order import str_order
+
+        transforms = [
+            (hilbert_order, {}),
+            (str_order, {}),
+            (sort_by_column, {"columns": "id"}),
+            (sort_by_quadkey, {}),
+            (hilbert_order, {"add_bbox_flag": True}),
+            (str_order, {"add_bbox_flag": True}),
+            (sort_by_column, {"columns": "id", "add_bbox_flag": True}),
+            (sort_by_quadkey, {"add_bbox_flag": True}),
+            (extract, {}),
+            (extract, {"exclude_cols": "geometry"}),
+            (extract, {"exclude_cols": "geometry,secondary"}),
+            (add_bbox_column, {"bbox_column_name": "computed"}),
+        ]
+        for transform, options in transforms:
+            captured.clear()
+            transform(str(source), str(dest), overwrite=True, **options)
+            transform(str(source), "-", **options)
+            assert (
+                read_raw_geo(captured[0].schema.metadata).value
+                == read_raw_geo(pq.read_metadata(dest).metadata).value
+            ), (transform.__name__, options)
+
+        from geoparquet_io.core.add.bbox import add_bbox_table
+
+        pq.write_table(add_bbox_table(table, bbox_column_name="existing_bounds"), source)
+        for transform, options in transforms[:8]:
+            if not options.get("add_bbox_flag"):
+                continue
+            captured.clear()
+            transform(str(source), str(dest), overwrite=True, **options)
+            transform(str(source), "-", **options)
+            assert (
+                read_raw_geo(captured[0].schema.metadata).value
+                == read_raw_geo(pq.read_metadata(dest).metadata).value
+            ), (transform.__name__, "existing covering")
+        pq.write_table(table, source)
+
+        from geoparquet_io.api import ops
+        from geoparquet_io.api.table import Table
+
+        for sort in (
+            lambda: ops.sort_column(table, "id", add_bbox=True),
+            lambda: ops.sort_quadkey(table, add_bbox=True),
+            lambda: Table(table).sort_column("id", add_bbox=True).to_arrow(),
+            lambda: Table(table).sort_quadkey(add_bbox=True).to_arrow(),
+        ):
+            assert "bbox" in sort().column_names
+
+        from click.testing import CliRunner
+
+        from geoparquet_io.cli.main import cli
+
+        for kind in ("column", "quadkey"):
+            args = ["sort", kind, str(source), str(dest)]
+            if kind == "column":
+                args.append("id")
+            result = CliRunner().invoke(cli, [*args, "--add-bbox", "--overwrite"])
+            assert result.exit_code == 0, result.output
+            assert "bbox" in pq.read_schema(dest).names
+
+        monkeypatch.setattr("geoparquet_io.core.stream_io.read_arrow_stream", lambda: table)
+        captured.clear()
+        sort_by_column("-", "-", columns="bbox", add_bbox_flag=True)
+        assert "bbox" in captured[0].column_names
+        assert captured[0].num_rows == table.num_rows
+
     def test_execute_transform_dry_run(self, tmp_path, sample_geo_table, geo_metadata):
         """Test execute_transform with dry_run=True."""
         import pyarrow.parquet as pq

@@ -161,6 +161,7 @@ def str_order_command(
     help="Sort in descending order (default: ascending)",
 )
 @allow_schema_diff_option
+@bbox_option
 @output_format_options
 @geoparquet_version_option
 @overwrite_option
@@ -176,6 +177,7 @@ def sort_column(
     columns,
     descending,
     allow_schema_diff,
+    add_bbox,
     write,
     overwrite,
     verbose,
@@ -207,6 +209,7 @@ def sort_column(
             verbose=verbose,
             overwrite=overwrite,
             allow_schema_diff=allow_schema_diff,
+            add_bbox_flag=add_bbox,
             **write.funnel_kwargs(),
         )
 
@@ -238,6 +241,7 @@ def sort_column(
     help="Exclude quadkey column from output after sorting",
 )
 @allow_schema_diff_option
+@bbox_option
 @output_format_options
 @geoparquet_version_option
 @overwrite_option
@@ -255,6 +259,7 @@ def sort_quadkey(
     use_centroid,
     remove_quadkey_column,
     allow_schema_diff,
+    add_bbox,
     write,
     overwrite,
     verbose,
@@ -287,5 +292,6 @@ def sort_quadkey(
             verbose=verbose,
             overwrite=overwrite,
             allow_schema_diff=allow_schema_diff,
+            add_bbox_flag=add_bbox,
             **write.funnel_kwargs(),
         )

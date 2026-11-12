@@ -20,8 +20,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import sort
-from geoparquet_io.core import sort_by_column as sort_by_column_module
-from geoparquet_io.core import sort_quadkey as sort_quadkey_module
+from geoparquet_io.core import sort_common
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.exceptions import GeoParquetError, InvalidParameterError
 from geoparquet_io.core.sort_by_column import sort_by_column, sort_by_column_table
@@ -610,9 +609,7 @@ class TestSortPartitionSchemaMismatch:
         DuckDB calls invalid input must keep its original type and text."""
         parts_dir, _ = places_parts_dir
         boom = duckdb.InvalidInputException("something else entirely")
-        with mock.patch.object(
-            sort_by_column_module, "write_parquet_with_metadata", side_effect=boom
-        ):
+        with mock.patch.object(sort_common, "write_parquet_with_metadata", side_effect=boom):
             with pytest.raises(duckdb.InvalidInputException, match="something else entirely"):
                 sort_by_column(str(parts_dir), temp_output_file, "name")
 
@@ -621,9 +618,7 @@ class TestSortPartitionSchemaMismatch:
     ):
         parts_dir, _ = places_parts_dir
         boom = duckdb.InvalidInputException("something else entirely")
-        with mock.patch.object(
-            sort_quadkey_module, "write_parquet_with_metadata", side_effect=boom
-        ):
+        with mock.patch.object(sort_common, "write_parquet_with_metadata", side_effect=boom):
             with pytest.raises(duckdb.InvalidInputException, match="something else entirely"):
                 sort_by_quadkey(str(parts_dir), temp_output_file)
 
@@ -894,6 +889,6 @@ class TestSortQuadkeyHiveInput:
         when the constructor itself threw, hiding the real failure."""
         parts_dir, _ = places_parts_dir
         boom = RuntimeError("no connection for you")
-        with mock.patch.object(sort_quadkey_module, "get_duckdb_connection", side_effect=boom):
+        with mock.patch.object(sort_common, "get_duckdb_connection", side_effect=boom):
             with pytest.raises(RuntimeError, match="no connection for you"):
                 sort_by_quadkey(str(parts_dir), temp_output_file)

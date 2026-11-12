@@ -603,17 +603,15 @@ class TestIndexStreamingForwardMemoryLimit:
         assert table.num_rows == 766
         assert "s2_cell" in table.column_names
 
-    def test_sort_by_column_streaming_forwards_memory_limit(self):
-        from geoparquet_io.core.sort_by_column import _sort_by_column_streaming
+    def test_sort_by_column_streaming_forwards_memory_limit(self, places_test_file):
+        from geoparquet_io.core.sort_by_column import sort_by_column
 
-        with mock.patch("geoparquet_io.core.sort_by_column.execute_transform") as mocked:
-            _sort_by_column_streaming(
-                input_path="in.parquet",
-                output_path="out.parquet",
-                column_list=["name"],
-                descending=False,
-                verbose=False,
-                write=WriteOptions(compression="ZSTD", memory_limit="604MB"),
+        with mock.patch("geoparquet_io.core.sort_common.write_output") as mocked:
+            sort_by_column(
+                places_test_file,
+                "-",
+                columns="name",
+                memory_limit="604MB",
             )
         mocked.assert_called_once()
         assert mocked.call_args.kwargs.get("memory_limit") == "604MB"
@@ -660,19 +658,10 @@ class TestIndexStreamingForwardMemoryLimit:
         assert "quadkey" in table.column_names
 
     def test_sort_by_quadkey_streaming_forwards_memory_limit(self, places_test_file):
-        from geoparquet_io.core.sort_quadkey import _sort_by_quadkey_streaming
+        from geoparquet_io.core.sort_quadkey import sort_by_quadkey
 
-        with mock.patch("geoparquet_io.core.sort_quadkey.write_output") as mocked:
-            _sort_by_quadkey_streaming(
-                input_path=places_test_file,
-                output_path="unused_output.parquet",
-                quadkey_column_name="quadkey",
-                resolution=13,
-                use_centroid=False,
-                remove_quadkey_column=False,
-                verbose=False,
-                write=WriteOptions(compression="ZSTD", memory_limit="607MB"),
-            )
+        with mock.patch("geoparquet_io.core.sort_common.write_output") as mocked:
+            sort_by_quadkey(places_test_file, "-", memory_limit="607MB")
         mocked.assert_called_once()
         assert mocked.call_args.kwargs.get("memory_limit") == "607MB"
 
@@ -692,7 +681,7 @@ class TestIndexStreamingForwardMemoryLimit:
         assert mocked.call_args.kwargs.get("memory_limit") == "609MB"
 
     def test_execute_transform_forwards_memory_limit(self, places_test_file, temp_output_file):
-        """execute_transform itself (used by all index and sort column streaming) must
+        """execute_transform itself (used by index streaming) must
         forward memory_limit into write_output -> write_parquet_with_metadata."""
         from geoparquet_io.core.stream_io import execute_transform
 

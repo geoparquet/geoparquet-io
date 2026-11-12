@@ -1,6 +1,6 @@
-"""Shared dispatch, staging and writing for spatial sorts."""
+"""Shared dispatch, staging and writing for all four sorts."""
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 
 import duckdb
 
@@ -10,21 +10,27 @@ from geoparquet_io.core.common import add_bbox, get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
     get_duckdb_connection,
+    query_schema,
     sql_path,
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import RemoteAccessError
 from geoparquet_io.core.file_utils import (
     handle_output_overwrite,
+    is_partition_path,
     resolve_file_url,
     scratch_path,
     unlink_released_file,
 )
-from geoparquet_io.core.geo_metadata import sanitized_carried_geo
+from geoparquet_io.core.geo_metadata import bbox_column_to_declare, sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import primary_geometry_column, resolve_geometry_column
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
-from geoparquet_io.core.partition.reader import require_single_file
+from geoparquet_io.core.partition.reader import (
+    build_read_parquet_expr,
+    raise_for_schema_mismatch,
+    require_single_file,
+)
 from geoparquet_io.core.remote import (
     get_remote_error_hint,
     is_remote_url,
@@ -33,7 +39,7 @@ from geoparquet_io.core.remote import (
     validate_profile_for_urls,
 )
 from geoparquet_io.core.stream_io import open_input, write_output
-from geoparquet_io.core.streaming import is_stdin, should_stream_output
+from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file, should_stream_output
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
@@ -115,12 +121,21 @@ def _prepare_working_file(input_parquet, add_bbox_flag, verbose):
 
 
 @contextmanager
-def _file_source(input_path, output_path, add_bbox_flag, verbose, write):
-    working, temp_file = _prepare_working_file(input_path, add_bbox_flag, verbose)
+def _file_source(input_path, add_bbox_flag, verbose, allow_schema_diff):
+    working, temp_file = (
+        _prepare_working_file(input_path, add_bbox_flag, verbose)
+        if allow_schema_diff is None or add_bbox_flag
+        else (input_path, None)
+    )
     try:
-        validate_profile_for_urls(write.remote_access().profile, input_path, output_path)
         show_remote_read_message(working, verbose)
-        source = sql_path(resolve_file_url(working, verbose))
+        source = (
+            sql_path(resolve_file_url(working, verbose))
+            if allow_schema_diff is None
+            else build_read_parquet_expr(
+                working, allow_schema_diff=allow_schema_diff, verbose=verbose
+            )
+        )
         metadata, _ = get_parquet_metadata(working, verbose)
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working))
         try:
@@ -145,10 +160,19 @@ def run_sort(
     verbose,
     write,
     overwrite,
+    build_key=None,
+    prepare_input=None,
+    allow_schema_diff=None,
+    success_message=None,
 ):
     """Validate before dispatch, then build and write one ordering query.
 
-    ``build_query`` owns only the ordering key; it returns (query, reordered).
+    ``build_key(con, source, metadata, working)`` resolves the ordering key;
+    the default resolves a geometry column. ``build_query`` receives that key
+    and returns (query, reordered). ``prepare_input(path, verbose)`` supplies
+    any required file-backed columns and returns (working_path, temporary_path).
+    The runner stages stdin for that contract and owns both temporary files.
+    ``allow_schema_diff=None`` requires a single file; a boolean accepts datasets.
     File queries retain their file witness for bounds and metadata policy.
     """
     if effective_version == "1.1":
@@ -160,36 +184,47 @@ def run_sort(
     streaming = is_stdin(input_path) or stream_output
     if not stream_output:
         handle_output_overwrite(output_path, overwrite, input_path, remove=False)
-    if not is_stdin(input_path):
+    validate_profile_for_urls(write.remote_access().profile, input_path, output_path)
+    if not is_stdin(input_path) and allow_schema_diff is None:
         require_single_file(input_path, command)
     if stream_output:
         verbose = False
-    context = (
-        open_input(input_path, verbose=verbose, stream_output=stream_output)
-        if streaming
-        else _file_source(input_path, output_path, add_bbox_flag, verbose, write)
-    )
     try:
-        with context as opened:
+        with ExitStack() as stack:
+            working_input = input_path
+            if prepare_input is not None:
+                if is_stdin(working_input):
+                    working_input = read_stdin_to_temp_file(verbose)
+                    stack.callback(unlink_released_file, working_input)
+                working_input, temp_file = prepare_input(working_input, verbose)
+                stack.callback(unlink_released_file, temp_file)
+            context = (
+                open_input(working_input, verbose=verbose, stream_output=stream_output)
+                if streaming
+                else _file_source(
+                    working_input,
+                    add_bbox_flag and not is_partition_path(working_input),
+                    verbose,
+                    allow_schema_diff,
+                )
+            )
+            opened = stack.enter_context(context)
             if streaming:
                 source, metadata, _, con = opened
-                described = describe_query(con, f"SELECT * FROM {source}")
-                geom_col = resolve_geometry_column(
-                    described,
-                    geometry_column,
-                    geo=sanitized_carried_geo(metadata),
-                    where=input_path,
-                )
                 working = None
             else:
                 source, metadata, con, working = opened
-                geom_col = resolve_geometry_column(working, geometry_column, verbose=verbose)
+            described = describe_query(con, f"SELECT * FROM {source}")
             custom_metadata = None
-            if streaming and add_bbox_flag:
+            if add_bbox_flag and (streaming or is_partition_path(working_input)):
                 bbox_query, _, _, custom_metadata = prepare_streaming_bbox(
                     source,
                     con,
-                    "bbox",
+                    bbox_column_to_declare(
+                        query_schema(con, f"SELECT * FROM {source}"),
+                        sanitized_carried_geo(metadata),
+                    )
+                    or "bbox",
                     force=False,
                     geoparquet_version=write.geoparquet_version,
                     metadata=metadata,
@@ -197,17 +232,28 @@ def run_sort(
                     geometry_column=primary_geometry_column(
                         described, geo=sanitized_carried_geo(metadata)
                     )
-                    or geom_col,
+                    or geometry_column,
                 )
                 source = f"({bbox_query})"
-            query, reordered = build_query(con, source, geom_col, verbose, working)
+            key = (
+                build_key(con, source, metadata, working)
+                if build_key is not None
+                else resolve_geometry_column(
+                    working or described,
+                    geometry_column,
+                    geo=sanitized_carried_geo(metadata),
+                    where=input_path,
+                    verbose=verbose,
+                )
+            )
+            query, reordered = build_query(con, source, key, verbose, working)
             if streaming:
                 write_output(
                     con,
                     query,
                     output_path,
                     original_metadata=metadata,
-                    geometry_column=geom_col,
+                    geometry_column=geometry_column,
                     verbose=verbose,
                     custom_metadata=custom_metadata,
                     **write.funnel_kwargs(),
@@ -220,10 +266,14 @@ def run_sort(
                     original_metadata=metadata,
                     verbose=verbose,
                     input_file=input_path,
+                    custom_metadata=custom_metadata,
+                    invalidate_derived_stats=is_partition_path(input_path),
                     **write.funnel_kwargs(),
                 )
             if not stream_output:
-                if reordered:
+                if success_message is not None:
+                    success(f"{success_message} to: {output_path}")
+                elif reordered:
                     success(f"Successfully reordered data using {label} to: {output_path}")
                 else:
                     success(f"Wrote data without {label} ordering to: {output_path}")
@@ -231,4 +281,7 @@ def run_sort(
         if is_remote_url(input_path):
             hints = get_remote_error_hint(exc, input_path)
             raise RemoteAccessError(input_path, f"{hints}\n\nOriginal error: {exc}") from exc
+        raise
+    except Exception as exc:
+        raise_for_schema_mismatch(exc, input_path)
         raise
