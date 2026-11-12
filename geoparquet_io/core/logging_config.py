@@ -221,17 +221,18 @@ def _bootstrap_default_handler(verbose: bool) -> None:
       Installing a second stream handler here made every gpio message appear
       twice in an embedding application.
     * Nothing has configured logging at all — a bare script importing gpio.
-      Install the CLI handler so output is not silently dropped, but put back a
-      level the caller explicitly chose for the ``geoparquet_io`` logger.
+      Install a package handler so output is not silently dropped. The root
+      logger remains available for the host to configure later.
     """
     if logging.getLogger().handlers:
         logger.addHandler(logging.NullHandler())
         return
 
-    chosen_level = logger.level  # NOTSET unless something explicitly set it
-    setup_cli_logging(verbose=verbose, show_timestamps=False, use_colors=False)
-    if chosen_level != logging.NOTSET:
-        logger.setLevel(chosen_level)
+    handler = DynamicStreamHandler()
+    handler.setFormatter(CLIFormatter(show_timestamps=False, use_colors=False))
+    logger.addHandler(handler)
+    if logger.level == logging.NOTSET:
+        logger.setLevel(logging.DEBUG if verbose else logging.INFO)
 
 
 def configure_verbose(verbose: bool) -> None:

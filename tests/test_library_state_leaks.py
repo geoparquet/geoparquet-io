@@ -384,6 +384,11 @@ def test_bootstrap_installs_a_real_handler_when_nothing_configured_logging():
 
     _bootstrap_default_handler(verbose=False)
 
+    stream = io.StringIO()
+    logging.basicConfig(stream=stream, format="HOST:%(message)s", level=logging.INFO)
+    logging.getLogger("host_application").warning("configured after gpio")
+    assert stream.getvalue() == "HOST:configured after gpio\n"
+
     assert gpio_logger.handlers, "gpio installed no handler; output would be dropped"
     assert not all(isinstance(h, logging.NullHandler) for h in gpio_logger.handlers), (
         "gpio installed only a NullHandler with no host handlers to propagate to"
