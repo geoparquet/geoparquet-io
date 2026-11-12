@@ -1715,3 +1715,44 @@ class TestDownloadPerLevelCachesHousekeeping:
             assert path.exists()
         mock_con.execute.assert_not_called()
         mock_con.close.assert_called_once()
+
+        # A cold country request must not fetch region too (#1149). A failed
+        # region COPY must leave neither a published partial nor discard country.
+        import re
+
+        for path in fresh.values():
+            path.unlink()
+        copies = []
+        fail_region = False
+
+        def copy(query):
+            if not query.startswith("COPY"):
+                return
+            level = "region" if "region" in query.split(" TO ")[0] else "country"
+            copies.append(level)
+            destination = Path(re.search(r" TO '([^']+)'", query)[1])
+            destination.write_bytes(b"partial" if fail_region else b"complete")
+            if fail_region:
+                raise OSError("object store interrupted")
+
+        from contextlib import nullcontext
+
+        monkeypatch.setattr(admin_datasets, "scoped_write_memory_limit", lambda *a: nullcontext())
+        mock_con.execute.side_effect = copy
+        dataset.get_source_for_level("country")
+        assert copies == ["country"]
+        assert fresh["country"].read_bytes() == b"complete"
+        assert not fresh["region"].exists()
+
+        fail_region = True
+        with pytest.raises(OSError, match="interrupted"):
+            dataset.get_source_for_level("region")
+        assert fresh["country"].read_bytes() == b"complete"
+        assert not fresh["region"].exists()
+        assert not list(tmp_path.glob(".gpio-stage-*"))
+
+        fail_region = False
+        dataset.get_source_for_level("region")
+        dataset.get_source_for_level("country")
+        assert copies == ["country", "region", "region"]
+        assert fresh["region"].read_bytes() == b"complete"

@@ -36,6 +36,7 @@ from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     InvalidParameterError,
 )
+from geoparquet_io.core.file_utils import atomic_write
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.memory_limits import open_bounded_connection, scoped_write_memory_limit
@@ -1119,11 +1120,11 @@ class OvertureAdminDataset(AdminDataset):
                 warn(age_warning)
             return str(cache_path)
 
-        self._download_per_level_caches()
+        self._download_per_level_caches([level])
         return str(cache_path)
 
-    def _download_per_level_caches(self) -> None:
-        """Download separate country and region cache files.
+    def _download_per_level_caches(self, levels: Iterable[str] | None = None) -> None:
+        """Download only the requested level caches (all levels for the base fallback).
 
         The full Overture divisions dataset is ~4.5GB with 1M+ rows. We split
         into per-level, land-only files (see :meth:`_build_level_cache_query`)
@@ -1150,7 +1151,7 @@ class OvertureAdminDataset(AdminDataset):
             )
             version = self.get_version()
             try:
-                for level in self.get_available_levels():
+                for level in self.get_available_levels() if levels is None else levels:
                     cache_path = self.get_cached_path_for_level(level)
                     # Drop every superseded cache for this level/version so
                     # renamed keys don't strand ~40MB files in the cache dir.
@@ -1163,12 +1164,15 @@ class OvertureAdminDataset(AdminDataset):
                     # Bounded like every other gpio write (#1156): the remote
                     # scan + simplification of the ~4.5GB Overture dataset used
                     # to run at DuckDB's own 80%-of-RAM default.
-                    with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
+                    with (
+                        atomic_write(str(cache_path)) as staged,
+                        scoped_write_memory_limit(con, self.memory_limit, self.verbose),
+                    ):
                         # A download cache, not an output: DuckDB's fast ZSTD 3,
                         # named explicitly rather than left to DuckDB's default.
                         cache_codec = resolve_codec("ZSTD", 3, context="write")
                         con.execute(
-                            f"COPY ({query}) TO {sql_path(cache_path)} "
+                            f"COPY ({query}) TO {sql_path(staged)} "
                             f"(FORMAT PARQUET, {', '.join(cache_codec.duckdb_copy_options())})"
                         )
                     info(f"Cached {level} dataset at: {cache_path}")
