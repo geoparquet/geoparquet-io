@@ -142,6 +142,8 @@ def sort_by_column(
     if not column_list:
         raise InvalidParameterError("columns", "at least one column name must be specified")
 
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
+
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
@@ -158,9 +160,6 @@ def sort_by_column(
         return
 
     # File-based mode
-    # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
-
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_parquet, output_parquet)
 

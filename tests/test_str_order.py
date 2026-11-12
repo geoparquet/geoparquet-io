@@ -528,7 +528,8 @@ def _assert_str_materialized_scan_bounds():
         assert sum(node["result_set_size"] for node in scans) <= 4096 * 48
 
 
-def test_sort_stdin_refuses_existing_output_before_reading(tmp_path, monkeypatch):
+@pytest.mark.parametrize("kind", ["str", "hilbert", "column", "quadkey"])
+def test_sort_stdin_refuses_existing_output_before_reading(tmp_path, monkeypatch, kind):
     from geoparquet_io.core.exceptions import GeoParquetError
     from geoparquet_io.core.hilbert_order import hilbert_order
 
@@ -537,7 +538,15 @@ def test_sort_stdin_refuses_existing_output_before_reading(tmp_path, monkeypatch
     stdin = mock.MagicMock()
     stdin.buffer.read.side_effect = AssertionError("input must not be consumed")
     monkeypatch.setattr(sys, "stdin", stdin)
-    for sort in (str_order, hilbert_order):
-        with pytest.raises(GeoParquetError, match="already exists"):
-            sort("-", str(output))
-        assert output.read_bytes() == b"keep me"
+    from geoparquet_io.core.sort_by_column import sort_by_column
+    from geoparquet_io.core.sort_quadkey import sort_by_quadkey
+
+    sorts = {
+        "str": str_order,
+        "hilbert": hilbert_order,
+        "column": lambda *args: sort_by_column(*args, columns="id"),
+        "quadkey": sort_by_quadkey,
+    }
+    with pytest.raises(GeoParquetError, match="already exists"):
+        sorts[kind]("-", str(output))
+    assert output.read_bytes() == b"keep me"

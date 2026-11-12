@@ -142,6 +142,8 @@ def sort_by_quadkey(
     configure_verbose(verbose)
     row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
 
+    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
+
     # Check for streaming mode (stdin input or stdout output)
     is_streaming = is_stdin(input_parquet) or should_stream_output(output_parquet)
 
@@ -160,9 +162,6 @@ def sort_by_quadkey(
         return
 
     # File-based mode
-    # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
-
     # Validate profile is only used with S3
     validate_profile_for_urls(profile, input_parquet, output_parquet)
 
