@@ -240,6 +240,9 @@ def test_fix_intermediates_stay_on_output_volume(tmp_path, monkeypatch):
     def write_fix(current, destination, *args):
         staged.append(Path(destination))
         Path(destination).write_bytes(b"fixed")
+        from geoparquet_io.core.file_utils import get_all_parquet_files
+
+        assert str(destination) not in get_all_parquet_files(str(target.parent))
         return {"fix_applied": "fixed"}
 
     for name in (
@@ -263,3 +266,17 @@ def test_fix_intermediates_stay_on_output_volume(tmp_path, monkeypatch):
     assert output.is_symlink()
     assert all(not path.exists() for path in staged)
     assert source.read_bytes() == b"input"
+
+
+def test_fix_does_not_create_missing_destination_parent(tmp_path):
+    import pytest
+
+    from geoparquet_io.core import check_fixes
+    from geoparquet_io.core.exceptions import GeoParquetError
+
+    source = tmp_path / "input.parquet"
+    source.write_bytes(b"input")
+    output = tmp_path / "absent" / "output.parquet"
+    with pytest.raises(GeoParquetError):
+        check_fixes.apply_all_fixes(str(source), str(output), {"spatial": {"fix_available": True}})
+    assert not output.parent.exists()

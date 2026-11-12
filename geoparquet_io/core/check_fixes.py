@@ -674,7 +674,6 @@ def _run_fix_chain(
     directory = None
     if not is_remote_url(output_file):
         directory = os.path.dirname(os.path.realpath(output_file))
-        os.makedirs(directory, exist_ok=True)
     current_file = parquet_file
     fixes_applied = []
     bbox_result = check_results.get("bbox", {})

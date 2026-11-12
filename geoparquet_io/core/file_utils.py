@@ -31,6 +31,8 @@ from geoparquet_io.core.remote import (
     protocol_label,
 )
 
+_STAGE_PREFIX = ".gpio-stage-"
+
 
 def _has_glob_characters(text: str) -> bool:
     """Whether *text* holds a character a glob reads as magic: ``*``, ``?``, ``[``."""
@@ -516,7 +518,7 @@ def atomic_write(
         yield str(destination)
         return
     final = Path(os.path.realpath(destination))
-    stage_dir = Path(tempfile.mkdtemp(prefix=".gpio-stage-", dir=final.parent))
+    stage_dir = Path(tempfile.mkdtemp(prefix=_STAGE_PREFIX, dir=final.parent))
     staged = stage_dir / f"{final.stem}{suffix}"
     try:
         with _success_output_path(str(staged), str(destination)):
@@ -563,7 +565,9 @@ def scratch_file(
 @contextlib.contextmanager
 def scratch_dir(*, prefix: str = "gpio_", directory: str | None = None) -> Iterator[str]:
     """A private (0700) scratch directory, removed with its contents on exit."""
-    scratch = Path(tempfile.mkdtemp(prefix=prefix, dir=directory))
+    scratch = Path(
+        tempfile.mkdtemp(prefix=_STAGE_PREFIX if directory is not None else prefix, dir=directory)
+    )
     try:
         yield str(scratch)
     finally:
