@@ -1806,15 +1806,11 @@ def test_carto_request_and_probe_never_log_credentials(monkeypatch, caplog):
         json_reply({"error": [f"bad api_key={secret}"]}, status=400),
         httpx.ConnectError(f"failed api_key={secret}"),
     )
-    # Exercise the old standalone transport too, without ever reaching the network.
-    from geoparquet_io.core import http_retry
-
-    monkeypatch.setattr(httpx, "stream", http_retry.get_shared_http_client().stream)
     conn = _AttemptCountingConnection(RuntimeError("IO Error: Could not open GDAL dataset"))
     monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
     with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
         with pytest.raises(CartoError) as caught:
-            _fetch_with_retry("https://x/sql", "tbl", "SELECT 1", api_key=secret)
+            _fetch_with_retry(f"https://user:{secret}@x/sql", "tbl", "SELECT 1", api_key=secret)
         status = carto_module._probe_request_status(f"https://x/sql?api_key={secret}", 2)
     assert status.code is None
     assert len(http.requests) == 2

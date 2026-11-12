@@ -25,6 +25,7 @@ import socket
 import xml.etree.ElementTree  # nosec B405 -- only classifies ParseError; never parses XML
 from collections.abc import Sequence
 from typing import NamedTuple, TypeGuard
+from urllib.parse import urlsplit, urlunsplit
 
 
 def sanitize_url_for_logging(url: str) -> str:
@@ -43,9 +44,13 @@ def sanitize_url_for_logging(url: str) -> str:
     """
     if not url:
         return url
-    # Remove query string (may contain presigned credentials)
-    if "?" in url:
-        url = url.split("?")[0]
+    parsed = urlsplit(url)
+    host = parsed.hostname
+    if host is not None:
+        host = f"[{host}]" if ":" in host else host
+        if parsed.port is not None:
+            host = f"{host}:{parsed.port}"
+    url = urlunsplit((parsed.scheme, host or parsed.netloc, parsed.path, "", ""))
     # Truncate very long paths but keep filename for debugging. A directory
     # URL ends in "/" and has no filename to keep: the elision would leave
     # `s3://bucket/datasets/.../`, which names nothing a user can act on --
