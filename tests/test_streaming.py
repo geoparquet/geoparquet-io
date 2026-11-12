@@ -647,6 +647,24 @@ class TestStreamIO:
         assert "covering" not in geo["columns"]["footprint"]
         assert result["bbox"].to_pylist() == [{"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}]
 
+    def test_stdout_bbox_collision(self, monkeypatch):
+        from geoparquet_io.core.str_order import str_order
+        from tests.test_str_order import _point_table
+
+        table = _point_table([(0, 1, 2)]).append_column("bbox", pa.array(["keep"]))
+        source = io.BytesIO()
+        with ipc.new_stream(source, table.schema) as writer:
+            writer.write_table(table)
+        source.seek(0)
+        output = io.BytesIO()
+        monkeypatch.setattr(sys, "stdin", mock.Mock(buffer=source, isatty=lambda: False))
+        monkeypatch.setattr(sys, "stdout", mock.Mock(buffer=output, isatty=lambda: False))
+        str_order("-", "-", add_bbox_flag=True)
+        result = ipc.open_stream(output.getvalue()).read_all()
+        assert "bbox_1" in result.column_names
+        geo = json.loads(result.schema.metadata[b"geo"])
+        assert geo["columns"]["geometry"]["covering"]["bbox"]["xmin"] == ["bbox_1", "xmin"]
+
     def test_hilbert_file_to_stdout_keeps_native_crs_and_edges(self, tmp_path, monkeypatch):
         import geoarrow.pyarrow as ga
 
