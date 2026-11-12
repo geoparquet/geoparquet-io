@@ -883,7 +883,8 @@ def _convert_from_stream(
             primary_geometry_column(schema),
             f"the Arrow stream (columns: [{', '.join(schema.names)}])",
         )
-        _warn_on_explicit_null_crs(schema.empty_table(), geometry_column)
+        if keep_crs:
+            _warn_on_explicit_null_crs(schema.empty_table(), geometry_column)
         return convert_to_geojson_stream(
             path,
             output_path=output_path,

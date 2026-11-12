@@ -141,19 +141,23 @@ def _explicit_null_crs_table() -> pa.Table:
     return table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
 
 
-def test_convert_geojson_stdin_warns_once_on_an_explicit_null_crs(tmp_path, caplog):
+@pytest.mark.parametrize("keep_crs", [True, False])
+def test_convert_geojson_stdin_warns_once_on_an_explicit_null_crs(tmp_path, caplog, keep_crs):
     """An explicit ``crs: null`` on stdin is unknown, not lon/lat, so the user is told."""
     from geoparquet_io.core.geojson_stream import _convert_from_stream
 
-    table = _explicit_null_crs_table()
+    table = _explicit_null_crs_table().set_column(
+        0, "geometry", pa.array([shapely.to_wkb(shapely.box(1, 2, 3, 4))])
+    )
     with (
         patch(
             "geoparquet_io.core.streaming.read_arrow_stream", side_effect=lambda: table.to_reader()
         ),
         caplog.at_level("WARNING"),
     ):
-        _convert_from_stream(output_path=str(tmp_path / "a.geojson"), keep_crs=True)
-        _convert_from_stream(output_path=str(tmp_path / "b.geojson"), keep_crs=True)
+        _convert_from_stream(output_path=str(tmp_path / "a.geojson"), keep_crs=keep_crs)
+        if keep_crs:
+            _convert_from_stream(output_path=str(tmp_path / "b.geojson"), keep_crs=keep_crs)
     warned = [r for r in caplog.records if r.getMessage().startswith("Input has an explicit null")]
     assert len(warned) == 1
 
