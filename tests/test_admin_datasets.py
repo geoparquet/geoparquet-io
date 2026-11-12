@@ -1790,3 +1790,94 @@ class TestDownloadPerLevelCachesHousekeeping:
         dataset.get_source_for_level("country")
         assert copies == ["country", "region", "region"]
         assert fresh["region"].read_bytes() == b"complete"
+
+
+def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, monkeypatch):
+    """A bounded cold join must not COPY a global level before its bbox filter."""
+    from http.server import BaseHTTPRequestHandler
+
+    from geoparquet_io.core import admin_datasets
+    from scripts.profile_command import CallSpies
+    from scripts.profile_matrix.workloads import serve_workload
+
+    source = tmp_path / "divisions.parquet"
+    inp = tmp_path / "input.parquet"
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
+    con.execute(
+        f"COPY (SELECT ST_Buffer(ST_Point((i//2048)*10, (i%2048)/4096.0), 0.1) geometry, "
+        "'US' country, 'country' subtype, true is_land, "
+        "{'xmin': (i//2048)*10-0.1, 'xmax': (i//2048)*10+0.1, "
+        "'ymin': (i%2048)/4096.0-0.1, 'ymax': (i%2048)/4096.0+0.1} bbox "
+        f"FROM range(32768) t(i)) TO {sql_path(source)} "
+        "(FORMAT PARQUET, ROW_GROUP_SIZE 2048)"
+    )
+    con.execute(f"COPY (SELECT ST_Point(0,0) geometry) TO {sql_path(inp)} (FORMAT PARQUET)")
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: cache)
+    dataset = OvertureAdminDataset()
+    monkeypatch.setattr(dataset, "get_version", lambda: "fixture")
+    counts = {"requests": 0, "bytes": 0}
+    send_header = BaseHTTPRequestHandler.send_header
+
+    def count_response(handler, name, value):
+        if handler.command == "GET" and name.lower() == "content-length":
+            counts["requests"] += 1
+            counts["bytes"] += int(value)
+        return send_header(handler, name, value)
+
+    monkeypatch.setattr(BaseHTTPRequestHandler, "send_header", count_response)
+    try:
+        with serve_workload(source) as url:
+            monkeypatch.setattr(dataset, "get_default_source", lambda: url)
+            with CallSpies() as spies:
+                admin_datasets.run_admin_join(
+                    con,
+                    dataset,
+                    ["country"],
+                    input_path=str(inp),
+                    input_geom_col="geometry",
+                    input_bbox_col=None,
+                    admin_bbox_col="bbox",
+                    select_for=lambda levels, cols: "b.country AS admin_country",
+                    final_table="bounded_admin_result",
+                )
+            assert con.execute("SELECT admin_country FROM bounded_admin_result").fetchall() == [
+                ("US",)
+            ]
+            assert counts["requests"] > 0
+            assert counts["bytes"] < source.stat().st_size // 4, counts
+            assert spies.counts["parquet_writes"] == 0
+            assert not list(cache.glob("*.parquet"))
+            assert not list(cache.glob(".gpio-stage-*"))
+            # Empty caches remain cold; bounded reads retain simplification.
+            cache_path = dataset.get_cached_path_for_level("country")
+            cache_path.touch()
+            extent = (0, 0, 0, 0)
+            assert (
+                "ST_SimplifyPreserveTopology"
+                in dataset._source_for_join("country", False, extent)[1]
+            )
+            cache_path.unlink()
+            con.execute(
+                f"COPY ({dataset._build_level_cache_query('country', str(source))}) "
+                f"TO {sql_path(cache_path)} (FORMAT PARQUET)"
+            )
+            before = counts.copy()
+            assert dataset._source_for_join("country", False, extent) == (
+                str(cache_path),
+                dataset.table_reference(str(cache_path)),
+            )
+            assert dataset._source_for_join("country", False, None)[0] == str(cache_path)
+            assert dataset._source_for_join("country", True, extent) == (
+                url,
+                dataset.table_reference(url),
+            )
+            custom = OvertureAdminDataset(source_path=str(source))
+            assert custom._source_for_join("country", False, extent) == (
+                str(source),
+                custom.table_reference(str(source)),
+            )
+            assert counts == before
+    finally:
+        con.close()

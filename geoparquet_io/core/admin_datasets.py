@@ -658,6 +658,12 @@ class AdminDataset(ABC):
             return None
         return self.get_source_for_level(level, no_cache=no_cache)
 
+    def _source_for_join(
+        self, level: str, no_cache: bool, extent: tuple[float, float, float, float] | None
+    ) -> tuple[str | None, str]:
+        source = self.source_for_level(level, no_cache=no_cache)
+        return source, self.table_reference(source)
+
     def get_read_parquet_options(self) -> dict:
         """
         Get additional options to pass to read_parquet() for this dataset.
@@ -1068,7 +1074,9 @@ class OvertureAdminDataset(AdminDataset):
         suffix = f"-{'-'.join(extra)}" if extra else ""
         return cache_dir / f"overture-{version}-{level}{suffix}-land.parquet"
 
-    def _build_level_cache_query(self, level: str, source: str) -> str:
+    def _build_level_cache_query(
+        self, level: str, source: str, extent: tuple[float, float, float, float] | None = None
+    ) -> str:
         """Build the SELECT that produces a non-overlapping per-level cache.
 
         Only land polygons are kept. Overture stores a separate maritime (EEZ)
@@ -1098,12 +1106,18 @@ class OvertureAdminDataset(AdminDataset):
             _overture_country_code_sql() + " AS country" if col == "country" else col
             for col in config["cols"]
         )
-        where = _overture_level_predicate(level)
+        # The bounded inline relation is still filtered as a raw source by the
+        # join, so retain is_land for that predicate (global caches omit it).
+        if extent is not None:
+            cols += ", is_land"
+        where = f"WHERE {_overture_level_predicate(level)}"
+        if extent is not None:
+            where += f" AND {_admin_bbox_predicate('bbox', extent)}"
         return (
             f"SELECT ST_SimplifyPreserveTopology(geometry, {tol}) as geometry, "
             f"{cols} "
             f"FROM read_parquet({sql_path(source)}, hive_partitioning=1) "
-            f"WHERE {where}"
+            f"{where}"
         )
 
     def get_source_for_level(self, level: str, no_cache: bool = False) -> str:
@@ -1124,6 +1138,18 @@ class OvertureAdminDataset(AdminDataset):
 
         self._download_per_level_caches([level])
         return str(cache_path)
+
+    def _source_for_join(
+        self, level: str, no_cache: bool, extent: tuple[float, float, float, float] | None
+    ) -> tuple[str | None, str]:
+        if extent is not None and not no_cache and self.source_path is None:
+            cache_path = self.get_cached_path_for_level(level)
+            if not (cache_path.exists() and cache_path.stat().st_size > 0):
+                # A global cache key must never hold only one command's extent.
+                # Read the bounded relation directly, retaining cache simplification.
+                source = self.get_default_source()
+                return source, f"({self._build_level_cache_query(level, source, extent)})"
+        return super()._source_for_join(level, no_cache, extent)
 
     def _download_per_level_caches(self, levels: Iterable[str] | None = None) -> None:
         """Download only the requested level caches (all levels for the base fallback).
@@ -1334,6 +1360,18 @@ def _admin_input_extent(
     return None if bbox is None else (bbox[0], bbox[2], bbox[1], bbox[3])
 
 
+def _admin_bbox_predicate(bbox_col: str, extent: tuple[float, float, float, float]) -> str:
+    """Overlap against a CRS84 extent, shared by remote reads and local joins."""
+    xmin, xmax, ymin, ymax = extent
+    q_bbox = quote_identifier(bbox_col)
+    return f"""
+        ({q_bbox}.xmin <= {xmax} AND
+         {q_bbox}.xmax >= {xmin} AND
+         {q_bbox}.ymin <= {ymax} AND
+         {q_bbox}.ymax >= {ymin})
+    """
+
+
 def _admin_where_clause(
     dataset: "AdminDataset",
     levels: list[str],
@@ -1360,13 +1398,7 @@ def _admin_where_clause(
             debug(f"Filtering admin boundaries: {subtype_filter}")
     if admin_bbox_col and extent:
         xmin, xmax, ymin, ymax = extent
-        q_bbox = quote_identifier(admin_bbox_col)
-        clauses.append(f"""
-            ({q_bbox}.xmin <= {xmax} AND
-             {q_bbox}.xmax >= {xmin} AND
-             {q_bbox}.ymin <= {ymax} AND
-             {q_bbox}.ymax >= {ymin})
-        """)
+        clauses.append(_admin_bbox_predicate(admin_bbox_col, extent))
         if verbose:
             debug(
                 "Filtering admin boundaries to input extent: "
@@ -1655,6 +1687,9 @@ def run_admin_join(
 
     - reads the input -- ``input_path``, RAW, through :func:`sql_path` -- or,
       after the first step, the previous step's temp table, by its bare name;
+    - uses a warm Overture level cache, or reads a cold level directly with
+      extent pushdown and the cache's simplification, without publishing a
+      partial-coverage global cache;
     - filters the admin side to its levels and to the input's extent, which is
       read once for the whole chain and only when the admin side has a bbox to
       filter on (#480);
@@ -1684,8 +1719,11 @@ def run_admin_join(
     relation = sql_path(input_path)
     intermediates = []
     for i, (step_levels, step_columns) in enumerate(steps):
-        source = dataset.source_for_level(step_levels[0], no_cache=no_cache) or admin_source
-        admin_table_ref = dataset.table_reference(source)
+        if per_level:
+            source, admin_table_ref = dataset._source_for_join(step_levels[0], no_cache, extent)
+        else:
+            source = admin_source
+            admin_table_ref = dataset.table_reference(source)
         query = build_admin_join_query(
             input_relation=relation,
             admin_table_ref=admin_table_ref,
