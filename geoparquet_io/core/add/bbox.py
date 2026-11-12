@@ -365,6 +365,13 @@ def _add_bbox_streaming(
             metadata=metadata,
         )
 
+        if passed_through:
+            progress(
+                f"Input already has bbox column '{bbox_column_name}'; "
+                "passed it through unchanged - the existing bbox column was not recomputed."
+            )
+            progress("Use --force to recompute and replace the existing bbox column.")
+
         write_output(
             con,
             query,
@@ -417,11 +424,6 @@ def prepare_streaming_bbox(
     # second column named 'bbox_1'.
     has_bbox_struct = _has_bbox_struct_column(con, source, bbox_column_name)
     if not force and has_bbox_struct:
-        progress(
-            f"Input already has bbox column '{bbox_column_name}'; "
-            "passed it through unchanged - the existing bbox column was not recomputed."
-        )
-        progress("Use --force to recompute and replace the existing bbox column.")
         return f"SELECT * FROM {source}", True, bbox_column_name, None
 
     # Get column names from query result (works with both table names and read_parquet)

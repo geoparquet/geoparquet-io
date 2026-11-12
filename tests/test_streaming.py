@@ -513,7 +513,7 @@ class TestStreamIO:
         assert streamed.num_rows == sample_geo_table.num_rows
         assert b"geo" not in (streamed.schema.metadata or {})
 
-    def test_projected_secondary_custom_covering_matches_file(self, tmp_path, monkeypatch):
+    def test_projected_secondary_custom_covering_matches_file(self, tmp_path, monkeypatch, caplog):
         import pyarrow.parquet as pq
 
         from geoparquet_io.core.geo_metadata import build_bbox_covering
@@ -589,13 +589,16 @@ class TestStreamIO:
 
         from geoparquet_io.core.add.bbox import add_bbox_table
 
+        caplog.set_level("INFO", logger="geoparquet_io")
         pq.write_table(add_bbox_table(table, bbox_column_name="existing_bounds"), source)
         for transform, options in transforms[:8]:
             if not options.get("add_bbox_flag"):
                 continue
             captured.clear()
+            caplog.clear()
             transform(str(source), str(dest), overwrite=True, **options)
             transform(str(source), "-", **options)
+            assert "Use --force" not in caplog.text
             assert (
                 read_raw_geo(captured[0].schema.metadata).value
                 == read_raw_geo(pq.read_metadata(dest).metadata).value
