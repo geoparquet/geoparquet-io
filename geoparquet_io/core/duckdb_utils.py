@@ -995,13 +995,13 @@ def build_spatial_join_query(
     straddling a border goes to the smaller code, not to the region holding
     most of its area.
 
-    The dedup is spill-safe at the scale the admin commands target. Input rows
-    are numbered with ``row_number() OVER ()`` -- a streaming window, with no
-    ``PARTITION BY`` to buffer -- and the survivor is picked with ``DISTINCT
-    ON``, which DuckDB plans as a hash aggregate (it spills) followed by a sort
-    on the row number (it spills). The ``QUALIFY row_number() OVER (PARTITION
-    BY ...)`` form that #461 retired buffers every row in a window that does
-    not spill, and is not used.
+    The input row (including its unique row number) is a struct in the DISTINCT
+    ON key. DuckDB can spill grouping keys; putting large input geometries in
+    arg_min aggregate states instead makes the join OOM (#550). Only target
+    values remain in aggregate states. The struct expands back into the original
+    columns after dedup, and sorting by row number preserves input order. Each
+    input is read once, including volatile relations. The retired QUALIFY window
+    (#461) also failed the memory bound and is not used.
 
     Args:
         input_relation: The input side: a table name, ``read_parquet(...)``
@@ -1027,12 +1027,13 @@ def build_spatial_join_query(
     key_select = ", ".join(f"{expr} AS {key}" for expr, key in zip(match_order, keys, strict=True))
     key_order = ", ".join(f"{key} ASC NULLS LAST" for key in keys)
     return (
-        f"SELECT * EXCLUDE ({row}, {', '.join(keys)}) FROM (\n"
-        f"    SELECT DISTINCT ON ({row}) * FROM (\n"
-        f"        SELECT {input_alias}.*, {target_select}, {key_select}\n"
+        f"SELECT __gpio_input_values.* EXCLUDE ({row}), "
+        f"* EXCLUDE (__gpio_input_values, {row}, {', '.join(keys)}) FROM (\n"
+        f"    SELECT DISTINCT ON ({row}, __gpio_input_values) * FROM (\n"
+        f"        SELECT {input_alias} AS __gpio_input_values, {input_alias}.{row}, "
+        f"{target_select}, {key_select}\n"
         f"        FROM (SELECT *, row_number() OVER () AS {row} FROM {input_relation}) {input_alias}\n"
-        f"        LEFT JOIN {target_relation} {target_alias}\n"
-        f"        ON {condition}\n"
+        f"        LEFT JOIN {target_relation} {target_alias} ON {condition}\n"
         "    )\n"
         f"    ORDER BY {row}, {key_order}\n"
         ")"
