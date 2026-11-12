@@ -195,3 +195,66 @@ def test_no_module_percent_encodes_a_read_path():
         encoding="utf-8"
     )
     assert "quote(" not in source, "file_utils must not percent-encode a path; see #825"
+
+
+def test_partition_default_geography_uses_real_remote_schema(recording_http_server, tmp_path):
+    import geoarrow.pyarrow as ga
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.main import cli
+    from geoparquet_io.core import parquet_footer as footer
+    from geoparquet_io.core.duckdb_metadata import get_schema_info
+    from tests.native_geo_probes import geo_block
+
+    base, served, _ = recording_http_server
+    source = served / "default.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "grp": ["a"],
+                "geometry": ga.wkb()
+                .with_edge_type(ga.EdgeType.SPHERICAL)
+                .wrap_array(ga.as_wkb(["LINESTRING(170 10,-170 10)"]).storage),
+            }
+        ),
+        source,
+        store_schema=False,
+    )
+    raw = source.read_bytes()
+    length = int.from_bytes(raw[-8:-4], "little")
+    start = len(raw) - length - 8
+    block = raw[start:-8]
+    fields, _ = footer._struct_fields(block)
+    schema = footer._by_id(fields)[2]
+    logical = dict(footer._top_level_leaves(block, schema))["geometry"][10]
+    geography = footer._struct_fields(block, logical.value_start)[0][0]
+    members = footer._struct_fields(block, geography.value_start)[0]
+    replacement = footer._without_field(block, members, footer._GEOGRAPHY_ALGORITHM)
+    block = block[: geography.value_start] + replacement + block[geography.end :]
+    source.write_bytes(raw[:start] + block + len(block).to_bytes(4, "little") + b"PAR1")
+    remote = f"{base}/default.parquet"
+    schema_rows = get_schema_info(remote)
+    assert any("GeographyType" in str(row) for row in schema_rows), schema_rows
+    columns = []
+    for label, path in (("local", str(source)), ("remote", remote)):
+        out = tmp_path / label
+        result = CliRunner().invoke(
+            cli,
+            [
+                "partition",
+                "string",
+                path,
+                str(out),
+                "--column",
+                "grp",
+                "--skip-analysis",
+                "--geoparquet-version",
+                "1.1",
+            ],
+        )
+        assert result.exit_code == 0, (result.output, result.exception)
+        columns.append(geo_block(next(out.rglob("*.parquet")))["columns"]["geometry"])
+    assert columns[0]["edges"] == "spherical"
+    assert columns[1] == columns[0]

@@ -36,7 +36,7 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import sql_path
-from geoparquet_io.core.edges import geoarrow_edge_type
+from geoparquet_io.core.edges import geoarrow_edge_type, logical_type_edges
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import get_first_parquet_file, output_is_kept, scratch_file
 from geoparquet_io.core.logging_config import debug
@@ -138,7 +138,8 @@ class PartitionWriteOptions:
             field_type = pa.binary()
             if native is not None:
                 field_type = ga.wkb().with_crs(native.get("crs"))
-                field_type = field_type.with_edge_type(geoarrow_edge_type(native.get("algorithm")))
+                edges = logical_type_edges(native) if native["geo_type"] == "Geography" else None
+                field_type = field_type.with_edge_type(geoarrow_edge_type(edges))
             fields.append(pa.field(column["name"], field_type))
         return pa.schema(fields, metadata=metadata)
 
