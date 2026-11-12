@@ -410,24 +410,48 @@ def test_every_strategy_rebuilds_secondary_statistics(tmp_path):
     table = table.replace_schema_metadata(with_geo_key(None, block))
     pq.write_table(table, source)
     expected = geometry_stats_of(_mixed_table(), "geometry")
-    for strategy in ("duckdb-kv", "in-memory", "streaming", "disk-rewrite"):
-        con = get_duckdb_connection(load_spatial=True)
-        output = tmp_path / f"secondary-{strategy}.parquet"
-        try:
-            write_parquet_with_metadata(
-                con,
-                f"SELECT * FROM {sql_path(str(source))}",
-                str(output),
-                input_file=str(source),
-                original_metadata=pq.read_metadata(source).metadata,
-                write_strategy=strategy,
-                geoparquet_version="1.1",
-            )
-        finally:
-            con.close()
-        other = footer_geo(output)["columns"]["other"]
-        assert (other["bbox"], other["geometry_types"]) == (
-            expected.bbox,
-            expected.geometry_types,
-        ), strategy
-        assert other["epoch"] == 2020.0
+    for registered in (False, True):
+        for strategy in ("duckdb-kv", "in-memory", "streaming", "disk-rewrite"):
+            con = get_duckdb_connection(load_spatial=True)
+            con.register("registered_input", table.replace_schema_metadata(None))
+            output = tmp_path / f"secondary-{strategy}.parquet"
+            try:
+                write_parquet_with_metadata(
+                    con,
+                    "SELECT id, ST_GeomFromWKB(geometry) AS geometry, other FROM registered_input"
+                    if registered
+                    else f"SELECT * FROM {sql_path(str(source))}",
+                    str(output),
+                    input_file=None if registered else str(source),
+                    original_metadata=pq.read_metadata(source).metadata,
+                    write_strategy=strategy,
+                    geoparquet_version="1.1",
+                )
+            finally:
+                con.close()
+            other = footer_geo(output)["columns"]["other"]
+            assert (other["bbox"], other["geometry_types"]) == (
+                expected.bbox,
+                expected.geometry_types,
+            ), strategy
+            assert other["epoch"] == 2020.0
+
+    # Native secondaries follow the same completed-output rule as WKB columns.
+    from geoparquet_io.core.geo_metadata import GeoBlockOptions
+    from geoparquet_io.core.write_funnels import _written_geo_block
+
+    native = table.set_column(
+        table.schema.get_field_index("other"),
+        "other",
+        pa.array([{"x": 4.0, "y": 5.0}] * table.num_rows),
+    )
+    block["columns"]["other"]["encoding"] = "point"
+    block["columns"]["other"]["geometry_types"] = ["Point"]
+    pq.write_table(native.replace_schema_metadata(with_geo_key(None, block)), source)
+    rebuilt = _written_geo_block(
+        str(source),
+        with_geo_key(None, block),
+        GeoBlockOptions(geometry_column="geometry", version="1.1"),
+    )
+    assert rebuilt["columns"]["other"]["geometry_types"] == ["Point"]
+    assert rebuilt["columns"]["other"]["bbox"] == [4.0, 5.0, 4.0, 5.0]

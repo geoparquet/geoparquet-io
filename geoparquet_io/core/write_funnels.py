@@ -1420,10 +1420,12 @@ def _write_strategy_output(strategy, kwargs: dict) -> dict | None:
     if defer_stats:
         kwargs["defer_stats"] = True
     strategy.write_from_query(**kwargs)
-    if not defer_stats and (
-        version == "parquet-geo-only" or not (kwargs["geometry_info"] or {}).get("secondary")
-    ):
+    if version == "parquet-geo-only":
         return None
+    if not defer_stats:
+        written = sanitized_carried_geo(pq.read_schema(kwargs["output_path"]).metadata)
+        if len(written.get("columns") or {}) < 2:
+            return None
     return _written_geo_block(
         kwargs["output_path"],
         kwargs["original_metadata"],

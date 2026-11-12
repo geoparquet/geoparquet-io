@@ -1935,7 +1935,8 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
             geo_meta["columns"][column].setdefault(key, value)
     _apply_stats(geo_meta, secondaries.stats)
     _apply_stats(geo_meta, options.stats)
-    _name_geoarrow_geometry_types(col_meta, view, primary)
+    for name, entry in geo_meta["columns"].items():
+        _name_geoarrow_geometry_types(entry, view, name)
     if options.measure_missing is not None:
         _apply_stats(geo_meta, options.measure_missing(geo_meta))
     provenance = geo_meta if carried else sanitized_carried_geo(options.covering_provenance)
