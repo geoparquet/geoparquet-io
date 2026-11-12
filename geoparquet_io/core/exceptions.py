@@ -45,12 +45,8 @@ def sanitize_url_for_logging(url: str) -> str:
     if not url:
         return url
     parsed = urlsplit(url)
-    host = parsed.hostname
-    if host is not None:
-        host = f"[{host}]" if ":" in host else host
-        if parsed.port is not None:
-            host = f"{host}:{parsed.port}"
-    url = urlunsplit((parsed.scheme, host or parsed.netloc, parsed.path, "", ""))
+    netloc = parsed.netloc.rpartition("@")[2]
+    url = urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
     # Truncate very long paths but keep filename for debugging. A directory
     # URL ends in "/" and has no filename to keep: the elision would leave
     # `s3://bucket/datasets/.../`, which names nothing a user can act on --

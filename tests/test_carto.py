@@ -1801,6 +1801,15 @@ def test_carto_request_and_probe_never_log_credentials(monkeypatch, caplog):
 
     http = FakeTransport.install(monkeypatch)
     secret = "SORTSECRET"
+    from geoparquet_io.core.exceptions import InvalidParameterError
+    from geoparquet_io.core.remote import show_remote_read_message, validate_profile_for_urls
+
+    with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+        for url in [f"https://user:{secret}@/file.parquet", "https://host:bad/file.parquet"]:
+            show_remote_read_message(url, verbose=True)
+            with pytest.raises(InvalidParameterError):
+                validate_profile_for_urls("profile", url)
+    assert all(secret not in record.getMessage() for record in caplog.records)
     http.respond(
         "/sql",
         json_reply({"error": [f"bad api_key={secret}"]}, status=400),
