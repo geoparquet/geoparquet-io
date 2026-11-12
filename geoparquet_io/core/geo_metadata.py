@@ -2770,9 +2770,10 @@ def _footer_stats(
 
 
 def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+    from geoparquet_io.core.duckdb_utils import sql_path
     from geoparquet_io.core.file_utils import resolve_file_url
     from geoparquet_io.core.geometry_detection import primary_geometry_column
+    from geoparquet_io.core.memory_limits import open_bounded_connection
     from geoparquet_io.core.remote import needs_httpfs
 
     path = str(path)
@@ -2784,7 +2785,9 @@ def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
         )
         if footer is not None:
             return footer
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
+    # This aggregate retains only distinct types and four bounds. A small
+    # analysis budget also caps parallel decompression buffers on large hosts.
+    con = open_bounded_connection(memory_limit="256MB", load_httpfs=needs_httpfs(path))
     try:
         query = f"SELECT * FROM read_parquet({sql_path(resolve_file_url(path, verbose=False))})"
         return _stats(QuerySource(con, query), geometry_column, **kwargs)

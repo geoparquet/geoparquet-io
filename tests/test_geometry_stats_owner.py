@@ -266,3 +266,29 @@ def test_wrapped_footer_bounds_fall_back_to_cartesian_scan(tmp_path, monkeypatch
         ],
     )
     assert bounds_of(path, "geometry") == [-170, 10, 178, 12]
+
+
+def test_file_scan_bounds_working_memory_at_the_owner(tmp_path, monkeypatch):
+    import geoparquet_io.core.geo_metadata as owner
+    from geoparquet_io.core.memory_limits import parse_size_string
+
+    original = owner._query_stats
+    observed = []
+
+    def measure(con, *args):
+        settings = con.execute(
+            "SELECT current_setting('threads'), current_setting('memory_limit'), "
+            "current_setting('preserve_insertion_order')"
+        ).fetchall()[0]
+        observed.append(settings)
+        return original(con, *args)
+
+    monkeypatch.setattr(owner, "_query_stats", measure)
+    path = _file(tmp_path, [_pt(1, 2), _pt(3, 4)])
+    assert geometry_types_of(path, "geometry") == ["Point"]
+    assert bounds_of(path, "geometry") == [1, 2, 3, 4]
+    assert observed
+    for threads, limit, preserve_order in observed:
+        assert threads == 1
+        assert parse_size_string(limit) <= 256 * 1024 * 1024
+        assert not preserve_order
