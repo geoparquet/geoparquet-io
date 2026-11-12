@@ -977,13 +977,11 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             # The composer measured ``geometry_types``; the block is written as composed.
             schema_metadata = with_geo_key(schema_metadata, geo_meta)
 
-        if extra_kv_metadata:
-            for key, value in extra_kv_metadata.items():
-                bkey = key.encode("utf-8") if isinstance(key, str) else key
-                bval = value.encode("utf-8") if isinstance(value, str) else value
-                schema_metadata[bkey] = bval
-
-        return schema.with_metadata(schema_metadata)
+        return apply_output_kv_metadata(
+            schema.with_metadata(schema_metadata).empty_table(),
+            None if geo_meta is not None else "parquet-geo-only",
+            extra_kv_metadata,
+        ).schema
 
     def _convert_batch_to_geoarrow(
         self,

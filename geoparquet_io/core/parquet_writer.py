@@ -1083,7 +1083,8 @@ def output_schema_metadata(
       the block that write built. ``parquet-geo-only`` drops it too, as it
       means "carry no GeoParquet metadata".
     * Every other key (fiboa, vecorel, STAC, provenance) survives (#690), and
-      ``extra_kv_metadata`` is merged in last, so the caller's value wins.
+      ``extra_kv_metadata`` is merged in last, except that the generated ``geo``
+      wins and ``parquet-geo-only`` forbids even an explicit ``geo``.
 
     Keys and values come back as ``bytes``, ready for
     ``replace_schema_metadata`` or ``with_metadata``.
@@ -1098,7 +1099,11 @@ def output_schema_metadata(
         if _as_bytes(key) not in dropped
     }
     for key, value in (extra_kv_metadata or {}).items():
-        result[_as_bytes(key)] = _as_bytes(value)
+        encoded_key = _as_bytes(key)
+        if encoded_key == b"geo":
+            if geoparquet_version == "parquet-geo-only" or b"geo" in result:
+                continue
+        result[encoded_key] = _as_bytes(value)
     return result
 
 

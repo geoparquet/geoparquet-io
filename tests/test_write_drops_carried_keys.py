@@ -253,9 +253,11 @@ class TestOutputSchemaMetadata:
         assert output_schema_metadata(metadata, "1.1") == {b"geography_note": b"kept"}
 
     def test_extra_kv_overrides_a_kept_key(self):
-        metadata = {b"fiboa": b"old", b"pandas": b"{}"}
-        result = output_schema_metadata(metadata, "1.1", {"fiboa": "new", b"stac": b"s"})
-        assert result == {b"fiboa": b"new", b"stac": b"s"}
+        metadata = {b"fiboa": b"old", b"pandas": b"{}", b"geo": b"generated"}
+        extras = {"fiboa": "new", b"stac": b"s", "geo": "explicit"}
+        result = output_schema_metadata(metadata, "1.1", extras)
+        assert result == {b"fiboa": b"new", b"stac": b"s", b"geo": b"generated"}
+        assert b"geo" not in output_schema_metadata(metadata, "parquet-geo-only", extras)
 
     def test_apply_is_zero_copy(self):
         table = _carried_table()
@@ -292,12 +294,13 @@ def test_assembled_geo_block_keeps_geo_prefixed_sidecars():
     }
 
 
-def test_disk_rewrite_lets_an_explicit_geo_extra_win(tmp_path):
-    """The caller's extras merge last, over the generated ``geo``, as before the fix."""
+@pytest.mark.parametrize("strategy", list(WriteStrategy))
+def test_generated_geo_wins_over_an_explicit_extra(strategy, tmp_path):
+    """All writers describe the geometry they write, even with an explicit extra."""
     out = tmp_path / "out.parquet"
     explicit = json.dumps({**STALE_GEO, "version": "1.1.0", "note": "explicit"})
 
-    WriteStrategyFactory.get_strategy(WriteStrategy.DISK_REWRITE).write_from_table(
+    WriteStrategyFactory.get_strategy(strategy).write_from_table(
         table=_carried_table(),
         output_path=str(out),
         geometry_column="geometry",
@@ -311,7 +314,7 @@ def test_disk_rewrite_lets_an_explicit_geo_extra_win(tmp_path):
     )
 
     footer = _footer(out)
-    assert json.loads(footer[b"geo"])["note"] == "explicit"
+    assert "note" not in json.loads(footer[b"geo"])
     assert b"pandas" not in footer
 
 
