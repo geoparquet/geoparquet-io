@@ -323,15 +323,12 @@ def _convert_streaming(
 ):
     """Handle streaming output for convert command."""
 
-    # Registers the GeoArrow extension types process-wide, so the `pq.read_table`
-    # below materialises a Parquet GEOMETRY/GEOGRAPHY column as `geoarrow.wkb`
-    # rather than plain `binary` and the stream describes its geometry as one.
-    # The registration is global, which is why it happens here rather than being
-    # relied on -- see `constants._fix_vecorel_schema` (#1006, #993).
+    # Register geometry field types before reading the scratch file's schema.
     import geoarrow.pyarrow  # noqa: F401
+    import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from geoparquet_io.core.streaming import write_arrow_stream
+    from geoparquet_io.core.streaming import STREAM_BATCH_ROWS, write_arrow_stream
 
     # Convert to temp file first, then stream
     with scratch_file(prefix="gpio_convert_") as temp_path:
@@ -357,17 +354,14 @@ def _convert_streaming(
             **write.funnel_kwargs(),
         )
 
-        # Read and stream to stdout. Through `ParquetFile` so the file handle is
-        # closed here, before the scratch copy is removed, rather than whenever the
-        # reader `pq.read_table` creates internally is collected: with the
-        # extension types registered the table it returns is reachable through
-        # Python-side objects that outlive this frame's refcount drop, and
-        # Windows refuses to delete a file that still has a reader open
-        # (WinError 32). POSIX unlinks an open file happily, so only the Windows
-        # legs saw it.
+        # Keep the file open while draining batches, and close it before the
+        # scratch context deletes it (also required on Windows).
         with pq.ParquetFile(temp_path) as reader:
-            table = reader.read()
-        write_arrow_stream(table)
+            write_arrow_stream(
+                pa.RecordBatchReader.from_batches(
+                    reader.schema_arrow, reader.iter_batches(batch_size=STREAM_BATCH_ROWS)
+                )
+            )
 
 
 def _reproject_impl_cli(

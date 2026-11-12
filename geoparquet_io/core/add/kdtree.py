@@ -46,12 +46,8 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.sizing import bytes_to_mb
 from geoparquet_io.core.stream_io import write_output
-from geoparquet_io.core.streaming import (
-    is_stdin,
-    read_stdin_to_temp_file,
-    should_stream_output,
-)
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+from geoparquet_io.core.streaming import is_stdin, should_stream_output
+from geoparquet_io.core.write_funnels import read_stdin_to_temp_file, write_parquet_with_metadata
 
 #: Rows per partition that `gpio add kdtree` / `gpio partition kdtree` aim for
 #: when neither `--partitions` nor `--auto` is given, and the default the Python

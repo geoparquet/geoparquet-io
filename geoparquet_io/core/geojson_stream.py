@@ -43,10 +43,8 @@ if TYPE_CHECKING:
 
 from geoparquet_io.core.crs_utils import (
     crs_is_explicitly_null,
-    crs_of,
     is_default_crs,
     source_crs_string,
-    transform_source_crs,
     transform_source_label,
     warn_null_crs_once,
 )
@@ -56,12 +54,10 @@ from geoparquet_io.core.duckdb_utils import (
     duckdb_type_contains_geometry,
     fetch_one,
     quote_identifier,
-    register_arrow,
     sql_literal,
     sql_path,
     uses_aws_profile,
 )
-from geoparquet_io.core.edges import require_planar_export
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import resolve_file_url
 from geoparquet_io.core.geo_metadata import (
@@ -76,7 +72,6 @@ from geoparquet_io.core.logging_config import configure_verbose, debug, info, su
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import is_stdin
-from geoparquet_io.core.write_funnels import table_nonplanar_edges
 
 # RFC 8142 record separator character
 RS = "\x1e"
@@ -469,6 +464,21 @@ def _maybe_native_feature_collection(
     )
 
 
+def _feature_rows(con, query):
+    """Drain serialized features in bounded batches, releasing the result on error."""
+    from geoparquet_io.core.streaming import STREAM_BATCH_ROWS
+
+    # Ordered parallel scans queue wide serialized geometries ahead of the
+    # single Python consumer (6 GB RSS on a 406 MB stream); keep one producer.
+    with (
+        scoped_write_memory_limit(con, None, False, pinned={"threads": 1}),
+        con.sql(query).to_arrow_reader(batch_size=STREAM_BATCH_ROWS) as reader,
+    ):
+        for batch in reader:
+            for value in batch.column(0):
+                yield value.as_py()
+
+
 def _stream_to_stdout(
     con: duckdb.DuckDBPyConnection,
     query: str,
@@ -490,7 +500,7 @@ def _stream_to_stdout(
     import json
     import os
 
-    result = con.execute(query)
+    result = _feature_rows(con, query)
     count = 0
 
     # The `with` is inside the `try`: switching stdout to UTF-8 flushes whatever
@@ -498,20 +508,16 @@ def _stream_to_stdout(
     # that flush raises where only this handler should see it.
     try:
         with _utf8_stdout() as output:
-            while True:
-                row = result.fetchone()  # drains to None; guard: open-result ok
-                if row is None:
-                    break
-
+            for row in result:
                 if rs:
                     output.write(RS)
 
                 if pretty:
                     # Parse and re-serialize with indentation
-                    feature = json.loads(row[0])
+                    feature = json.loads(row)
                     output.write(json.dumps(feature, indent=2))
                 else:
-                    output.write(row[0])
+                    output.write(row)
 
                 output.write("\n")
                 count += 1
@@ -530,6 +536,8 @@ def _stream_to_stdout(
             os.dup2(devnull_fd, stdout_fd)
         finally:
             os.close(devnull_fd)
+    finally:
+        result.close()
 
     return count
 
@@ -560,9 +568,9 @@ def _stream_feature_collection(
 
     from geoparquet_io.core.file_utils import atomic_write
 
-    result = con.execute(query)
     # Stage stdout too: a query or encoding failure must publish no partial JSON.
     with contextlib.ExitStack() as stack:
+        result = stack.enter_context(contextlib.closing(_feature_rows(con, query)))
         # Windows typeshed types TemporaryFile as a wrapper, not a TextIOWrapper.
         output: IO[str]
         if output_path:
@@ -580,11 +588,8 @@ def _stream_feature_collection(
         prefix = json.dumps(header, indent=2 if pretty else None)
         output.write(prefix[:-4] if pretty else prefix[:-3])
         count = 0
-        while True:
-            row = result.fetchone()  # drains to None; guard: open-result ok
-            if row is None:
-                break
-            feature = json.loads(row[0])
+        for row in result:
+            feature = json.loads(row)
             encoded = json.dumps(feature, indent=2 if pretty else None)
             if pretty:
                 output.write(",\n" if count else "[\n")
@@ -866,107 +871,35 @@ def _convert_from_stream(
         The stream's CRS is read from its ``geo`` block, then from the geometry
         field's GeoArrow CRS, through the same resolver a file input uses (#1261).
     """
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
-    from geoparquet_io.core.streaming import (
-        read_arrow_stream,
-    )
+    from geoparquet_io.core.file_utils import unlink_released_file
+    from geoparquet_io.core.write_funnels import read_stdin_to_temp_file
 
-    debug("Reading Arrow IPC stream from stdin...")
-
-    # Read Arrow IPC from stdin
-    table = read_arrow_stream()
-
-    debug(f"Read {table.num_rows} rows from stream")
-
-    # Find geometry column
-    geometry_column = require_geometry_column(
-        primary_geometry_column(table),
-        f"the Arrow stream (columns: [{', '.join(table.column_names)}])",
-    )
-
-    debug(f"Using geometry column: {geometry_column}")
-
-    edges = table_nonplanar_edges(table, geometry_column, None).get(geometry_column)
-    require_planar_export(GEOJSON_EXPORT, geometry_column, edges)
-    _warn_on_explicit_null_crs(table, geometry_column)
-    # --keep-crs writes the input coordinates, so the CRS is never resolved.
-    source_crs = (
-        None if keep_crs else transform_source_crs(crs_of(table, geometry_column=geometry_column))
-    )
-    needs_reproject = _needs_reprojection(source_crs)
-    if needs_reproject:
-        info(f"Reprojecting from {transform_source_label(source_crs)} to WGS84 (RFC 7946)")
-    elif not keep_crs:
-        _refuse_extent_outside_lonlat("the Arrow stream", geometry_column, table)
-
-    # Get property columns
-    property_columns = [
-        col for col in table.column_names if not _is_geometry_or_bbox(col, geometry_column)
-    ]
-
-    debug(f"Property columns: {', '.join(property_columns)}")
-
-    # Register table with DuckDB
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-
+    path = read_stdin_to_temp_file(verbose)
     try:
-        register_arrow(con, "input_stream", table)
+        import pyarrow.parquet as pq
 
-        # Create view with proper geometry type
-        source_ref = (
-            create_geometry_view(con, "input_stream", geometry_column, "input_stream_geom")
-            if geometry_column
-            else "input_stream"
+        schema = pq.read_schema(path)
+        geometry_column = require_geometry_column(
+            primary_geometry_column(schema),
+            f"the Arrow stream (columns: [{', '.join(schema.names)}])",
         )
-
-        count = _maybe_native_feature_collection(
-            con,
-            source_ref,
-            geometry_column,
-            property_columns,
+        _warn_on_explicit_null_crs(schema.empty_table(), geometry_column)
+        return convert_to_geojson_stream(
+            path,
             output_path=output_path,
+            rs=rs,
             precision=precision,
             write_bbox=write_bbox,
             id_field=id_field,
             description=description,
+            seq=seq,
             pretty=pretty,
-            source_crs=source_crs if needs_reproject else None,
-            repair_geometry=repair_geometry,
             verbose=verbose,
-        )
-        if count is not None:
-            success(f"Wrote {count:,} features to {output_path}")
-            return count
-
-        # Build and execute query
-        query = _build_feature_query(
-            source_ref,
-            geometry_column,
-            property_columns,
-            precision=precision,
-            write_bbox=write_bbox,
-            id_field=id_field,
-            source_crs=source_crs if needs_reproject else None,
+            keep_crs=keep_crs,
             repair_geometry=repair_geometry,
         )
-        debug(f"Query: {query}")
-
-        # File output: always write FeatureCollection
-        if output_path:
-            count = _stream_feature_collection(
-                con, query, description, pretty, output_path=output_path
-            )
-            success(f"Wrote {count:,} features to {output_path}")
-            return count
-
-        # Streaming output: GeoJSONSeq or FeatureCollection to stdout
-        if seq:
-            return _stream_to_stdout(con, query, rs, pretty)
-        else:
-            return _stream_feature_collection(con, query, description, pretty)
-
     finally:
-        con.close()
+        unlink_released_file(path)
 
 
 def convert_to_geojson(

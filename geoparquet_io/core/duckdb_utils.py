@@ -2522,8 +2522,11 @@ def variant_export_guard(
 
 
 def _zero_row_schema(con, sql: str, params=None) -> pa.Schema:
-    # read_all() drains the (empty) reader, so the connection is free afterwards.
-    return con.sql(sql, params=params).arrow().read_all().schema
+    with con.sql(sql, params=params).arrow() as reader:
+        schema = reader.schema
+        for _ in reader:
+            pass
+        return schema
 
 
 _VARIANT_TYPE_KEYWORD = re.compile(r"\bVARIANT\b")

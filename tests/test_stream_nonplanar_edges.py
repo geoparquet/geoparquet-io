@@ -259,7 +259,9 @@ def test_in_process_hops_keep_geometry_and_apply_an_explicit_unknown_crs(tmp_pat
         {"footprint": (2, geo_type), "boundary": (3, ga.wkb())},
     )
     emitted = []
-    monkeypatch.setattr(stream_io, "write_arrow_stream", emitted.append)
+    monkeypatch.setattr(
+        stream_io, "write_arrow_stream", lambda reader: emitted.append(reader.read_all())
+    )
     extract(str(source), "-", exclude_cols="boundary")
     first = emitted.pop()
     assert first.schema.field("footprint").type.edge_type == ga.EdgeType.SPHERICAL
@@ -271,7 +273,9 @@ def test_in_process_hops_keep_geometry_and_apply_an_explicit_unknown_crs(tmp_pat
     # sender's field still names a known one. Edge semantics stay spherical.
     geo["columns"]["footprint"]["crs"] = None
     incoming = first.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
-    monkeypatch.setattr(stream_io, "read_arrow_stream", lambda: incoming)
+    monkeypatch.setattr(
+        "geoparquet_io.core.streaming.read_arrow_stream", lambda: incoming.to_reader()
+    )
     extract("-", "-")
     output = emitted.pop()
     assert _storage(output.column("footprint")) == [_CAP]

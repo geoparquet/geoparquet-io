@@ -253,7 +253,7 @@ class TestNativeEquivalence:
         parquet = tmp_path / "in.parquet"
         _write_parquet(parquet, EQUIVALENCE_CASES["points_mixed_props"])
         table = pq.read_table(parquet)
-        monkeypatch.setattr(streaming, "read_arrow_stream", lambda: table)
+        monkeypatch.setattr(streaming, "read_arrow_stream", lambda: table.to_reader())
 
         native_fc, legacy_fc, native_count, legacy_count = _convert_both(
             Path("-"), tmp_path, monkeypatch
@@ -271,7 +271,7 @@ class TestNativeEquivalence:
         _write_parquet(parquet, EQUIVALENCE_CASES["points_mixed_props"])
         # Keep only the NULL-geometry row; both writers must drop it.
         table = pq.read_table(parquet).slice(2, 1)
-        monkeypatch.setattr(streaming, "read_arrow_stream", lambda: table)
+        monkeypatch.setattr(streaming, "read_arrow_stream", lambda: table.to_reader())
 
         native_fc, legacy_fc, native_count, legacy_count = _convert_both(
             Path("-"), tmp_path, monkeypatch
@@ -586,7 +586,9 @@ class TestFastPathPlumbing:
 
         parquet = tmp_path / "in.parquet"
         _write_parquet(parquet, EQUIVALENCE_CASES["points_mixed_props"])
-        monkeypatch.setattr(streaming, "read_arrow_stream", lambda: pq.read_table(parquet))
+        monkeypatch.setattr(
+            streaming, "read_arrow_stream", lambda: pq.read_table(parquet).to_reader()
+        )
 
         def _fake_maybe(*args, **kwargs):
             Path(kwargs["output_path"]).write_text('{"type":"FeatureCollection","features":[]}')

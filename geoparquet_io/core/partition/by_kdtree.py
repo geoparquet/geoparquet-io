@@ -25,7 +25,8 @@ from geoparquet_io.core.partition.common import (
     preview_partition,
     raise_if_no_rows,
 )
-from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
+from geoparquet_io.core.streaming import is_stdin
+from geoparquet_io.core.write_funnels import read_stdin_to_temp_file
 
 
 def _add_kdtree_column_to_temp(

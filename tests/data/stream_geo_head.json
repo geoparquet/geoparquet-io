@@ -1,0 +1,27 @@
+{
+  "filtered": {
+    "query": "SELECT i, ST_Point(i,i) geometry FROM range(8) t(i) WHERE i > 3",
+    "metadata": "{\"version\": \"1.1.0\", \"primary_column\": \"geometry\", \"columns\": {\"geometry\": {\"encoding\": \"WKB\"}}}",
+    "geo": "{\"version\": \"1.1.0\", \"primary_column\": \"geometry\", \"columns\": {\"geometry\": {\"encoding\": \"WKB\", \"geometry_types\": [\"Point\"], \"bbox\": [4.0, 4.0, 7.0, 7.0]}}}"
+  },
+  "repaired": {
+    "query": "SELECT ST_MakeValid(ST_GeomFromText('POLYGON((0 0,2 2,0 2,2 0,0 0))')) geometry",
+    "metadata": "{\"version\": \"1.1.0\", \"primary_column\": \"geometry\", \"columns\": {\"geometry\": {\"encoding\": \"WKB\"}}}",
+    "geo": "{\"version\": \"1.1.0\", \"primary_column\": \"geometry\", \"columns\": {\"geometry\": {\"encoding\": \"WKB\", \"geometry_types\": [\"MultiPolygon\"], \"bbox\": [0.0, 0.0, 2.0, 2.0]}}}"
+  },
+  "multi": {
+    "query": "SELECT ST_Point(1,2) geometry, ST_GeomFromText('LINESTRING(0 0,3 4)') secondary",
+    "metadata": "{\"version\": \"1.1.0\", \"primary_column\": \"geometry\", \"columns\": {\"geometry\": {\"encoding\": \"WKB\"}, \"secondary\": {\"encoding\": \"WKB\"}}}",
+    "geo": "{\"version\": \"1.1.0\", \"primary_column\": \"geometry\", \"columns\": {\"geometry\": {\"encoding\": \"WKB\", \"geometry_types\": [\"Point\"], \"bbox\": [1.0, 2.0, 1.0, 2.0]}, \"secondary\": {\"encoding\": \"WKB\", \"geometry_types\": [\"LineString\"], \"bbox\": [0.0, 0.0, 3.0, 4.0]}}}"
+  },
+  "native": {
+    "geo": "{\"version\": \"2.0.0\", \"primary_column\": \"geometry\", \"columns\": {\"geometry\": {\"encoding\": \"WKB\", \"geometry_types\": [\"Point Z\"], \"bbox\": [1.25, 2.5, 1.25, 2.5]}}}",
+    "metadata": "{\"version\": \"2.0.0\", \"primary_column\": \"geometry\", \"columns\": {\"geometry\": {\"encoding\": \"WKB\", \"geometry_types\": []}}}",
+    "query": "SELECT ST_GeomFromText('POINT Z (1.25 2.5 3.75)') geometry"
+  },
+  "empty": {
+    "query": "SELECT ST_Point(1,2) geometry WHERE false",
+    "metadata": "{\"version\": \"1.1.0\", \"primary_column\": \"geometry\", \"columns\": {\"geometry\": {\"encoding\": \"WKB\"}}}",
+    "geo": "{\"version\": \"1.1.0\", \"primary_column\": \"geometry\", \"columns\": {\"geometry\": {\"encoding\": \"WKB\", \"geometry_types\": []}}}"
+  }
+}

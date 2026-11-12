@@ -127,7 +127,9 @@ def test_convert_geojson_stdin(variant, fixtures, tmp_path):
 
     table = gpio.read(str(fixtures[variant])).to_arrow()
     out = tmp_path / "out.geojson"
-    with patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table):
+    with patch(
+        "geoparquet_io.core.streaming.read_arrow_stream", side_effect=lambda: table.to_reader()
+    ):
         _convert_from_stream(output_path=str(out))
     _assert_tokyo(*_geojson_centre(out.read_text()))
 
@@ -145,7 +147,9 @@ def test_convert_geojson_stdin_warns_once_on_an_explicit_null_crs(tmp_path, capl
 
     table = _explicit_null_crs_table()
     with (
-        patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table),
+        patch(
+            "geoparquet_io.core.streaming.read_arrow_stream", side_effect=lambda: table.to_reader()
+        ),
         caplog.at_level("WARNING"),
     ):
         _convert_from_stream(output_path=str(tmp_path / "a.geojson"), keep_crs=True)

@@ -56,7 +56,7 @@ def test_stream_export_refuses_before_emitting_output(
 ):
     """An IPC declaration has the same export contract as a Parquet declaration."""
     table = _table(carrier=carrier)
-    monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table)
+    monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table.to_reader())
     output = tmp_path / "out.geojson"
     with pytest.raises(GeoParquetError, match="non-planar"):
         convert_to_geojson(
@@ -155,7 +155,9 @@ def test_unused_nonplanar_secondary_does_not_block_planar_export(
     table = table.append_column("secondary", secondary)
     output = tmp_path / "out.geojson"
     if source_mode == "stream":
-        monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table)
+        monkeypatch.setattr(
+            "geoparquet_io.core.streaming.read_arrow_stream", lambda: table.to_reader()
+        )
         source = "-"
     else:
         path = tmp_path / "mixed.parquet"
@@ -178,7 +180,9 @@ def test_explicit_planar_block_overrides_native_edge_type(tmp_path, monkeypatch,
     table = table.replace_schema_metadata(_table(edges="planar").schema.metadata)
     output = tmp_path / "out.geojson"
     if source_mode == "stream":
-        monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table)
+        monkeypatch.setattr(
+            "geoparquet_io.core.streaming.read_arrow_stream", lambda: table.to_reader()
+        )
         source = "-"
     else:
         path = tmp_path / "override.parquet"
@@ -199,7 +203,7 @@ def test_metadata_only_geoarrow_field_is_refused(tmp_path, monkeypatch):
         },
     )
     table = table.cast(pa.schema([field]))
-    monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table)
+    monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table.to_reader())
     with pytest.raises(GeoParquetError, match="spherical"):
         convert_to_geojson("-", str(tmp_path / "out.geojson"))
 

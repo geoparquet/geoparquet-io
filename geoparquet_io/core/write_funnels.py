@@ -2351,3 +2351,147 @@ def write_aggregate_table(
         verbose=verbose,
         geo_bbox=geo_bbox,
     )
+
+
+def _stream_input_metadata(table: pa.Table) -> dict:
+    """Carry every input geometry's CRS and resolved edges before registration.
+
+    The I/O interface passes KV metadata alongside a DuckDB source, whose Arrow
+    field types are gone. Fill the description from those fields once, using
+    the same block-over-type edge authority as the table write and repair paths.
+    """
+    from geoparquet_io.core.arrow_geo_metadata import table_geometry_info
+    from geoparquet_io.core.geo_metadata import (
+        ArrowTableSource,
+        GeoBlockOptions,
+        compose_geo_block,
+        with_geo_block,
+    )
+    from geoparquet_io.core.geometry_detection import primary_geometry_column
+    from geoparquet_io.core.parquet_writer import version_to_describe
+
+    metadata = dict(table.schema.metadata or {})
+    geo = sanitized_carried_geo(metadata)
+    geometry_info = table_geometry_info(table, None, geo)
+    if geometry_info is None:
+        return metadata
+    inferred_columns = geometry_info["metadata"]
+    # The owner resolves over the geometry columns' own Arrow fields: a
+    # non-geometry column that merely has a standard name cannot win, and every
+    # inferred column is declared by the block or GeoArrow-typed, so one answers.
+    geometry_fields = pa.schema([table.schema.field(name) for name in inferred_columns])
+    primary = primary_geometry_column(geometry_fields, geo=geo)
+    # What each column's field says (its CRS, the "not known" geometry types),
+    # the primary's included, is ``geometry_info``; the data's edges, resolved
+    # block-over-type, are ``column_edges``. The composer lets whatever the
+    # carried block already says win. Edges are recorded, not mapped, for a
+    # description: the write at the other end of the pipe maps them to the
+    # output's version, so a 2.0 output keeps an ellipsoidal algorithm.
+    block = compose_geo_block(
+        ArrowTableSource(table),
+        GeoBlockOptions(
+            geometry_column=primary,
+            version=version_to_describe(table.schema),
+            describe=True,
+            covering=None,
+            column_edges=table_nonplanar_edges(table, primary, None),
+            geometry_info={
+                "secondary": [name for name in inferred_columns if name != primary],
+                "metadata": inferred_columns,
+            },
+        ),
+    )
+    return dict(with_geo_block(table, block).schema.metadata)
+
+
+def read_stdin_to_temp_file(verbose: bool = False) -> str:
+    """
+    Read Arrow IPC stream from stdin and write to a temporary parquet file.
+
+    This is a shared utility for commands that need file-based processing
+    but want to support stdin input. The caller is responsible for cleanup.
+
+    The stream's ``geo`` metadata is reconciled with the stream's own schema
+    before the temp file is written: entries naming a column the stream does not
+    carry are dropped, then any derived stat left out is computed from the rows.
+    gpio's own producers now carry ``geometry_types``, but a stream can come from
+    anywhere, and DuckDB refuses to open a Parquet file whose ``geo`` metadata
+    declares a geometry column without it — so closing both gaps here is what
+    keeps a pipe readable by the file-based command on the other end (#722).
+
+    Args:
+        verbose: Whether to print verbose output
+
+    Returns:
+        Path to the temporary parquet file. Caller must delete after use.
+    """
+    # Registers the GeoArrow extension types process-wide, so a geometry column
+    # arriving on the stream as `geoarrow.wkb` is written to the scratch file
+    # with its Parquet GEOMETRY/GEOGRAPHY logical type -- and the CRS inside it --
+    # rather than demoted to plain `binary`. That scratch file is the witness the
+    # write facade then reads the output's version and CRS from (#993), so it has
+    # to be lossless with respect to the stream. The registration is global, which
+    # is why it happens here rather than being relied on (#1006).
+    import geoarrow.pyarrow  # noqa: F401
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.file_utils import scratch_path
+
+    if verbose:
+        debug("Reading Arrow IPC stream from stdin...")
+
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, planar_view, sql_path
+    from geoparquet_io.core.file_utils import unlink_released_file
+    from geoparquet_io.core.geo_metadata import QuerySource, backfill_derived_stats
+    from geoparquet_io.core.parquet_footer import patch_or_rewrite
+    from geoparquet_io.core.streaming import (
+        STREAM_BATCH_ROWS,
+        _arrow_stream_batches,
+        read_arrow_stream,
+    )
+
+    reader = read_arrow_stream()
+    schema = reader.schema
+    metadata = prune_geo_metadata_to_columns(
+        _stream_input_metadata(schema.empty_table()), schema.names
+    )
+    # The carried block can be incomplete; DuckDB must be able to open the
+    # scratch file to fill it. Restore the exact block after deriving its gaps.
+    scratch_metadata = {k: v for k, v in metadata.items() if k not in (b"geo", "geo")}
+
+    def prepare(table):
+        view, _ = planar_view(table)
+        return view.replace_schema_metadata(scratch_metadata)
+
+    scratch_schema = prepare(schema.empty_table()).schema
+    writer_kwargs = without_geometry_dictionary(
+        {}, scratch_schema, sanitized_carried_geo(metadata).get("columns", {})
+    )
+    temp_path = scratch_path(prefix="gpio_stdin_")
+    try:
+        with reader, pq.ParquetWriter(temp_path, scratch_schema, **writer_kwargs) as writer:
+            chunks = (
+                prepare(pa.Table.from_batches([batch])) for batch in _arrow_stream_batches(reader)
+            )
+            for group in regroup(chunks, STREAM_BATCH_ROWS):
+                writer.write_table(group)
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
+        try:
+            metadata = backfill_derived_stats(
+                metadata,
+                QuerySource(con, f"SELECT * FROM read_parquet({sql_path(temp_path)})"),
+                verbose,
+            )
+        finally:
+            con.close()
+        geo = metadata.get(b"geo", metadata.get("geo"))
+        if geo is not None:
+            patch_or_rewrite(
+                temp_path,
+                {"geo": geo.decode() if isinstance(geo, bytes) else geo},
+                rewrite=rewrite_footer_kv,
+            )
+    except BaseException:
+        unlink_released_file(temp_path)
+        raise
+    return temp_path

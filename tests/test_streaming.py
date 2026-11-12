@@ -149,7 +149,7 @@ class TestArrowStreamIO:
         monkeypatch.setattr(sys, "stdin", mock_stdin)
         result = read_arrow_stream()
 
-        assert result.equals(sample_table)
+        assert result.read_all().equals(sample_table)
 
     def test_write_arrow_stream_to_stdout(self, sample_table, monkeypatch):
         """Test writing Arrow IPC to mocked stdout."""
@@ -169,7 +169,7 @@ class TestArrowStreamIO:
 
         assert result.equals(sample_table)
 
-    def test_read_arrow_stream_raises_on_invalid_data(self, monkeypatch):
+    def test_read_arrow_stream_raises_on_invalid_data(self, monkeypatch, tmp_path, sample_table):
         """Test that invalid data raises StreamingError."""
         invalid_buffer = io.BytesIO(b"not arrow ipc data")
 
@@ -180,6 +180,21 @@ class TestArrowStreamIO:
         monkeypatch.setattr(sys, "stdin", mock_stdin)
         with pytest.raises(StreamingError, match="Invalid Arrow IPC stream"):
             read_arrow_stream()
+
+        # A valid schema followed by a truncated batch fails during draining.
+        data = io.BytesIO()
+        with ipc.new_stream(data, sample_table.schema) as writer:
+            writer.write_table(sample_table)
+        mock_stdin.buffer = io.BytesIO(data.getvalue()[:-16])
+        from geoparquet_io.core.write_funnels import read_stdin_to_temp_file
+
+        scratch = tmp_path / "broken.parquet"
+        monkeypatch.setattr(
+            "geoparquet_io.core.file_utils.scratch_path", lambda **kwargs: str(scratch)
+        )
+        with pytest.raises(StreamingError, match="Invalid Arrow IPC stream"):
+            read_stdin_to_temp_file()
+        assert not scratch.exists()
 
 
 class TestMetadataHandling:
@@ -385,7 +400,7 @@ class TestStreamIO:
         with open_input("-") as (source, metadata, is_stream, con):
             assert is_stream is True
             # Source should be a view name for stream input
-            assert "input_stream" in source
+            assert con.sql(f"SELECT count(*) FROM {source}").fetchall() == [(2,)]
             assert metadata is not None
             assert con is not None
 
@@ -462,6 +477,9 @@ class TestStreamIO:
         assert read_table.num_rows == 2
 
         con.close()
+        from tests.stream_assertions import assert_stdout_arrow_memory_is_bounded
+
+        assert_stdout_arrow_memory_is_bounded(tmp_path, monkeypatch)
 
     def test_execute_transform_file_to_file(self, tmp_path, sample_geo_table, geo_metadata):
         """Test execute_transform with file input and file output."""
@@ -825,8 +843,10 @@ class TestReadStdinToTempFile:
     def _run(self, monkeypatch, table):
         from geoparquet_io.core import streaming as streaming_mod
 
-        monkeypatch.setattr(streaming_mod, "read_arrow_stream", lambda: table)
-        return streaming_mod.read_stdin_to_temp_file()
+        monkeypatch.setattr(streaming_mod, "read_arrow_stream", lambda: table.to_reader())
+        from geoparquet_io.core.write_funnels import read_stdin_to_temp_file
+
+        return read_stdin_to_temp_file()
 
     def test_missing_geometry_types_is_filled_in(self, monkeypatch):
         import os
