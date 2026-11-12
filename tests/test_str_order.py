@@ -587,3 +587,24 @@ def test_streaming_bbox_explicit_geometry(tmp_path, monkeypatch):
     assert pq.read_table(output)["bbox"].to_pylist() == [
         {"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}
     ]
+
+
+@pytest.mark.slow
+def test_hilbert_file_to_stdout_keeps_native_crs_and_edges(tmp_path, monkeypatch):
+    from geoparquet_io.core.crs_utils import crs_of
+    from geoparquet_io.core.edges import geoarrow_type_edges
+    from geoparquet_io.core.hilbert_order import hilbert_order
+
+    source = tmp_path / "geography.parquet"
+    import geoarrow.pyarrow as ga
+
+    from tests.native_geo_probes import write_native_geo_only
+
+    native_type = ga.wkb().with_crs("EPSG:4269").with_edge_type(ga.EdgeType.SPHERICAL)
+    write_native_geo_only(source, [(0, "point", _point_wkb(1, 2))], {"geometry": (2, native_type)})
+    output = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", mock.Mock(buffer=output, isatty=lambda: False))
+    hilbert_order(str(source), "-")
+    result = ipc.open_stream(output.getvalue()).read_all()
+    assert geoarrow_type_edges(result.schema.field("geometry").type) == "spherical"
+    assert "4269" in str(crs_of(result))

@@ -159,7 +159,7 @@ def run_sort(
     if should_stream_output(output_path):
         verbose = False
     context = (
-        open_input(input_path, verbose=verbose)
+        open_input(input_path, verbose=verbose, stream_output=should_stream_output(output_path))
         if streaming
         else _file_source(input_path, output_path, add_bbox_flag, verbose, write, command)
     )
