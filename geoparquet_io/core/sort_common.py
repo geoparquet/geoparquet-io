@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 import duckdb
 
-from geoparquet_io.core.add.bbox import _make_streaming_bbox_query
+from geoparquet_io.core.add.bbox import prepare_streaming_bbox
 from geoparquet_io.core.bbox_structure import get_bbox_advice
 from geoparquet_io.core.common import add_bbox, get_parquet_metadata
 from geoparquet_io.core.duckdb_utils import (
@@ -20,7 +20,7 @@ from geoparquet_io.core.file_utils import (
     scratch_path,
     unlink_released_file,
 )
-from geoparquet_io.core.geo_metadata import build_bbox_covering, sanitized_carried_geo
+from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import resolve_geometry_column
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
@@ -180,17 +180,16 @@ def run_sort(
                 geom_col = resolve_geometry_column(working, geometry_column, verbose=verbose)
             custom_metadata = None
             if streaming and add_bbox_flag:
-                bbox_query, carried, bbox_name = _make_streaming_bbox_query(
+                bbox_query, _, _, custom_metadata = prepare_streaming_bbox(
                     source,
                     con,
                     "bbox",
                     force=False,
                     geoparquet_version=write.geoparquet_version,
                     metadata=metadata,
+                    geometry_column=geom_col,
                 )
                 source = f"({bbox_query})"
-                if not carried:
-                    custom_metadata = {"covering": {"bbox": build_bbox_covering(bbox_name)}}
             query, reordered = build_query(con, source, geom_col, verbose, working)
             if streaming:
                 write_output(

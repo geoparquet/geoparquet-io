@@ -550,3 +550,40 @@ def test_sort_stdin_refuses_existing_output_before_reading(tmp_path, monkeypatch
     with pytest.raises(GeoParquetError, match="already exists"):
         sorts[kind]("-", str(output))
     assert output.read_bytes() == b"keep me"
+
+
+@pytest.mark.slow
+def test_streaming_bbox_native_multipolygon(tmp_path, monkeypatch):
+    import geoarrow.pyarrow as ga
+
+    table = ga.as_geoarrow(
+        pa.array(["MULTIPOLYGON (((0 0, 4 0, 4 3, 0 0)))"]), type=ga.multipolygon()
+    )
+    table = pa.table({"geometry": table})
+    stream = io.BytesIO()
+    with ipc.new_stream(stream, table.schema) as writer:
+        writer.write_table(table)
+    stream.seek(0)
+    monkeypatch.setattr(sys, "stdin", mock.Mock(buffer=stream, isatty=lambda: False))
+    output = tmp_path / "native.parquet"
+    str_order("-", str(output), add_bbox_flag=True, geoparquet_version="1.1-geoarrow")
+    assert pq.read_table(output)["bbox"].to_pylist() == [
+        {"xmin": 0.0, "ymin": 0.0, "xmax": 4.0, "ymax": 3.0}
+    ]
+
+
+@pytest.mark.slow
+def test_streaming_bbox_explicit_geometry(tmp_path, monkeypatch):
+    table = (
+        _point_table([(0, 1, 2)]).rename_columns(["id", "footprint"]).replace_schema_metadata(None)
+    )
+    stream = io.BytesIO()
+    with ipc.new_stream(stream, table.schema) as writer:
+        writer.write_table(table)
+    stream.seek(0)
+    monkeypatch.setattr(sys, "stdin", mock.Mock(buffer=stream, isatty=lambda: False))
+    output = tmp_path / "explicit.parquet"
+    str_order("-", str(output), geometry_column="footprint", add_bbox_flag=True)
+    assert pq.read_table(output)["bbox"].to_pylist() == [
+        {"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}
+    ]

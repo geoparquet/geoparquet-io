@@ -1239,21 +1239,21 @@ class TestAddBboxMetadataPreservesFileProperties:
 
 
 class TestStreamingGeometryColumnFallback:
-    """`_make_streaming_bbox_query` on a source with no geometry column refuses it
+    """`prepare_streaming_bbox` on a source with no geometry column refuses it
     with the shared error rather than guessing the literal 'geometry' (#1367).
     """
 
     def test_refuses_a_source_with_no_geometry_column(self):
         import duckdb
 
-        from geoparquet_io.core.add.bbox import _make_streaming_bbox_query
+        from geoparquet_io.core.add.bbox import prepare_streaming_bbox
         from geoparquet_io.core.geometry_detection import GeometryColumnNotFoundError
 
         con = duckdb.connect()
         con.execute("CREATE TABLE t AS SELECT 1 AS id, 'x' AS label")
 
         with pytest.raises(GeometryColumnNotFoundError):
-            _make_streaming_bbox_query("t", con, "bbox", force=False)
+            prepare_streaming_bbox("t", con, "bbox", force=False)
 
 
 class TestPreviewCopyWithoutOutputPath:
