@@ -741,3 +741,68 @@ def test_remote_covering_output_refusal_names_fix_output():
 
     with pytest.raises(GeoParquetError, match="--fix-output"):
         fix_bbox_metadata("local.parquet", "s3://bucket/fixed.parquet")
+
+
+def test_all_fixes_share_one_data_rewrite(tmp_path):
+    """Keep the staged chain's exact bytes while avoiding intermediate data writes."""
+    import json
+
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from scripts.profile_command import CallSpies
+
+    source = tmp_path / "source.parquet"
+    with get_duckdb_connection(load_spatial=True) as con:
+        table = (
+            con.sql(
+                "SELECT i AS id, CASE WHEN i % 13 = 0 THEN NULL ELSE i % 5 END AS value, "
+                "ST_AsWKB(CASE WHEN i % 113 = 0 THEN NULL "
+                "WHEN i % 127 = 0 THEN ST_GeomFromText('POINT EMPTY') "
+                "ELSE ST_Point(((i * 7919) % 10001) / 100.0, i % 7) END) AS geometry "
+                "FROM range(10001) t(i)"
+            )
+            .arrow()
+            .read_all()
+        )
+    for version in ("1.0", "1.1"):
+        geo = {
+            "version": version + ".0",
+            "primary_column": "geometry",
+            "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+        }
+        pq.write_table(
+            table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}),
+            source,
+            compression="SNAPPY",
+            row_group_size=1024,
+        )
+        bbox = tmp_path / "bbox.parquet"
+        sorted_file = tmp_path / "sorted.parquet"
+        baseline = tmp_path / "baseline.parquet"
+        fix_bbox_column(str(source), str(bbox))
+        fix_bbox_metadata(str(bbox), str(bbox))
+        fix_spatial_ordering(str(bbox), str(sorted_file))
+        fix_compression(str(sorted_file), str(baseline), geoparquet_version=version)
+        checks = {
+            "bbox": {
+                "needs_bbox_column": True,
+                "needs_bbox_metadata": True,
+                "version": version + ".0",
+                "file_type": "geoparquet_v1",
+            },
+            "spatial": {"fix_available": True},
+            "compression": {"fix_available": True},
+            "row_groups": {"fix_available": True},
+        }
+        output = tmp_path / "output.parquet"
+        with CallSpies() as counters:
+            result = check_fixes.apply_all_fixes(str(source), str(output), checks)
+        assert output.read_bytes() == baseline.read_bytes()
+        assert counters.counts["parquet_writes"] == 1
+        assert counters.counts["arrow_read_all"] == (2 if version == "1.1" else 0)
+        assert result["fixes_applied"] == [
+            "Added bbox column",
+            "Added bbox covering metadata",
+            "Applied Hilbert spatial ordering",
+            "Optimized compression (ZSTD)",
+            "Optimized row groups (49,152 rows/group)",
+        ]

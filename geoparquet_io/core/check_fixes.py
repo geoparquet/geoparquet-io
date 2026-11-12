@@ -7,13 +7,16 @@ import shutil
 
 from geoparquet_io.core.add.bbox import add_bbox_column
 from geoparquet_io.core.add.bbox_metadata import add_bbox_metadata
-from geoparquet_io.core.bbox_structure import bbox_covering_column_for
+from geoparquet_io.core.bbox_structure import bbox_covering_column_for, resolve_bbox_name
 from geoparquet_io.core.common import get_parquet_metadata
-from geoparquet_io.core.duckdb_metadata import get_file_metadata
+from geoparquet_io.core.duckdb_metadata import get_file_metadata, get_usable_column_names
 from geoparquet_io.core.duckdb_utils import (
+    computed_column_query,
     file_relation,
     file_schema,
+    get_duckdb_connection,
     quote_identifier,
+    sql_path,
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import GeoParquetError
@@ -26,15 +29,24 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
+    QuerySource,
     SchemaSource,
+    bbox_struct_sql,
     bboxless_covering_columns,
+    bounds_of,
+    build_bbox_covering,
     compose_geo_block,
     covering_lacks_bbox,
     geo_key_value,
     sanitized_carried_geo,
 )
-from geoparquet_io.core.geometry_detection import primary_geometry_column, require_geometry_column
-from geoparquet_io.core.hilbert_order import hilbert_order
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    require_geometry_column,
+    resolve_geometry_read,
+)
+from geoparquet_io.core.geometry_repair import warn_planar_math_for_file
+from geoparquet_io.core.hilbert_order import hilbert_order, hilbert_order_query
 from geoparquet_io.core.logging_config import debug, info, progress
 from geoparquet_io.core.parquet_footer import patch_or_rewrite
 from geoparquet_io.core.parquet_writer import (
@@ -43,10 +55,11 @@ from geoparquet_io.core.parquet_writer import (
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_rewrite,
 )
-from geoparquet_io.core.remote import RemoteOptions, is_remote_url
+from geoparquet_io.core.remote import RemoteOptions, is_remote_url, needs_httpfs
 from geoparquet_io.core.write_funnels import (
     rewrite_file_through_funnel,
     rewrite_footer_kv,
+    write_parquet_with_metadata,
 )
 
 # Every fix below writes DEFAULT_ROW_GROUP_ROWS rows per row group.
@@ -620,6 +633,46 @@ def _apply_spatial_ordering_fix(
     return temp_file, ["Applied Hilbert spatial ordering"]
 
 
+@uses_aws_profile
+def _fix_bbox_and_spatial_ordering(parquet_file, output_file, verbose, profile, geoparquet_version):
+    """Compose the bbox projection and Hilbert sort before their single write."""
+    warn_planar_math_for_file("add_bbox", parquet_file)
+    metadata, _ = get_parquet_metadata(parquet_file, verbose)
+    raw_url = resolve_file_url(parquet_file, verbose)
+    primary = require_geometry_column(primary_geometry_column(parquet_file), parquet_file)
+    # Match the final writer: parallel bounds scans retain extra geometry buffers.
+    with contextlib.closing(
+        get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(raw_url), threads=1)
+    ) as con:
+        read = resolve_geometry_read(con, raw_url, primary)
+        version = resolve_output_geoparquet_version(None, input_file=parquet_file)
+        bbox_name = resolve_bbox_name(
+            get_usable_column_names(raw_url, con), version, requested="bbox"
+        )
+        source = sql_path(raw_url)
+        ordered = hilbert_order_query(
+            source,
+            read.expr,
+            bounds_of(QuerySource(con, f"SELECT * FROM {source}", metadata), primary),
+        )
+        query = computed_column_query(
+            f"({ordered})", bbox_name, bbox_struct_sql(read.shape_expr, primary, read)
+        )
+        with atomic_write(output_file) as destination:
+            write_parquet_with_metadata(
+                con,
+                query,
+                destination,
+                input_file=parquet_file,
+                original_metadata=metadata,
+                custom_metadata={"covering": {"bbox": build_bbox_covering(bbox_name)}},
+                row_group_rows=DEFAULT_ROW_GROUP_ROWS,
+                verbose=verbose,
+                profile=profile,
+                geoparquet_version=geoparquet_version,
+            )
+
+
 def _place_result(result_file: str, output_file: str) -> None:
     """Leave the finished file at *output_file* without consuming the user's input.
 
@@ -642,7 +695,9 @@ def _place_result(result_file: str, output_file: str) -> None:
         shutil.copy2(result_file, destination)
 
 
-def _apply_compression_fix(check_results, current_file, output_file, gp_version, verbose, profile):
+def _apply_compression_fix(
+    check_results, current_file, output_file, gp_version, verbose, profile, *, rewritten=False
+):
     """Handle compression and row group optimization.
 
     Returns:
@@ -663,7 +718,10 @@ def _apply_compression_fix(check_results, current_file, output_file, gp_version,
     if verbose:
         progress("\n[4/4] Optimizing compression and row groups...")
 
-    fix_compression(current_file, output_file, verbose, profile, gp_version)
+    if rewritten:
+        _place_result(current_file, output_file)
+    else:
+        fix_compression(current_file, output_file, verbose, profile, gp_version)
 
     fixes = []
     if needs_compression:
@@ -693,23 +751,49 @@ def _run_fix_chain(
     )
     fixes_applied.extend(fixes)
 
-    # Step 1: Handle bbox column (add or remove)
-    current_file, fixes = _apply_bbox_column_fix(
-        bbox_result, current_file, scratch, verbose, profile, directory
+    combined = (
+        bbox_result.get("needs_bbox_column", False)
+        and not bbox_result.get("needs_bbox_removal", False)
+        and (check_results.get("spatial") or {}).get("fix_available", False)
     )
-    fixes_applied.extend(fixes)
+    if combined:
+        if verbose:
+            progress("\n[1-3/4] Adding bbox covering and applying Hilbert ordering...")
+        destination = scratch.enter_context(scratch_file(directory=directory))
+        final_version = (
+            geoparquet_version
+            if any(
+                (check_results.get(key) or {}).get("fix_available", False)
+                for key in ("compression", "row_groups")
+            )
+            else None
+        )
+        _fix_bbox_and_spatial_ordering(current_file, destination, verbose, profile, final_version)
+        current_file = destination
+        fixes_applied.append("Added bbox column")
+        if not bbox_result.get("has_bbox_metadata", False) or bbox_result.get(
+            "needs_bbox_metadata", False
+        ):
+            fixes_applied.append("Added bbox covering metadata")
+        fixes_applied.append("Applied Hilbert spatial ordering")
+    else:
+        # Step 1: Handle bbox column (add or remove)
+        current_file, fixes = _apply_bbox_column_fix(
+            bbox_result, current_file, scratch, verbose, profile, directory
+        )
+        fixes_applied.extend(fixes)
 
-    # Step 2: Handle bbox metadata
-    current_file, fixes = _apply_bbox_metadata_fix(
-        bbox_result, current_file, parquet_file, scratch, verbose, profile, directory
-    )
-    fixes_applied.extend(fixes)
+        # Step 2: Handle bbox metadata
+        current_file, fixes = _apply_bbox_metadata_fix(
+            bbox_result, current_file, parquet_file, scratch, verbose, profile, directory
+        )
+        fixes_applied.extend(fixes)
 
-    # Step 3: Apply Hilbert sorting
-    current_file, fixes = _apply_spatial_ordering_fix(
-        check_results, current_file, scratch, verbose, profile, directory
-    )
-    fixes_applied.extend(fixes)
+        # Step 3: Apply Hilbert sorting
+        current_file, fixes = _apply_spatial_ordering_fix(
+            check_results, current_file, scratch, verbose, profile, directory
+        )
+        fixes_applied.extend(fixes)
 
     # Step 4: Fix compression + row groups
     fixes = _apply_compression_fix(
@@ -719,6 +803,7 @@ def _run_fix_chain(
         geoparquet_version,
         verbose,
         profile,
+        rewritten=combined,
     )
     fixes_applied.extend(fixes)
 

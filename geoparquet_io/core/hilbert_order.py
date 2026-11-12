@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from itertools import pairwise
 
 import duckdb
@@ -508,6 +509,28 @@ def _hilbert_order_streaming(
             success(f"Successfully reordered data using Hilbert curve to: {output_path}")
 
 
+def hilbert_order_query(source: str, key_expr: str, bounds: Sequence[float] | None) -> str:
+    """Build the file sort's SQL over a caller's SQL source, keeping nulls last."""
+    if not bounds:
+        return f"SELECT * FROM {source}"
+    xmin, ymin, xmax, ymax = bounds
+    return f"""
+        WITH non_empty AS (
+            SELECT * FROM {source}
+            WHERE {key_expr} IS NOT NULL AND NOT ST_IsEmpty({key_expr})
+            ORDER BY ST_Hilbert({key_expr},
+                ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax})))
+        ),
+        empty_or_null AS (
+            SELECT * FROM {source}
+            WHERE {key_expr} IS NULL OR ST_IsEmpty({key_expr})
+        )
+        SELECT * FROM non_empty
+        UNION ALL
+        SELECT * FROM empty_or_null
+    """
+
+
 @uses_aws_profile
 def _hilbert_order_file_based(
     input_parquet: str,
@@ -600,21 +623,7 @@ def _hilbert_order_file_based(
 
         # Build Hilbert ordering query with empty geometry handling
         # Non-empty geometries are ordered by Hilbert curve, empty/null appended at end
-        order_query = f"""
-            WITH non_empty AS (
-                SELECT * FROM {sql_path(working_url)}
-                WHERE {key_expr} IS NOT NULL AND NOT ST_IsEmpty({key_expr})
-                ORDER BY ST_Hilbert({key_expr},
-                    ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax})))
-            ),
-            empty_or_null AS (
-                SELECT * FROM {sql_path(working_url)}
-                WHERE {key_expr} IS NULL OR ST_IsEmpty({key_expr})
-            )
-            SELECT * FROM non_empty
-            UNION ALL
-            SELECT * FROM empty_or_null
-        """
+        order_query = hilbert_order_query(sql_path(working_url), key_expr, bounds)
 
         try:
             write_parquet_with_metadata(

@@ -50,32 +50,16 @@ class TestApplySpatialOrderingFix:
     """Tests for _apply_spatial_ordering_fix function."""
 
     def test_no_spatial_fix_needed(self):
-        """Test when no spatial ordering fix is needed."""
+        """Missing and explicitly disabled spatial results both leave the input alone."""
         from geoparquet_io.core.check_fixes import _apply_spatial_ordering_fix
 
-        check_results = {"spatial": {"fix_available": False}}
-        temp_files = contextlib.ExitStack()
-
-        current_file, fixes = _apply_spatial_ordering_fix(
-            check_results, "/some/file.parquet", temp_files, False, None
-        )
-
-        assert current_file == "/some/file.parquet"
-        assert fixes == []
-
-    def test_missing_spatial_result(self):
-        """Test when spatial result is missing."""
-        from geoparquet_io.core.check_fixes import _apply_spatial_ordering_fix
-
-        check_results = {}
-        temp_files = contextlib.ExitStack()
-
-        current_file, fixes = _apply_spatial_ordering_fix(
-            check_results, "/some/file.parquet", temp_files, False, None
-        )
-
-        assert current_file == "/some/file.parquet"
-        assert fixes == []
+        for check_results in ({}, {"spatial": {"fix_available": False}}):
+            with contextlib.ExitStack() as scratch:
+                current_file, fixes = _apply_spatial_ordering_fix(
+                    check_results, "/some/file.parquet", scratch, False, None
+                )
+            assert current_file == "/some/file.parquet"
+            assert fixes == []
 
 
 class TestApplyCompressionFix:
