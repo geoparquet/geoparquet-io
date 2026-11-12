@@ -191,7 +191,7 @@ def _file_stream_metadata(con, source, path, schema, metadata) -> dict:
     return _stream_input_metadata(described.replace_schema_metadata(metadata))
 
 
-def _stream_input_metadata(table: pa.Table) -> dict:
+def _stream_input_metadata(table: pa.Table, *, version: str | None = None) -> dict:
     """Carry every input geometry's CRS and resolved edges before registration.
 
     The I/O interface passes KV metadata alongside a DuckDB source, whose Arrow
@@ -219,7 +219,7 @@ def _stream_input_metadata(table: pa.Table) -> dict:
         ArrowTableSource(table),
         GeoBlockOptions(
             geometry_column=primary,
-            version=version_to_describe(table.schema),
+            version=version or version_to_describe(table.schema),
             describe=True,
             covering=None,
             column_edges=table_nonplanar_edges(table, primary, None),
@@ -363,6 +363,11 @@ def _write_stream_output(
     # pruning has just emptied of its bbox member -- or one declared over a
     # struct the spec forbids -- is no more writable here than there (#1172),
     # and a 1.0 input upgrades and declares its bbox column as a file does.
+    if not carried:
+        original_metadata = _stream_input_metadata(
+            table.replace_schema_metadata(original_metadata),
+            version=resolve_output_geoparquet_version(None, original_metadata=original_metadata),
+        )
     if original_metadata:
         original_metadata = prune_geo_metadata_to_columns(
             original_metadata, table.column_names, repoint_primary=True

@@ -16,6 +16,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.geometry_detection import (
+    create_geometry_view,
     register_geometry_column,
     resolve_geometry_column,
     resolve_geometry_read,
@@ -274,6 +275,7 @@ def hilbert_order(
 
 
 def _hilbert_query(con, source, geom_col, verbose, working):
+    source = create_geometry_view(con, source, geom_col)
     key_expr = resolve_geometry_read(con, source, geom_col, relation=True).expr
     (empty_count,) = fetch_one(
         con.execute(

@@ -616,6 +616,26 @@ class TestStreamIO:
             )
         pq.write_table(table, source)
 
+        bare = collision.rename_columns(["id", "footprint", "secondary", "bbox"])
+        bare = bare.drop(["secondary"]).replace_schema_metadata(None)
+        for transform in (hilbert_order, str_order):
+            for explicit in (None, "footprint"):
+                stream_table = bare if explicit else bare.rename_columns(["id", "geometry", "bbox"])
+                monkeypatch.setattr(
+                    "geoparquet_io.core.stream_io.read_arrow_stream",
+                    lambda stream_table=stream_table: stream_table,
+                )
+                captured.clear()
+                kwargs = {"geometry_column": explicit, "add_bbox_flag": True}
+                transform("-", str(dest), overwrite=True, **kwargs)
+                transform("-", "-", **kwargs)
+                expected = read_raw_geo(pq.read_metadata(dest).metadata).value
+                actual = read_raw_geo(captured[0].schema.metadata).value
+                assert expected is not None, (transform.__name__, explicit)
+                assert actual == expected, (transform.__name__, explicit)
+                geom = explicit or "geometry"
+                assert actual["columns"][geom]["covering"]["bbox"]["xmin"] == ["bbox_1", "xmin"]
+
         from geoparquet_io.api import ops
         from geoparquet_io.api.table import Table
 
