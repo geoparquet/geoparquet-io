@@ -8,6 +8,7 @@ boundary datasets with hierarchical level support. Datasets can be local files
 or remote URLs, with automatic caching and error handling.
 """
 
+import hashlib
 import os
 import time
 from abc import ABC, abstractmethod
@@ -20,6 +21,7 @@ import duckdb
 from geoparquet_io.core import duckdb_utils
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import reproject_to_source_sql, transform_geom_sql
+from geoparquet_io.core.duckdb_metadata import get_per_row_group_bbox_stats
 from geoparquet_io.core.duckdb_utils import (
     build_spatial_join_condition,
     build_spatial_join_query,
@@ -36,7 +38,12 @@ from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     InvalidParameterError,
 )
-from geoparquet_io.core.file_utils import atomic_write
+from geoparquet_io.core.file_utils import (
+    _sweep_orphaned_staging_dirs,
+    atomic_write,
+    glob_matches,
+    has_glob_pattern,
+)
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.memory_limits import open_bounded_connection, scoped_write_memory_limit
@@ -302,14 +309,14 @@ def cache_spill_dirs() -> list[Path]:
 
 def clear_cache(confirm: bool = False) -> dict | None:
     """
-    Clear all cached admin datasets, and any spill directories left in the cache.
+    Clear level caches, completed object parts, and abandoned cache scratch.
 
     Args:
         confirm: If True, actually delete files. If False, return without action.
 
     Returns:
         Dictionary with deletion stats: ``files_deleted``/``bytes_freed`` for the
-        cached datasets, ``spill_dirs_deleted``/``spill_bytes_freed`` for the
+        cached datasets and object parts, ``spill_dirs_deleted``/``spill_bytes_freed`` for the
         leftovers of interrupted runs. The two are counted apart because a spill
         directory is not a cached dataset: it is a bug's residue, and saying so
         is the point of reporting it at all.
@@ -333,13 +340,24 @@ def clear_cache(confirm: bool = False) -> dict | None:
     bytes_freed = 0
 
     # Only delete .parquet files
-    for cache_file in cache_dir.glob("*.parquet"):
+    cache_files = list(cache_dir.glob("*.parquet"))
+    object_dirs = list(cache_dir.glob(".overture-*-parts"))
+    for object_dir in object_dirs:
+        if object_dir.is_dir() and not object_dir.is_symlink():
+            cache_files.extend(object_dir.glob("*.parquet"))
+            _sweep_orphaned_staging_dirs(object_dir)
+    for cache_file in cache_files:
         try:
             bytes_freed += cache_file.stat().st_size
             cache_file.unlink()
             files_deleted += 1
         except OSError:
             pass  # Ignore deletion errors
+    for object_dir in object_dirs:
+        try:
+            object_dir.rmdir()
+        except OSError:
+            pass  # A live stage or another writer still owns the directory.
 
     # ...and the spill directories an interrupted run left behind, which the
     # ``*.parquet`` glob above reported as nothing and deleted nothing of. Price
@@ -347,6 +365,7 @@ def clear_cache(confirm: bool = False) -> dict | None:
     # what the sweep actually removed is counted as freed.
     sizes = {path: spill_dir_bytes([path]) for path in cache_spill_dirs()}
     removed = sweep_orphaned_spill_dirs(cache_dir)
+    _sweep_orphaned_staging_dirs(cache_dir)
 
     return {
         "files_deleted": files_deleted,
@@ -1144,9 +1163,36 @@ class OvertureAdminDataset(AdminDataset):
                 # A global cache key must never hold only one command's extent.
                 # Read the bounded relation directly, retaining cache simplification.
                 source = self.get_default_source()
-                relation = f"({self._build_level_cache_query(level, source, extent)})"
-                return relation, relation
+                if self._extent_prunes_row_groups(source, extent):
+                    relation = f"({self._build_level_cache_query(level, source, extent)})"
+                    return relation, relation
         return super()._source_for_join(level, no_cache, extent)
+
+    def _extent_prunes_row_groups(
+        self, source: str, extent: tuple[float, float, float, float]
+    ) -> bool:
+        """Bounded reads win only if the footer proves some groups can be skipped.
+
+        With no pruning, each invocation would scan the whole level again;
+        build the reusable cache instead. Missing statistics prove no savings.
+        """
+        xmin, xmax, ymin, ymax = extent
+        with s3_config_scope(self.get_s3_config()):
+            con = get_duckdb_connection(load_httpfs=True)
+            try:
+                objects = glob_matches(source) if has_glob_pattern(source) else [source]
+                for obj in objects:
+                    if any(
+                        row["xmin"] > xmax
+                        or row["xmax"] < xmin
+                        or row["ymin"] > ymax
+                        or row["ymax"] < ymin
+                        for row in get_per_row_group_bbox_stats(obj, con=con)
+                    ):
+                        return True
+                return False
+            finally:
+                con.close()
 
     def _download_per_level_caches(self, levels: Iterable[str] | None = None) -> None:
         """Download only the requested level caches (all levels for the base fallback).
@@ -1175,6 +1221,7 @@ class OvertureAdminDataset(AdminDataset):
                 load_spatial=True, load_httpfs=True, temp_directory=spill_directory(cache_dir)
             )
             version = self.get_version()
+            objects = None
             try:
                 for level in self.get_available_levels() if levels is None else levels:
                     cache_path = self.get_cached_path_for_level(level)
@@ -1185,11 +1232,35 @@ class OvertureAdminDataset(AdminDataset):
                     if cache_path.exists() and cache_path.stat().st_size > 0:
                         continue
 
-                    query = self._build_level_cache_query(level, source)
+                    _sweep_orphaned_staging_dirs(cache_dir)
+                    if objects is None:
+                        objects = glob_matches(source) if has_glob_pattern(source) else [source]
+                        if not objects:
+                            raise FileNotFoundGeoParquetError(source, "Overture source objects")
+                    query = self._cache_source_objects(con, level, objects, cache_path)
                     self._copy_to_cache(con, query, cache_path)
                     info(f"Cached {level} dataset at: {cache_path}")
             finally:
                 con.close()
+
+    def _cache_source_objects(
+        self, con: duckdb.DuckDBPyConnection, level: str, objects: list[str], cache_path: Path
+    ) -> str:
+        """Keep each completed object, then assemble the level in source order."""
+        if len(objects) == 1:
+            return self._build_level_cache_query(level, objects[0])
+        parts_dir = cache_path.parent / f".{cache_path.stem}-parts"
+        parts_dir.mkdir(exist_ok=True)
+        _sweep_orphaned_staging_dirs(parts_dir)
+        parts = []
+        for index, obj in enumerate(objects):
+            # Immutable release object identity survives a changed listing order.
+            part = parts_dir / f"{hashlib.sha256(obj.encode()).hexdigest()}.parquet"
+            if not (part.exists() and part.stat().st_size > 0):
+                info(f"Caching {level} object {index + 1}/{len(objects)}...")
+                self._copy_to_cache(con, self._build_level_cache_query(level, obj), part)
+            parts.append(sql_path(part))
+        return f"SELECT * FROM read_parquet([{', '.join(parts)}])"
 
     def _download_to_cache(self, cache_path: Path) -> Path:
         """Download per-level caches (called by base class fallback)."""

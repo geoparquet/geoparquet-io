@@ -1243,6 +1243,15 @@ def orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
     Legacy leaves without a marker retain the conservative pid check. Windows
     has no fcntl and always uses that check.
     """
+    try:
+        with _spill_base_lock(base_dir):
+            return _orphaned_spill_dirs(base_dir)
+    except OSError:
+        return []
+
+
+def _orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
+    """Probe markers only with the base lock held, including read-only listings."""
     found: list[str] = []
     try:
         entries = list(os.scandir(base_dir))
@@ -1290,27 +1299,16 @@ def sweep_orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
     Returns:
         The paths actually removed, for callers that report what they freed.
     """
-    removed: list[str] = []
-    try:
-        with _spill_base_lock(base_dir):
-            for path in orphaned_spill_dirs(base_dir):
-                marker = None
-                try:
-                    # Reacquire and hold through removal: listing is a snapshot.
-                    marker = _spill_lock(path)
-                    match = _SPILL_DIR_RE.match(os.path.basename(path))
-                    if marker is None and (match is None or _process_is_alive(int(match[1]))):
-                        continue
-                    shutil.rmtree(path)
-                except OSError:
-                    continue
-                finally:
-                    if marker is not None:
-                        marker.close()
-                removed.append(path)
-    except OSError:
-        pass  # Missing/read-only base: sweeping must never fail the caller.
-    return removed
+    from geoparquet_io.core.file_utils import _sweep_orphaned_dirs
+
+    def candidates() -> Iterator[tuple[str, int]]:
+        return (
+            (path, int(match[1]))
+            for path in _orphaned_spill_dirs(base_dir)
+            if (match := _SPILL_DIR_RE.match(os.path.basename(path)))
+        )
+
+    return _sweep_orphaned_dirs(base_dir, candidates, 0)
 
 
 def spill_directory(base_dir: str | os.PathLike | None = None) -> str:

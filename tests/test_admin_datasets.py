@@ -1741,55 +1741,82 @@ class TestDownloadPerLevelCachesHousekeeping:
         mock_con.execute.assert_not_called()
         mock_con.close.assert_called_once()
 
-    def test_requested_level_retry_preserves_completed_cache(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock
+    def test_requested_level_retry_preserves_completed_cache_and_objects(
+        self, tmp_path, monkeypatch
+    ):
+        """A broken second object must not make the next attempt read the first again."""
+        import duckdb
 
         from geoparquet_io.core import admin_datasets
+        from geoparquet_io.core.duckdb_utils import sql_literal
 
-        monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
-        mock_con = MagicMock()
-        monkeypatch.setattr(admin_datasets, "get_duckdb_connection", lambda **kwargs: mock_con)
+        source = tmp_path / "source"
+        source.mkdir()
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: cache)
         dataset = OvertureAdminDataset()
-        monkeypatch.setattr(dataset, "get_version", lambda: "test")
-        monkeypatch.setattr(dataset, "get_default_source", lambda: "s3://stub/divisions")
-        fresh = {
-            level: dataset.get_cached_path_for_level(level)
-            for level in dataset.get_available_levels()
-        }
-        # A cold country request must not fetch region too (#1149). A failed
-        # region COPY must leave neither a published partial nor discard country.
-        copies = []
-        fail_region = False
+        monkeypatch.setattr(dataset, "get_version", lambda: "fixture")
+        monkeypatch.setattr(dataset, "get_default_source", lambda: str(source / "part-*.parquet"))
+        con = get_duckdb_connection(load_spatial=True)
+        try:
 
-        def copy(query):
-            if not query.startswith("COPY"):
-                return
-            level = "region" if "region" in query.split(" TO ")[0] else "country"
-            copies.append(level)
-            destination = Path(re.search(r" TO '([^']+)'", query)[1])
-            destination.write_bytes(b"partial" if fail_region else b"complete")
-            if fail_region:
-                raise OSError("object store interrupted")
+            def write_part(name, country):
+                con.execute(
+                    f"COPY (SELECT ST_Point(0,0) geometry, {sql_literal(country)} country, "
+                    f"{sql_literal(country + '-X')} region, subtype, true is_land, "
+                    "{'xmin': 0.0, 'xmax': 0.0, 'ymin': 0.0, 'ymax': 0.0} bbox "
+                    "FROM (VALUES ('country'), ('region')) t(subtype)) "
+                    f"TO {sql_path(source / name)} (FORMAT PARQUET)"
+                )
 
-        monkeypatch.setattr(admin_datasets, "scoped_write_memory_limit", lambda *a: nullcontext())
-        mock_con.execute.side_effect = copy
-        dataset.get_source_for_level("country")
-        assert copies == ["country"]
-        assert fresh["country"].read_bytes() == b"complete"
-        assert not fresh["region"].exists()
+            write_part("part-a.parquet", "US")
+            (source / "part-b.parquet").write_bytes(b"PAR1broken")
+            reads = []
+            original = dataset._build_level_cache_query
 
-        fail_region = True
-        with pytest.raises(OSError, match="interrupted"):
-            dataset.get_source_for_level("region")
-        assert fresh["country"].read_bytes() == b"complete"
-        assert not fresh["region"].exists()
-        assert not list(tmp_path.glob(".gpio-stage-*"))
+            def query(level, path, extent=None):
+                reads.append(path)
+                return original(level, path, extent)
 
-        fail_region = False
-        dataset.get_source_for_level("region")
-        dataset.get_source_for_level("country")
-        assert copies == ["country", "region", "region"]
-        assert fresh["region"].read_bytes() == b"complete"
+            monkeypatch.setattr(dataset, "_build_level_cache_query", query)
+            with pytest.raises(duckdb.Error):
+                dataset.get_source_for_level("country")
+            assert not dataset.get_cached_path_for_level("country").exists()
+            completed = list(cache.rglob("*.parquet"))
+            assert len(completed) == 1
+            stamp = completed[0].stat().st_mtime_ns
+            assert not list(cache.rglob(".gpio-stage-*"))
+            (source / "part-b.parquet").unlink()
+            write_part("part-b.parquet", "CA")
+            final = dataset.get_source_for_level("country")
+            assert completed[0].stat().st_mtime_ns == stamp
+            assert reads.count(str(source / "part-a.parquet")) == 1
+            assert reads.count(str(source / "part-b.parquet")) == 2
+            assert con.execute(
+                f"SELECT country FROM {sql_path(final)} ORDER BY country"
+            ).fetchall() == [("CA",), ("US",)]
+            assert not dataset.get_cached_path_for_level("region").exists()
+            country_bytes = Path(final).read_bytes()
+            (source / "part-b.parquet").write_bytes(b"PAR1broken")
+            with pytest.raises(duckdb.Error):
+                dataset.get_source_for_level("region")
+            assert Path(final).read_bytes() == country_bytes
+            assert not dataset.get_cached_path_for_level("region").exists()
+            assert not list(cache.rglob(".gpio-stage-*"))
+            (source / "part-b.parquet").unlink()
+            write_part("part-b.parquet", "CA")
+            region = dataset.get_source_for_level("region")
+            assert con.execute(f"SELECT count(*) FROM {sql_path(region)}").fetchall() == [(2,)]
+            monkeypatch.setattr(
+                dataset, "get_default_source", lambda: pytest.fail("warm cache read")
+            )
+            assert dataset.get_source_for_level("country") == final
+            assert dataset.get_source_for_level("region") == region
+            admin_datasets.clear_cache(confirm=True)
+            assert not list(cache.rglob("*.parquet"))
+        finally:
+            con.close()
 
 
 def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, monkeypatch):
@@ -1860,10 +1887,14 @@ def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, m
             assert "is_land" not in dataset.get_subtype_filter(["country"], inline_source)
             assert "is_land" not in con.sql(f"SELECT * FROM {inline_relation}").columns
             cache_path.unlink()
-            con.execute(
-                f"COPY ({dataset._build_level_cache_query('country', str(source))}) "
-                f"TO {sql_path(cache_path)} (FORMAT PARQUET)"
-            )
+            # With no prunable groups, build once instead of rereading globally.
+            bounded_bytes = counts["bytes"]
+            with CallSpies() as global_spies:
+                global_source, _ = dataset._source_for_join("country", False, (-180, 180, -90, 90))
+            assert global_source == str(cache_path)
+            assert cache_path.stat().st_size > 0
+            assert global_spies.counts["parquet_writes"] == 1
+            assert counts["bytes"] - bounded_bytes > source.stat().st_size // 2
             before = counts.copy()
             assert dataset._source_for_join("country", False, extent) == (
                 str(cache_path),

@@ -7,14 +7,21 @@ import fnmatch
 import functools
 import glob as glob_module
 import os
+import re
 import shutil
 import tempfile
+import time
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path, PurePath
 from urllib.parse import urlsplit
 
-from geoparquet_io.core.duckdb_utils import get_active_s3_config
+from geoparquet_io.core.duckdb_utils import (
+    _process_is_alive,
+    _spill_base_lock,
+    _spill_lock,
+    get_active_s3_config,
+)
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
@@ -472,12 +479,65 @@ def _publish_sidecars(stage_dir: Path, staged: Path, final: Path, suffixes: Iter
     """Move every file the writer left beside *staged*, and drop the old set's leftovers."""
     published = {part.name for part in stage_dir.iterdir()}
     for sidecar in sorted(stage_dir.iterdir()):
-        if sidecar != staged:
+        if sidecar != staged and sidecar.name != ".gpio-owner.lock":
             os.replace(sidecar, final.parent / sidecar.name)
     for stale in suffixes:
         old = final.parent / f"{final.stem}{stale}"
         if old.name not in published and old != final:
             old.unlink(missing_ok=True)
+
+
+def _sweep_orphaned_dirs(
+    base_dir: str | os.PathLike,
+    candidates: Callable[[], Iterable[tuple[str, int]]],
+    minimum_age: float,
+) -> list[str]:
+    """Shared collector: enumerate under the base lock, hold ownership through deletion.
+
+    Probing a marker before taking the base lock can steal it from a creator
+    between open() and flock(), leaving that live creator without protection.
+    """
+    removed = []
+    try:
+        with _spill_base_lock(base_dir):
+            for path, pid in candidates():
+                marker = None
+                try:
+                    directory = Path(path)
+                    if directory.is_symlink() or not directory.is_dir():
+                        continue
+                    if minimum_age and time.time() - directory.stat().st_mtime < minimum_age:
+                        continue
+                    marker = _spill_lock(path)
+                    if marker is None and _process_is_alive(pid):
+                        continue
+                    shutil.rmtree(path)
+                    removed.append(path)
+                except OSError:
+                    continue
+                finally:
+                    if marker is not None:
+                        marker.close()
+    except OSError:
+        pass  # Missing/read-only base: cleanup must not fail the caller.
+    return removed
+
+
+def _sweep_orphaned_staging_dirs(base_dir: Path) -> list[str]:
+    """Collect stages older than a day, only while holding their ownership lock.
+
+    Reuse spill ownership across PID namespaces; age alone cannot protect a slow
+    live writer. Legacy stages without an owner identity are left untouched.
+    """
+
+    def candidates() -> Iterator[tuple[str, int]]:
+        return (
+            (str(stage), int(match[1]))
+            for stage in base_dir.glob(".gpio-stage-*")
+            if (match := re.fullmatch(r"\.gpio-stage-(\d+)-[a-z0-9_]{8}", stage.name))
+        )
+
+    return _sweep_orphaned_dirs(base_dir, candidates, 24 * 60 * 60)
 
 
 @contextlib.contextmanager
@@ -523,7 +583,13 @@ def atomic_write(
         yield str(destination)
         return
     final = Path(os.path.realpath(destination))
-    stage_dir = Path(tempfile.mkdtemp(prefix=".gpio-stage-", dir=final.parent))
+    with _spill_base_lock(final.parent):
+        stage_dir = Path(tempfile.mkdtemp(prefix=f".gpio-stage-{os.getpid()}-", dir=final.parent))
+        try:
+            marker = _spill_lock(str(stage_dir))
+        except BaseException:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+            raise
     staged = stage_dir / f"{final.stem}{suffix}"
     try:
         yield str(staged)
@@ -535,6 +601,8 @@ def atomic_write(
         os.replace(staged, final)
     finally:
         shutil.rmtree(stage_dir, ignore_errors=True)
+        if marker is not None:
+            marker.close()
 
 
 def scratch_path(suffix: str = ".parquet", *, prefix: str = "gpio_") -> str:
