@@ -447,7 +447,7 @@ def add_stac_metadata(
         # `./a.parquet` for `a.parquet` is the in-place patch, not an output.
         destination = parquet_file
     else:
-        handle_output_overwrite(destination, overwrite, remove=False)
+        handle_output_overwrite(destination, overwrite)
 
     existing, column_names = _existing_payload(parquet_file)
     payload = _merged_payload(existing, payload)

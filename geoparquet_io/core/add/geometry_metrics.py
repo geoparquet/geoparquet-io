@@ -184,7 +184,7 @@ def _add_metrics_file_based(
 ) -> None:
     """Handle file-based geometry metrics addition — two passes via add_computed_column."""
     # remove=False: the output is staged and replaced only on success.
-    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet)
     require_single_file(input_parquet, "add geometry-metrics")
 
     geom_col = require_geometry_column(

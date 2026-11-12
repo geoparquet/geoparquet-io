@@ -347,7 +347,7 @@ def _refuse_existing(paths: list[str], force: bool) -> None:
     """Refuse to silently overwrite files the user did not name one by one
     (the --force gate gpio pmtiles pyramid shares, through the one owner)."""
     for path in paths:
-        handle_output_overwrite(path, force, flag="--force", remove=False)
+        handle_output_overwrite(path, force, flag="--force")
 
 
 def _input_bbox_field(con, source_sql: str, input_parquet: str | None, info) -> pa.Field | None:
@@ -529,7 +529,7 @@ def _refuse_overview_out(input_parquet: str, overview_out: str, force: bool) -> 
     the siblings, is not silently replaced. Its ``level`` column must not
     shadow one the input already has (OVERVIEWS_SPEC 4.1) -- checked on the
     input before any rollup runs."""
-    handle_output_overwrite(overview_out, force, input_parquet, flag="--force", remove=False)
+    handle_output_overwrite(overview_out, force, input_parquet, flag="--force")
     names = matching_columns("level", pq.read_schema(input_parquet).names)
     if names:
         raise InvalidParameterError(

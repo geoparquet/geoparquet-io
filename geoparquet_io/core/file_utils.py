@@ -383,7 +383,7 @@ def handle_output_overwrite(
     input_path: str | None = None,
     *,
     flag: str = "--overwrite",
-    remove: bool = True,
+    remove: bool = False,
 ) -> None:
     """The one overwrite policy: what a command does about an output that exists.
 
@@ -402,10 +402,9 @@ def handle_output_overwrite(
         flag: How the caller spells the switch, for the refusal's hint
             (``--force`` for the tile and overview commands, ``overwrite=True``
             for the Python API)
-        remove: Unlink an existing output when *overwrite* is set. False for a
-            writer that replaces the file itself (an atomic rename, an in-place
-            patch, tippecanoe's own ``--force``), so the old output survives a
-            run that fails before it is replaced.
+        remove: Explicitly unlink an existing output when *overwrite* is set.
+            By default the writer replaces it only on success, so a failed run
+            preserves the last good output.
 
     Raises:
         GeoParquetError: When the output may not be written.

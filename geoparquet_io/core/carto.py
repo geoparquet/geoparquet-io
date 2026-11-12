@@ -1317,7 +1317,7 @@ def convert_carto_to_geoparquet(
     """
     configure_verbose(verbose)
 
-    handle_output_overwrite(output_file, overwrite, remove=False)
+    handle_output_overwrite(output_file, overwrite)
 
     # Fetch data
     table = carto_to_table(

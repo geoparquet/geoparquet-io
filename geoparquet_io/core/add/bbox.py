@@ -474,7 +474,7 @@ def _add_bbox_file_based(
 ) -> None:
     """Handle file-based add_bbox operation."""
     # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet)
 
     # Check for partition input (not supported)
     require_single_file(input_parquet, "add bbox")

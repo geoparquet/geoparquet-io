@@ -447,7 +447,7 @@ def write_gdal_format(
     # (#1289).
     require_planar_export_file(input_path, target=str(config["description"]), profile=profile)
 
-    handle_output_overwrite(output_path, overwrite, remove=False)
+    handle_output_overwrite(output_path, overwrite)
 
     validate_output_path(output_path, verbose)
     progress(f"Converting to {config['description']}: {output_path}")
@@ -644,7 +644,7 @@ def write_csv(
     if include_wkt:
         require_planar_export_file(input_path, target="CSV", profile=profile)
 
-    handle_output_overwrite(output_path, overwrite, remove=False)
+    handle_output_overwrite(output_path, overwrite)
 
     validate_output_path(output_path, verbose)
 
@@ -766,7 +766,7 @@ def write_geojson(
             "output_path", "GeoJSON output path must be local. Use upload() for cloud destinations."
         )
 
-    handle_output_overwrite(output_path, overwrite, remove=False)
+    handle_output_overwrite(output_path, overwrite)
 
     validate_profile_for_urls(profile, input_path)
 

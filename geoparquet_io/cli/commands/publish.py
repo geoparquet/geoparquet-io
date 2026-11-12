@@ -27,7 +27,7 @@ from geoparquet_io.core.upload import upload as upload_impl
 def _check_existing_stac(path, shown, overwrite: bool) -> None:
     """Refuse to replace any existing output without --overwrite (the one
     overwrite policy, whatever the file holds), and say so when replacing it."""
-    handle_output_overwrite(str(path), overwrite, remove=False)
+    handle_output_overwrite(str(path), overwrite)
     if Path(path).exists():
         click.echo(click.style(f"⚠️  Overwriting existing file: {shown}", fg="yellow"))
 
@@ -115,7 +115,7 @@ def _handle_stac_collection(
 
         # Write item JSON next to parquet file
         item_file = parquet_file.parent / f"{item_id}.json"
-        handle_output_overwrite(str(item_file), overwrite, remove=False)
+        handle_output_overwrite(str(item_file), overwrite)
 
         write_stac_json(item_dict, str(item_file), verbose)
 

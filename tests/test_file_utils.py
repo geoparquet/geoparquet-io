@@ -468,13 +468,15 @@ class TestHandleOutputOverwrite:
         with pytest.raises(GeoParquetError, match="already exists"):
             handle_output_overwrite(str(existing), overwrite=False)
 
-    def test_existing_file_with_overwrite_deletes(self, tmp_path):
-        """Existing file with overwrite flag is deleted."""
+    def test_existing_file_with_overwrite_preserves_until_replaced(self, tmp_path):
+        """Overwrite permission must not delete the last good output."""
         existing = tmp_path / "existing.parquet"
         existing.write_bytes(b"test")
 
         handle_output_overwrite(str(existing), overwrite=True)
 
+        assert existing.read_bytes() == b"test"
+        handle_output_overwrite(str(existing), overwrite=True, remove=True)
         assert not existing.exists()
 
     def test_same_input_output_raises(self, tmp_path):
