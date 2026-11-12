@@ -615,6 +615,38 @@ class TestStreamIO:
             {"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}
         ]
 
+    def test_sort_secondary_key_bbox_covers_primary(self, tmp_path, monkeypatch):
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.str_order import str_order
+        from tests.test_str_order import _point_table, _point_wkb
+
+        table = _point_table([(0, 1, 2)]).append_column(
+            "footprint", pa.array([_point_wkb(100, 200)])
+        )
+        geo = json.loads(table.schema.metadata[b"geo"])
+        geo["columns"]["footprint"] = {"encoding": "WKB", "geometry_types": ["Point"]}
+        table = table.replace_schema_metadata({b"geo": json.dumps(geo).encode()})
+        source = io.BytesIO()
+        with ipc.new_stream(source, table.schema) as writer:
+            writer.write_table(table)
+        source.seek(0)
+        monkeypatch.setattr(sys, "stdin", mock.Mock(buffer=source, isatty=lambda: False))
+        output = tmp_path / "secondary.parquet"
+        str_order(
+            "-",
+            str(output),
+            geometry_column="footprint",
+            add_bbox_flag=True,
+            geoparquet_version="1.1",
+        )
+        result = pq.read_table(output)
+        geo = json.loads(result.schema.metadata[b"geo"])
+        assert geo["primary_column"] == "geometry"
+        assert geo["columns"]["geometry"]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
+        assert "covering" not in geo["columns"]["footprint"]
+        assert result["bbox"].to_pylist() == [{"xmin": 1.0, "ymin": 2.0, "xmax": 1.0, "ymax": 2.0}]
+
     def test_hilbert_file_to_stdout_keeps_native_crs_and_edges(self, tmp_path, monkeypatch):
         import geoarrow.pyarrow as ga
 

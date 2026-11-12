@@ -21,7 +21,7 @@ from geoparquet_io.core.file_utils import (
     unlink_released_file,
 )
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
-from geoparquet_io.core.geometry_detection import resolve_geometry_column
+from geoparquet_io.core.geometry_detection import primary_geometry_column, resolve_geometry_column
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.partition.reader import require_single_file
@@ -193,7 +193,11 @@ def run_sort(
                     force=False,
                     geoparquet_version=write.geoparquet_version,
                     metadata=metadata,
-                    geometry_column=geom_col,
+                    # Added bbox follows the primary, independently of the sort key.
+                    geometry_column=primary_geometry_column(
+                        described, geo=sanitized_carried_geo(metadata)
+                    )
+                    or geom_col,
                 )
                 source = f"({bbox_query})"
             query, reordered = build_query(con, source, geom_col, verbose, working)
