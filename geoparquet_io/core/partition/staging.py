@@ -23,7 +23,6 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
-from pathlib import Path
 from urllib.parse import unquote
 
 import pyarrow as pa
@@ -31,13 +30,20 @@ import pyarrow.parquet as pq
 
 from geoparquet_io.core.column_selection import unique_name
 from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.duckdb_metadata import (
+    get_kv_metadata,
+    get_schema_info,
+    parse_geometry_logical_type,
+)
 from geoparquet_io.core.duckdb_utils import sql_path
+from geoparquet_io.core.edges import geoarrow_edge_type
 from geoparquet_io.core.exceptions import PartitionError
-from geoparquet_io.core.file_utils import output_is_kept, scratch_file
+from geoparquet_io.core.file_utils import get_first_parquet_file, output_is_kept, scratch_file
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.parquet_writer import WriteOptions
-from geoparquet_io.core.remote import is_remote_url, open_url
+from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 # Internal alias used to drive the single-pass PARTITION_BY split. DuckDB drops
@@ -92,9 +98,9 @@ class PartitionWriteOptions:
     (#1005). ``test_partition_schema_witness.py`` checks every construction site
     names it.
 
-    Remote witnesses are captured as a metadata-only Parquet file once per run.
-    Each finalization reads that local snapshot, retaining logical types and
-    referenced CRS metadata without fetching the remote footer per output.
+    Remote witnesses read KV and native geometry declarations through DuckDB
+    once per run. Each finalization uses a local metadata-only witness; its
+    non-geometry fields are placeholders, never used to read data.
     """
 
     #: The resolved output version; it replaces ``write.geoparquet_version``
@@ -115,22 +121,36 @@ class PartitionWriteOptions:
         }
 
     @cached_property
-    def _remote_footer(self) -> bytes:
-        with open_url(self.input_file) as reader:
-            metadata = pq.read_metadata(reader)
-        sink = pa.BufferOutputStream()
-        metadata.write_metadata_file(sink)
-        return bytes(sink.getvalue())
+    def _remote_schema(self) -> pa.Schema:
+        import geoarrow.pyarrow as ga
+
+        assert self.input_file is not None
+        source = get_first_parquet_file(self.input_file)
+        if source is None:
+            raise PartitionError(f"No Parquet file found for witness: {self.input_file}")
+        metadata = get_kv_metadata(source)
+        # The witness needs declarations, not data types for reading rows.
+        # Keep CRS reference keys, but let Arrow regenerate its schema carrier.
+        metadata.pop(b"ARROW:schema", None)
+        fields = []
+        for column in root_schema_columns(get_schema_info(source)):
+            native = parse_geometry_logical_type(column.get("logical_type") or "")
+            field_type = pa.binary()
+            if native is not None:
+                field_type = ga.wkb().with_crs(native.get("crs"))
+                field_type = field_type.with_edge_type(geoarrow_edge_type(native.get("algorithm")))
+            fields.append(pa.field(column["name"], field_type))
+        return pa.schema(fields, metadata=metadata)
 
     @contextmanager
     def write_kwargs(self):
-        """Keep the remote footer snapshot local for the duration of a write."""
+        """Keep the cached remote declarations local for the duration of a write."""
         kwargs = self.as_write_kwargs()
         if not is_remote_url(self.input_file):
             yield kwargs
             return
         with scratch_file() as witness:
-            Path(witness).write_bytes(self._remote_footer)
+            pq.write_metadata(self._remote_schema, witness)
             kwargs["input_file"] = witness
             yield kwargs
 

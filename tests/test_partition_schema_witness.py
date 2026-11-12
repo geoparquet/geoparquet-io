@@ -179,26 +179,42 @@ def test_every_partition_write_options_names_its_witness():
 
 @pytest.mark.parametrize("source_fixture", ["projected_conus", "spherical_secondary"])
 def test_remote_witness_is_read_once_per_run(source_fixture, request, tmp_path, monkeypatch):
-    import obstore as obs
-    from obstore.store import MemoryStore
+    import fsspec
 
     import geoparquet_io.core.partition.staging as staging
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 
     source = request.getfixturevalue(source_fixture)
-    store = MemoryStore()
-    obs.put(store, "data.parquet", source.read_bytes())
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata, get_schema_info
+
     reads = []
+    resolutions = []
+    remote = "gs://bucket/data.parquet"
+    if source_fixture == "spherical_secondary":
+        remote = "s3://bucket/parts/*.parquet"
+    concrete = remote.replace("*.parquet", "first.parquet")
+
+    def no_fsspec(*args, **kwargs):
+        raise ImportError("Please install gcsfs")
 
     def resolve(url):
-        reads.append(url)
-        from io import BytesIO
+        resolutions.append(url)
+        return concrete
 
-        return BytesIO(obs.get(store, "data.parquet").bytes())
+    def read_kv(url):
+        reads.append(("kv", url))
+        return get_kv_metadata(str(source))
 
-    monkeypatch.setattr(staging, "open_url", resolve)
+    def read_schema(url):
+        reads.append(("schema", url))
+        return get_schema_info(str(source))
+
+    monkeypatch.setattr(fsspec, "open", no_fsspec)
+    monkeypatch.setattr(staging, "get_first_parquet_file", resolve, raising=False)
+    monkeypatch.setattr(staging, "get_kv_metadata", read_kv, raising=False)
+    monkeypatch.setattr(staging, "get_schema_info", read_schema, raising=False)
     options = staging.PartitionWriteOptions(
-        input_file="s3://bucket/data.parquet",
+        input_file=remote,
         geoparquet_version="1.1",
     )
     con = get_duckdb_connection()
@@ -219,7 +235,8 @@ def test_remote_witness_is_read_once_per_run(source_fixture, request, tmp_path, 
                 assert geo_block_crs_id(output) == EPSG_5070
             else:
                 assert _edges(output, "route") == "spherical"
-        assert reads == ["s3://bucket/data.parquet"]
+        assert sorted(reads) == [("kv", concrete), ("schema", concrete)]
+        assert resolutions == [remote]
     finally:
         con.close()
 
