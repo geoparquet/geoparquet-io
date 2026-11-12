@@ -278,18 +278,21 @@ def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
     if verbose:
         debug("Adding bbox column...")
 
-    add_bbox_column(
-        input_parquet=parquet_file,
-        output_parquet=output_file,
-        bbox_column_name="bbox",
-        dry_run=False,
-        verbose=verbose,
-        compression=None,
-        compression_level=None,
-        row_group_rows=DEFAULT_ROW_GROUP_ROWS,
-        profile=profile,
-        overwrite=True,  # check --fix manages file lifecycle
-    )
+    with atomic_write(
+        output_file, mode_from=parquet_file if not is_remote_url(parquet_file) else None
+    ) as destination:
+        add_bbox_column(
+            input_parquet=parquet_file,
+            output_parquet=destination,
+            bbox_column_name="bbox",
+            dry_run=False,
+            verbose=verbose,
+            compression=None,
+            compression_level=None,
+            row_group_rows=DEFAULT_ROW_GROUP_ROWS,
+            profile=profile,
+            overwrite=True,  # check --fix manages file lifecycle
+        )
 
     return {"fix_applied": "Added bbox column", "success": True}
 
@@ -308,6 +311,12 @@ def fix_bbox_metadata(parquet_file, output_file, verbose=False, profile=None):
     """
     if verbose:
         debug("Adding bbox covering metadata...")
+
+    if is_remote_url(output_file):
+        raise GeoParquetError(
+            "--fix-output must be a local path for a bbox covering metadata fix. "
+            "Write locally, then upload the result."
+        )
 
     # The input is only read: the rewrite goes straight to output_file in one
     # pass (staged beside it when it already exists), so the caller still has
@@ -398,7 +407,9 @@ def fix_bbox_all(
     if not needs_column and not needs_metadata:
         return {"fix_applied": None, "success": True}
 
-    with atomic_write(output_file) as destination:
+    with atomic_write(
+        output_file, mode_from=parquet_file if not is_remote_url(parquet_file) else None
+    ) as destination:
         if needs_column:
             # add_bbox_column writes the covering with the column, so a
             # separate metadata pass here would only re-read what it just wrote.
@@ -436,7 +447,9 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
     row_group_rows = resolve_row_group_rows_for_rewrite(
         file_meta.get("num_rows", 0), file_meta.get("num_row_groups", 0)
     )
-    with atomic_write(output_file) as destination:
+    with atomic_write(
+        output_file, mode_from=parquet_file if not is_remote_url(parquet_file) else None
+    ) as destination:
         hilbert_order(
             input_parquet=parquet_file,
             output_parquet=destination,

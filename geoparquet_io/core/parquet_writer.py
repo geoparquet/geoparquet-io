@@ -11,6 +11,10 @@ identical CLI request wrote 49,152 (#971), ``convert geoparquet`` documenting
 100k row groups while nothing set any (#981), and every auto-version path but
 ``convert`` downgrading a native-geo-only input to 1.1 WKB (#600).
 
+The query funnel refuses an output resolving to its explicit input witness.
+In-place callers stage through ``file_utils.atomic_write`` first; remote
+rewrites stage locally and upload only after their reader closes (#1040).
+
 This module is the single owner of those shared decisions. It owns exactly
 four, because each one is a fact about the *output file* that no individual
 write path is entitled to answer for itself:

@@ -453,3 +453,12 @@ def test_every_reader_and_command_words_a_non_parquet_file_alike(tmp_path, conte
         with pytest.raises(GeoParquetError) as caught:
             reader(str(bad))
         assert caught.value.message == expected
+
+
+def test_permission_error_is_a_user_facing_cli_failure():
+    from geoparquet_io.cli.exception_handler import cli_error_for
+
+    result = cli_error_for(PermissionError(13, "Permission denied", "/readonly/output.parquet"))
+    assert isinstance(result, click.ClickException)
+    assert "Permission denied" in result.format_message()
+    assert "/readonly/output.parquet" in result.format_message()

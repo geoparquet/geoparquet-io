@@ -101,6 +101,9 @@ def cli_error_for(exc: BaseException, *, path: str | None = None) -> click.Click
     if isinstance(exc, GeoParquetError):
         return handle_core_exception(exc)
 
+    if isinstance(exc, PermissionError):
+        return click.ClickException(message)
+
     if is_input_file_duckdb_error(exc):
         return click.ClickException(message)
 

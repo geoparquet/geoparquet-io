@@ -684,3 +684,55 @@ def _detected(check_results):
     """The bbox check's file-type answer, in ``detect_geoparquet_file_type``'s shape."""
     bbox = check_results.get("bbox", {})
     return {"file_type": bbox.get("file_type"), "geo_version": bbox.get("version")}
+
+
+def test_fresh_fix_outputs_inherit_private_input_mode(places_test_file, tmp_path, monkeypatch):
+    import stat
+
+    from geoparquet_io.core.check_fixes import (
+        apply_all_fixes,
+        fix_bbox_all,
+        fix_bbox_column,
+        fix_compression,
+        fix_spatial_ordering,
+    )
+
+    source = tmp_path / "private.parquet"
+    source.write_bytes(Path(places_test_file).read_bytes())
+    source.chmod(0o600)
+    for name, fix in (
+        ("compression", lambda out: fix_compression(str(source), str(out))),
+        ("column", lambda out: fix_bbox_column(str(source), str(out))),
+        (
+            "chain",
+            lambda out: apply_all_fixes(
+                str(source),
+                str(out),
+                {
+                    "bbox": {"needs_bbox_column": True},
+                },
+            ),
+        ),
+        ("bbox", lambda out: fix_bbox_all(str(source), str(out), True, True)),
+        ("spatial", lambda out: fix_spatial_ordering(str(source), str(out))),
+    ):
+        output = tmp_path / f"{name}.parquet"
+        fix(output)
+        assert stat.S_IMODE(output.stat().st_mode) == 0o600, name
+
+    def denied(*args, **kwargs):
+        raise PermissionError("Cannot preserve private input permissions")
+
+    monkeypatch.setattr(shutil, "copymode", denied)
+    refused = tmp_path / "refused.parquet"
+    with pytest.raises(PermissionError):
+        fix_compression(str(source), str(refused))
+    assert not refused.exists(), "never publish private data with broader permissions"
+
+
+def test_remote_covering_output_refusal_names_fix_output():
+    from geoparquet_io.core.check_fixes import fix_bbox_metadata
+    from geoparquet_io.core.exceptions import GeoParquetError
+
+    with pytest.raises(GeoParquetError, match="--fix-output"):
+        fix_bbox_metadata("local.parquet", "s3://bucket/fixed.parquet")

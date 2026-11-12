@@ -986,9 +986,14 @@ gpio check all partitions/ --sample-files 3
     fix each subdirectory separately, or fix in place.
 
 `--fix-output` leaves the input untouched and writes no `.bak`; a file already at
-the output path is replaced without a prompt. A second spelling of the input's own
+the output path requires `--overwrite` to replace. A second spelling of the input's own
 path (`./in.parquet`, a symlink, a different letter case on macOS or Windows) counts
 as in place: the file is backed up and rewritten like a plain `--fix`.
+
+In-place fixes need free space on the destination filesystem for the staged
+rewrite and, by default, the backup: the original, staging copy and `.bak` can
+occupy about three times the input size. Intermediate passes also stage there;
+complex fixes may need additional space.
 
 ## See Also
 

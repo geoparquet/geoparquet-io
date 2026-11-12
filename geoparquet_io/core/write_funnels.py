@@ -80,8 +80,13 @@ from geoparquet_io.core.edges import (
     logical_type_edges,
     requests_planar,
 )
-from geoparquet_io.core.exceptions import RemoteAccessError
-from geoparquet_io.core.file_utils import atomic_write, get_all_parquet_files, is_partition_path
+from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
+from geoparquet_io.core.file_utils import (
+    atomic_write,
+    get_all_parquet_files,
+    is_partition_path,
+    is_same_file_path,
+)
 from geoparquet_io.core.geo_metadata import (
     DETECT_BBOX_COLUMN,
     GENERATED_COLUMN_FIELDS,
@@ -1043,29 +1048,32 @@ def rewrite_file_through_funnel(
     """
     import duckdb  # deferred: the embeddable import surface defers duckdb (#1307)
 
-    with atomic_write(destination) as staged:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(source))
-        try:
-            write_parquet_with_metadata(
-                con=con,
-                query=query,
-                output_file=staged,
-                original_metadata=original_metadata,
-                compression=None,
-                compression_level=None,
-                row_group_rows=row_group_rows,
-                verbose=verbose,
-                profile=profile,
-                geoparquet_version=geoparquet_version,
-                input_file=source,
-            )
-        except duckdb.IOException as e:
-            if is_remote_url(source):
-                hints = get_remote_error_hint(e, source)
-                raise RemoteAccessError(source, f"{hints}\n\nOriginal error: {str(e)}") from e
-            raise
-        finally:
-            con.close()
+    with remote_write_context(destination, verbose=verbose) as (local, remote):
+        with atomic_write(local, mode_from=source if not is_remote_url(source) else None) as staged:
+            con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(source))
+            try:
+                write_parquet_with_metadata(
+                    con=con,
+                    query=query,
+                    output_file=staged,
+                    original_metadata=original_metadata,
+                    compression=None,
+                    compression_level=None,
+                    row_group_rows=row_group_rows,
+                    verbose=verbose,
+                    profile=profile,
+                    geoparquet_version=geoparquet_version,
+                    input_file=source,
+                )
+            except duckdb.IOException as e:
+                if is_remote_url(source):
+                    hints = get_remote_error_hint(e, source)
+                    raise RemoteAccessError(source, f"{hints}\n\nOriginal error: {str(e)}") from e
+                raise
+            finally:
+                con.close()
+        if remote:
+            upload_if_remote(local, destination, profile=profile, verbose=verbose)
 
 
 def _footer_keys(pf: pq.ParquetFile) -> dict[bytes, bytes]:
@@ -1491,6 +1499,10 @@ def write_parquet_with_metadata(
         None
     """
 
+    if input_file and is_same_file_path(input_file, output_file):
+        raise GeoParquetError(
+            "The write facade refuses in-place output; stage via file_utils.atomic_write."
+        )
     configure_verbose(verbose)
 
     # A conversion rebuilds the input's measured facts. Transforming an
@@ -1739,9 +1751,8 @@ def write_parquet_with_metadata(
     ):
         if not rewrite_needed:
             # Fast path: plain DuckDB COPY TO without geo metadata manipulation
-            if verbose:
-                debug(f"Writing GeoParquet version: {effective_version}")
-                debug(f"No metadata rewrite needed for {effective_version} - using plain COPY TO")
+            debug(f"Writing GeoParquet version: {effective_version}")
+            debug(f"No metadata rewrite needed for {effective_version} - using plain COPY TO")
 
             # Nothing but a bare DuckDB COPY writes this file, so a sub-vector
             # request lands at 2,048 whatever was asked for. Say so here, where
@@ -1789,8 +1800,7 @@ def write_parquet_with_metadata(
                     else bool(geoarrow_encoding)
                 )
                 if not already_native and write_strategy != "streaming":
-                    if verbose:
-                        debug("Routing 1.1-geoarrow WKB input through arrow-streaming")
+                    debug("Routing 1.1-geoarrow WKB input through arrow-streaming")
                     write_strategy = "streaming"
 
             # "auto" (WriteOptions' default) is this funnel's duckdb-kv (#761).

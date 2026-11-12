@@ -20,7 +20,7 @@ from geoparquet_io.core.exceptions import (
     GeoParquetError,
     InvalidParameterError,
 )
-from geoparquet_io.core.logging_config import debug
+from geoparquet_io.core.logging_config import _success_output_path, debug
 from geoparquet_io.core.remote import (
     canonical_store_url,
     is_account_first_azure_url,
@@ -455,11 +455,10 @@ def unlink_released_file(path: str | os.PathLike | None) -> None:
 
 
 def _take_mode(staged: Path, source: Path | str | None) -> None:
-    """Give *staged* the permission bits of *source*; a missing source changes nothing."""
+    """Give *staged* the permission bits of *source* before publishing private data."""
     if source is None:
         return
-    with contextlib.suppress(OSError):
-        shutil.copymode(source, staged)
+    shutil.copymode(source, staged)
 
 
 def _publish_sidecars(stage_dir: Path, staged: Path, final: Path, suffixes: Iterable[str]) -> None:
@@ -520,7 +519,8 @@ def atomic_write(
     stage_dir = Path(tempfile.mkdtemp(prefix=".gpio-stage-", dir=final.parent))
     staged = stage_dir / f"{final.stem}{suffix}"
     try:
-        yield str(staged)
+        with _success_output_path(str(staged), str(destination)):
+            yield str(staged)
         if not staged.exists():
             return  # the writer decided there was nothing to write
         _take_mode(staged, final if final.exists() else mode_from)

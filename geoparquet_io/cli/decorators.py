@@ -1191,7 +1191,7 @@ def check_fix_options(*, help_text: str):
         func = click.option(
             "--fix-output",
             type=click.Path(),
-            help="Output path (default: overwrites with .bak backup)",
+            help="Write fixes here, leaving input untouched (default: fix in place with .bak backup)",
         )(func)
         return click.option("--fix", is_flag=True, help=help_text)(func)
 
