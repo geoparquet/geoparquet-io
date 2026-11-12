@@ -639,28 +639,6 @@ class TestStreamIO:
                 geom = explicit or "geometry"
                 assert actual["columns"][geom]["covering"]["bbox"]["xmin"] == ["bbox_1", "xmin"]
 
-        malformed = pa.table({"id": [1, 2, 3], "geometry": [wkb, b"malformed", b""]})
-        pq.write_table(malformed, source)
-        monkeypatch.setattr("geoparquet_io.core.stream_io.read_arrow_stream", lambda: malformed)
-        for transform in (hilbert_order, str_order):
-            for stdin in (False, True):
-                for stdout in (False, True):
-                    captured.clear()
-                    transform(
-                        "-" if stdin else str(source), "-" if stdout else str(dest), overwrite=True
-                    )
-                    result = captured[0] if stdout else pq.read_table(dest)
-                    assert dict(
-                        zip(result["id"].to_pylist(), result["geometry"].to_pylist(), strict=True)
-                    ) == {
-                        1: wkb,
-                        2: b"malformed",
-                        3: b"",
-                    }, (transform.__name__, stdin, stdout)
-                    assert result["id"].to_pylist()[0] == 1
-
-        pq.write_table(table, source)
-
         from geoparquet_io.api import ops
         from geoparquet_io.api.table import Table
 
@@ -706,6 +684,37 @@ class TestStreamIO:
         sort_by_column("-", "-", columns="bbox", add_bbox_flag=True)
         assert "bbox" in captured[0].column_names
         assert captured[0].num_rows == table.num_rows
+
+    def test_bare_wkb_sorts_preserve_bytes(self, tmp_path, monkeypatch):
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.hilbert_order import hilbert_order
+        from geoparquet_io.core.str_order import str_order
+
+        source = tmp_path / "bare.parquet"
+        dest = tmp_path / "sorted.parquet"
+        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+        captured = []
+        monkeypatch.setattr("geoparquet_io.core.stream_io.write_arrow_stream", captured.append)
+        malformed = pa.table({"id": [1, 2, 3], "geometry": [wkb, b"malformed", b""]})
+        pq.write_table(malformed, source)
+        monkeypatch.setattr("geoparquet_io.core.stream_io.read_arrow_stream", lambda: malformed)
+        for transform in (hilbert_order, str_order):
+            for stdin in (False, True):
+                for stdout in (False, True):
+                    captured.clear()
+                    transform(
+                        "-" if stdin else str(source), "-" if stdout else str(dest), overwrite=True
+                    )
+                    result = captured[0] if stdout else pq.read_table(dest)
+                    assert dict(
+                        zip(result["id"].to_pylist(), result["geometry"].to_pylist(), strict=True)
+                    ) == {
+                        1: wkb,
+                        2: b"malformed",
+                        3: b"",
+                    }, (transform.__name__, stdin, stdout)
+                    assert result["id"].to_pylist()[0] == 1
 
     def test_execute_transform_dry_run(self, tmp_path, sample_geo_table, geo_metadata):
         """Test execute_transform with dry_run=True."""

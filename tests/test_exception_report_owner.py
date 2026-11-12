@@ -32,8 +32,8 @@ def test_logging_redacts_credentials_once(caplog):
         error("failed with token: SECRETTOKEN on s3://bucket/y.parquet")
     assert "secret@" not in caplog.text and "SECRETKEY" not in caplog.text
     assert "SECRETTOKEN" not in caplog.text
-    # URLs are otherwise intact: the line still names the file it is about.
-    assert "s3://bucket/x.parquet" in caplog.text
+    # A fixed userinfo marker leaves the destination visible.
+    assert "s3://[redacted]@bucket/x.parquet" in caplog.text
     assert "k:" not in caplog.text
     assert "s3://bucket/y.parquet" in caplog.text
 

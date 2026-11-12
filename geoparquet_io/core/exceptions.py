@@ -37,9 +37,10 @@ def _url_without_credentials(url: str) -> str:
 
     parts = re.split(r"(\s+)", url)
     for i, token in enumerate(parts):
-        if "://" not in token:
+        scheme, separator, _ = token.partition("://")
+        if not separator:
             continue
-        start = token.index("://") + 3
+        start = len(scheme) + len(separator)
         last_at = token.rfind("@", start)
         if last_at != -1:
             # A query/fragment @ makes even the apparent hostname secret.
