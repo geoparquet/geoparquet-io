@@ -295,7 +295,9 @@ class TestUpdateMode:
         assert "| `small.py` | Small module. |" in section
         assert "Lines" not in section
         assert "More details" not in section
-        large.write_text(large.read_text() + "# another source line\n")
+        (tmp_path / "small.py").write_text(
+            (tmp_path / "small.py").read_text() + "# source line\n" * 100
+        )
         assert self.mod.generate_core_modules_section(tmp_path) == section
         assert section.index("large.py") < section.index("small.py")
         assert "__init__.py" not in section

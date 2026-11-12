@@ -114,7 +114,7 @@ def generate_cli_section() -> str:
 
 
 def generate_core_modules_section(core_dir: Path) -> str:
-    """List the fourteen largest top-level core modules, as in the existing table."""
+    """List every top-level core module in name order."""
     modules = []
     for path in core_dir.glob("*.py"):
         if path.name == "__init__.py":
@@ -122,8 +122,8 @@ def generate_core_modules_section(core_dir: Path) -> str:
         source = path.read_text(encoding="utf-8")
         purpose = ast.get_docstring(ast.parse(source)) or ""
         first_line = purpose.splitlines()[0] if purpose else ""
-        modules.append((len(source.splitlines()), path.name, first_line))
-    modules.sort(key=lambda module: (-module[0], module[1]))
+        modules.append((path.name, first_line))
+    modules.sort()
     lines = [
         "<!-- BEGIN GENERATED: core-modules -->",
         "### Core Modules",
@@ -131,11 +131,9 @@ def generate_core_modules_section(core_dir: Path) -> str:
         "| Module | Purpose |",
         "|--------|---------|",
     ]
-    for _, name, purpose in modules[:14]:
+    for name, purpose in modules:
         purpose = purpose.replace("|", "\\|")
         lines.append(f"| `{name}` | {purpose} |")
-    if len(modules) > 14:
-        lines.append(f"| ... | *{len(modules) - 14} more modules* |")
     lines.append("<!-- END GENERATED: core-modules -->")
     return "\n".join(lines)
 
