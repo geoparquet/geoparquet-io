@@ -208,13 +208,7 @@ _CARRIED = (
 )
 XFAIL: dict[tuple[str, str], str] = {
     (path, field): _CARRIED
-    for path in (
-        "stale_sort_hilbert",
-        "stale_extract",
-        "stale_add_quadkey",
-        "stale_add_bbox",
-        "stale_add_bbox_metadata",
-    )
+    for path in ("stale_add_bbox_metadata",)
     for field in ("bbox", "geometry_types")
 }
 

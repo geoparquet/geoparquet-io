@@ -1786,9 +1786,18 @@ def write_parquet_with_metadata(
             )
             strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
-            if verbose:
-                debug(f"Writing GeoParquet version: {effective_version}")
-                debug(f"Using write strategy: {strategy.name}")
+            debug(f"Writing GeoParquet version: {effective_version}")
+            debug(f"Using write strategy: {strategy.name}")
+
+            # The primary's measured facts belong to the output rows, even when the
+            # caller only sorts or adds a column: the input block may already be stale.
+            # Keep declarations and secondary-column invalidation policy unchanged.
+            if geometry_column:
+                original_metadata = strip_derived_stats(
+                    original_metadata,
+                    columns={geometry_column},
+                    recomputed_columns={geometry_column},
+                )
 
             write_kwargs = {
                 "con": con,
