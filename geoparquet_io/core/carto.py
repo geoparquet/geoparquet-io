@@ -15,6 +15,7 @@ from urllib.parse import quote, urlparse
 
 import pyarrow as pa
 
+from geoparquet_io.core import http_retry
 from geoparquet_io.core.bbox_parse import BBox, any_piece, parse_optional_bbox
 from geoparquet_io.core.column_selection import (
     exclude_columns,
@@ -39,6 +40,8 @@ from geoparquet_io.core.exceptions import (
     GeoParquetError,
     InvalidParameterError,
     classify_failure,
+    redact_credentials,
+    sanitize_url_for_logging,
     status_message,
 )
 from geoparquet_io.core.file_utils import handle_output_overwrite
@@ -747,10 +750,10 @@ def _probe_request_status(full_url: str, timeout: float) -> _CartoStatus:
         status. A probe that cannot answer must say so rather than guess: no
         status means the retryable class.
     """
-    import httpx
-
+    # The enclosing run_with_retry owns the attempt budget; do not retry the
+    # probe separately or buffer a potentially huge successful response.
     try:
-        with httpx.stream(
+        with http_retry.get_shared_http_client().stream(
             "GET",
             full_url,
             timeout=min(timeout, STATUS_PROBE_TIMEOUT),
@@ -772,7 +775,10 @@ def _probe_request_status(full_url: str, timeout: float) -> _CartoStatus:
         # one, and Windows runners, where a SYN to a closed loopback port is
         # dropped rather than refused, reported "Request timed out ... try
         # --limit" for a connection that was never made.
-        debug(f"Status probe failed ({probe_error}); treating the failure as retryable")
+        debug(
+            f"Status probe failed ({redact_credentials(str(probe_error))}); "
+            "treating the failure as retryable"
+        )
         return _CartoStatus(None, False)
 
 
@@ -916,7 +922,7 @@ def _fetch_with_retry(
     else:
         read_expr = f"read_csv_auto({sql_path(full_url)})"
 
-    debug(f"Request URL: {full_url[:100]}...")
+    debug(f"Request URL: {sanitize_url_for_logging(full_url)[:100]}...")
 
     started = time.monotonic()
 
