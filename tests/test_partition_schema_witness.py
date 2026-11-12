@@ -164,25 +164,64 @@ def test_every_partition_write_options_names_its_witness():
             )
             sites.append((f"{source}:{node.lineno}", named))
 
+    import inspect
+    import textwrap
+
+    from geoparquet_io.core.partition.staging import PartitionWriteOptions
+
+    kwargs_tree = ast.parse(
+        textwrap.dedent(inspect.getsource(PartitionWriteOptions.as_write_kwargs))
+    )
+    assert not any(isinstance(node, ast.IfExp) for node in ast.walk(kwargs_tree))
     assert len(sites) >= 3, sites
     assert all(named for _, named in sites), [site for site, ok in sites if not ok]
 
 
-@pytest.mark.parametrize(
-    "remote",
-    ["s3://bucket/data.parquet", "https://example.com/data.parquet", "gs://bucket/data.parquet"],
-)
-def test_a_remote_witness_is_not_forwarded_to_each_partition(remote):
-    """A remote input is not re-read once per partition.
+@pytest.mark.parametrize("source_fixture", ["projected_conus", "spherical_secondary"])
+def test_remote_witness_is_read_once_per_run(source_fixture, request, tmp_path, monkeypatch):
+    import obstore as obs
+    from obstore.store import MemoryStore
 
-    Every partition write would fetch the remote footer again, several times
-    and on a new connection each (#1013): 100 partitions of an HTTP input went
-    from 5 s to over 5 minutes. A local witness is a pyarrow footer read,
-    about half a millisecond, so only a local one is forwarded.
-    """
-    from geoparquet_io.core.partition.staging import PartitionWriteOptions
+    import geoparquet_io.core.partition.staging as staging
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 
-    assert PartitionWriteOptions(input_file=remote).as_write_kwargs()["input_file"] is None
+    source = request.getfixturevalue(source_fixture)
+    store = MemoryStore()
+    obs.put(store, "data.parquet", source.read_bytes())
+    reads = []
+
+    def resolve(url):
+        reads.append(url)
+        from io import BytesIO
+
+        return BytesIO(obs.get(store, "data.parquet").bytes())
+
+    monkeypatch.setattr(staging, "open_url", resolve)
+    options = staging.PartitionWriteOptions(
+        input_file="s3://bucket/data.parquet",
+        geoparquet_version="1.1",
+    )
+    con = get_duckdb_connection()
+    try:
+        for i in range(3):
+            directory = tmp_path / f"stage{i}"
+            directory.mkdir()
+            con.execute(
+                f"COPY (SELECT * FROM {sql_path(str(source))}) TO "
+                f"{sql_path(str(directory / 'part.parquet'))} "
+                "(FORMAT PARQUET, GEOPARQUET_VERSION 'NONE')"
+            )
+            output = tmp_path / f"out{i}.parquet"
+            staging.finalize_partition_file(
+                con, str(directory), str(output), {}, False, False, options
+            )
+            if source_fixture == "projected_conus":
+                assert geo_block_crs_id(output) == EPSG_5070
+            else:
+                assert _edges(output, "route") == "spherical"
+        assert reads == ["s3://bucket/data.parquet"]
+    finally:
+        con.close()
 
 
 def test_a_local_witness_is_forwarded(projected_conus):

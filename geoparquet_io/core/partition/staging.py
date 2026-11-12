@@ -20,18 +20,24 @@ from __future__ import annotations
 
 import os
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import cached_property
+from pathlib import Path
 from urllib.parse import unquote
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from geoparquet_io.core.column_selection import unique_name
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.duckdb_utils import sql_path
 from geoparquet_io.core.exceptions import PartitionError
-from geoparquet_io.core.file_utils import output_is_kept
+from geoparquet_io.core.file_utils import output_is_kept, scratch_file
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import WriteOptions
-from geoparquet_io.core.remote import is_remote_url
+from geoparquet_io.core.remote import is_remote_url, open_url
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 # Internal alias used to drive the single-pass PARTITION_BY split. DuckDB drops
@@ -86,13 +92,9 @@ class PartitionWriteOptions:
     (#1005). ``test_partition_schema_witness.py`` checks every construction site
     names it.
 
-    Only a *local* witness reaches the writes, though. Every partition write
-    reads it again, and a local footer is a pyarrow read of about half a
-    millisecond; a remote one is several fetches on a new connection each
-    (#1013), which took 100 partitions of an HTTP input from 5 s to over five
-    minutes. A remote input therefore keeps the ``geo``-block-only answer it had
-    before: a native-geo-only remote input still loses its CRS at 1.x and its
-    GEOGRAPHY edges, until the witness can be read once per run.
+    Remote witnesses are captured as a metadata-only Parquet file once per run.
+    Each finalization reads that local snapshot, retaining logical types and
+    referenced CRS metadata without fetching the remote footer per output.
     """
 
     #: The resolved output version; it replaces ``write.geoparquet_version``
@@ -108,9 +110,29 @@ class PartitionWriteOptions:
         return {
             **self.write.funnel_kwargs(),
             "geoparquet_version": self.geoparquet_version,
-            "input_file": None if is_remote_url(self.input_file) else self.input_file,
+            "input_file": self.input_file,
             "extra_kv_metadata": self.extra_kv_metadata,
         }
+
+    @cached_property
+    def _remote_footer(self) -> bytes:
+        with open_url(self.input_file) as reader:
+            metadata = pq.read_metadata(reader)
+        sink = pa.BufferOutputStream()
+        metadata.write_metadata_file(sink)
+        return sink.getvalue().to_pybytes()
+
+    @contextmanager
+    def write_kwargs(self):
+        """Keep the remote footer snapshot local for the duration of a write."""
+        kwargs = self.as_write_kwargs()
+        if not is_remote_url(self.input_file):
+            yield kwargs
+            return
+        with scratch_file() as witness:
+            Path(witness).write_bytes(self._remote_footer)
+            kwargs["input_file"] = witness
+            yield kwargs
 
 
 def make_partition_aliases(count: int, existing_columns) -> list[str]:
@@ -257,15 +279,16 @@ def finalize_partition_file(
     # output file.
     staging_glob = os.path.join(partition_dir, "*.parquet")
     query = f"SELECT * FROM read_parquet({sql_path(staging_glob)}, hive_partitioning=false)"
-    write_parquet_with_metadata(
-        con,
-        query,
-        output_filename,
-        original_metadata=metadata,
-        invalidate_derived_stats=True,
-        verbose=False,
-        **options.as_write_kwargs(),
-    )
+    with options.write_kwargs() as write_kwargs:
+        write_parquet_with_metadata(
+            con,
+            query,
+            output_filename,
+            original_metadata=metadata,
+            invalidate_derived_stats=True,
+            verbose=False,
+            **write_kwargs,
+        )
     if verbose:
         debug(f"Wrote {output_filename}")
     return True
