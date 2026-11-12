@@ -580,9 +580,6 @@ def _handle_existing_bbox(
 
     existing_bbox_col = bbox_info.get("bbox_column_name")
 
-    if force:
-        return False, _handle_existing_bbox_force(bbox_column_name, existing_bbox_col)
-
     if bbox_column_name != existing_bbox_col:
         # Not a conflict: the requested column does not exist yet, so compute it
         # and leave the existing one alone. Copying the input would not satisfy
@@ -592,6 +589,10 @@ def _handle_existing_bbox(
             f"'{existing_bbox_col}'. File will have 2 bbox columns."
         )
         return False, None
+
+    if force:
+        progress(f"Replacing existing bbox column '{existing_bbox_col}'...")
+        return False, existing_bbox_col
 
     if write_options_requested:
         # A verbatim copy reproduces the input's compression, row groups and
@@ -684,19 +685,6 @@ def _copy_instead_of_recomputing(
         f'Copied "{input_parquet}" to "{output_parquet}" unchanged - '
         "the existing bbox column was not recomputed."
     )
-
-
-def _handle_existing_bbox_force(bbox_column_name: str, existing_bbox_col: str) -> str | None:
-    """Handle force mode when bbox column exists. Returns column to replace or None."""
-    if bbox_column_name == existing_bbox_col:
-        progress(f"Replacing existing bbox column '{existing_bbox_col}'...")
-        return existing_bbox_col
-    else:
-        warn(
-            f"Warning: Adding '{bbox_column_name}' alongside existing "
-            f"'{existing_bbox_col}'. File will have 2 bbox columns."
-        )
-        return None
 
 
 if __name__ == "__main__":
