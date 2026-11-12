@@ -33,6 +33,8 @@ from geoparquet_io.core.geo_metadata import (
     covering_supported,
     declared_version,
     geo_key_value,
+    geometry_stats_of,
+    geometry_types_of,
     sanitized_carried_geo,
     with_geo_key,
 )
@@ -378,6 +380,14 @@ def add_bbox_metadata(
         SchemaSource(schema, with_geo_key(None, geo_meta)),
         GeoBlockOptions(
             geometry_column=primary_col,
+            stats={
+                primary_col: {
+                    "bbox": geometry_stats_of(
+                        parquet_file, primary_col, bbox_column=target_column, verbose=verbose
+                    ).bbox,
+                    "geometry_types": geometry_types_of(parquet_file, primary_col, verbose=verbose),
+                }
+            },
             covering=target_column,
             version=resolve_output_geoparquet_version(
                 None, original_metadata=metadata, preserve_input=True

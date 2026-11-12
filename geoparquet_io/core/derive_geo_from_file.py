@@ -35,8 +35,10 @@ from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     SchemaSource,
     compose_geo_block,
+    geometry_stats_of,
     read_raw_geo,
     row_group_geometry_stats,
+    sanitized_carried_geo,
     sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geometry_detection import primary_geometry_column
@@ -294,6 +296,8 @@ def _with_primary_column(
 def derive_v2_geo_metadata(
     output_path: str,
     primary_column: str | None = None,
+    *,
+    refresh_stats: bool = False,
 ) -> dict | None:
     """The GeoParquet 2.0 ``geo`` block a written file needs, when its own is wrong.
 
@@ -304,7 +308,11 @@ def derive_v2_geo_metadata(
     without it ``geometry_detection.primary_geometry_column`` picks among the
     native columns (a standard geometry name, then the alphabetically first).
 
-    When the file does carry a ``geo`` key, the one thing checked is its
+    ``refresh_stats`` rebuilds a carried block's measured fields from the
+    written file, keeping declarations. Complete native footer statistics avoid
+    a data scan; missing statistics fall back through ``geometry_stats_of``.
+
+    Otherwise, when the file does carry a ``geo`` key, the one thing checked is its
     ``primary_column``. DuckDB's generated block names the FIRST geometry column
     in the schema, so a secondary written before the primary (``centroid``
     before ``geometry``) became the primary. A block that describes
@@ -324,7 +332,22 @@ def derive_v2_geo_metadata(
     try:
         kv = pf.metadata.metadata or {}
         if b"geo" in kv:
-            return _with_primary_column(kv[b"geo"], primary_column, pf.schema_arrow)
+            if not refresh_stats:
+                return _with_primary_column(kv[b"geo"], primary_column, pf.schema_arrow)
+            block = sanitized_carried_geo(kv)
+            if not block:
+                return None
+            primary = primary_column or block["primary_column"]
+            stats = {
+                name: {"bbox": measured.bbox, "geometry_types": measured.geometry_types}
+                for name in block["columns"]
+                if name in pf.schema_arrow.names
+                for measured in [geometry_stats_of(output_path, name)]
+            }
+            return compose_geo_block(
+                SchemaSource(pf.schema_arrow, kv),
+                GeoBlockOptions(geometry_column=primary, version="2.0", stats=stats),
+            )
         schema = pf.metadata.schema
         geo_cols: dict[int, tuple[str, str]] = {}
         for i in range(len(schema)):

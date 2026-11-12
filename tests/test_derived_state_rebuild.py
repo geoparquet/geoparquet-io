@@ -13,8 +13,7 @@ declaration and not a property of the coordinates; the fresh build gets the
 declaration back as GeoArrow extension metadata on the geometry column, the
 way the API carries it.
 
-A cell that fails on the base is a strict xfail keyed to its open issue, or to
-#1367 where no open issue covers it (the fix lands in T2/T3).
+All cells must describe the written rows, including footer-patched files.
 """
 
 from __future__ import annotations
@@ -201,26 +200,6 @@ PATHS = {
 }
 FIELDS = ("bbox", "geometry_types", "covering", "edges")
 
-#: (path, field) -> reason, for every cell that fails on the base (3185269f).
-_CARRIED = (
-    "#1367: no open issue; the path copies the input's geo block through instead of "
-    "rebuilding bbox/geometry_types from the rows (fix lands in T2/T3)"
-)
-XFAIL: dict[tuple[str, str], str] = {
-    (path, field): _CARRIED
-    for path in ("stale_add_bbox_metadata",)
-    for field in ("bbox", "geometry_types")
-}
-
-
-def _cases():
-    for path in PATHS:
-        for field in FIELDS:
-            marks = []
-            if (path, field) in XFAIL:
-                marks.append(pytest.mark.xfail(strict=True, reason=XFAIL[(path, field)]))
-            yield pytest.param(path, field, marks=marks, id=f"{path}-{field}")
-
 
 class _Rewritten(dict):
     """(output block, fresh block) per path, built the first time a cell asks.
@@ -245,13 +224,14 @@ def rewritten(tmp_path_factory) -> dict[str, tuple[dict, dict]]:
     return _Rewritten(tmp_path_factory)
 
 
-@pytest.mark.parametrize(("path", "field"), list(_cases()))
-def test_derived_field_matches_a_fresh_build(path, field, rewritten):
+@pytest.mark.parametrize("path", PATHS)
+def test_derived_field_matches_a_fresh_build(path, rewritten):
     actual, fresh = rewritten[path]
-    assert _field(actual, field) == _field(fresh, field), (
-        f"{path}: {field} is {_field(actual, field)!r}, a fresh build of the same rows says "
-        f"{_field(fresh, field)!r}"
-    )
+    for field in FIELDS:
+        assert _field(actual, field) == _field(fresh, field), (
+            f"{path}: {field} is {_field(actual, field)!r}, a fresh build of the same rows says "
+            f"{_field(fresh, field)!r}"
+        )
 
 
 def test_the_extract_case_really_changes_the_derived_state(tmp_path):
@@ -262,3 +242,111 @@ def test_the_extract_case_really_changes_the_derived_state(tmp_path):
     assert column["geometry_types"] == ["Point"]
     if "bbox" in column:
         assert column["bbox"][2] < 100.0
+
+
+def test_file_statistics_use_complete_footers_and_scan_missing_chunks(tmp_path, monkeypatch):
+    """Incomplete footer stats must not silently under-cover the file."""
+    import geoparquet_io.core.geo_metadata as owner
+
+    table = _mixed_table().append_column(
+        "bbox",
+        pa.array(
+            [_vertex_bbox(w) for w in _mixed_table().column("geometry").to_pylist()],
+            pa.struct([(k, pa.float64()) for k in ("xmin", "ymin", "xmax", "ymax")]),
+        ),
+    )
+    expected = owner.geometry_stats_of(_mixed_table(), "geometry")
+    original = owner._query_stats
+    scans = []
+
+    def scan(*args, **kwargs):
+        scans.append(args)
+        return original(*args, **kwargs)
+
+    import duckdb
+
+    executed = []
+    execute = duckdb.DuckDBPyConnection.execute
+
+    def record(self, query, *args, **kwargs):
+        executed.append(str(query))
+        return execute(self, query, *args, **kwargs)
+
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "execute", record)
+    monkeypatch.setattr(owner, "_query_stats", scan)
+    for statistics in (True, False):
+        path = tmp_path / f"stats-{statistics}.parquet"
+        pq.write_table(table, path, row_group_size=10, write_statistics=statistics)
+        scans.clear()
+        actual = owner.geometry_stats_of(str(path), "geometry", bbox_column="bbox")
+        assert actual.bbox == expected.bbox
+        assert bool(scans) is (not statistics)
+        executed.clear()
+        assert owner.geometry_types_of(str(path), "geometry") == expected.geometry_types
+        assert not any("MIN(__x0)" in query for query in executed), (
+            "a types-only scan must not aggregate geometry envelopes"
+        )
+
+    import geoparquet_io.core.duckdb_metadata as footer_owner
+
+    path = str(tmp_path / "stats-True.parquet")
+    original_footer = footer_owner.get_row_group_bbox_stats
+
+    def incomplete(*args, **kwargs):
+        chunks, origin = original_footer(*args, **kwargs)
+        return chunks[:-1], origin
+
+    monkeypatch.setattr(footer_owner, "get_row_group_bbox_stats", incomplete)
+    scans.clear()
+    assert owner.geometry_stats_of(path, "geometry", bbox_column="bbox").bbox == expected.bbox
+    assert scans, "one missing row group must trigger a scan, not a partial extent"
+
+
+def test_native_fast_path_refreshes_carried_statistics_after_filtering(tmp_path, monkeypatch):
+    """Keeping a covering/epoch must not carry facts about rows we dropped."""
+    from geoparquet_io.core import write_funnels
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+    from geoparquet_io.core.geo_metadata import geometry_stats_of
+
+    src = _stale_source(tmp_path)
+    native = tmp_path / "native.parquet"
+    _invoke("convert", "geoparquet", src, native, "--geoparquet-version", "2.0")
+    metadata = pq.read_metadata(native).metadata
+    import json
+
+    block = json.loads(metadata[b"geo"])
+    block["columns"]["geometry"]["epoch"] = 2020.0
+    metadata[b"geo"] = json.dumps(block).encode()
+    out = tmp_path / "filtered.parquet"
+    copies = []
+    original = write_funnels._plain_copy_to
+
+    def copy(*args, **kwargs):
+        copies.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(write_funnels, "_plain_copy_to", copy)
+    import geoparquet_io.core.geo_metadata as owner
+
+    def no_scan(*args, **kwargs):
+        pytest.fail("native output statistics should be read from its footer")
+
+    monkeypatch.setattr(owner, "_query_stats", no_scan)
+    con = get_duckdb_connection(load_spatial=True)
+    try:
+        write_funnels.write_parquet_with_metadata(
+            con,
+            f"SELECT * FROM read_parquet({sql_path(str(native))}) WHERE id < {N_POINTS}",
+            str(out),
+            original_metadata=metadata,
+            input_file=str(native),
+            geoparquet_version="2.0",
+        )
+    finally:
+        con.close()
+    assert copies, "the native fast path must stay enabled"
+    col = footer_geo(out)["columns"]["geometry"]
+    fresh = geometry_stats_of(_mixed_table().slice(0, N_POINTS), "geometry")
+    assert col["epoch"] == 2020.0
+    assert col["bbox"] == fresh.bbox
+    assert col["geometry_types"] == fresh.geometry_types

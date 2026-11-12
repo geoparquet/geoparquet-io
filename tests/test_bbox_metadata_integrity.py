@@ -653,6 +653,7 @@ def test_the_patched_block_is_a_written_block_not_a_description(tmp_path):
         GeoBlockOptions(
             geometry_column="geometry",
             covering="bbox",
+            stats={"geometry": {"bbox": [1.0, 2.0, 1.0, 2.0], "geometry_types": ["Point"]}},
             version=resolve_output_geoparquet_version(
                 None, original_metadata=carried, preserve_input=True
             ),

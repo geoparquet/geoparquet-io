@@ -545,6 +545,7 @@ def _ensure_v2_geo_metadata(
     verbose: bool = False,
     primary_column: str | None = None,
     defer: bool = False,
+    refresh_stats: bool = False,
 ) -> dict | None:
     """Attach GeoParquet 2.0 geo metadata if the writer omitted it (#589).
 
@@ -573,7 +574,9 @@ def _ensure_v2_geo_metadata(
     one ``patch_or_rewrite`` call halves the post-write I/O (#1270). Returns the
     pending block then, ``None`` otherwise.
     """
-    geo_meta = derive_v2_geo_metadata(output_path, primary_column=primary_column)
+    geo_meta = derive_v2_geo_metadata(
+        output_path, primary_column=primary_column, refresh_stats=refresh_stats
+    )
     if geo_meta is None:
         return None
     if defer:
@@ -726,6 +729,7 @@ def _plain_copy_to(
             verbose=verbose,
             primary_column=geometry_column,
             defer=defer_v2_geo_repair,
+            refresh_stats=carry_geo_metadata is not None,
         )
 
     if verbose:

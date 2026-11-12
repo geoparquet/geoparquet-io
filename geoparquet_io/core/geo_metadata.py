@@ -2315,6 +2315,11 @@ def _query_stats(
     measured = _geometry_rows_sql(con, query, geometry_column, bbox_column)
     if measured is None:
         return _NO_STATS, None
+    if not need_bbox:
+        # Project only types so DuckDB prunes the unused envelope expressions.
+        rows = con.execute(f"SELECT DISTINCT __t FROM ({measured})").fetchall()
+        names = {geometry_type_name(row[0]) for row in rows}
+        return GeometryStats(None, sorted(name for name in names if name)), None
     located = f"SELECT * FROM ({measured}) WHERE {_located_sql('__x0', '__y0', '__x1', '__y1')}"
     # Keep unlocated rows for their types; aggregate filters avoid pushing the
     # envelope predicate through the source and re-evaluating its geometry.
@@ -2720,6 +2725,37 @@ def _stats(
     )
 
 
+def _footer_stats(
+    path: str, geometry_column: str, bbox_column: str | None, *, need_bbox: bool
+) -> GeometryStats | None:
+    """Complete physical footer facts; never fold a subset of the row groups."""
+    from geoparquet_io.core.duckdb_metadata import (
+        get_file_metadata,
+        get_native_geo_stats_by_row_group,
+        get_row_group_bbox_stats,
+    )
+
+    groups = get_file_metadata(path)["num_row_groups"]
+    if bbox_column is not None:
+        chunks, _ = get_row_group_bbox_stats(
+            path, bbox_column=lambda: bbox_column, native=lambda: []
+        )
+    else:
+        chunks = get_native_geo_stats_by_row_group(path, geometry_column) or []
+    if len(chunks) != groups:
+        return None
+    if need_bbox and any(
+        any(c.get(k) is None or not math.isfinite(c[k]) for k in ("xmin", "ymin", "xmax", "ymax"))
+        for c in chunks
+    ):
+        return None
+    if bbox_column is None and any(not c.get("geometry_types") for c in chunks):
+        return None
+    # Ordinary file scans measure Cartesian min/max; antimeridian wrapping is
+    # requested separately and must retain its data scan.
+    return row_group_geometry_stats(chunks, geographic=False)
+
+
 def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
     from geoparquet_io.core.file_utils import resolve_file_url
@@ -2729,6 +2765,12 @@ def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
     path = str(path)
     if geometry_column is None:
         geometry_column = primary_geometry_column(path)
+    if not kwargs["antimeridian"]:
+        footer = _footer_stats(
+            path, geometry_column, kwargs["bbox_column"], need_bbox=kwargs["need_bbox"]
+        )
+        if footer is not None:
+            return footer
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
     try:
         query = f"SELECT * FROM read_parquet({sql_path(resolve_file_url(path, verbose=False))})"
@@ -2757,7 +2799,9 @@ def geometry_stats_of(
 
     ``bbox_column`` measures a bbox covering's struct (its ``xmin``..``ymax``
     fields) instead of the geometry: the fast path for a file that has one.
-    It yields no types. ``antimeridian=True`` returns a lon/lat extent astride
+    It yields no types. File sources use complete physical row-group statistics
+    first (bbox struct min/max, or native GEOMETRY bounds/types); missing facts
+    fall back to a projected scan. ``antimeridian=True`` returns a lon/lat extent astride
     the antimeridian with ``xmin > xmax``.
 
     A trailing ``ORDER BY`` on a query is dropped first: an aggregate cannot
