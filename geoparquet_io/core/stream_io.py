@@ -288,6 +288,12 @@ def write_output(
     """
     validate_output(output_path)
 
+    carried = sanitized_carried_geo(original_metadata)
+    geometry_column = primary_geometry_column(
+        describe_query(con, query),
+        geo={**carried, "primary_column": geometry_column} if geometry_column else carried,
+    )
+
     if should_stream_output(output_path):
         # Arrow IPC to stdout has no DuckDB write engine to configure, so a
         # memory limit cannot be applied. Say so rather than dropping it silently.
