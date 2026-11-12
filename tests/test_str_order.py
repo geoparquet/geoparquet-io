@@ -417,8 +417,8 @@ def test_str_order_rejects_zero_row_group_size_by_the_name_the_user_typed(tmp_pa
     assert "tile_size" not in str(excinfo.value)
 
 
-def test_str_order_streaming_warns_that_add_bbox_is_ignored(tmp_path, monkeypatch, caplog):
-    """Streaming has no bbox step (same gap as `sort hilbert`), so say so."""
+def test_str_order_streaming_adds_bbox(tmp_path, monkeypatch, caplog):
+    """A requested bbox survives stdin dispatch (#776)."""
     table = _point_table([(index, index % 4, index // 4) for index in range(16)])
     stream = io.BytesIO()
     with ipc.RecordBatchStreamWriter(stream, table.schema) as writer:
@@ -433,8 +433,10 @@ def test_str_order_streaming_warns_that_add_bbox_is_ignored(tmp_path, monkeypatc
     with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
         str_order("-", str(output), add_bbox_flag=True, geoparquet_version="1.1")
 
-    assert any("--add-bbox is ignored in streaming mode" in r.message for r in caplog.records)
-    assert "bbox" not in pq.read_table(output).column_names
+    result = pq.read_table(output)
+    assert "bbox" in result.column_names
+    geo = json.loads(result.schema.metadata[b"geo"])
+    assert geo["columns"]["geometry"]["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
 
 
 def test_str_order_streaming_uses_the_streams_own_primary_column(tmp_path, monkeypatch):
@@ -524,3 +526,19 @@ def _assert_str_materialized_scan_bounds():
         visit(profile)
         assert sum(node["operator_cardinality"] for node in scans) <= 4096
         assert sum(node["result_set_size"] for node in scans) <= 4096 * 48
+
+
+@pytest.mark.parametrize("method", ["str", "hilbert"])
+def test_sort_stdin_refuses_existing_output_before_reading(tmp_path, monkeypatch, method):
+    from geoparquet_io.core.exceptions import GeoParquetError
+    from geoparquet_io.core.hilbert_order import hilbert_order
+
+    output = tmp_path / "existing.parquet"
+    output.write_bytes(b"keep me")
+    stdin = mock.MagicMock()
+    stdin.buffer.read.side_effect = AssertionError("input must not be consumed")
+    monkeypatch.setattr(sys, "stdin", stdin)
+    sort = str_order if method == "str" else hilbert_order
+    with pytest.raises(GeoParquetError, match="already exists"):
+        sort("-", str(output))
+    assert output.read_bytes() == b"keep me"

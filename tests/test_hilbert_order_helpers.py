@@ -57,7 +57,7 @@ class TestHilbertV11Warning:
 class TestHilbertRgSizeGuidance:
     """Tests for row group size guidance when Hilbert sorting with v2.0."""
 
-    @patch("geoparquet_io.core.hilbert_order._hilbert_order_file_based")
+    @patch("geoparquet_io.core.hilbert_order.run_sort")
     def test_large_rg_with_v20_shows_guidance(self, _mock_file_based, caplog):
         """Large RG size + v2.0 should show spatial guidance."""
         from geoparquet_io.core.hilbert_order import hilbert_order
@@ -76,7 +76,7 @@ class TestHilbertRgSizeGuidance:
         # either -- it moved to 49,152 in #961.
         assert f"{DEFAULT_ROW_GROUP_ROWS:,}" in caplog.text
 
-    @patch("geoparquet_io.core.hilbert_order._hilbert_order_file_based")
+    @patch("geoparquet_io.core.hilbert_order.run_sort")
     def test_large_rg_with_pgo_shows_guidance(self, _mock_file_based, caplog):
         """Large RG size + parquet-geo-only should show spatial guidance."""
         from geoparquet_io.core.hilbert_order import hilbert_order
@@ -90,7 +90,7 @@ class TestHilbertRgSizeGuidance:
             )
         assert "row group" in caplog.text.lower() or "row-group" in caplog.text.lower()
 
-    @patch("geoparquet_io.core.hilbert_order._hilbert_order_file_based")
+    @patch("geoparquet_io.core.hilbert_order.run_sort")
     def test_small_rg_with_v20_no_guidance(self, _mock_file_based, caplog):
         """Small RG size + v2.0 should NOT show guidance."""
         from geoparquet_io.core.hilbert_order import hilbert_order
@@ -104,7 +104,7 @@ class TestHilbertRgSizeGuidance:
             )
         assert "spatial filter pushdown" not in caplog.text
 
-    @patch("geoparquet_io.core.hilbert_order._hilbert_order_file_based")
+    @patch("geoparquet_io.core.hilbert_order.run_sort")
     def test_large_rg_with_v11_no_guidance(self, _mock_file_based, caplog):
         """Large RG size + v1.1 should NOT show RG guidance (v1.1 has no geo stats anyway)."""
         from geoparquet_io.core.hilbert_order import hilbert_order
@@ -120,7 +120,7 @@ class TestHilbertRgSizeGuidance:
         # Note: v1.1 warning about "no spatial filter pushdown benefit" IS expected
         assert "Smaller row groups" not in caplog.text
 
-    @patch("geoparquet_io.core.hilbert_order._hilbert_order_file_based")
+    @patch("geoparquet_io.core.hilbert_order.run_sort")
     def test_no_rg_rows_specified_no_guidance(self, _mock_file_based, caplog):
         """No row_group_rows specified should NOT show guidance."""
         from geoparquet_io.core.hilbert_order import hilbert_order

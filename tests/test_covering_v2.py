@@ -449,22 +449,22 @@ def test_advised_output_version_is_silent_for_stdin():
     Returning the default instead made `sort hilbert -` advise "consider
     --geoparquet-version 2.0" while it was already writing 2.0 (#738).
     """
-    from geoparquet_io.core.hilbert_order import _advised_output_version
+    from geoparquet_io.core.sort_common import advised_output_version
 
-    assert _advised_output_version("-", None, verbose=False) is None
+    assert advised_output_version("-", None, verbose=False) is None
 
 
 def test_advised_output_version_is_silent_for_an_unreadable_input(tmp_path):
     """A failed read is not evidence of a 1.1 input."""
-    from geoparquet_io.core.hilbert_order import _advised_output_version
+    from geoparquet_io.core.sort_common import advised_output_version
 
-    assert _advised_output_version(str(tmp_path / "nope.parquet"), None, verbose=False) is None
+    assert advised_output_version(str(tmp_path / "nope.parquet"), None, verbose=False) is None
 
 
 def test_advised_output_version_honours_an_explicit_version():
-    from geoparquet_io.core.hilbert_order import _advised_output_version
+    from geoparquet_io.core.sort_common import advised_output_version
 
-    assert _advised_output_version("-", "2.0", verbose=False) == "2.0"
+    assert advised_output_version("-", "2.0", verbose=False) == "2.0"
 
 
 def test_a_non_bbox_covering_survives_a_write_that_adds_a_bbox_covering(tmp_path):
