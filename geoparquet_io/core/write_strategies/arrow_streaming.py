@@ -55,6 +55,7 @@ from geoparquet_io.core.logging_config import configure_verbose, debug, progress
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
+    output_schema_metadata,
     regroup,
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_query,
@@ -462,6 +463,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                     extra_kv_metadata=extra_kv_metadata,
                     geoarrow_target_type=geoarrow_target_type,
                     geometry_columns=geometry_columns,
+                    geoparquet_version=geoparquet_version,
                 )
 
     def _precompute_metadata(
@@ -543,6 +545,8 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
         geoarrow_target_type=None,
         geometry_columns: set[str] | None = None,
+        *,
+        geoparquet_version: str,
     ) -> None:
         """Stream batches from reader to Parquet file."""
         first_batch = None
@@ -561,6 +565,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 extra_kv_metadata=extra_kv_metadata,
                 geoarrow_target_type=geoarrow_target_type,
                 geometry_columns=geometry_columns,
+                geoparquet_version=geoparquet_version,
             )
             return
 
@@ -574,6 +579,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             extra_kv_metadata=extra_kv_metadata,
             geoarrow_target_type=geoarrow_target_type,
             geometry_columns=geometry_columns,
+            geoparquet_version=geoparquet_version,
         )
 
         geoarrow_type = None
@@ -613,6 +619,8 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
         geoarrow_target_type=None,
         geometry_columns: set[str] | None = None,
+        *,
+        geoparquet_version: str,
     ) -> None:
         """Handle writing an empty result set."""
         schema_with_meta = self._build_streaming_schema(
@@ -625,6 +633,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             extra_kv_metadata=extra_kv_metadata,
             geoarrow_target_type=geoarrow_target_type,
             geometry_columns=geometry_columns,
+            geoparquet_version=geoparquet_version,
         )
         writer_kwargs = without_geometry_dictionary(
             writer_kwargs, schema_with_meta, geometry_columns or {geometry_column}
@@ -869,6 +878,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             # parquet-geo-only has set `geo_meta` to None by now, so the
             # secondaries are named here or not at all.
             geometry_columns=geometry_columns,
+            geoparquet_version=effective_version,
         )
 
         writer_kwargs = codec.pyarrow_kwargs()
@@ -912,6 +922,8 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
         extra_kv_metadata: dict[str, str] | None = None,
         geoarrow_target_type=None,
         geometry_columns: set[str] | None = None,
+        *,
+        geoparquet_version: str,
     ) -> pa.Schema:
         """Build the output schema for streaming write.
 
@@ -977,11 +989,9 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
             # The composer measured ``geometry_types``; the block is written as composed.
             schema_metadata = with_geo_key(schema_metadata, geo_meta)
 
-        return apply_output_kv_metadata(
-            schema.with_metadata(schema_metadata).empty_table(),
-            None if geo_meta is not None else "parquet-geo-only",
-            extra_kv_metadata,
-        ).schema
+        return schema.with_metadata(
+            output_schema_metadata(schema_metadata, geoparquet_version, extra_kv_metadata)
+        )
 
     def _convert_batch_to_geoarrow(
         self,

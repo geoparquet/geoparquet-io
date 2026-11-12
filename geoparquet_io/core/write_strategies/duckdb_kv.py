@@ -51,7 +51,7 @@ from geoparquet_io.core.geometry_detection import GeometryRead
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
-    apply_output_kv_metadata,
+    output_schema_metadata,
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_write,
 )
@@ -181,6 +181,8 @@ def _build_copy_options(
     row_group_rows: int | None,
     geo_meta_json: str | None = None,
     extra_kv_metadata: dict[str, str] | None = None,
+    *,
+    geoparquet_version: str,
 ) -> list[str]:
     """Build COPY TO options list.
 
@@ -188,12 +190,11 @@ def _build_copy_options(
     at gpio's 15 rather than DuckDB's own 3 (#1335).
     """
     options = ["FORMAT PARQUET", *codec.duckdb_copy_options(), "GEOPARQUET_VERSION 'NONE'"]
-    table = pa.table({}).replace_schema_metadata(
-        {b"geo": geo_meta_json.encode()} if geo_meta_json else None
+    metadata = output_schema_metadata(
+        {"geo": geo_meta_json} if geo_meta_json else None,
+        geoparquet_version,
+        extra_kv_metadata,
     )
-    metadata = apply_output_kv_metadata(
-        table, None if geo_meta_json else "parquet-geo-only", extra_kv_metadata
-    ).schema.metadata
     kv_pairs = {key.decode(): value.decode() for key, value in (metadata or {}).items()}
     kv_clause = build_kv_metadata_clause(kv_pairs)
     if kv_clause:
@@ -371,7 +372,10 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         )
 
         copy_options = _build_copy_options(
-            codec, row_group_rows, extra_kv_metadata=extra_kv_metadata
+            codec,
+            row_group_rows,
+            extra_kv_metadata=extra_kv_metadata,
+            geoparquet_version="parquet-geo-only",
         )
         copy_query = f"COPY ({final_query}) TO {sql_path(local_path)} ({', '.join(copy_options)})"
         con.execute(copy_query)
@@ -437,7 +441,11 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             )
 
         copy_options = _build_copy_options(
-            codec, row_group_rows, geo_key_value(geo_meta), extra_kv_metadata
+            codec,
+            row_group_rows,
+            geo_key_value(geo_meta),
+            extra_kv_metadata,
+            geoparquet_version=geoparquet_version,
         )
         copy_query = f"COPY ({final_query}) TO {sql_path(local_path)} ({', '.join(copy_options)})"
 

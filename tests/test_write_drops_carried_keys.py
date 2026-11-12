@@ -317,6 +317,21 @@ def test_generated_geo_wins_over_an_explicit_extra(tmp_path):
         assert "note" not in json.loads(footer[b"geo"])
         assert b"pandas" not in footer
 
+    # With no geometry to describe, 1.1 keeps the caller's explicit geo as on main.
+    WriteStrategyFactory.get_strategy(WriteStrategy.DUCKDB_KV).write_from_table(
+        table=pa.table({"id": [1]}),
+        output_path=str(out),
+        geometry_column=None,
+        geoparquet_version="1.1",
+        compression="ZSTD",
+        compression_level=None,
+        row_group_size_mb=None,
+        row_group_rows=None,
+        verbose=False,
+        extra_kv_metadata={"geo": explicit},
+    )
+    assert _footer(out)[b"geo"] == explicit.encode()
+
 
 @pytest.mark.parametrize("strategy", list(WriteStrategy))
 def test_caller_extras_named_like_carried_keys_survive(strategy, tmp_path):

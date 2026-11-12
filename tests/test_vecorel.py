@@ -230,6 +230,7 @@ class TestExtraKvMetadata:
         from geoparquet_io.core.write_strategies.duckdb_kv import _build_copy_options
 
         options = _build_copy_options(
+            geoparquet_version="1.1",
             codec=resolve_codec("ZSTD", None, context="write"),
             row_group_rows=None,
             geo_meta_json='{"version": "1.1"}',
@@ -245,21 +246,23 @@ class TestExtraKvMetadata:
         from geoparquet_io.core.write_strategies.duckdb_kv import _build_copy_options
 
         options = _build_copy_options(
+            geoparquet_version="1.1",
             codec=resolve_codec("ZSTD", None, context="write"),
             row_group_rows=None,
             geo_meta_json=None,
-            extra_kv_metadata={"vecorel": '{"schemas": {}}'},
+            extra_kv_metadata={"vecorel": '{"schemas": {}}', "geo": '{"explicit": true}'},
         )
         kv_option = [o for o in options if "KV_METADATA" in o]
         assert len(kv_option) == 1
         assert "'vecorel':" in kv_option[0]
-        assert "'geo':" not in kv_option[0]
+        assert "'geo':" in kv_option[0]
 
     def test_build_copy_options_no_kv(self):
         from geoparquet_io.core.compression import resolve_codec
         from geoparquet_io.core.write_strategies.duckdb_kv import _build_copy_options
 
         options = _build_copy_options(
+            geoparquet_version="1.1",
             codec=resolve_codec("ZSTD", None, context="write"),
             row_group_rows=None,
         )
