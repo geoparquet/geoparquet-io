@@ -221,3 +221,41 @@ class TestFixBboxAll:
 
         assert fix_result["success"] is True
         assert_buildings_output_is_sound(output_file)
+
+
+def test_fix_intermediates_stay_on_output_volume(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from geoparquet_io.core import check_fixes
+
+    source = tmp_path / "input.parquet"
+    source.write_bytes(b"input")
+    output = tmp_path / "destination" / "output.parquet"
+    output.parent.mkdir()
+    staged = []
+
+    def write_fix(current, destination, *args):
+        staged.append(Path(destination))
+        Path(destination).write_bytes(b"fixed")
+        return {"fix_applied": "fixed"}
+
+    for name in (
+        "fix_bboxless_cover",
+        "fix_bbox_removal",
+        "fix_bbox_column",
+        "fix_bbox_metadata",
+        "fix_spatial_ordering",
+    ):
+        monkeypatch.setattr(check_fixes, name, write_fix)
+    for checks in (
+        {"covering": {"fix_available": True}},
+        {"bbox": {"needs_bbox_removal": True}},
+        {"bbox": {"needs_bbox_column": True}},
+        {"bbox": {"needs_bbox_metadata": True}},
+        {"spatial": {"fix_available": True}},
+    ):
+        check_fixes.apply_all_fixes(str(source), str(output), checks)
+    assert len(staged) == 6  # Adding bbox also adds its covering on that scratch.
+    assert all(path.parent.parent == output.parent for path in staged)
+    assert all(not path.exists() for path in staged)
+    assert source.read_bytes() == b"input"

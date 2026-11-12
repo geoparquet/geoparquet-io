@@ -2,6 +2,7 @@
 
 import contextlib
 import functools
+import os
 import shutil
 
 from geoparquet_io.core.add.bbox import add_bbox_column
@@ -489,7 +490,7 @@ def fix_row_groups(parquet_file, output_file, verbose=False, profile=None, geopa
     return {"fix_applied": "Optimized row groups", "success": True}
 
 
-def _apply_cover_fix(check_results, current_file, scratch, verbose, profile):
+def _apply_cover_fix(check_results, current_file, scratch, verbose, profile, directory=None):
     """Drop a covering with no bbox member, before anything else reads the block.
 
     First, so the rest of the chain works from a file whose `geo` block is one
@@ -504,7 +505,7 @@ def _apply_cover_fix(check_results, current_file, scratch, verbose, profile):
     if not (check_results.get("covering") or {}).get("fix_available", False):
         return current_file, []
 
-    temp_file = scratch.enter_context(scratch_file())
+    temp_file = scratch.enter_context(scratch_file(directory=directory))
     summary = fix_bboxless_cover(current_file, temp_file, verbose, profile)
     if summary["fix_applied"] is None:
         # The check and the repair disagree about this file; keep the input.
@@ -512,7 +513,7 @@ def _apply_cover_fix(check_results, current_file, scratch, verbose, profile):
     return temp_file, [summary["fix_applied"]]
 
 
-def _apply_bbox_column_fix(bbox_result, current_file, scratch, verbose, profile):
+def _apply_bbox_column_fix(bbox_result, current_file, scratch, verbose, profile, directory=None):
     """Handle bbox column addition or removal.
 
     Returns:
@@ -522,7 +523,7 @@ def _apply_bbox_column_fix(bbox_result, current_file, scratch, verbose, profile)
 
     # Remove bbox column if needed (v2/parquet-geo-only)
     if bbox_result.get("needs_bbox_removal", False):
-        temp_file = scratch.enter_context(scratch_file())
+        temp_file = scratch.enter_context(scratch_file(directory=directory))
         bbox_column_name = bbox_result.get("bbox_column_name")
         fix_bbox_removal(current_file, temp_file, bbox_column_name, verbose, profile)
         fixes.append(f"Removed bbox column '{bbox_column_name}'")
@@ -530,7 +531,7 @@ def _apply_bbox_column_fix(bbox_result, current_file, scratch, verbose, profile)
 
     # Add bbox column if needed (v1.x)
     if bbox_result.get("needs_bbox_column", False):
-        temp_file = scratch.enter_context(scratch_file())
+        temp_file = scratch.enter_context(scratch_file(directory=directory))
         if verbose:
             progress("\n[1/4] Adding bbox column...")
         fix_bbox_column(current_file, temp_file, verbose, profile)
@@ -540,7 +541,9 @@ def _apply_bbox_column_fix(bbox_result, current_file, scratch, verbose, profile)
     return current_file, fixes
 
 
-def _apply_bbox_metadata_fix(bbox_result, current_file, parquet_file, scratch, verbose, profile):
+def _apply_bbox_metadata_fix(
+    bbox_result, current_file, parquet_file, scratch, verbose, profile, directory=None
+):
     """Handle bbox metadata addition.
 
     Returns:
@@ -564,7 +567,7 @@ def _apply_bbox_metadata_fix(bbox_result, current_file, parquet_file, scratch, v
     if is_same_file_path(current_file, parquet_file):
         # The user's file is only read: the covering goes onto a scratch
         # written in one pass, and current_file leaves the user's path here.
-        temp_file = scratch.enter_context(scratch_file())
+        temp_file = scratch.enter_context(scratch_file(directory=directory))
         fix_bbox_metadata(current_file, temp_file, verbose, profile)
         return temp_file, ["Added bbox covering metadata"]
 
@@ -572,7 +575,9 @@ def _apply_bbox_metadata_fix(bbox_result, current_file, parquet_file, scratch, v
     return current_file, ["Added bbox covering metadata"]
 
 
-def _apply_spatial_ordering_fix(check_results, current_file, scratch, verbose, profile):
+def _apply_spatial_ordering_fix(
+    check_results, current_file, scratch, verbose, profile, directory=None
+):
     """Handle Hilbert spatial ordering.
 
     Returns:
@@ -583,7 +588,7 @@ def _apply_spatial_ordering_fix(check_results, current_file, scratch, verbose, p
         return current_file, []
 
     # A path, not a file: hilbert_order refuses an existing output (#278).
-    temp_file = scratch.enter_context(scratch_file())
+    temp_file = scratch.enter_context(scratch_file(directory=directory))
 
     if verbose:
         progress("\n[3/4] Applying Hilbert spatial ordering...")
@@ -653,29 +658,35 @@ def _run_fix_chain(
 
     *scratch* is the ``ExitStack`` that owns every intermediate copy.
     """
+    directory = None
+    if not is_remote_url(output_file):
+        directory = os.path.dirname(os.path.abspath(output_file))
+        os.makedirs(directory, exist_ok=True)
     current_file = parquet_file
     fixes_applied = []
     bbox_result = check_results.get("bbox", {})
 
     # Step 0: Drop a covering the spec does not allow (#1173)
-    current_file, fixes = _apply_cover_fix(check_results, current_file, scratch, verbose, profile)
+    current_file, fixes = _apply_cover_fix(
+        check_results, current_file, scratch, verbose, profile, directory
+    )
     fixes_applied.extend(fixes)
 
     # Step 1: Handle bbox column (add or remove)
     current_file, fixes = _apply_bbox_column_fix(
-        bbox_result, current_file, scratch, verbose, profile
+        bbox_result, current_file, scratch, verbose, profile, directory
     )
     fixes_applied.extend(fixes)
 
     # Step 2: Handle bbox metadata
     current_file, fixes = _apply_bbox_metadata_fix(
-        bbox_result, current_file, parquet_file, scratch, verbose, profile
+        bbox_result, current_file, parquet_file, scratch, verbose, profile, directory
     )
     fixes_applied.extend(fixes)
 
     # Step 3: Apply Hilbert sorting
     current_file, fixes = _apply_spatial_ordering_fix(
-        check_results, current_file, scratch, verbose, profile
+        check_results, current_file, scratch, verbose, profile, directory
     )
     fixes_applied.extend(fixes)
 

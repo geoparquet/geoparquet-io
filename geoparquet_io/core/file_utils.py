@@ -548,17 +548,20 @@ def scratch_path(suffix: str = ".parquet", *, prefix: str = "gpio_") -> str:
 
 
 @contextlib.contextmanager
-def scratch_file(suffix: str = ".parquet", *, prefix: str = "gpio_") -> Iterator[str]:
+def scratch_file(
+    suffix: str = ".parquet", *, prefix: str = "gpio_", directory: str | None = None
+) -> Iterator[str]:
     """A path for a scratch file that is read back and never published.
 
     The one temp-naming rule for an intermediate copy (a pass between two
     writes, a spooled input, an in-memory table a file-based call reads). The
     path is in a fresh private directory (0700) under the temp directory, so
     the copy of the user's data is no one else's to read, and the file is not
-    created -- the writer makes it. The directory and everything in it are
+    created -- the writer makes it. ``directory`` stages beside a final output
+    when the intermediate must stay on its volume. The directory and everything in it are
     removed when the block exits, whatever the outcome.
     """
-    with scratch_dir(prefix=prefix) as scratch:
+    with scratch_dir(prefix=prefix, directory=directory) as scratch:
         yield str(Path(scratch) / f"scratch{suffix}")
 
 
