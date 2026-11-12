@@ -2840,13 +2840,14 @@ def bounds_of(
 
     :func:`geometry_stats_of`'s bbox; the same sources and the same policy.
     """
-    return geometry_stats_of(
+    bbox = geometry_stats_of(
         source,
         geometry_column,
         antimeridian=antimeridian,
         bbox_column=bbox_column,
         verbose=verbose,
     ).bbox
+    return list(bbox_xy(bbox)) if bbox is not None else None
 
 
 def geometry_types_of(source, geometry_column: str | None, *, verbose: bool = False) -> list[str]:

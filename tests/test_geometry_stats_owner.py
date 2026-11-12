@@ -240,3 +240,13 @@ def test_multifile_statistics_include_every_file(tmp_path):
         pq.write_table(table, tmp_path / f"{name}.parquet")
     for source in (str(tmp_path), str(tmp_path / "*.parquet")):
         assert bounds_of(source, "geometry", bbox_column="bbox") == [1, 2, 30, 40]
+
+
+def test_bounds_keep_xy_contract_with_native_xyz_footer(tmp_path):
+    import geoarrow.pyarrow as ga
+
+    path = tmp_path / "xyz.parquet"
+    geometry = ga.as_wkb(["POINT Z (1 2 3)", "POINT Z (4 5 6)"])
+    pq.write_table(pa.table({"geometry": geometry}), path)
+    assert geometry_stats_of(str(path), "geometry").bbox == [1, 2, 3, 4, 5, 6]
+    assert bounds_of(str(path), "geometry") == [1, 2, 4, 5]
