@@ -127,7 +127,10 @@ def _open_stdin_input(
         for source, metadata, _, connection in _open_file_input(
             path, con, verbose, stream_output=True
         ):
-            geom_col = primary_geometry_column(None, geo=sanitized_carried_geo(metadata))
+            geom_col = primary_geometry_column(
+                describe_query(connection, f"SELECT * FROM {source}"),
+                geo=sanitized_carried_geo(metadata),
+            )
             if geom_col:
                 source = create_geometry_view(connection, source, geom_col)
             yield source, metadata, True, connection

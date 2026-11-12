@@ -378,12 +378,15 @@ class TestStreamIO:
             assert metadata is not None
             assert con is not None
 
-    def test_open_input_with_stdin(self, sample_geo_table, geo_metadata, monkeypatch):
+    @pytest.mark.parametrize("carry_geo", [True, False])
+    def test_open_input_with_stdin(self, sample_geo_table, geo_metadata, monkeypatch, carry_geo):
         """Test open_input with stdin."""
         from geoparquet_io.core.stream_io import open_input
 
         # Create Arrow IPC buffer
-        table_with_meta = sample_geo_table.replace_schema_metadata(geo_metadata)
+        table_with_meta = sample_geo_table.replace_schema_metadata(
+            geo_metadata if carry_geo else None
+        )
         ipc_buffer = io.BytesIO()
         writer = ipc.RecordBatchStreamWriter(ipc_buffer, table_with_meta.schema)
         writer.write_table(table_with_meta)
@@ -401,7 +404,7 @@ class TestStreamIO:
             assert is_stream is True
             # Source should be a view name for stream input
             assert con.sql(f"SELECT count(*) FROM {source}").fetchall() == [(2,)]
-            assert metadata is not None
+            assert con.sql(f"SELECT ST_X(geometry) FROM {source}").fetchall() == [(1.0,), (1.0,)]
             assert con is not None
 
     def test_write_output_to_file(self, tmp_path, sample_geo_table, geo_metadata):
