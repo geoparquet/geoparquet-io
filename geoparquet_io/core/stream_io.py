@@ -368,19 +368,10 @@ def _write_stream_output(
         original_metadata = backfill_derived_stats(original_metadata, table)
         # A stream takes no version option: auto mode, the facade's answer.
         version = resolve_output_geoparquet_version(None, original_metadata=original_metadata)
-        if custom_metadata:
-            block = compose_geo_block(
-                ArrowTableSource(table.replace_schema_metadata(original_metadata)),
-                GeoBlockOptions(
-                    geometry_column=primary_geometry_column(table, geo=carried) or geometry_column,
-                    version=version,
-                    custom_metadata=custom_metadata,
-                ),
-            )
-            table = with_geo_block(table.replace_schema_metadata(original_metadata), block)
-        else:
-            original_metadata = compose_carried_geo(original_metadata, table.schema, version)
-            table = apply_metadata_to_table(table, original_metadata)
+        original_metadata = compose_carried_geo(
+            original_metadata, table.schema, version, custom_metadata=custom_metadata
+        )
+        table = apply_metadata_to_table(table, original_metadata)
 
     write_arrow_stream(table)
     return table

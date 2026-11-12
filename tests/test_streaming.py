@@ -463,7 +463,9 @@ class TestStreamIO:
 
         con.close()
 
-    def test_execute_transform_file_to_file(self, tmp_path, sample_geo_table, geo_metadata):
+    def test_execute_transform_file_to_file(
+        self, tmp_path, sample_geo_table, geo_metadata, monkeypatch
+    ):
         """Test execute_transform with file input and file output."""
         import pyarrow.parquet as pq
 
@@ -493,6 +495,23 @@ class TestStreamIO:
         out_table = pq.read_table(str(output_file))
         assert "id" in out_table.column_names
         assert "name" in out_table.column_names
+
+        # A geometry-free projection must not recreate geo from custom metadata.
+        output_buffer = io.BytesIO()
+        mock_stdout = mock.MagicMock()
+        mock_stdout.buffer = output_buffer
+        monkeypatch.setattr(sys, "stdout", mock_stdout)
+        execute_transform(
+            str(input_file),
+            "-",
+            transform_fn,
+            custom_metadata={"covering": {"bbox": {"xmin": ["bbox", "xmin"]}}},
+        )
+        output_buffer.seek(0)
+        streamed = ipc.open_stream(output_buffer).read_all()
+        assert streamed.column_names == ["id", "name"]
+        assert streamed.num_rows == sample_geo_table.num_rows
+        assert b"geo" not in (streamed.schema.metadata or {})
 
     def test_execute_transform_dry_run(self, tmp_path, sample_geo_table, geo_metadata):
         """Test execute_transform with dry_run=True."""
