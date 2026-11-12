@@ -21,7 +21,11 @@ from geoparquet_io.core.file_utils import (
     unlink_released_file,
 )
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
-from geoparquet_io.core.geometry_detection import primary_geometry_column, resolve_geometry_column
+from geoparquet_io.core.geometry_detection import (
+    primary_geometry_column,
+    resolve_geometry_column,
+    resolve_geometry_read,
+)
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version
 from geoparquet_io.core.partition.reader import (
@@ -189,6 +193,16 @@ def run_sort(
                 primary_geometry_column(described, geo=sanitized_carried_geo(metadata))
                 or geometry_column
             )
+            # Native files need GEOMETRY values; 1.x and IPC retain stored WKB.
+            version = resolve_output_geoparquet_version(
+                write.geoparquet_version, original_metadata=metadata, input_file=working
+            )
+            if primary and not stream_output and version in ("2.0", "parquet-geo-only"):
+                read = resolve_geometry_read(con, source, primary, relation=True)
+                if read.kind == "wkb":
+                    source = (
+                        f"(SELECT * REPLACE ({read.shape_expr} AS {read.quoted}) FROM {source})"
+                    )
             custom_metadata = None
             if add_bbox_flag:
                 bbox_query, _, _, custom_metadata = prepare_streaming_bbox(

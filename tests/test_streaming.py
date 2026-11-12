@@ -679,14 +679,20 @@ class TestStreamIO:
             assert result.exit_code == 0, result.output
             assert "bbox" in pq.read_schema(dest).names
 
-        monkeypatch.setattr("geoparquet_io.core.stream_io.read_arrow_stream", lambda: table)
+        monkeypatch.setattr(
+            "geoparquet_io.core.stream_io.read_arrow_stream", lambda table=table: table
+        )
         captured.clear()
         sort_by_column("-", "-", columns="bbox", add_bbox_flag=True)
         assert "bbox" in captured[0].column_names
         assert captured[0].num_rows == table.num_rows
 
     def test_bare_wkb_sorts_preserve_bytes(self, tmp_path, monkeypatch):
+        from contextlib import nullcontext
+        from itertools import product
+
         import pyarrow.parquet as pq
+        from geoarrow.c.lib import GeoArrowCException
 
         from geoparquet_io.core.hilbert_order import hilbert_order
         from geoparquet_io.core.str_order import str_order
@@ -696,25 +702,45 @@ class TestStreamIO:
         wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
         captured = []
         monkeypatch.setattr("geoparquet_io.core.stream_io.write_arrow_stream", captured.append)
-        malformed = pa.table({"id": [1, 2, 3], "geometry": [wkb, b"malformed", b""]})
-        pq.write_table(malformed, source)
-        monkeypatch.setattr("geoparquet_io.core.stream_io.read_arrow_stream", lambda: malformed)
-        for transform in (hilbert_order, str_order):
-            for stdin in (False, True):
-                for stdout in (False, True):
-                    captured.clear()
-                    transform(
-                        "-" if stdin else str(source), "-" if stdout else str(dest), overwrite=True
-                    )
-                    result = captured[0] if stdout else pq.read_table(dest)
-                    assert dict(
-                        zip(result["id"].to_pylist(), result["geometry"].to_pylist(), strict=True)
-                    ) == {
-                        1: wkb,
-                        2: b"malformed",
-                        3: b"",
-                    }, (transform.__name__, stdin, stdout)
-                    assert result["id"].to_pylist()[0] == 1
+        versions = (None, "1.0", "1.1", "2.0", "parquet-geo-only", "1.1-geoarrow")
+        for malformed, transform, stdin, stdout, version in product(
+            (False, True), (hilbert_order, str_order), (False, True), (False, True), versions
+        ):
+            values = [wkb, b"malformed", b""] if malformed else [wkb, wkb, wkb]
+            table = pa.table({"id": [1, 2, 3], "geometry": values})
+            pq.write_table(table, source)
+            monkeypatch.setattr(
+                "geoparquet_io.core.stream_io.read_arrow_stream", lambda table=table: table
+            )
+            captured.clear()
+            rejects_invalid = malformed and not stdout and version == "1.1-geoarrow"
+            context = (
+                pytest.raises(GeoArrowCException, match="Expected uint32")
+                if rejects_invalid
+                else nullcontext()
+            )
+            with context:
+                transform(
+                    "-" if stdin else str(source),
+                    "-" if stdout else str(dest),
+                    overwrite=True,
+                    geoparquet_version=version,
+                )
+            if rejects_invalid:
+                continue
+            result = captured[0] if stdout else pq.read_table(dest)
+            native = not stdout and version in ("2.0", "parquet-geo-only")
+            if native:
+                field = pq.ParquetFile(dest).schema.column(1)
+                assert "Geometry" in str(field.logical_type), (transform, stdin, version)
+                assert field.name == "geometry"
+                assert pq.ParquetFile(dest).metadata.row_group(0).column(1).statistics is not None
+            if stdout or version != "1.1-geoarrow":
+                expected = [wkb, None, None] if native and malformed else values
+                assert dict(
+                    zip(result["id"].to_pylist(), result["geometry"].to_pylist(), strict=True)
+                ) == dict(zip([1, 2, 3], expected, strict=True))
+            assert result["id"].to_pylist()[0] == 1
 
     def test_execute_transform_dry_run(self, tmp_path, sample_geo_table, geo_metadata):
         """Test execute_transform with dry_run=True."""
@@ -1214,7 +1240,7 @@ class TestReadStdinToTempFile:
     def _run(self, monkeypatch, table):
         from geoparquet_io.core import streaming as streaming_mod
 
-        monkeypatch.setattr(streaming_mod, "read_arrow_stream", lambda: table)
+        monkeypatch.setattr(streaming_mod, "read_arrow_stream", lambda table=table: table)
         return streaming_mod.read_stdin_to_temp_file()
 
     def test_missing_geometry_types_is_filled_in(self, monkeypatch):
