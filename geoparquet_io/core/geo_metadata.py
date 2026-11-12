@@ -2879,10 +2879,11 @@ def missing_geometry_types(source, block: dict) -> dict[str, dict]:
     entry without it is invalid (#1433). Only the absent key is a gap here: the
     ``[]`` "not known" sentinel stays as the caller left it (#934); duckdb-kv,
     which fills that too, has its own gap rule (#952). ``source`` is anything
-    :func:`geometry_types_of` measures.
+    :func:`geometry_types_of` measures. A None source supplies the required
+    unknown-type sentinel while a writer defers measurement to its completed file.
     """
     return {
-        name: {"geometry_types": geometry_types_of(source, name)}
+        name: {"geometry_types": geometry_types_of(source, name) if source is not None else []}
         for name, meta in block["columns"].items()
         if isinstance(meta, dict) and "geometry_types" not in meta
     }

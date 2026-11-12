@@ -45,6 +45,7 @@ from geoparquet_io.core.geo_metadata import (
     geo_key_value,
     geometry_stats_of,
     geometry_types_of,
+    missing_geometry_types,
     sanitized_carried_geo,
 )
 from geoparquet_io.core.geometry_detection import GeometryRead
@@ -421,7 +422,7 @@ class DuckDBKVStrategy(BaseWriteStrategy):
                 crs=input_crs,
                 geometry_info=geometry_info,
                 measure_missing=(
-                    None
+                    (lambda block: missing_geometry_types(None, block))
                     if defer_stats
                     else lambda block: self._missing_stats(
                         con, query, geometry_column, block, verbose

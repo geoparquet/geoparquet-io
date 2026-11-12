@@ -527,11 +527,7 @@ class ArrowStreamingStrategy(BaseWriteStrategy):
                 crs=input_crs,
                 stats={geometry_column: measured},
                 geometry_info=geometry_info,
-                measure_missing=(
-                    (lambda block: missing_geometry_types(measure_source, block))
-                    if measure_source is not None
-                    else None
-                ),
+                measure_missing=lambda block: missing_geometry_types(measure_source, block),
                 verbose=verbose,
             ),
         )

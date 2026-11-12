@@ -908,12 +908,8 @@ class TestMultiGeometryDerivedStatsInvalidation:
         assert streamed["boundary"]["bbox"] == carried["boundary"]["bbox"]
         assert streamed["geometry"]["bbox"] == carried["geometry"]["bbox"]
 
-    def test_a_file_output_still_carries_the_secondary(self, tmp_path):
-        """The stream's precision must not leak into the file path (#934).
-
-        Widening the strip on a file output would delete a REQUIRED key that
-        nothing there puts back -- the unreadable output this PR exists to fix.
-        """
+    def test_a_file_output_rebuilds_the_secondary_for_filtered_rows(self, tmp_path):
+        """File output retains required types and measures bbox over the kept rows."""
         from geoparquet_io.core.extract import extract
 
         input_file = tmp_path / "in.parquet"
@@ -923,7 +919,7 @@ class TestMultiGeometryDerivedStatsInvalidation:
 
         boundary = self._geo(output_file)["columns"]["boundary"]
         assert boundary["geometry_types"] == ["Polygon"]
-        assert boundary["bbox"] == [-0.5, -0.5, 2.5, 2.5]
+        assert boundary["bbox"] == [-0.5, -0.5, 0.5, 0.5]
         self._assert_spec_valid(output_file)
 
     # --- extract: multi-file merge (recomputed) -----------------------------
