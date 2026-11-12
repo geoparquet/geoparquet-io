@@ -196,6 +196,9 @@ def _build_copy_options(
         extra_kv_metadata,
     )
     kv_pairs = {key.decode(): value.decode() for key, value in (metadata or {}).items()}
+    # Preserve COPY's established footer order: sidecars, then generated geo.
+    if "geo" in kv_pairs:
+        kv_pairs["geo"] = kv_pairs.pop("geo")
     kv_clause = build_kv_metadata_clause(kv_pairs)
     if kv_clause:
         options.append(kv_clause)

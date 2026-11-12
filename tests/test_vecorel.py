@@ -240,6 +240,7 @@ class TestExtraKvMetadata:
         assert len(kv_option) == 1
         assert "'geo':" in kv_option[0]
         assert "'vecorel':" in kv_option[0]
+        assert kv_option[0].index("'vecorel':") < kv_option[0].index("'geo':")
 
     def test_build_copy_options_only_extra_kv(self):
         from geoparquet_io.core.compression import resolve_codec
