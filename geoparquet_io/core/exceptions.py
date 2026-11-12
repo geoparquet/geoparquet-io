@@ -40,7 +40,12 @@ def _url_without_credentials(url: str) -> str:
         start = token.index("://") + 3
         authority = token[start:]
         if "@" in authority:
-            token = token[:start] + authority.rpartition("@")[2]
+            userinfo, _, host = authority.rpartition("@")
+            # An @ inside a query secret is indistinguishable from malformed
+            # userinfo. Retain neither candidate credential's trailing bytes.
+            if "?" in userinfo or "#" in userinfo:
+                return token[:start] + "[redacted]"
+            token = token[:start] + host
         return re.split(r"[?#]", token, maxsplit=1)[0]
 
     return _URL_IN_TEXT.sub(scrub, url)
@@ -74,9 +79,8 @@ def sanitize_url_for_logging(url: str) -> str:
     return url
 
 
-#: A URL embedded in free text. Quotes are excluded from the body because
-#: DuckDB writes URLs inside single quotes -- ``HTTP GET error on '<url>'`` --
-#: and the closing quote is not part of the URL.
+#: A diagnostic URL token. Quotes may be part of malformed credentials, so
+#: only whitespace and angle brackets bound the conservative redaction.
 _URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s<>]+")
 
 #: A complete ANSI escape sequence, removed whole so no readable tail is left

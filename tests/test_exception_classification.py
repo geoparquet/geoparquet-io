@@ -182,6 +182,7 @@ def test_a_gpio_error_arrives_sanitized():
                 for text in (url, f'failed "{url}" next', f"failed '{url}' next"):
                     assert secret not in clean(text)
                     assert "SECRET" not in clean(text)
+                    assert "END" not in clean(text)
 
 
 @pytest.mark.parametrize(
