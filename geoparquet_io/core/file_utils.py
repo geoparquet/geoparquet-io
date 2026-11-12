@@ -383,7 +383,6 @@ def handle_output_overwrite(
     input_path: str | None = None,
     *,
     flag: str = "--overwrite",
-    remove: bool = False,
 ) -> None:
     """The one overwrite policy: what a command does about an output that exists.
 
@@ -402,9 +401,8 @@ def handle_output_overwrite(
         flag: How the caller spells the switch, for the refusal's hint
             (``--force`` for the tile and overview commands, ``overwrite=True``
             for the Python API)
-        remove: Explicitly unlink an existing output when *overwrite* is set.
-            By default the writer replaces it only on success, so a failed run
-            preserves the last good output.
+
+    Existing outputs remain in place until the writer replaces them on success.
 
     Raises:
         GeoParquetError: When the output may not be written.
@@ -430,9 +428,6 @@ def handle_output_overwrite(
 
     if not overwrite:
         raise output_exists_error(output_path, flag)
-
-    if remove:
-        output_file.unlink()
 
 
 #: Seconds to wait before each further attempt at an unlink Windows refused.

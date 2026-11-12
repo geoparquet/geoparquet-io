@@ -476,8 +476,6 @@ class TestHandleOutputOverwrite:
         handle_output_overwrite(str(existing), overwrite=True)
 
         assert existing.read_bytes() == b"test"
-        handle_output_overwrite(str(existing), overwrite=True, remove=True)
-        assert not existing.exists()
 
     def test_same_input_output_raises(self, tmp_path):
         """Same input and output file raises."""
