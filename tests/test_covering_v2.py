@@ -263,7 +263,7 @@ def test_auto_mode_on_v2_input_does_not_advise_upgrading_to_v2(tmp_path):
     src = _write_v2_wkb(tmp_path / "in.parquet")
     out = tmp_path / "out.parquet"
 
-    with patch("geoparquet_io.core.hilbert_order.warn") as mock_warn:
+    with patch("geoparquet_io.core.sort_common.warn") as mock_warn:
         from geoparquet_io.core.hilbert_order import hilbert_order
 
         hilbert_order(src, str(out), geoparquet_version=None)

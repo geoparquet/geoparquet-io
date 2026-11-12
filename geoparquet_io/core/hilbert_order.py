@@ -246,11 +246,6 @@ def hilbert_order(
     """
     row_group_rows = resolve_row_group_rows(row_group_rows, row_group_size_mb)
     effective_version = advised_output_version(input_parquet, geoparquet_version, verbose, profile)
-    if effective_version == "1.1":
-        warn(
-            "Hilbert sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
-            "Consider using --geoparquet-version 2.0 to enable native geo_bbox row group statistics."
-        )
 
     if (
         row_group_rows
@@ -268,6 +263,7 @@ def hilbert_order(
         output_parquet,
         command="sort hilbert",
         label="Hilbert curve",
+        effective_version=effective_version,
         build_query=_hilbert_query,
         geometry_column=geometry_column,
         add_bbox_flag=add_bbox_flag,

@@ -139,6 +139,7 @@ def run_sort(
     *,
     command,
     label,
+    effective_version,
     build_query,
     geometry_column,
     add_bbox_flag,
@@ -151,6 +152,11 @@ def run_sort(
     ``build_query`` owns only the ordering key; it returns (query, reordered).
     File queries retain their file witness for bounds and metadata policy.
     """
+    if effective_version == "1.1":
+        warn(
+            f"{label.split()[0]} sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
+            "Consider using --geoparquet-version 2.0 to enable native geo_bbox row group statistics."
+        )
     streaming = is_stdin(input_path) or should_stream_output(output_path)
     if not should_stream_output(output_path):
         handle_output_overwrite(output_path, overwrite, input_path, remove=False)

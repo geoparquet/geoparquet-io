@@ -235,11 +235,6 @@ def str_order(
     tile_size = DEFAULT_STR_TILE_SIZE if row_group_rows is None else row_group_rows
     _validate_tile_size(tile_size)
     effective_version = advised_output_version(input_parquet, geoparquet_version, verbose, profile)
-    if effective_version == "1.1":
-        warn(
-            "STR sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
-            "Consider using --geoparquet-version 2.0 to enable native geo_bbox row group statistics."
-        )
 
     if row_group_size_mb is not None and row_group_rows is None:
         info(
@@ -253,6 +248,7 @@ def str_order(
         output_parquet,
         command="sort str",
         label="STR",
+        effective_version=effective_version,
         build_query=lambda con, source, geom_col, verbose, working: _str_query(
             con, source, geom_col, tile_size, verbose, working
         ),

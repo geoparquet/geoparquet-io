@@ -417,6 +417,7 @@ def test_str_order_rejects_zero_row_group_size_by_the_name_the_user_typed(tmp_pa
     assert "tile_size" not in str(excinfo.value)
 
 
+@pytest.mark.slow
 def test_str_order_streaming_adds_bbox(tmp_path, monkeypatch, caplog):
     """A requested bbox survives stdin dispatch (#776)."""
     table = _point_table([(index, index % 4, index // 4) for index in range(16)])

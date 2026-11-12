@@ -7,51 +7,23 @@ import pytest
 
 
 class TestHilbertV11Warning:
-    """Tests for v1.1 Hilbert sorting warning."""
+    """Both spatial sorts get their unchanged advisory from the shared owner."""
 
-    def test_warns_when_version_is_1_1(self, tmp_path, places_test_file):
-        """Hilbert sorting to v1.1 should warn about no filter pushdown benefit."""
-        from unittest.mock import patch
+    def test_version_advisory_comes_from_the_sort_owner(self, tmp_path, places_test_file):
+        from geoparquet_io.core.hilbert_order import hilbert_order
+        from geoparquet_io.core.str_order import str_order
 
-        output = str(tmp_path / "out.parquet")
-        with patch("geoparquet_io.core.hilbert_order.warn") as mock_warn:
-            from geoparquet_io.core.hilbert_order import hilbert_order
-
-            hilbert_order(places_test_file, output, geoparquet_version="1.1")
-
-        mock_warn.assert_any_call(
-            "Hilbert sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
-            "Consider using --geoparquet-version 2.0 to enable native geo_bbox row group statistics."
-        )
-
-    def test_warns_when_version_is_default_none(self, tmp_path, places_test_file):
-        """Hilbert sorting with default version (None, resolves to 1.1) should warn."""
-        from unittest.mock import patch
-
-        output = str(tmp_path / "out.parquet")
-        with patch("geoparquet_io.core.hilbert_order.warn") as mock_warn:
-            from geoparquet_io.core.hilbert_order import hilbert_order
-
-            hilbert_order(places_test_file, output, geoparquet_version=None)
-
-        mock_warn.assert_any_call(
-            "Hilbert sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
-            "Consider using --geoparquet-version 2.0 to enable native geo_bbox row group statistics."
-        )
-
-    def test_no_warning_when_version_is_2_0(self, tmp_path, places_test_file):
-        """Hilbert sorting to v2.0 should NOT warn."""
-        from unittest.mock import patch
-
-        output = str(tmp_path / "out.parquet")
-        with patch("geoparquet_io.core.hilbert_order.warn") as mock_warn:
-            from geoparquet_io.core.hilbert_order import hilbert_order
-
-            hilbert_order(places_test_file, output, geoparquet_version="2.0")
-
-        # Check that warn was never called with the v1.1 message
-        for call in mock_warn.call_args_list:
-            assert "no spatial filter pushdown" not in str(call)
+        for sort, label in ((hilbert_order, "Hilbert"), (str_order, "STR")):
+            for version in ("1.1", None, "2.0"):
+                output = str(tmp_path / f"{label}-{version}.parquet")
+                with patch("geoparquet_io.core.sort_common.warn") as mock_warn:
+                    sort(places_test_file, output, geoparquet_version=version)
+                advisory = (
+                    f"{label} sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
+                    "Consider using --geoparquet-version 2.0 to enable native geo_bbox row group statistics."
+                )
+                messages = [call.args[0] for call in mock_warn.call_args_list]
+                assert messages.count(advisory) == (0 if version == "2.0" else 1)
 
 
 class TestHilbertRgSizeGuidance:
