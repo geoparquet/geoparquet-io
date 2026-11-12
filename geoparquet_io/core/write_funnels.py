@@ -499,7 +499,11 @@ def _composed_edges(block: dict | None, edges_by_col: dict[str, str]) -> dict[st
         return {}
     stated = block_edges(block)
     columns = block.get("columns") or {}
-    return {name: stated.get(name, PLANAR) for name in edges_by_col if name in columns}
+    return {
+        name: edge if isinstance(edge := stated.get(name, PLANAR), str) else PLANAR
+        for name in edges_by_col
+        if name in columns
+    }
 
 
 def _geo_block_updates(
@@ -528,7 +532,7 @@ def _geo_block_updates(
         if isinstance(columns.get(name), dict):
             stats[name] = {"bbox": None}
     composed = _restored_geo_block(written_schema, geo_meta, edges_by_col, stats=stats)
-    if composed == geo_meta and not force:
+    if composed is None or (composed == geo_meta and not force):
         return {}
     return {"geo": geo_key_value(composed)}
 
@@ -669,7 +673,9 @@ def _plain_copy_to(
 
     # Map version to DuckDB GEOPARQUET_VERSION parameter
     version_config = GEOPARQUET_VERSIONS[geoparquet_version]
+    assert isinstance(version_config, dict)
     duckdb_version = version_config["duckdb_param"]
+    assert isinstance(duckdb_version, str)
 
     # DuckDB 1.5+: Apply CRS via ST_SetCRS so it's written natively into the
     # Parquet schema during COPY TO — no post-processing file rewrite needed.
@@ -1167,7 +1173,12 @@ def _rewrite_parquet(
                         writer.write_table(
                             pa.Table.from_batches([group]), row_group_size=group.num_rows
                         )
-        upload_if_remote(local, destination, profile=write.remote.profile, verbose=verbose)
+        upload_if_remote(
+            local,
+            destination,
+            profile=write.remote.profile if write.remote else None,
+            verbose=verbose,
+        )
 
 
 def _carries_more_than_duckdb_generates(geo_dict: dict) -> bool:

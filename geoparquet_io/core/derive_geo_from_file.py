@@ -14,8 +14,6 @@ imports is still importable from there. The type-code tables it reads are the
 single copies in ``geo_metadata``.
 """
 
-from typing import Any
-
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -59,7 +57,7 @@ def _geography_edges_from_logical(logical: str) -> str | None:
     return logical_type_edges(parse_geometry_logical_type(logical))
 
 
-def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, Any]:
+def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, dict | None]:
     """The CRS a native Geometry/Geography logical type declares.
 
     Returns ``(present, crs)``. ``present`` is False when the type names no CRS
@@ -245,9 +243,11 @@ def derive_secondary_geometry_info(
             continue
         if output_columns is not None and name not in output_columns:
             continue
-        logical = native.get(name)
+        native_logical = native.get(name)
         metadata[name] = (
-            _native_secondary_meta(logical, declared.get(name), input_file or "") if logical else {}
+            _native_secondary_meta(native_logical, declared.get(name), input_file or "")
+            if native_logical
+            else {}
         )
 
     if not metadata:
@@ -274,7 +274,11 @@ def _with_primary_column(
     geo = read_raw_geo({b"geo": raw_geo}).block
     if geo is None or not isinstance(geo.get("columns"), dict):
         return None
-    if primary_column not in geo["columns"] or geo.get("primary_column") == primary_column:
+    if (
+        primary_column is None
+        or primary_column not in geo["columns"]
+        or geo.get("primary_column") == primary_column
+    ):
         return None
     return compose_geo_block(
         SchemaSource(schema, {b"geo": raw_geo}),
@@ -348,6 +352,8 @@ def derive_v2_geo_metadata(
         # edges (``column_edges``: a fact, not a request, so no orientation);
         # the secondaries' as their declared metadata. No covering: none is
         # derivable from a logical type.
+        if primary is None:
+            return None
         declared = columns[primary]
         secondary = [name for name in columns if name != primary]
         return compose_geo_block(
@@ -356,7 +362,9 @@ def derive_v2_geo_metadata(
                 geometry_column=primary,
                 version="2.0",
                 covering=None,
-                column_edges={primary: edges_of(declared)} if declares_edges(declared) else None,
+                column_edges={primary: declared_edge}
+                if isinstance(declared_edge := edges_of(declared), str)
+                else None,
                 crs=declared["crs"] if "crs" in declared else KEEP_CRS,
                 stats={primary: {k: declared.get(k) for k in ("bbox", "geometry_types")}},
                 geometry_info={"secondary": secondary, "metadata": columns},

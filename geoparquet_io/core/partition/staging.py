@@ -120,7 +120,7 @@ class PartitionWriteOptions:
             metadata = pq.read_metadata(reader)
         sink = pa.BufferOutputStream()
         metadata.write_metadata_file(sink)
-        return sink.getvalue().to_pybytes()
+        return bytes(sink.getvalue())
 
     @contextmanager
     def write_kwargs(self):
