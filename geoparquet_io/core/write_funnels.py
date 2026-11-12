@@ -70,6 +70,7 @@ from geoparquet_io.core.duckdb_utils import (
     _get_query_columns,
     get_duckdb_connection,
     sql_path,
+    uses_aws_profile,
 )
 from geoparquet_io.core.edges import (
     PLANAR,
@@ -1029,6 +1030,7 @@ def open_parquet_writer(
     return pq.ParquetWriter(destination, schema, **kwargs, **options)
 
 
+@uses_aws_profile
 def rewrite_file_through_funnel(
     source: str,
     destination: str,
@@ -1134,6 +1136,7 @@ def rewrite_footer_kv(
     _rewrite_parquet(source, destination, updates, write=write, verbose=verbose)
 
 
+@uses_aws_profile
 def _rewrite_parquet(
     source: str,
     destination: str,

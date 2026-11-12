@@ -263,6 +263,7 @@ def fix_bboxless_cover(parquet_file, output_file, verbose=False, profile=None):
     return {"fix_applied": fix_applied, "success": True}
 
 
+@uses_aws_profile
 def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
     """Add missing bbox column.
 
@@ -385,6 +386,7 @@ def fix_bbox_removal(parquet_file, output_file, bbox_column_name, verbose=False,
     return {"fix_applied": f"Removed bbox column '{bbox_column_name}'", "success": True}
 
 
+@uses_aws_profile
 def fix_bbox_all(
     parquet_file, output_file, needs_column, needs_metadata, verbose=False, profile=None
 ):
@@ -424,6 +426,7 @@ def fix_bbox_all(
     return {"fix_applied": "Fixed bbox issues", "success": True}
 
 
+@uses_aws_profile
 def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None):
     """Apply Hilbert spatial ordering.
 

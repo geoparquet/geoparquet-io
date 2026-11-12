@@ -22,6 +22,7 @@ import pyarrow.parquet as pq
 from geoparquet_io.core.bbox_structure import bbox_covering_column_for
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import crs_of, is_geographic, load_crs, lonlat_source_name
+from geoparquet_io.core.duckdb_utils import uses_aws_profile
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
@@ -520,6 +521,7 @@ def _footer_kv_via_funnel(
     return {k.decode("utf-8"): v.decode("utf-8") for k, v in footer.items()}
 
 
+@uses_aws_profile
 def _simplify_file_streaming(
     pf: pq.ParquetFile,
     output_parquet: str,

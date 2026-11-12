@@ -588,3 +588,31 @@ def test_decorator_profile_counts_as_explicit_inside_an_exported_profile_scope(m
     with s3_config_scope(resolve_s3_config()):
         assert duckdb_utils._resolve_s3_settings(None, None, None)["profile"] is None
         assert probe("s3://b/k.parquet", profile="inner") == "inner"
+
+
+def test_staging_callers_keep_profile_scope_through_publication():
+    """Every profile-bearing staging owner keeps credentials until final upload."""
+    import ast
+    from pathlib import Path
+
+    missing = []
+    for path in (Path(__file__).parents[1] / "geoparquet_io").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if not {"profile", "write", "remote"} & {
+                arg.arg for arg in node.args.args + node.args.kwonlyargs
+            }:
+                continue
+            staged = any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "atomic_write"
+                for call in ast.walk(node)
+            )
+            scoped = any(
+                isinstance(d, ast.Name) and d.id == "uses_aws_profile" for d in node.decorator_list
+            )
+            if staged and not scoped:
+                missing.append(f"{path.name}:{node.name}")
+    assert not missing, missing
