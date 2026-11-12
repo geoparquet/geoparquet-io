@@ -743,7 +743,7 @@ def test_remote_covering_output_refusal_names_fix_output():
         fix_bbox_metadata("local.parquet", "s3://bucket/fixed.parquet")
 
 
-def test_all_fixes_share_one_data_rewrite(tmp_path):
+def test_all_fixes_share_one_data_rewrite(tmp_path, monkeypatch):
     """Keep the staged chain's exact bytes while avoiding intermediate data writes."""
     import json
 
@@ -806,3 +806,29 @@ def test_all_fixes_share_one_data_rewrite(tmp_path):
             "Optimized compression (ZSTD)",
             "Optimized row groups (49,152 rows/group)",
         ]
+
+        # Exercise final remote placement after the combined helper returns.
+        from obstore.store import LocalStore
+
+        from geoparquet_io.core.duckdb_utils import get_active_s3_config
+
+        bucket = tmp_path / "bucket"
+        bucket.mkdir(exist_ok=True)
+        uploads = []
+        outer_config = get_active_s3_config().copy()
+
+        def resolve_store(url, bucket=bucket, uploads=uploads):
+            assert url == "s3://private/result.parquet"
+            assert get_active_s3_config().get("profile") == "prod"
+            uploads.append(url)
+            return LocalStore(str(bucket)), "result.parquet"
+
+        with monkeypatch.context() as patch:
+            patch.setattr("geoparquet_io.core.file_utils.resolve_object_store", resolve_store)
+            remote_result = check_fixes.apply_all_fixes(
+                str(source), "s3://private/result.parquet", checks, profile="prod"
+            )
+        assert remote_result["success"]
+        assert uploads == ["s3://private/result.parquet"]
+        assert (bucket / "result.parquet").read_bytes() == baseline.read_bytes()
+        assert get_active_s3_config() == outer_config

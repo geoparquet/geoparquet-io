@@ -819,6 +819,7 @@ def _run_fix_chain(
     }
 
 
+@uses_aws_profile
 def apply_all_fixes(parquet_file, output_file, check_results, verbose=False, profile=None):
     """Orchestrate all fixes based on check results.
 
