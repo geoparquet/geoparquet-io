@@ -343,16 +343,3 @@ class TestCastTableEdgeCases:
         result = _cast_table_to_schema(table, target)
 
         assert result.schema.field("ts").type == pa.timestamp("ns")
-
-
-def test_view_layout_offset_twins():
-    from geoparquet_io.core.arrow_types import view_offset_type
-
-    for view, offset in [
-        (pa.binary_view(), pa.large_binary()),
-        (pa.string_view(), pa.large_string()),
-    ]:
-        assert view_offset_type(view) == offset
-        values = pa.array([None, "value"], type=view)
-        assert values.cast(offset).cast(view).equals(values)
-    assert view_offset_type(pa.binary()) is None

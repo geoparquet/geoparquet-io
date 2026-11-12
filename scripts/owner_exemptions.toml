@@ -41,10 +41,6 @@ path = "geoparquet_io/core/arcgis.py"
 name = "pyarrow.parquet.ParquetWriter"
 reason = "permanent scratch copy: the paged ArcGIS spool, read back by pq.read_table; never an output, so not a facade write. Its path comes from file_utils.scratch_path"
 [[G1.tid251]]
-path = "geoparquet_io/core/carto.py"
-name = "httpx"
-reason = "permanent: CARTO status probe streams one request with httpx.stream to read the status without the body; accepted caller-specific classification"
-[[G1.tid251]]
 path = "geoparquet_io/core/duckdb_utils.py"
 name = "psutil"
 reason = "permanent: process-liveness check for stale DuckDB temp dirs, not a memory fact; optional import (#1330)"
