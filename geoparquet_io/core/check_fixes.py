@@ -279,7 +279,9 @@ def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
         debug("Adding bbox column...")
 
     with atomic_write(
-        output_file, mode_from=parquet_file if not is_remote_url(parquet_file) else None
+        output_file,
+        mode_from=parquet_file if not is_remote_url(parquet_file) else None,
+        profile=profile,
     ) as destination:
         add_bbox_column(
             input_parquet=parquet_file,
@@ -408,7 +410,9 @@ def fix_bbox_all(
         return {"fix_applied": None, "success": True}
 
     with atomic_write(
-        output_file, mode_from=parquet_file if not is_remote_url(parquet_file) else None
+        output_file,
+        mode_from=parquet_file if not is_remote_url(parquet_file) else None,
+        profile=profile,
     ) as destination:
         if needs_column:
             # add_bbox_column writes the covering with the column, so a
@@ -448,7 +452,9 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
         file_meta.get("num_rows", 0), file_meta.get("num_row_groups", 0)
     )
     with atomic_write(
-        output_file, mode_from=parquet_file if not is_remote_url(parquet_file) else None
+        output_file,
+        mode_from=parquet_file if not is_remote_url(parquet_file) else None,
+        profile=profile,
     ) as destination:
         hilbert_order(
             input_parquet=parquet_file,

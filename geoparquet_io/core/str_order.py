@@ -23,6 +23,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
 from geoparquet_io.core.file_utils import (
+    atomic_write,
     handle_output_overwrite,
     resolve_file_url,
     unlink_released_file,
@@ -391,52 +392,55 @@ def _str_order_file_based(
     metadata, _ = get_parquet_metadata(working_parquet, verbose)
     geometry_column = resolve_geometry_column(working_parquet, geometry_column, verbose=verbose)
 
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
-    try:
-        geometry_source = create_geometry_view(con, source, geometry_column)
-        # The owner's read expression for the STR key: a GeoArrow coordinate
-        # struct is no argument to ST_IsEmpty or ST_XMin (#1438).
-        key_expr = resolve_geometry_read(con, geometry_source, geometry_column, relation=True).expr
-        row_count, total_count = _str_row_counts(con, geometry_source, key_expr)
-        reordered = row_count > 0
-        if not reordered:
-            warn("All geometries are empty or null. Writing file without STR ordering.")
-            query = f"SELECT * FROM {geometry_source}"
-        else:
-            query = _str_order_query(
-                geometry_source,
-                key_expr,
-                row_count,
-                tile_size,
-                has_empty=row_count < total_count,
-            )
-            if verbose:
-                tile_count, strip_count, strip_size = _str_layout(row_count, tile_size)
-                debug(
-                    f"STR layout: {row_count:,} spatial rows, {tile_count:,} tiles, "
-                    f"{strip_count:,} strips, about {strip_size:,} rows per strip"
+    with atomic_write(output_parquet, profile=write.remote.profile) as staged:
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
+        try:
+            geometry_source = create_geometry_view(con, source, geometry_column)
+            # The owner's read expression for the STR key: a GeoArrow coordinate
+            # struct is no argument to ST_IsEmpty or ST_XMin (#1438).
+            key_expr = resolve_geometry_read(
+                con, geometry_source, geometry_column, relation=True
+            ).expr
+            row_count, total_count = _str_row_counts(con, geometry_source, key_expr)
+            reordered = row_count > 0
+            if not reordered:
+                warn("All geometries are empty or null. Writing file without STR ordering.")
+                query = f"SELECT * FROM {geometry_source}"
+            else:
+                query = _str_order_query(
+                    geometry_source,
+                    key_expr,
+                    row_count,
+                    tile_size,
+                    has_empty=row_count < total_count,
                 )
+                if verbose:
+                    tile_count, strip_count, strip_size = _str_layout(row_count, tile_size)
+                    debug(
+                        f"STR layout: {row_count:,} spatial rows, {tile_count:,} tiles, "
+                        f"{strip_count:,} strips, about {strip_size:,} rows per strip"
+                    )
 
-        write_parquet_with_metadata(
-            con,
-            query,
-            output_parquet,
-            original_metadata=metadata,
-            verbose=verbose,
-            input_file=input_parquet,
-            **write.funnel_kwargs(),
-        )
-        if add_bbox_flag and temp_file_created:
-            success("Output includes bbox column and metadata for optimal performance")
-        if reordered:
-            success(f"Successfully reordered data using STR to: {output_parquet}")
-        else:
-            success(f"Wrote data without STR ordering to: {output_parquet}")
-    except duckdb.IOException as exc:
-        if is_remote_url(input_parquet):
-            hints = get_remote_error_hint(exc, input_parquet)
-            raise RemoteAccessError(input_parquet, f"{hints}\n\nOriginal error: {exc}") from exc
-        raise
-    finally:
-        con.close()
-        unlink_released_file(temp_file)
+            write_parquet_with_metadata(
+                con,
+                query,
+                staged,
+                original_metadata=metadata,
+                verbose=verbose,
+                input_file=input_parquet,
+                **write.funnel_kwargs(),
+            )
+            if add_bbox_flag and temp_file_created:
+                success("Output includes bbox column and metadata for optimal performance")
+            if reordered:
+                success(f"Successfully reordered data using STR to: {output_parquet}")
+            else:
+                success(f"Wrote data without STR ordering to: {output_parquet}")
+        except duckdb.IOException as exc:
+            if is_remote_url(input_parquet):
+                hints = get_remote_error_hint(exc, input_parquet)
+                raise RemoteAccessError(input_parquet, f"{hints}\n\nOriginal error: {exc}") from exc
+            raise
+        finally:
+            con.close()
+            unlink_released_file(temp_file)

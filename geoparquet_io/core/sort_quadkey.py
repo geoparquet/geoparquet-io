@@ -17,6 +17,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.file_utils import (
+    atomic_write,
     handle_output_overwrite,
     is_partition_path,
     resolve_file_url,
@@ -221,65 +222,66 @@ def sort_by_quadkey(
 
     # Bound before the try: the `finally` below closes it, and a constructor
     # that throws would otherwise be masked by an UnboundLocalError (#867).
-    con = None
-    try:
-        # Create DuckDB connection
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(actual_input))
+    with atomic_write(output_parquet, profile=profile) as staged:
+        con = None
+        try:
+            # Create DuckDB connection
+            con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(actual_input))
 
-        # Build SELECT clause - exclude quadkey if requested
-        if remove_quadkey_column:
-            select_cols = [
-                quote_identifier(col) for col in existing_columns if col != quadkey_column_name
-            ]
-            select_clause = ", ".join(select_cols)
-            progress(f"Sorting by '{quadkey_column_name}' (will be removed from output)")
-        else:
-            select_clause = "*"
-            progress(f"Sorting by '{quadkey_column_name}'")
+            # Build SELECT clause - exclude quadkey if requested
+            if remove_quadkey_column:
+                select_cols = [
+                    quote_identifier(col) for col in existing_columns if col != quadkey_column_name
+                ]
+                select_clause = ", ".join(select_cols)
+                progress(f"Sorting by '{quadkey_column_name}' (will be removed from output)")
+            else:
+                select_clause = "*"
+                progress(f"Sorting by '{quadkey_column_name}'")
 
-        # Build sort query
-        query = f"""
-            SELECT {select_clause}
-            FROM {read_expr}
-            ORDER BY {quote_identifier(quadkey_column_name)}
-        """
+            # Build sort query
+            query = f"""
+                SELECT {select_clause}
+                FROM {read_expr}
+                ORDER BY {quote_identifier(quadkey_column_name)}
+            """
 
-        if verbose:
-            debug(f"Sort query: {query}")
+            if verbose:
+                debug(f"Sort query: {query}")
 
-        # Write output with metadata preservation
-        write_parquet_with_metadata(
-            con,
-            query,
-            output_parquet,
-            original_metadata=metadata,
-            verbose=verbose,
-            input_file=input_parquet,
-            # `metadata` describes only the first file of a multi-file input
-            # (and the auto-add step carried that footer forward), so its
-            # bbox/geometry_types under-cover the merged output. Recompute
-            # rather than carry (#793).
-            invalidate_derived_stats=is_partition_path(input_parquet),
-            **write.funnel_kwargs(),
-        )
+            # Write output with metadata preservation
+            write_parquet_with_metadata(
+                con,
+                query,
+                staged,
+                original_metadata=metadata,
+                verbose=verbose,
+                input_file=input_parquet,
+                # `metadata` describes only the first file of a multi-file input
+                # (and the auto-add step carried that footer forward), so its
+                # bbox/geometry_types under-cover the merged output. Recompute
+                # rather than carry (#793).
+                invalidate_derived_stats=is_partition_path(input_parquet),
+                **write.funnel_kwargs(),
+            )
 
-        if remove_quadkey_column:
-            success(f"Sorted by quadkey and removed column to: {output_parquet}")
-        else:
-            success(f"Sorted by quadkey to: {output_parquet}")
+            if remove_quadkey_column:
+                success(f"Sorted by quadkey and removed column to: {output_parquet}")
+            else:
+                success(f"Sorted by quadkey to: {output_parquet}")
 
-    except duckdb.InvalidInputException as e:
-        # When the quadkey column already exists there is no auto-add step,
-        # so a schema mismatch across the glob first strikes the sort itself.
-        raise_for_schema_mismatch(e, input_parquet)
-        raise
-    finally:
-        if con:
-            con.close()
-        # Clean up temp file if we created one
-        if temp_file and verbose:
-            debug("Cleaning up temporary quadkey-enriched file...")
-        unlink_released_file(temp_file)
+        except duckdb.InvalidInputException as e:
+            # When the quadkey column already exists there is no auto-add step,
+            # so a schema mismatch across the glob first strikes the sort itself.
+            raise_for_schema_mismatch(e, input_parquet)
+            raise
+        finally:
+            if con:
+                con.close()
+            # Clean up temp file if we created one
+            if temp_file and verbose:
+                debug("Cleaning up temporary quadkey-enriched file...")
+            unlink_released_file(temp_file)
 
 
 def _sort_by_quadkey_streaming(

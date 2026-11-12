@@ -389,3 +389,64 @@ def test_verbose_fix_reports_final_destination(places_test_file, tmp_path, caplo
     successes = [r.message for r in caplog.records if "Wrote " in r.message]
     assert successes and any(str(output) in text for text in successes)
     assert all(".gpio-stage-" not in text for text in successes)
+
+
+def test_permitted_remote_inplace_callers_stage_and_close(places_test_file, tmp_path, monkeypatch):
+    """Mock the object store beneath real SQL, metadata, CLI and facade calls."""
+    from geoparquet_io.core import remote
+    from geoparquet_io.core.duckdb_utils import sql_path
+
+    url = "s3://bucket/input.parquet"
+    mirror = tmp_path / "object.parquet"
+    execute = duckdb.DuckDBPyConnection.execute
+    sql = duckdb.DuckDBPyConnection.sql
+    close = duckdb.DuckDBPyConnection.close
+    readers, closed, uploads = set(), set(), []
+
+    def redirect(query):
+        return query.replace(sql_path(url), sql_path(str(mirror)))
+
+    def run(self, query, parameters=None, **kwargs):
+        if str(query).lstrip().upper().startswith("COPY") and url in str(query):
+            readers.add(id(self))
+        parameters = (
+            [str(mirror) if p == url else p for p in parameters] if parameters else parameters
+        )
+        return execute(self, redirect(query), parameters, **kwargs)
+
+    def relation(self, query, **kwargs):
+        return sql(self, redirect(query), **kwargs)
+
+    def release(self):
+        closed.add(id(self))
+        return close(self)
+
+    def upload(local, destination, **kwargs):
+        assert destination == url
+        assert not remote.is_remote_url(local)
+        assert readers <= closed, "upload must follow closing input readers"
+        assert Path(local).is_file()
+        uploads.append(destination)
+        shutil.copyfile(local, mirror)
+
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "execute", run)
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "sql", relation)
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "close", release)
+    monkeypatch.setattr(remote, "upload_if_remote", upload)
+    monkeypatch.setattr(write_funnels, "upload_if_remote", upload)
+    for command in (
+        ["check", "bbox", url, "--fix", "--overwrite"],
+        ["sort", "column", url, url, "name", "--overwrite"],
+        ["sort", "hilbert", url, url, "--overwrite"],
+        ["sort", "str", url, url, "--overwrite"],
+        ["sort", "quadkey", url, url, "--overwrite"],
+    ):
+        table = pq.read_table(places_test_file).drop(["bbox"])
+        pq.write_table(table, mirror)
+        readers.clear()
+        closed.clear()
+        uploads.clear()
+        result = CliRunner().invoke(cli, command)
+        assert result.exit_code == 0, (command, result.output, result.exception)
+        assert uploads == [url]
+        assert pq.read_metadata(mirror).num_rows == table.num_rows

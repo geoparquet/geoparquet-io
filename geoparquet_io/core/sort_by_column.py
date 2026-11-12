@@ -16,7 +16,7 @@ from geoparquet_io.core.duckdb_utils import (
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import InvalidParameterError, RemoteAccessError
-from geoparquet_io.core.file_utils import handle_output_overwrite, is_partition_path
+from geoparquet_io.core.file_utils import atomic_write, handle_output_overwrite, is_partition_path
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
 from geoparquet_io.core.parquet_writer import WriteOptions, resolve_row_group_rows
 from geoparquet_io.core.partition.reader import build_read_parquet_expr, raise_for_schema_mismatch
@@ -206,37 +206,40 @@ def sort_by_column(
 
     progress(f"Sorting by {', '.join(column_list)}...")
 
-    try:
-        # Use the common write function with metadata preservation
-        write_parquet_with_metadata(
-            con,
-            order_query,
-            output_parquet,
-            original_metadata=metadata,
-            verbose=verbose,
-            input_file=input_parquet,
-            # `metadata` is the FIRST file's footer. Over a merged multi-file
-            # input its bbox/geometry_types under-cover the output, and a
-            # conformant reader would skip the rows they leave out, so the
-            # write recomputes them instead of carrying them (#793).
-            invalidate_derived_stats=is_partition_path(input_parquet),
-            **write.funnel_kwargs(),
-        )
+    with atomic_write(output_parquet, profile=profile) as staged:
+        try:
+            # Use the common write function with metadata preservation
+            write_parquet_with_metadata(
+                con,
+                order_query,
+                staged,
+                original_metadata=metadata,
+                verbose=verbose,
+                input_file=input_parquet,
+                # `metadata` is the FIRST file's footer. Over a merged multi-file
+                # input its bbox/geometry_types under-cover the output, and a
+                # conformant reader would skip the rows they leave out, so the
+                # write recomputes them instead of carrying them (#793).
+                invalidate_derived_stats=is_partition_path(input_parquet),
+                **write.funnel_kwargs(),
+            )
 
-        success(f"Sorted by {', '.join(column_list)} to: {output_parquet}")
+            success(f"Sorted by {', '.join(column_list)} to: {output_parquet}")
 
-    except duckdb.IOException as e:
-        if is_remote_url(input_parquet):
-            hints = get_remote_error_hint(e, input_parquet)
-            raise RemoteAccessError(input_parquet, f"{hints}\n\nOriginal error: {str(e)}") from e
-        raise
-    except duckdb.InvalidInputException as e:
-        # A multi-file input whose files disagree on their columns only
-        # surfaces here, when the read actually runs (#817's new surface).
-        raise_for_schema_mismatch(e, input_parquet)
-        raise
-    finally:
-        con.close()
+        except duckdb.IOException as e:
+            if is_remote_url(input_parquet):
+                hints = get_remote_error_hint(e, input_parquet)
+                raise RemoteAccessError(
+                    input_parquet, f"{hints}\n\nOriginal error: {str(e)}"
+                ) from e
+            raise
+        except duckdb.InvalidInputException as e:
+            # A multi-file input whose files disagree on their columns only
+            # surfaces here, when the read actually runs (#817's new surface).
+            raise_for_schema_mismatch(e, input_parquet)
+            raise
+        finally:
+            con.close()
 
 
 def _sort_by_column_streaming(

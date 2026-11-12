@@ -20,6 +20,7 @@ from geoparquet_io.core.duckdb_utils import (
 )
 from geoparquet_io.core.exceptions import RemoteAccessError
 from geoparquet_io.core.file_utils import (
+    atomic_write,
     handle_output_overwrite,
     resolve_file_url,
     scratch_path,
@@ -543,101 +544,105 @@ def _hilbert_order_file_based(
     if verbose:
         debug(f"Using geometry column: {geometry_column}")
 
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
+    with atomic_write(output_parquet, profile=write.remote.profile) as staged:
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
 
-    # The owner's read expression for the sort key: a GeoArrow coordinate struct
-    # is no argument to ST_IsEmpty or ST_Hilbert, and asking the owner hands
-    # those its representative point instead of dying on it (#1438). The bounds
-    # below stay the column's own, measured by the stats owner.
-    key_expr = resolve_geometry_read(con, working_url, geometry_column).expr
+        # The owner's read expression for the sort key: a GeoArrow coordinate struct
+        # is no argument to ST_IsEmpty or ST_Hilbert, and asking the owner hands
+        # those its representative point instead of dying on it (#1438). The bounds
+        # below stay the column's own, measured by the stats owner.
+        key_expr = resolve_geometry_read(con, working_url, geometry_column).expr
 
-    if verbose:
-        debug("Calculating dataset bounds for Hilbert ordering...")
+        if verbose:
+            debug("Calculating dataset bounds for Hilbert ordering...")
 
-    # Count empty/null geometries
-    empty_count_result = fetch_one(
-        con.execute(f"""
-        SELECT COUNT(*) FROM {sql_path(working_url)}
-        WHERE {key_expr} IS NULL OR ST_IsEmpty({key_expr})
-    """)
-    )
-    empty_count = empty_count_result[0] if empty_count_result else 0
-
-    if empty_count > 0:
-        warn(
-            f"Found {empty_count} empty/null geometries. "
-            "These will be placed at the end of the sorted output."
-        )
-
-    # Get bounds (empty geometries naturally excluded since ST_XMin returns NULL for them)
-    bounds = dataset_bounds(working_parquet, geometry_column, verbose=verbose)
-
-    # If all geometries are empty/null, copy file unchanged
-    if not bounds:
-        warn("All geometries are empty or null. Writing file without Hilbert ordering.")
-        passthrough_query = f"SELECT * FROM {sql_path(working_url)}"
-        write_parquet_with_metadata(
-            con,
-            passthrough_query,
-            output_parquet,
-            original_metadata=metadata,
-            verbose=verbose,
-            input_file=input_parquet,
-            **write.funnel_kwargs(),
-        )
-        con.close()
-        if temp_file_created:
-            unlink_released_file(temp_file)
-        success(f"Wrote data without Hilbert ordering to: {output_parquet}")
-        return
-
-    xmin, ymin, xmax, ymax = bounds
-    if verbose:
-        debug(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
-        debug("Reordering data using Hilbert curve...")
-
-    # Build Hilbert ordering query with empty geometry handling
-    # Non-empty geometries are ordered by Hilbert curve, empty/null appended at end
-    order_query = f"""
-        WITH non_empty AS (
-            SELECT * FROM {sql_path(working_url)}
-            WHERE {key_expr} IS NOT NULL AND NOT ST_IsEmpty({key_expr})
-            ORDER BY ST_Hilbert({key_expr},
-                ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax})))
-        ),
-        empty_or_null AS (
-            SELECT * FROM {sql_path(working_url)}
+        # Count empty/null geometries
+        empty_count_result = fetch_one(
+            con.execute(f"""
+            SELECT COUNT(*) FROM {sql_path(working_url)}
             WHERE {key_expr} IS NULL OR ST_IsEmpty({key_expr})
+        """)
         )
-        SELECT * FROM non_empty
-        UNION ALL
-        SELECT * FROM empty_or_null
-    """
+        empty_count = empty_count_result[0] if empty_count_result else 0
 
-    try:
-        write_parquet_with_metadata(
-            con,
-            order_query,
-            output_parquet,
-            original_metadata=metadata,
-            verbose=verbose,
-            input_file=input_parquet,
-            **write.funnel_kwargs(),
-        )
+        if empty_count > 0:
+            warn(
+                f"Found {empty_count} empty/null geometries. "
+                "These will be placed at the end of the sorted output."
+            )
+
+        # Get bounds (empty geometries naturally excluded since ST_XMin returns NULL for them)
+        bounds = dataset_bounds(working_parquet, geometry_column, verbose=verbose)
+
+        # If all geometries are empty/null, copy file unchanged
+        if not bounds:
+            warn("All geometries are empty or null. Writing file without Hilbert ordering.")
+            passthrough_query = f"SELECT * FROM {sql_path(working_url)}"
+            write_parquet_with_metadata(
+                con,
+                passthrough_query,
+                staged,
+                original_metadata=metadata,
+                verbose=verbose,
+                input_file=input_parquet,
+                **write.funnel_kwargs(),
+            )
+            con.close()
+            if temp_file_created:
+                unlink_released_file(temp_file)
+            success(f"Wrote data without Hilbert ordering to: {output_parquet}")
+            return
+
+        xmin, ymin, xmax, ymax = bounds
         if verbose:
-            debug("Hilbert ordering completed successfully")
-        if add_bbox_flag and temp_file_created:
-            success("Output includes bbox column and metadata for optimal performance")
-        if verbose:
-            debug(f"Successfully wrote ordered data to: {output_parquet}")
-    except duckdb.IOException as e:
-        con.close()
-        if is_remote_url(input_parquet):
-            hints = get_remote_error_hint(e, input_parquet)
-            raise RemoteAccessError(input_parquet, f"{hints}\n\nOriginal error: {str(e)}") from e
-        raise
-    finally:
-        unlink_released_file(temp_file)
+            debug(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
+            debug("Reordering data using Hilbert curve...")
+
+        # Build Hilbert ordering query with empty geometry handling
+        # Non-empty geometries are ordered by Hilbert curve, empty/null appended at end
+        order_query = f"""
+            WITH non_empty AS (
+                SELECT * FROM {sql_path(working_url)}
+                WHERE {key_expr} IS NOT NULL AND NOT ST_IsEmpty({key_expr})
+                ORDER BY ST_Hilbert({key_expr},
+                    ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax})))
+            ),
+            empty_or_null AS (
+                SELECT * FROM {sql_path(working_url)}
+                WHERE {key_expr} IS NULL OR ST_IsEmpty({key_expr})
+            )
+            SELECT * FROM non_empty
+            UNION ALL
+            SELECT * FROM empty_or_null
+        """
+
+        try:
+            write_parquet_with_metadata(
+                con,
+                order_query,
+                staged,
+                original_metadata=metadata,
+                verbose=verbose,
+                input_file=input_parquet,
+                **write.funnel_kwargs(),
+            )
+            if verbose:
+                debug("Hilbert ordering completed successfully")
+            if add_bbox_flag and temp_file_created:
+                success("Output includes bbox column and metadata for optimal performance")
+            if verbose:
+                debug(f"Successfully wrote ordered data to: {output_parquet}")
+        except duckdb.IOException as e:
+            con.close()
+            if is_remote_url(input_parquet):
+                hints = get_remote_error_hint(e, input_parquet)
+                raise RemoteAccessError(
+                    input_parquet, f"{hints}\n\nOriginal error: {str(e)}"
+                ) from e
+            raise
+        finally:
+            con.close()
+            unlink_released_file(temp_file)
 
 
 if __name__ == "__main__":
