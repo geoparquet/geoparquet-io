@@ -392,7 +392,7 @@ def hilbert_order(
         return
 
     # File-based mode
-    _hilbert_order_file_based(
+    reordered = _hilbert_order_file_based(
         input_parquet,
         output_parquet,
         geometry_column,
@@ -401,6 +401,11 @@ def hilbert_order(
         write,
         overwrite,
     )
+
+    if reordered:
+        success(f"Successfully reordered data using Hilbert curve to: {output_parquet}")
+    else:
+        success(f"Wrote data without Hilbert ordering to: {output_parquet}")
 
 
 def _hilbert_order_streaming(
@@ -524,8 +529,8 @@ def _hilbert_order_file_based(
     verbose: bool,
     write: WriteOptions,
     overwrite: bool = False,
-) -> None:
-    """Handle file-based hilbert_order operation."""
+) -> bool:
+    """Publish a file and return whether its located rows were reordered."""
     # Check if output file exists and handle overwrite (fixes issue #278)
     handle_output_overwrite(output_parquet, overwrite, input_parquet)
 
@@ -597,8 +602,7 @@ def _hilbert_order_file_based(
             con.close()
             if temp_file_created:
                 unlink_released_file(temp_file)
-            success(f"Wrote data without Hilbert ordering to: {output_parquet}")
-            return
+            return False
 
         xmin, ymin, xmax, ymax = bounds
         if verbose:
@@ -621,8 +625,7 @@ def _hilbert_order_file_based(
             )
             if verbose:
                 debug("Hilbert ordering completed successfully")
-            if add_bbox_flag and temp_file_created:
-                success("Output includes bbox column and metadata for optimal performance")
+
             if verbose:
                 debug(f"Successfully wrote ordered data to: {output_parquet}")
         except duckdb.IOException as e:
@@ -636,6 +639,7 @@ def _hilbert_order_file_based(
         finally:
             con.close()
             unlink_released_file(temp_file)
+    return True
 
 
 if __name__ == "__main__":

@@ -305,6 +305,7 @@ def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
             compression_level=None,
             row_group_rows=DEFAULT_ROW_GROUP_ROWS,
             profile=profile,
+            report=False,  # The check caller reports after publishing its final destination.
             overwrite=True,  # check --fix manages file lifecycle
         )
 

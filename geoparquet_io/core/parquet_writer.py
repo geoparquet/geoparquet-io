@@ -89,7 +89,7 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
-from geoparquet_io.core.logging_config import debug, info, success
+from geoparquet_io.core.logging_config import debug, info
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import RemoteOptions, remote_options_from_keywords
 from geoparquet_io.core.sizing import mb_to_bytes
@@ -1369,9 +1369,6 @@ def write_arrow_table(
     import pyarrow.parquet as pq
 
     pq.write_table(table, output_path, **write_kwargs)
-
-    if verbose:
-        success(f"Wrote {table.num_rows:,} rows to {output_path}")
 
 
 # ---------------------------------------------------------------------------

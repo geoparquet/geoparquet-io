@@ -277,6 +277,8 @@ def add_bbox_column(
     geoparquet_version: str | None = None,
     overwrite: bool = False,
     memory_limit: str | None = None,
+    *,
+    report: bool = True,
 ) -> None:
     """
     Add a bbox struct column to a GeoParquet file.
@@ -315,6 +317,7 @@ def add_bbox_column(
         force: Whether to replace an existing bbox column
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB')
+        report: Report completion; nested repair callers report after publication.
 
     Note:
         Bbox covering metadata is automatically added when the file is written,
@@ -353,6 +356,7 @@ def add_bbox_column(
         force,
         overwrite,
         write_options_requested=write_options_requested,
+        report=report,
     )
 
 
@@ -471,6 +475,7 @@ def _add_bbox_file_based(
     force: bool,
     overwrite: bool,
     write_options_requested: bool = False,
+    report: bool = True,
 ) -> None:
     """Handle file-based add_bbox operation."""
     # Check if output file exists and handle overwrite (fixes issue #278)
@@ -561,7 +566,7 @@ def _add_bbox_file_based(
         **write.funnel_kwargs(),
     )
 
-    if not dry_run:
+    if report and not dry_run:
         success(f"Successfully added bbox column '{bbox_column_name}' to: {output_parquet}")
 
 

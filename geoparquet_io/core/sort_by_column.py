@@ -224,8 +224,6 @@ def sort_by_column(
                 **write.funnel_kwargs(),
             )
 
-            success(f"Sorted by {', '.join(column_list)} to: {output_parquet}")
-
         except duckdb.IOException as e:
             if is_remote_url(input_parquet):
                 hints = get_remote_error_hint(e, input_parquet)
@@ -240,6 +238,8 @@ def sort_by_column(
             raise
         finally:
             con.close()
+
+    success(f"Sorted by {', '.join(column_list)} to: {output_parquet}")
 
 
 def _sort_by_column_streaming(

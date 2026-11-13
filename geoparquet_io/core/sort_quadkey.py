@@ -246,7 +246,7 @@ def sort_by_quadkey(
                 ORDER BY {quote_identifier(quadkey_column_name)}
             """
 
-            if verbose:
+            if verbose and not temp_file:
                 debug(f"Sort query: {query}")
 
             # Write output with metadata preservation
@@ -265,11 +265,6 @@ def sort_by_quadkey(
                 **write.funnel_kwargs(),
             )
 
-            if remove_quadkey_column:
-                success(f"Sorted by quadkey and removed column to: {output_parquet}")
-            else:
-                success(f"Sorted by quadkey to: {output_parquet}")
-
         except duckdb.InvalidInputException as e:
             # When the quadkey column already exists there is no auto-add step,
             # so a schema mismatch across the glob first strikes the sort itself.
@@ -282,6 +277,11 @@ def sort_by_quadkey(
             if temp_file and verbose:
                 debug("Cleaning up temporary quadkey-enriched file...")
             unlink_released_file(temp_file)
+
+    if remove_quadkey_column:
+        success(f"Sorted by quadkey and removed column to: {output_parquet}")
+    else:
+        success(f"Sorted by quadkey to: {output_parquet}")
 
 
 def _sort_by_quadkey_streaming(

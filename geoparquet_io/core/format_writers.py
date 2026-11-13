@@ -546,6 +546,7 @@ def write_gdal_format(
         # No `--write-memory` on the export commands, so this is the
         # ceiling-based default; the export used to run at DuckDB's own
         # 80%-of-host default, blind to a container or job cgroup (#1174).
+        debug(f"Export query: {copy_query(output_path)}")
         with scoped_write_memory_limit(con, None, verbose):
             with atomic_write(
                 output_path,
@@ -553,7 +554,6 @@ def write_gdal_format(
                 sidecar_suffixes=cast("tuple[str, ...] | None", config["sidecar_suffixes"]),
             ) as target:
                 query = copy_query(target)
-                debug(f"Executing: {query}")
                 con.execute(query)
                 if format_name == "geopackage" and not has_geometry:
                     _drop_gpkg_geometry_column(target)

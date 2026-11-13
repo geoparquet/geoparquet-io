@@ -271,6 +271,8 @@ def add_index_column(
     use_centroid=False,
     allow_schema_diff=False,
     hive_input=None,
+    *,
+    report=True,
 ):
     configure_verbose(verbose)
     write = write or WriteOptions()
@@ -327,7 +329,7 @@ def add_index_column(
         progress_message=f"Adding {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution})...",
         **write.funnel_kwargs(),
     )
-    if dry_run:
+    if dry_run or not report:
         return
     success(
         f"Successfully added {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution}) to: {output_parquet}"
@@ -480,6 +482,7 @@ def ensure_index_column(
             column_name,
             resolution,
             verbose=verbose,
+            report=False,
             write=WriteOptions(remote=RemoteOptions(profile=profile)),
             use_centroid=use_centroid,
             allow_schema_diff=allow_schema_diff,

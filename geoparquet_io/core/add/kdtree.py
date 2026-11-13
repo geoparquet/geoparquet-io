@@ -456,6 +456,8 @@ def add_kdtree_column(
     geoparquet_version: str | None = None,
     overwrite: bool = False,
     memory_limit: str | None = None,
+    *,
+    report: bool = True,
 ) -> None:
     """
     Add a KD-tree cell ID column to a GeoParquet file.
@@ -679,7 +681,7 @@ def add_kdtree_column(
 
     con.close()
 
-    if not dry_run:
+    if report and not dry_run:
         success(
             f"Added KD-tree column '{kdtree_column_name}' ({partition_count} partitions) to: {output_parquet}"
         )

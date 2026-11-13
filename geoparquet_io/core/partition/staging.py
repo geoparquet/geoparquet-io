@@ -226,7 +226,6 @@ def run_partitioned_copy(con, select_sql, partition_cols, staging_dir, verbose, 
     with scoped_write_memory_limit(con, memory_limit, verbose, pinned=pinned):
         if verbose:
             debug("Single-pass partition COPY (one scan of input):")
-            debug(copy_sql)
         con.execute(copy_sql)
 
 

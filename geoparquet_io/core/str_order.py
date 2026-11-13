@@ -431,12 +431,6 @@ def _str_order_file_based(
                 input_file=input_parquet,
                 **write.funnel_kwargs(),
             )
-            if add_bbox_flag and temp_file_created:
-                success("Output includes bbox column and metadata for optimal performance")
-            if reordered:
-                success(f"Successfully reordered data using STR to: {output_parquet}")
-            else:
-                success(f"Wrote data without STR ordering to: {output_parquet}")
         except duckdb.IOException as exc:
             if is_remote_url(input_parquet):
                 hints = get_remote_error_hint(exc, input_parquet)
@@ -445,3 +439,10 @@ def _str_order_file_based(
         finally:
             con.close()
             unlink_released_file(temp_file)
+
+    if add_bbox_flag and temp_file_created:
+        success("Output includes bbox column and metadata for optimal performance")
+    if reordered:
+        success(f"Successfully reordered data using STR to: {output_parquet}")
+    else:
+        success(f"Wrote data without STR ordering to: {output_parquet}")

@@ -381,27 +381,36 @@ def test_other_in_place_commands_release_handles(places_test_file, tmp_path, fix
         assert all(not r.holders and not r.source_holders for r in swaps), swaps
 
 
-def test_verbose_fix_reports_final_destination(places_test_file, tmp_path, caplog):
+def test_verbose_fix_reports_final_destination(places_test_file, tmp_path, caplog, monkeypatch):
+    from geoparquet_io.core import file_utils
+
     source = tmp_path / "input.parquet"
-    output = tmp_path / "fixed.parquet"
     shutil.copy(places_test_file, source)
-    with caplog.at_level("DEBUG", logger="geoparquet_io"):
-        result = CliRunner().invoke(
-            cli,
-            [
-                "sort",
-                "column",
-                str(source),
-                str(output),
-                pq.read_schema(source).names[0],
-                "--verbose",
-            ],
-        )
-    assert result.exit_code == 0, result.output
-    successes = [r.message for r in caplog.records if r.message.startswith("[SUCCESS]")]
-    assert len(successes) == 1, successes
-    assert str(output) in successes[0]
-    assert ".gpio-stage-" not in successes[0]
+    replace = file_utils.os.replace
+
+    def publish(src, dst):
+        # No destination completion may precede the publication syscall.
+        assert not [
+            r.message
+            for r in caplog.records
+            if r.message.startswith("[SUCCESS]") and str(dst) in r.message
+        ]
+        return replace(src, dst)
+
+    monkeypatch.setattr(file_utils.os, "replace", publish)
+    for command in ("column", "quadkey", "str", "hilbert"):
+        output = tmp_path / f"{command}.parquet"
+        caplog.clear()
+        args = ["sort", command, str(source), str(output)]
+        if command == "column":
+            args.append(pq.read_schema(source).names[0])
+        with caplog.at_level("DEBUG", logger="geoparquet_io"):
+            result = CliRunner().invoke(cli, [*args, "--verbose"])
+        assert result.exit_code == 0, result.output
+        successes = [r.message for r in caplog.records if r.message.startswith("[SUCCESS]")]
+        assert len(successes) == 1, successes
+        assert str(output) in successes[0]
+        assert ".gpio-stage-" not in successes[0]
 
 
 def test_permitted_remote_inplace_callers_stage_and_close(places_test_file, tmp_path, monkeypatch):

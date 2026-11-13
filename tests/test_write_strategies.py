@@ -88,7 +88,7 @@ class TestWriteStrategyFactory:
 class TestAtomicWrite:
     """Tests for atomic_write context manager."""
 
-    def test_successful_write(self, monkeypatch):
+    def test_successful_write(self, monkeypatch, caplog):
         """Successful write atomically renames file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "output.parquet"
@@ -101,6 +101,11 @@ class TestAtomicWrite:
 
         from geoparquet_io.core import remote
         from geoparquet_io.core.exceptions import GeoParquetError
+
+        with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+            with remote.remote_write_context("s3://bucket/output.parquet", verbose=True):
+                pass
+        assert "gpio_" not in caplog.text
 
         uploaded = []
         monkeypatch.setattr(
@@ -641,23 +646,24 @@ class TestWriteStrategiesNoGeometry:
         self, duckdb_connection, non_geo_query, output_file, caplog
     ):
         """An inner writer leaves success reporting to its caller, after publication."""
-        strategy = WriteStrategyFactory.get_strategy(WriteStrategy.DISK_REWRITE)
 
-        with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
-            strategy.write_from_query(
-                con=duckdb_connection,
-                query=non_geo_query,
-                output_path=output_file,
-                geometry_column=None,
-                original_metadata=None,
-                geoparquet_version="1.1",
-                compression="ZSTD",
-                compression_level=15,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                input_crs=None,
-                verbose=True,
-            )
+        for kind in (WriteStrategy.DISK_REWRITE, WriteStrategy.ARROW_MEMORY):
+            strategy = WriteStrategyFactory.get_strategy(kind)
+            with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+                strategy.write_from_query(
+                    con=duckdb_connection,
+                    query=non_geo_query,
+                    output_path=output_file,
+                    geometry_column=None,
+                    original_metadata=None,
+                    geoparquet_version="1.1",
+                    compression="ZSTD",
+                    compression_level=15,
+                    row_group_size_mb=None,
+                    row_group_rows=None,
+                    input_crs=None,
+                    verbose=True,
+                )
 
         assert "[SUCCESS]" not in caplog.text
         self._assert_valid_plain_parquet(output_file)
