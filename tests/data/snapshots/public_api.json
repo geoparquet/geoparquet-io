@@ -451,6 +451,8 @@
     "scratch_dir",
     "scratch_file",
     "scratch_path",
+    "sweep_orphaned_dirs",
+    "sweep_orphaned_staging_dirs",
     "unlink_released_file",
     "validate_output_path",
     "validate_parquet_extension"

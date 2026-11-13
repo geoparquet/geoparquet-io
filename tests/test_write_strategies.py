@@ -116,15 +116,15 @@ class TestAtomicWrite:
             assert stage.is_dir()
             old = time.time() - 2 * 24 * 60 * 60
             os.utime(stage, (old, old))
-            assert file_utils._sweep_orphaned_staging_dirs(tmp_path) == []
+            assert file_utils.sweep_orphaned_staging_dirs(tmp_path) == []
             proc.kill()
             proc.wait(timeout=10)
             # A fresh abandoned stage waits for the age guard.
             os.utime(stage, None)
-            assert file_utils._sweep_orphaned_staging_dirs(tmp_path) == []
+            assert file_utils.sweep_orphaned_staging_dirs(tmp_path) == []
             os.utime(stage, (old, old))
             monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
-            assert file_utils._sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == [str(stage)]
+            assert file_utils.sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == [str(stage)]
             assert stage.exists(), "pricing must not delete an abandoned stage"
             result = admin_datasets.clear_cache(confirm=True)
             assert result["staging_dirs_deleted"] == 1

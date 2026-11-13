@@ -42,10 +42,10 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.file_utils import (
-    _sweep_orphaned_staging_dirs,
     atomic_write,
     glob_matches,
     has_glob_pattern,
+    sweep_orphaned_staging_dirs,
 )
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.logging_config import debug, info, warn
@@ -334,9 +334,7 @@ def _cache_inventory(cache_dir: Path) -> dict[str, list[Path]]:
         "files": [path for root in roots for path in root.glob("*.parquet")],
         "spill_dirs": cache_spill_dirs(cache_dir),
         "staging_dirs": [
-            Path(path)
-            for root in roots
-            for path in _sweep_orphaned_staging_dirs(root, dry_run=True)
+            Path(path) for root in roots for path in sweep_orphaned_staging_dirs(root, dry_run=True)
         ],
     }
 
@@ -389,7 +387,7 @@ def clear_cache(confirm: bool = False) -> dict | None:
             pass  # Ignore deletion errors.
 
     removed = sweep_orphaned_spill_dirs(cache_dir)
-    stages = [path for root in entries["roots"] for path in _sweep_orphaned_staging_dirs(root)]
+    stages = [path for root in entries["roots"] for path in sweep_orphaned_staging_dirs(root)]
     for object_dir in entries["roots"][1:]:
         try:
             object_dir.rmdir()
@@ -1297,7 +1295,7 @@ class OvertureAdminDataset(AdminDataset):
                     if cache_path.exists() and cache_path.stat().st_size > 0:
                         continue
 
-                    _sweep_orphaned_staging_dirs(cache_dir)
+                    sweep_orphaned_staging_dirs(cache_dir)
                     if objects is None:
                         objects = glob_matches(source) if has_glob_pattern(source) else [source]
                         if not objects:
@@ -1319,7 +1317,7 @@ class OvertureAdminDataset(AdminDataset):
             return self._build_level_cache_query(level, objects[0])
         parts_dir = cache_path.parent / f".{cache_path.stem}-parts"
         parts_dir.mkdir(exist_ok=True)
-        _sweep_orphaned_staging_dirs(parts_dir)
+        sweep_orphaned_staging_dirs(parts_dir)
         parts = []
         for index, obj in enumerate(objects):
             # Immutable release object identity survives a changed listing order.

@@ -14,15 +14,9 @@ import time
 import uuid
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path, PurePath
+from typing import BinaryIO
 from urllib.parse import urlsplit
 
-from geoparquet_io.core.duckdb_utils import (
-    _SPILL_LOCK_NAME,
-    _process_is_alive,
-    _spill_base_lock,
-    _spill_lock,
-    get_active_s3_config,
-)
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
@@ -488,7 +482,60 @@ def _publish_sidecars(stage_dir: Path, staged: Path, final: Path, suffixes: Iter
             old.unlink(missing_ok=True)
 
 
-def _sweep_orphaned_dirs(
+_SPILL_LOCK_NAME = ".gpio-owner.lock"
+
+
+def _spill_lock(path: str) -> BinaryIO | None:
+    """Take a nonblocking ownership lock; None means Windows (no fcntl)."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    marker = open(os.path.join(path, _SPILL_LOCK_NAME), "a+b")
+    try:
+        fcntl.flock(marker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException:
+        marker.close()
+        raise
+    return marker
+
+
+@contextlib.contextmanager
+def _spill_base_lock(base: str | os.PathLike):
+    """Serialize publishing a marker and sweeping on a shared spill volume."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    # Lock the base directory itself: a sidecar lock would outlive every spill
+    # and violate callers' scratch cleanup guarantees. This also works when
+    # the base is read-only (scanning it still must be best effort).
+    descriptor = os.open(base, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _process_is_alive(pid: int) -> bool:
+    """Whether ``pid`` is still running. Answers True whenever it cannot tell.
+
+    Only ever used to decide *not* to delete something, so the unsure answer has
+    to be "alive": a false "dead" would take a running sibling's scratch space
+    away mid-query, while a false "alive" merely leaves one more directory for
+    the next run (or the OS tmp reaper) to collect.
+    """
+    try:
+        import psutil
+
+        return psutil.pid_exists(pid)
+    except Exception:  # psutil is optional on vendored hosts (#1330): unsure means alive
+        return True
+
+
+def sweep_orphaned_dirs(
     base_dir: str | os.PathLike,
     candidates: Callable[[], Iterable[tuple[str, int]]],
     minimum_age: float,
@@ -531,7 +578,7 @@ def _sweep_orphaned_dirs(
     return removed
 
 
-def _sweep_orphaned_staging_dirs(base_dir: Path, *, dry_run: bool = False) -> list[str]:
+def sweep_orphaned_staging_dirs(base_dir: Path, *, dry_run: bool = False) -> list[str]:
     """Collect stages older than a day, only while holding their ownership lock.
 
     Reuse spill ownership across PID namespaces; age alone cannot protect a slow
@@ -545,7 +592,7 @@ def _sweep_orphaned_staging_dirs(base_dir: Path, *, dry_run: bool = False) -> li
             if (match := re.fullmatch(r"\.gpio-stage-(\d+)-[a-z0-9_]{8}", stage.name))
         )
 
-    return _sweep_orphaned_dirs(base_dir, candidates, 24 * 60 * 60, dry_run=dry_run)
+    return sweep_orphaned_dirs(base_dir, candidates, 24 * 60 * 60, dry_run=dry_run)
 
 
 @contextlib.contextmanager
@@ -796,6 +843,8 @@ def resolve_object_store(url: str) -> tuple[object, str]:
     from geoparquet_io.core.upload import _setup_store_and_kwargs, parse_object_store_url
 
     bucket_url, key = parse_object_store_url(canonical)
+    from geoparquet_io.core.duckdb_utils import get_active_s3_config
+
     s3_config = get_active_s3_config()
     store, _kwargs = _setup_store_and_kwargs(
         bucket_url,

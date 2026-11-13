@@ -45,9 +45,9 @@ path = "geoparquet_io/core/carto.py"
 name = "httpx"
 reason = "permanent: CARTO status probe streams one request with httpx.stream to read the status without the body; accepted caller-specific classification"
 [[G1.tid251]]
-path = "geoparquet_io/core/duckdb_utils.py"
+path = "geoparquet_io/core/file_utils.py"
 name = "psutil"
-reason = "permanent: process-liveness check for stale DuckDB temp dirs, not a memory fact; optional import (#1330)"
+reason = "permanent: process-liveness check for stale spill and staging dirs, not a memory fact; optional import (#1330)"
 [[G1.tid251]]
 path = "geoparquet_io/core/wfs.py"
 name = "httpx"

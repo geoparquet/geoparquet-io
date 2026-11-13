@@ -366,14 +366,15 @@ def dead_pid(monkeypatch):
     So the owner check is pinned for this one fake pid only. Every other pid,
     ``os.getpid()`` included, still goes through the real psutil check.
     """
-    from geoparquet_io.core import duckdb_utils
+    from geoparquet_io.core import duckdb_utils, file_utils
 
-    real_check = duckdb_utils._process_is_alive
+    real_check = file_utils._process_is_alive
 
     def process_is_alive(pid: int) -> bool:
         return pid != DEAD_SPILL_PID and real_check(pid)
 
     monkeypatch.setattr(duckdb_utils, "_process_is_alive", process_is_alive)
+    monkeypatch.setattr(file_utils, "_process_is_alive", process_is_alive)
     return DEAD_SPILL_PID
 
 

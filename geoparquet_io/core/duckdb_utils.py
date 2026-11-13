@@ -45,6 +45,13 @@ from geoparquet_io.core.edges import (
     without_edges,
 )
 from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationError
+from geoparquet_io.core.file_utils import (
+    _SPILL_LOCK_NAME,
+    _process_is_alive,
+    _spill_base_lock,
+    _spill_lock,
+    sweep_orphaned_dirs,
+)
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.remote import is_s3_url, needs_httpfs
@@ -1162,43 +1169,8 @@ _SPILL_DIR_RE = re.compile(rf"^{re.escape(_SPILL_DIR_PREFIX)}(\d+)-[0-9a-f]{{12}
 
 # Keep the marker open for the owning process's lifetime. A lock is independent
 # of the pid namespace from which a sibling sweeps the shared volume.
-_SPILL_LOCK_NAME = ".gpio-owner.lock"
 _spill_locks: dict[str, BinaryIO] = {}
 _spill_locks_guard = threading.Lock()
-
-
-def _spill_lock(path: str) -> BinaryIO | None:
-    """Take a nonblocking ownership lock; None means Windows (no fcntl)."""
-    try:
-        import fcntl
-    except ImportError:
-        return None
-    marker = open(os.path.join(path, _SPILL_LOCK_NAME), "a+b")
-    try:
-        fcntl.flock(marker, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BaseException:
-        marker.close()
-        raise
-    return marker
-
-
-@contextmanager
-def _spill_base_lock(base: str | os.PathLike):
-    """Serialize publishing a marker and sweeping on a shared spill volume."""
-    try:
-        import fcntl
-    except ImportError:
-        yield
-        return
-    # Lock the base directory itself: a sidecar lock would outlive every spill
-    # and violate callers' scratch cleanup guarantees. This also works when
-    # the base is read-only (scanning it still must be best effort).
-    descriptor = os.open(base, os.O_RDONLY)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(descriptor)
 
 
 def _release_spill_lock(path: str) -> None:
@@ -1222,22 +1194,6 @@ def _release_spill_locks() -> None:
 
 
 atexit.register(_release_spill_locks)
-
-
-def _process_is_alive(pid: int) -> bool:
-    """Whether ``pid`` is still running. Answers True whenever it cannot tell.
-
-    Only ever used to decide *not* to delete something, so the unsure answer has
-    to be "alive": a false "dead" would take a running sibling's scratch space
-    away mid-query, while a false "alive" merely leaves one more directory for
-    the next run (or the OS tmp reaper) to collect.
-    """
-    try:
-        import psutil
-
-        return psutil.pid_exists(pid)
-    except Exception:  # psutil is optional on vendored hosts (#1330): unsure means alive
-        return True
 
 
 def orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
@@ -1303,7 +1259,6 @@ def sweep_orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
     Returns:
         The paths actually removed, for callers that report what they freed.
     """
-    from geoparquet_io.core.file_utils import _sweep_orphaned_dirs
 
     def candidates() -> Iterator[tuple[str, int]]:
         return (
@@ -1312,7 +1267,7 @@ def sweep_orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
             if (match := _SPILL_DIR_RE.match(os.path.basename(path)))
         )
 
-    return _sweep_orphaned_dirs(base_dir, candidates, 0)
+    return sweep_orphaned_dirs(base_dir, candidates, 0)
 
 
 def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
