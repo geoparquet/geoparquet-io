@@ -254,6 +254,7 @@ def configure_verbose(verbose: bool) -> None:
 
 # ============================================================================
 # Helper functions for styled output
+# Clean for host handlers too; token redaction is idempotent with CLI formatter cleaning.
 # These map to the current click.echo patterns used throughout the codebase
 # ============================================================================
 
@@ -264,7 +265,7 @@ def success(message: str) -> None:
 
     Use for: Completed operations, passed validations, successful writes.
     """
-    logger.info(f"[SUCCESS]{message}")
+    logger.info(f"[SUCCESS]{clean_error_text(message)}")
 
 
 def warn(message: str) -> None:
@@ -273,9 +274,9 @@ def warn(message: str) -> None:
 
     Use for: Non-critical issues, recommendations, deprecation notices.
 
-    CLIFormatter cleans the final output, including interpolated exceptions.
+    The CLI formatter also cleans interpolated and third-party records.
     """
-    logger.warning(message)
+    logger.warning(clean_error_text(message))
 
 
 def error(message: str) -> None:
@@ -284,7 +285,7 @@ def error(message: str) -> None:
 
     Use for: Failed operations, validation failures, critical issues.
     """
-    logger.error(message)
+    logger.error(clean_error_text(message))
 
 
 def info(message: str) -> None:
@@ -293,7 +294,7 @@ def info(message: str) -> None:
 
     Use for: Informational details, tips, context about operations.
     """
-    logger.info(f"[INFO]{message}")
+    logger.info(f"[INFO]{clean_error_text(message)}")
 
 
 def debug(message: str) -> None:
@@ -302,7 +303,7 @@ def debug(message: str) -> None:
 
     Use for: Detailed diagnostic output, internal state, SQL queries.
     """
-    logger.debug(message)
+    logger.debug(clean_error_text(message))
 
 
 def progress(message: str) -> None:
@@ -311,4 +312,4 @@ def progress(message: str) -> None:
 
     Use for: Progress updates, status messages, general output.
     """
-    logger.info(message)
+    logger.info(clean_error_text(message))

@@ -410,7 +410,8 @@ def test_every_log_level_sanitizes_url_and_query_credentials(caplog, tmp_path):
     assert len(caplog.records) == len(messages) * 6
     formatter = CLIFormatter(use_colors=False)
     assert all("SORTSECRET" not in formatter.format(record) for record in caplog.records)
-    assert all("SORTSECRET" in record.getMessage() for record in caplog.records)
+    # caplog is a host handler: no CLI formatter protects these library records.
+    assert all("SORTSECRET" not in record.getMessage() for record in caplog.records)
 
     for path in (
         ".../key=7/part-?.parquet",
