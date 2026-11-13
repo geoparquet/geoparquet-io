@@ -1089,7 +1089,7 @@ class TestVersionExtraction:
 
         assert carried_geoparquet_version(metadata) is None
 
-    def test_a_geoarrow_table_with_no_geo_key_writes_2_0(self):
+    def test_a_geoarrow_table_with_no_geo_key_writes_2_0(self, tmp_path, monkeypatch):
         """No metadata, but geoarrow types: native data, so 2.0 (approved change 10)."""
         import geoarrow.pyarrow as ga
 
@@ -1100,6 +1100,33 @@ class TestVersionExtraction:
 
         assert resolve_output_geoparquet_version(None, table=table) == "2.0"
         assert resolve_output_geoparquet_version(None, original_metadata={}, table=table) == "2.0"
+
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+        from geoparquet_io.core.stream_io import write_output
+
+        captured = []
+        monkeypatch.setattr("geoparquet_io.core.stream_io.write_arrow_stream", captured.append)
+        dest = tmp_path / "native.parquet"
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+            source = tmp_path / "source.parquet"
+            pq.write_table(table, source)
+            for output in (str(dest), "-"):
+                write_output(
+                    con,
+                    f"SELECT * FROM read_parquet({sql_path(str(source))})",
+                    output,
+                    original_metadata={},
+                    input_file=str(source),
+                )
+        finally:
+            con.close()
+        file_table = pq.read_table(dest)
+        assert json.loads(file_table.schema.metadata[b"geo"])["version"] == "2.0.0"
+        assert json.loads(captured[0].schema.metadata[b"geo"])["version"] == "2.0.0"
+        assert file_table.to_pydict() == captured[0].to_pydict()
 
     def test_the_carried_version_takes_precedence_over_geoarrow_types(self):
         import geoarrow.pyarrow as ga

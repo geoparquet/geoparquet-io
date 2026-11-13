@@ -392,9 +392,12 @@ def _write_stream_output(
     # struct the spec forbids -- is no more writable here than there (#1172),
     # and a 1.0 input upgrades and declares its bbox column as a file does.
     if not carried:
+        # IPC wrappers on plain WKB are not evidence of native source geometry.
         original_metadata = _stream_input_metadata(
             table.replace_schema_metadata(original_metadata),
-            version=resolve_output_geoparquet_version(None, original_metadata=original_metadata),
+            version=resolve_output_geoparquet_version(
+                None, original_metadata=original_metadata, table=table.select(list(native_columns))
+            ),
         )
     if original_metadata:
         original_metadata = backfill_derived_stats(original_metadata, table)
