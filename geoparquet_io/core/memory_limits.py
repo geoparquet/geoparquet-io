@@ -195,7 +195,7 @@ def default_memory_limit() -> str | None:
 _BYTES_PER_THREAD = 512 * BYTES_PER_MIB
 # Ordered eager reads retain buffers; use the upper end of DuckDB’s 1–4 GB/thread guidance.
 # https://duckdb.org/docs/stable/guides/performance/how_to_tune_workloads.html
-MATERIALIZED_BYTES_PER_THREAD = 4 * 1024**3
+_MATERIALIZED_BYTES_PER_THREAD = 4 * 1024**3
 
 
 def _thread_cap(limit_bytes: int, per_thread: int = _BYTES_PER_THREAD) -> int:
