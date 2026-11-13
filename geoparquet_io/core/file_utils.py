@@ -560,12 +560,15 @@ def _process_is_alive(pid: int) -> bool:
 
 def sweep_orphaned_dirs(
     base_dir: str | os.PathLike,
-    candidates: Callable[[], Iterable[tuple[str, int]]],
+    candidates: Callable[[], Iterable[tuple[str, int | None]]],
     minimum_age: float,
     *,
     dry_run: bool = False,
 ) -> list[str]:
     """Shared collector: enumerate under the base lock, hold ownership through deletion.
+
+    A None PID means no process identity is available; on Windows these
+    directories have no concurrency protection.
 
     Probing a marker before taking the base lock can steal it from a creator
     between open() and flock(), leaving that live creator without protection.
@@ -582,11 +585,11 @@ def sweep_orphaned_dirs(
                     if minimum_age and time.time() - directory.stat().st_mtime < minimum_age:
                         continue
                     if dry_run and not (directory / _SPILL_LOCK_NAME).is_file():
-                        if not _process_is_alive(pid):
+                        if pid is None or not _process_is_alive(pid):
                             removed.append(path)
                         continue
                     marker = _spill_lock(path)
-                    if marker is None and _process_is_alive(pid):
+                    if marker is None and pid is not None and _process_is_alive(pid):
                         continue
                     if not dry_run:
                         shutil.rmtree(path)

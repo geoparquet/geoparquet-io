@@ -198,7 +198,7 @@ def _remove_stale_level_caches(cache_dir: Path, version: str, level: str, cache_
     sweep_orphaned_dirs(
         cache_dir,
         lambda: (
-            (str(parts), -1)
+            (str(parts), None)
             for parts in cache_dir.glob(f".overture-*-{level}*-parts")
             if parts != current_parts or cache_path.exists()
         ),

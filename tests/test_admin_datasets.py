@@ -1878,6 +1878,14 @@ class TestDownloadPerLevelCachesHousekeeping:
         assert final.read_bytes() == b"sibling result"
         assert not parts.exists()
 
+        # Parts have no PID identity; Windows cleanup needs no optional psutil.
+        with monkeypatch.context() as windows:
+            windows.setattr(file_utils, "_spill_lock", lambda path: None)
+            windows.setattr(file_utils, "_process_is_alive", lambda pid: pytest.fail("PID probe"))
+            unowned.mkdir()
+            admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
+            assert not unowned.exists()
+
     def test_requested_level_retry_preserves_completed_cache_and_objects(
         self, tmp_path, monkeypatch
     ):
