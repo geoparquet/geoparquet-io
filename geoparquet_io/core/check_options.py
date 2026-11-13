@@ -35,7 +35,8 @@ from dataclasses import dataclass, fields, replace
 from typing import TYPE_CHECKING, Any
 
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
-from geoparquet_io.core.remote import RemoteOptions, _caller_stacklevel
+from geoparquet_io.core.deprecation import warn_deprecated
+from geoparquet_io.core.remote import RemoteOptions
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -242,12 +243,18 @@ def check_options_from_keywords(
         raise TypeError(
             f"{where}() got {named} both in options= and as a keyword; set each field in one place"
         )
-    _warn_deprecated_spellings(where, asked)
+    keywords = _SPELLINGS_BY_ENTRY_POINT.get(where, {})
+    warn_deprecated(
+        {
+            field: (
+                f"{where}({keywords.get(field, field)}=...)",
+                f"pass options=gpio.CheckOptions({field}=...) instead",
+            )
+            for field in asked
+        }
+    )
     return base.merge(CheckOptions.pick(asked))
 
-
-#: One warning per deprecated spelling per process, keyed ``"<entry point>.<field>"``.
-_warned_spellings: set[str] = set()
 
 #: Field -> the keyword an entry point spells it with, when the two differ.
 _SPELLINGS_BY_ENTRY_POINT: dict[str, dict[str, str]] = {
@@ -257,32 +264,3 @@ _SPELLINGS_BY_ENTRY_POINT: dict[str, dict[str, str]] = {
     "validate": {"spec_sample_size": "sample_size"},
     "Table.fix": {"fix_output": "output"},
 }
-
-
-def _warn_deprecated_spellings(where: str, asked: Any) -> None:
-    """Warn once per process for each deprecated keyword *where* was given.
-
-    The frame count comes from :func:`geoparquet_io.core.remote._caller_stacklevel`,
-    the one owner of that question: ``stacklevel`` differs by entry point --
-    ``api/check.py``'s five path-level checks are wrapped by ``_one_file_only``,
-    which puts a frame between the check and its caller, while ``Table``'s
-    methods are not -- and counting frames until the first one outside
-    ``geoparquet_io`` is right for both doors. A second copy here drifted from
-    the remote concern's and said the same thing twice.
-    """
-    import warnings
-
-    keywords = _SPELLINGS_BY_ENTRY_POINT.get(where, {})
-    stacklevel = _caller_stacklevel()
-    for field in sorted(asked):
-        key = f"{where}.{field}"
-        if key in _warned_spellings:
-            continue
-        _warned_spellings.add(key)
-        keyword = keywords.get(field, field)
-        warnings.warn(
-            f"{where}({keyword}=...) is deprecated and will be removed in the next "
-            f"minor release; pass options=gpio.CheckOptions({field}=...) instead",
-            DeprecationWarning,
-            stacklevel=stacklevel,
-        )

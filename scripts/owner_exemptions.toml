@@ -41,10 +41,6 @@ path = "geoparquet_io/core/arcgis.py"
 name = "pyarrow.parquet.ParquetWriter"
 reason = "permanent scratch copy: the paged ArcGIS spool, read back by pq.read_table; never an output, so not a facade write. Its path comes from file_utils.scratch_path"
 [[G1.tid251]]
-path = "geoparquet_io/core/carto.py"
-name = "httpx"
-reason = "permanent: CARTO status probe streams one request with httpx.stream to read the status without the body; accepted caller-specific classification"
-[[G1.tid251]]
 path = "geoparquet_io/core/file_utils.py"
 name = "psutil"
 reason = "permanent: process-liveness check for stale spill and staging dirs, not a memory fact; optional import (#1330)"
@@ -241,6 +237,9 @@ reason = "permanent: constant geometry filter, not a spatial join"
 # underscore on either side is ignored (_is_geographic_crs is an
 # is_geographic*), and [G2.known_copies] adds renamed copies by exact name.
 [G2.owners]
+"warn_deprecated" = ["geoparquet_io/core/deprecation.py"]
+"run_sort" = ["geoparquet_io/core/sort_common.py"]
+"advised_output_version" = ["geoparquet_io/core/sort_common.py"]
 "is_geographic*" = ["geoparquet_io/core/crs_utils.py"]
 "*crs_equal*" = ["geoparquet_io/core/crs_utils.py"]
 "resolve_*version*" = ["geoparquet_io/core/parquet_writer.py"]
@@ -433,9 +432,6 @@ block = "api.table:Table.from_bigquery|cli.commands.extract:extract_bigquery_cmd
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "api.table:extract_arcgis|core.arcgis:convert_arcgis_to_geoparquet"
-reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
-[[G3.pylint]]
-block = "core.extract:_extract_streaming|core.str_order:_str_order_streaming"
 reason = "permanent: the same keyword-argument list forwarded to one callee (API/CLI facade or write-funnel call), not a second implementation"
 [[G3.pylint]]
 block = "core.process.raster.contour:contour_file|core.process.raster.polygonize:polygonize_file"

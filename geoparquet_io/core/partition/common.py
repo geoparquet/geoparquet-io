@@ -64,7 +64,7 @@ def readable_geoparquet(input_parquet: str):
     pre-flight aggregate in :func:`analyze_partition_strategy` and the schema
     probe in :func:`partition_by_column`. Every gpio writer emits
     ``geometry_types``, and the partition commands spool a piped stream through
-    :func:`~geoparquet_io.core.streaming.read_stdin_to_temp_file`, which fills it
+    :func:`~geoparquet_io.core.write_funnels.read_stdin_to_temp_file`, which fills it
     in, so what reaches here is normally a file written elsewhere. Say which
     column is missing what instead of letting a raw
     ``_duckdb.InvalidInputException`` and its traceback out. Anything else

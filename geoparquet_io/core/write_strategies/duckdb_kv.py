@@ -94,7 +94,7 @@ def _native_typed_query(
     columns = geo_meta.get("columns") or {}
     type_crs = input_crs
     primary_type_crs = type_crs_for(columns.get(geometry_column))
-    if is_unknown_type_crs(primary_type_crs):
+    if type_crs is None or is_unknown_type_crs(primary_type_crs):
         type_crs = primary_type_crs
     typed = _wrap_query_with_crs(query, geometry_column, type_crs, geoparquet_version)
     return wrap_query_with_secondary_crs(con, typed, columns, geometry_column, geoparquet_version)

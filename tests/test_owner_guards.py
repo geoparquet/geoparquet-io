@@ -72,7 +72,7 @@ CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 EXPECTED_COUNTS = {
     "G1.binary_mb": 0,
     "G1.raw_parquet_copy": 4,
-    "G1.tid251": 7,
+    "G1.tid251": 6,
     "G1.geo_parse": 0,
     "G1.set_memory_limit": 0,
     "G1.sql_escape": 0,
@@ -102,7 +102,7 @@ EXPECTED_COUNTS = {
     "G2.exemptions": 5,
     "G3.pairs": 0,
     "G3.baseline": 0,
-    "G3.pylint": 14,
+    "G3.pylint": 13,
     "G13.options": 11,
     "G13.bbox_parsers": 0,
     "G4.whitelist": 149,
@@ -4932,11 +4932,12 @@ def _g2_tree(tmp_path: Path, files: dict[str, str], exemptions: str = "") -> Pat
     return repo
 
 
-def test_g12_g2_flags_a_second_is_geographic_crs(tmp_path):
-    repo = _g2_tree(tmp_path, {"extract2.py": "def is_geographic_crs(crs):\n    return True\n"})
-    result = _run_owner_defs("--repo", str(repo))
-    assert result.returncode == 1, result.stdout
-    assert "is_geographic_crs" in result.stdout
+def test_g12_g2_flags_second_policy_owners(tmp_path):
+    for name in ("is_geographic_crs", "warn_deprecated"):
+        repo = _g2_tree(tmp_path / name, {"extract2.py": f"def {name}(value):\n    return True\n"})
+        result = _run_owner_defs("--repo", str(repo))
+        assert result.returncode == 1, result.stdout
+        assert name in result.stdout
 
 
 def test_g12_g2_flags_the_schema_rule_in_a_nested_module_but_not_the_owner(tmp_path):
@@ -6965,3 +6966,101 @@ def test_raw_parquet_copy_table_and_query_are_guarded(tmp_path, sql):
         )
         == 1
     )
+
+
+def test_all_sort_commands_use_the_sort_owner():
+    """Sort leaves may build keys, but cannot grow a second I/O pipeline."""
+    for filename in ("hilbert_order.py", "str_order.py", "sort_by_column.py", "sort_quadkey.py"):
+        tree = ast.parse((PACKAGE / "core" / filename).read_text(encoding="utf-8"))
+        names = {
+            node.func.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "run_sort" in names, filename
+        assert not names & {
+            "open_input",
+            "write_output",
+            "execute_transform",
+            "write_parquet_with_metadata",
+            "handle_output_overwrite",
+            "should_stream_output",
+            "validate_profile_for_urls",
+        }, filename
+
+    runner = ast.parse((PACKAGE / "core" / "sort_common.py").read_text(encoding="utf-8"))
+    assert not any(
+        isinstance(node, ast.Name) and node.id == "write_parquet_with_metadata"
+        for node in ast.walk(runner)
+    )
+    for filename in ("sort_common.py", "write_strategies/duckdb_kv.py"):
+        tree = ast.parse((PACKAGE / "core" / filename).read_text(encoding="utf-8"))
+        assert not any(
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Compare)
+            and any(
+                isinstance(value, ast.Constant) and value.value == "wkb"
+                for value in node.test.comparators
+            )
+            for node in ast.walk(tree)
+        ), filename
+
+
+def _extractor_raw_reports(source):
+    """Logging helpers and gpio errors clean once; direct sinks must clean explicitly."""
+    violations = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import) and any(alias.name == "logging" for alias in node.names):
+            violations.append(node.lineno)
+        if isinstance(node, ast.ImportFrom) and (
+            node.module == "logging"
+            or (
+                node.module == "geoparquet_io.core.logging_config"
+                and any(alias.name in {"logger", "get_logger"} for alias in node.names)
+            )
+        ):
+            violations.append(node.lineno)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in {"print", "echo"}
+        ):
+            violations.append(node.lineno)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in {
+                "debug",
+                "info",
+                "warning",
+                "error",
+                "exception",
+                "log",
+                "critical",
+            }:
+                violations.append(node.lineno)
+        if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call):
+            call = node.exc
+            if isinstance(call.func, ast.Name) and call.func.id in {
+                "ValueError",
+                "RuntimeError",
+                "FileNotFoundError",
+            }:
+                for arg in call.args:
+                    if not isinstance(arg, ast.Constant) and not (
+                        isinstance(arg, ast.Call)
+                        and isinstance(arg.func, ast.Name)
+                        and arg.func.id == "clean_error_text"
+                    ):
+                        violations.append(node.lineno)
+    return violations
+
+
+def test_extractors_use_sanitizing_report_owners():
+    core = PACKAGE / "core"
+    for path in [core / name for name in ("wfs.py", "carto.py", "arcgis.py")] + list(
+        core.glob("extract*.py")
+    ):
+        assert not _extractor_raw_reports(path.read_text(encoding="utf-8")), path
+    for unsafe in ('logger.debug(f"Fetching {url}")', 'raise ValueError(f"Bad query: {query}")'):
+        assert _extractor_raw_reports(unsafe)
+    assert not _extractor_raw_reports('debug(f"Fetching {url}")')
+    assert not _extractor_raw_reports('raise ValueError(clean_error_text(f"Bad {url}"))')

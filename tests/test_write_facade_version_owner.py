@@ -145,9 +145,9 @@ def test_the_sort_advisory_resolves_the_version_the_write_will_use(native_geo_on
     native-geo-only input does not have, and fell back to the 1.1 default while
     the write resolved 2.0 from the file itself.
     """
-    from geoparquet_io.core.hilbert_order import _advised_output_version
+    from geoparquet_io.core.sort_common import advised_output_version
 
-    assert _advised_output_version(str(native_geo_only), None, verbose=False) == "2.0"
+    assert advised_output_version(str(native_geo_only), None, verbose=False) == "2.0"
 
 
 @pytest.mark.parametrize("command", ["hilbert", "str"])

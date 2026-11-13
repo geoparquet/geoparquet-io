@@ -882,3 +882,152 @@ class TestZeroRowStreams:
 
         assert result.returncode == 0, result.stderr.decode(errors="replace")
         assert self._read_stream(result.stdout).num_rows == 0
+
+
+def _sort_dataset_source(tmp_path, carrier, shape):
+    import json
+    import struct
+
+    import geoarrow.pyarrow as ga
+    from pyproj import CRS
+
+    parts = tmp_path / f"{carrier}-{shape}"
+    parts.mkdir()
+    for index, coordinate in enumerate((1.0, 90.0)):
+        geometry = (
+            struct.pack("<BIdd", 1, 1, coordinate, coordinate)
+            if not index
+            else (struct.pack("<BII4d", 1, 2, 2, 1.0, 1.0, coordinate, coordinate))
+        )
+        table = pa.table({"id": [index], "quadkey": [f"12{index}"], "geometry": [geometry]})
+        if shape == "union" and index:
+            table = table.append_column("note", pa.array(["later"]))
+        entry = {
+            "encoding": "WKB",
+            "geometry_types": ["LineString" if index else "Point"],
+            "bbox": [1.0, 1.0, coordinate, coordinate],
+            "crs": CRS("EPSG:4269").to_json_dict(),
+        }
+        if carrier == "spherical":
+            entry["edges"] = "spherical"
+        if carrier != "wkb":
+            native_type = ga.wkb().with_crs("EPSG:4269")
+            if carrier == "spherical":
+                native_type = native_type.with_edge_type(ga.EdgeType.SPHERICAL)
+            table = table.set_column(
+                2,
+                "geometry",
+                pa.ExtensionArray.from_storage(native_type, table["geometry"].combine_chunks()),
+            )
+        if carrier != "native-only":
+            table = table.replace_schema_metadata(
+                {
+                    b"geo": json.dumps(
+                        {
+                            "version": "1.1.0" if carrier == "wkb" else "2.0.0",
+                            "primary_column": "geometry",
+                            "columns": {"geometry": entry},
+                        }
+                    ).encode()
+                }
+            )
+        pq.write_table(table, parts / f"{index}.parquet")
+    source = (
+        str(parts / "0.parquet")
+        if shape == "single"
+        else (str(parts) if shape == "directory" else str(parts / "*.parquet"))
+    )
+    return source
+
+
+def _assert_dataset_sort_output(table, carrier, shape, cell):
+    import json
+
+    from geoparquet_io.core.crs_utils import crs_equal, crs_of
+    from geoparquet_io.core.edges import geoarrow_type_edges
+
+    assert crs_equal(crs_of(table), "EPSG:4269"), cell
+    block = json.loads(table.schema.metadata[b"geo"])
+    entry = block["columns"]["geometry"]
+    assert entry.get("edges", "planar") == ("spherical" if carrier == "spherical" else "planar"), (
+        cell
+    )
+    if isinstance(table.schema.field("geometry").type, pa.ExtensionType):
+        assert geoarrow_type_edges(table.schema.field("geometry").type) == entry.get(
+            "edges", "planar"
+        ), cell
+    for field, column in zip(table.schema, table.columns, strict=True):
+        if isinstance(field.type, pa.ExtensionType):
+            table = table.set_column(
+                table.schema.get_field_index(field.name),
+                field.name,
+                pa.chunked_array([chunk.storage for chunk in column.chunks]),
+            )
+    assert table.num_rows == (1 if shape == "single" else 2), cell
+    assert ("note" in table.column_names) == (shape == "union"), cell
+    bbox = entry["bbox"]
+    maximum = 1 if shape == "single" else 90
+    assert bbox[0] <= 1 and bbox[1] <= 1 and bbox[2] >= maximum and bbox[3] >= maximum, cell
+    if carrier != "spherical":
+        assert bbox == [1, 1, maximum, maximum], cell
+    assert set(entry["geometry_types"]) == (
+        {"Point"} if shape == "single" else {"Point", "LineString"}
+    ), cell
+    return table, block
+
+
+def test_dataset_sort_file_stdout_parity(tmp_path):
+    """All sorts retain fields and measured dataset extents through the input owner."""
+    from itertools import product
+
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.commands.sort import sort
+    from geoparquet_io.core.crs_utils import crs_equal
+
+    for carrier, shape in product(
+        ("wkb", "native", "native-only", "spherical"),
+        ("single", "directory", "glob", "union"),
+    ):
+        source = _sort_dataset_source(tmp_path, carrier, shape)
+        for method in ("column", "quadkey", "hilbert", "str"):
+            tables = []
+            for stdout in (False, True):
+                dest = tmp_path / "sorted.parquet"
+                args = [method, source, "-" if stdout else str(dest), "--overwrite"]
+                if method == "column":
+                    args += ["note" if shape == "union" else "id"]
+                if shape == "union":
+                    args += ["--allow-schema-diff"]
+                result = CliRunner().invoke(sort, args)
+                cell = (carrier, shape, method, stdout)
+                if method in ("hilbert", "str"):
+                    if shape == "union":
+                        assert result.exit_code != 0, cell
+                        assert "No such option '--allow-schema-diff'" in result.output, cell
+                        continue
+                    if shape != "single" and not stdout:
+                        assert result.exit_code != 0, cell
+                        assert "requires a single parquet file" in result.output, cell
+                        continue
+                assert result.exit_code == 0, (cell, result.output, result.exception)
+                table = (
+                    pa.ipc.open_stream(result.stdout_bytes).read_all()
+                    if stdout
+                    else pq.read_table(dest)
+                )
+                table, block = _assert_dataset_sort_output(table, carrier, shape, cell)
+                tables.append((table, block))
+            if len(tables) == 2:
+                left, right = tables
+                assert left[0].column_names == right[0].column_names
+                assert left[0].to_pydict() == right[0].to_pydict()
+                assert crs_equal(
+                    left[1]["columns"]["geometry"]["crs"], right[1]["columns"]["geometry"]["crs"]
+                )
+                for _, block in tables:
+                    block["columns"]["geometry"].pop("crs")
+                    # Spherical file bounds may conservatively span all longitudes.
+                    block["columns"]["geometry"].pop("bbox")
+                    block["columns"]["geometry"]["geometry_types"].sort()
+                assert left[1] == right[1]

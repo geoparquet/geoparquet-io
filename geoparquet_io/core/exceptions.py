@@ -27,6 +27,35 @@ from collections.abc import Sequence
 from typing import NamedTuple, TypeGuard
 
 
+def _url_without_credentials(url: str) -> str:
+    """Remove URL secrets from diagnostic text, including malformed URLs.
+
+    URL parsers treat an unescaped slash as a path delimiter, even in a leaked
+    password. Diagnostics deliberately over-redact through the last @ in the
+    whitespace-delimited URL token; quotes cannot delimit an untrusted secret.
+    """
+
+    parts = re.split(r"(\s+)", url)
+    for i, token in enumerate(parts):
+        scheme = token.find("://")
+        if scheme == -1:
+            continue
+        start = scheme + 3
+        last_at = token.rfind("@", start)
+        if last_at != -1:
+            # A query/fragment @ makes even the apparent hostname secret.
+            prefix = token[start:last_at]
+            if "?" in prefix or "#" in prefix:
+                token = token[:start] + "[redacted]"
+            else:
+                token = token[:start] + "[redacted]@" + token[last_at + 1 :]
+        prefix, token = token[:start], token[start:]
+        path, query, parameters = token.partition("?")
+        # A question mark in a filename glob is not a parameter list.
+        parts[i] = prefix + (path if query and "=" in parameters else token).split("#", 1)[0]
+    return "".join(parts)
+
+
 def sanitize_url_for_logging(url: str) -> str:
     """Remove credentials and query params from URL for safe logging.
 
@@ -43,9 +72,7 @@ def sanitize_url_for_logging(url: str) -> str:
     """
     if not url:
         return url
-    # Remove query string (may contain presigned credentials)
-    if "?" in url:
-        url = url.split("?")[0]
+    url = _url_without_credentials(url)
     # Truncate very long paths but keep filename for debugging. A directory
     # URL ends in "/" and has no filename to keep: the elision would leave
     # `s3://bucket/datasets/.../`, which names nothing a user can act on --
@@ -57,74 +84,51 @@ def sanitize_url_for_logging(url: str) -> str:
     return url
 
 
-#: A URL embedded in free text. Quotes are excluded from the body because
-#: DuckDB writes URLs inside single quotes -- ``HTTP GET error on '<url>'`` --
-#: and the closing quote is not part of the URL.
-_URL_IN_TEXT = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://[^\s'\"<>]+")
-
 #: A complete ANSI escape sequence, removed whole so no readable tail is left
 #: behind when the introducing ESC goes.
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
-#: C0/C1 control characters, minus tab and newline, which error text legitimately
-#: uses. ``\r`` is not spared: on a terminal it rewinds the line and can hide
-#: what was printed before it.
+#: Keep boundaries when removing terminal controls; tabs/newlines already separate tokens.
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
-#: ``name=value`` / ``name: value`` credential pairs in free text. A server's
-#: error body often echoes the request it rejected, ``api_key=...`` included,
-#: and that text is not inside a URL, so the URL pass cannot see it.
 _CREDENTIAL_PAIR = re.compile(
-    r"(?i)\b((?:[a-z0-9_.-]*(?:api[_-]?key|apikey|token|secret|password|passwd|signature|"
-    r"credential|authorization))(?:\s*[=:]\s*)|key=)"
-    r"(?:(?:bearer|basic)\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s&'\"<>,;]+)"
+    r"(?i:(?<![\w.-])([\"']?(?:api[_-]?key|token|access_token|secret|password|"
+    r"passwd|signature|credential|authorization|x-amz-signature|x-amz-credential|"
+    r"x-amz-security-token)[\"']?\s*[=:]\s*)"
+    r"(?:bearer\s+|basic\s+)?(?:\"(?:[^\"\\]|\\(?:[\s\S]|$))*(?:\"|$)|"
+    r"'(?:[^'\\]|\\(?:[\s\S]|$))*(?:'|$)|"
+    r"[^\s\"',;&\]}>]+))"
 )
 
 
-#: ``scheme://user:password@host`` userinfo. The password is replaced.
-_URL_USERINFO = re.compile(r"(://[^/\s:@'\"]+:)[^/\s@'\"]+@")
-
-
 def redact_credentials(text: str) -> str:
-    """Replace credential values in free text, leaving everything else intact.
-
-    The single redaction both the error path (`clean_error_text`)
-    and the log path (``logging_config.warn`` / ``error``) use: ``name=value``
-    / ``name: value`` credential pairs, and the password of ``scheme://user:pw@host``.
-    URLs are otherwise untouched, so a log line still names the file it is about.
-    """
-    if not text:
-        return text
-    text = _URL_USERINFO.sub(r"\1***@", text)
-    return _CREDENTIAL_PAIR.sub(lambda m: f"{m.group(1)}***", text)
+    """Best-effort diagnostic redaction: normalize, strip URL secrets, then named values."""
+    text = _CONTROL_CHARS.sub(" ", _ANSI_ESCAPE.sub("", text))
+    text = _url_without_credentials(text)
+    return _CREDENTIAL_PAIR.sub(lambda match: f"{match.group(1)}***", text)
 
 
 def clean_error_text(text: str) -> str:
     """The one policy for text that reaches a user, a log line or a gpio error.
 
-    Three things can ride into an error message from outside gpio, and none is
+    Two things can ride into an error message from outside gpio, and none is
     safe to echo verbatim:
 
     * **Credentials in URLs.** DuckDB names the URL it failed on, query string and
       all -- ``HTTP GET error on 'https://bucket/x.parquet?X-Amz-Signature=...'``.
-      The query string (where a presigned URL's signature and an Azure SAS ``sig=``
-      ride) is removed; the rest of the URL is kept, because a gpio error that
-      names the destination on purpose must not elide it.
-    * **Echoed credential pairs.** ``api_key=...``, ``token: ...``,
-      ``password=...``, ``user:pw@host`` in the text itself (a server body quoting
-      the request) have their value replaced by ``***`` (:func:`redact_credentials`).
+      Userinfo and the query string (where a presigned URL's signature and an
+      Azure SAS ``sig=`` ride) are removed; the rest of the URL is kept, because
+      a gpio error that names the destination on purpose must not elide it.
     * **Control characters.** DuckDB quotes the offending value back in a
       conversion or parse error, so a value a *file* chose reaches the terminal.
       ANSI escapes in it can rewrite the line, so an input could author a clean
-      ``Error:`` line of its own choosing. They are stripped; tab and newline stay.
+      ``Error:`` line of its own choosing. ANSI formatting is removed; other
+      controls become spaces to preserve boundaries. Tab and newline stay.
     """
     if not text:
         return text
-    text = _URL_IN_TEXT.sub(lambda m: m.group(0).split("?")[0], text)
-    text = redact_credentials(text)
-    text = _ANSI_ESCAPE.sub("", text)
-    return _CONTROL_CHARS.sub("", text)
+    return redact_credentials(text)
 
 
 class GeoParquetError(Exception):
@@ -522,7 +526,7 @@ _NOT_PARQUET_TEXT = re.compile(
 #: A quoted run or a URL: user-chosen text inside a DuckDB message (the path, the
 #: layer, the SQL). Removed before :func:`_duckdb_io_verdict` reads the rest, so
 #: a file or table *named* "forbidden" cannot decide the verdict (#1020).
-_USER_TEXT_IN_MESSAGE = re.compile(r"'[^']*'|\"[^\"]*\"|" + _URL_IN_TEXT.pattern)
+_USER_TEXT_IN_MESSAGE = re.compile(r"'[^']*'|\"[^\"]*\"|" + r"\S*://\S*")
 _HTTP_STATUS_TEXT = re.compile(r"\(HTTP (\d{3})\)|\bHTTP(?: error)?[ :]+(\d{3})\b", re.IGNORECASE)
 
 

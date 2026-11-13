@@ -30,6 +30,7 @@ import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.duckdb_utils import as_wkb_sql, geom_from_wkb_sql
+from geoparquet_io.core.exceptions import clean_error_text
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.sizing import BYTES_PER_MIB, bytes_to_mb
 from geoparquet_io.core.wfs_defaults import DEFAULT_WFS_PAGE_SIZE
@@ -3098,7 +3099,9 @@ def _clip_to_area_of_use(
     """
     target = load_crs(crs)
     if target is None:
-        raise ValueError(f"pyproj cannot read the CRS {crs[:200]!r}")
+        raise ValueError(
+            clean_error_text(f"pyproj cannot read the CRS {clean_error_text(crs)[:200]!r}")
+        )
     area = target.area_of_use
     xmin, ymin, xmax, ymax = lon_lat
     if area is None:

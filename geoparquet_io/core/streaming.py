@@ -283,6 +283,8 @@ def apply_geoarrow_extension_type(
     geometry_column: str,
     crs: dict | str | None = None,
     edges: str | None = None,
+    *,
+    preserve_wkb: bool = False,
 ) -> pa.Table:
     """
     Convert geometry column to geoarrow extension type.
@@ -295,6 +297,7 @@ def apply_geoarrow_extension_type(
         geometry_column: Name of the geometry column
         crs: CRS as PROJJSON dict, string identifier, or None
         edges: Recognized edge algorithm, or planar, to carry in the field type
+        preserve_wkb: Wrap stored binary without parsing or re-encoding its values
 
     Returns:
         Table with geometry column converted to geoarrow extension type
@@ -326,7 +329,12 @@ def apply_geoarrow_extension_type(
         geom_col = _rebatch_wkb_under_byte_limit(geom_col)
 
         # Convert to geoarrow WKB extension type
-        wkb_arr = ga.as_wkb(geom_col)
+        if preserve_wkb and (
+            pa.types.is_binary(geom_col.type) or pa.types.is_large_binary(geom_col.type)
+        ):
+            wkb_arr = ga.wkb().wrap_array(_ensure_at_least_one_chunk(geom_col.cast(pa.binary())))
+        else:
+            wkb_arr = ga.as_wkb(geom_col)
 
         # Keep both parts of the geometry model in the IPC field. The next
         # process may have no geo block to recover a lost declaration from.

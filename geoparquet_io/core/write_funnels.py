@@ -87,6 +87,7 @@ from geoparquet_io.core.geo_metadata import (
     GENERATED_COLUMN_FIELDS,
     GEOPARQUET_VERSIONS,
     KEEP_CRS,
+    NATIVE_GEOMETRY_VERSIONS,
     GeoBlockOptions,
     QuerySource,
     SchemaSource,
@@ -112,6 +113,7 @@ from geoparquet_io.core.geodesic_bbox import (
 from geoparquet_io.core.geometry_detection import (
     BUILT_GEOMETRY_COLUMN,
     _detect_geometry_from_query,
+    _query_with_native_geometry,
     native_geometry_types_from_query,
     primary_geometry_column,
 )
@@ -161,6 +163,7 @@ from geoparquet_io.core.write_strategies.base import (
     geoarrow_encoding_of,
     has_unknown_secondary,
     query_geoarrow_encoding,
+    resolve_geometry_columns,
     with_declared_primary_encoding,
     wrap_query_with_secondary_crs,
 )
@@ -785,38 +788,25 @@ def _merge_derived_geometry_info(caller: dict | None, derived: dict | None) -> d
     return merged
 
 
-def _rebuilt_secondary_crs(
+def _declared_secondary_geometry_info(
     con,
     query: str,
     geometry_info: dict | None,
     metadata: dict | None,
     geometry_column: str | None,
-    rebuild: bool,
     output_columns: list[str] | None,
     verbose: bool,
 ) -> tuple[dict | None, list[str] | None]:
-    """``geometry_info`` keeping each secondary's declared ``crs`` through a rebuild.
+    """Keep surviving secondary declarations, including WKB invisible to DESCRIBE.
 
-    ``declared_write_metadata`` strips every column's ``crs`` for the composer
-    to decide, but only the primary's has a decider (``input_crs``); a declared
-    secondary came out with no ``crs`` key, i.e. OGC:CRS84. ``convert`` hid it
-    by naming the CRS in its own ``geometry_info``, which still wins the merge.
-
-    Only a secondary the query emits is restored: a ``geometry_info`` entry
-    survives the merge, so restoring a projected-away one would declare a
-    column the file does not have. The pruning step's probe is reused; it
-    skips a ``geo``-only input, whose stripped metadata is empty, so the output
-    columns are probed here then, and returned for the later steps to reuse.
-    Unknown output columns restore nothing, the gate ``_resolve_geometry_info``
-    applies.
+    Use source declarations even when projection removed the original primary's
+    carried block. Never restore measured stats invalidated by the caller.
     """
-    if not rebuild:
-        return geometry_info, output_columns
     columns = (sanitized_carried_geo(metadata) or {}).get("columns") or {}
     declared = {
-        name: {"crs": entry["crs"]}
+        name: {key: value for key, value in entry.items() if key in ("crs", "encoding")}
         for name, entry in columns.items()
-        if name != geometry_column and "crs" in entry
+        if name != geometry_column
     }
     if declared and output_columns is None:
         output_columns = _probe_output_columns(con, query, verbose, "restore secondary crs")
@@ -1529,13 +1519,12 @@ def write_parquet_with_metadata(
     original_metadata, output_columns = _prune_metadata_to_output_columns(
         con, query, original_metadata, geometry_column, verbose
     )
-    geometry_info, output_columns = _rebuilt_secondary_crs(
+    geometry_info, output_columns = _declared_secondary_geometry_info(
         con,
         query,
         geometry_info,
         input_metadata,
         geometry_column,
-        rebuild_geo_metadata,
         output_columns,
         verbose,
     )
@@ -1650,6 +1639,12 @@ def write_parquet_with_metadata(
         geometry_info, output_columns = _resolve_geometry_info(
             con, query, geometry_info, geometry_column, input_file, output_columns, verbose
         )
+    query = _query_with_native_geometry(
+        con,
+        query,
+        resolve_geometry_columns(geometry_column, geometry_info),
+        native_output=effective_version in NATIVE_GEOMETRY_VERSIONS,
+    )
     if carried_geo_block is not None:
         # The carried block REPLACES DuckDB's generated one, which does describe
         # every geometry column -- so a block that omits a native secondary the
@@ -2353,7 +2348,7 @@ def write_aggregate_table(
     )
 
 
-def _stream_input_metadata(table: pa.Table) -> dict:
+def _stream_input_metadata(table: pa.Table, *, version: str | None = None) -> dict:
     """Carry every input geometry's CRS and resolved edges before registration.
 
     The I/O interface passes KV metadata alongside a DuckDB source, whose Arrow
@@ -2391,7 +2386,7 @@ def _stream_input_metadata(table: pa.Table) -> dict:
         ArrowTableSource(table),
         GeoBlockOptions(
             geometry_column=primary,
-            version=version_to_describe(table.schema),
+            version=version or version_to_describe(table.schema),
             describe=True,
             covering=None,
             column_edges=table_nonplanar_edges(table, primary, None),

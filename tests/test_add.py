@@ -135,7 +135,7 @@ class TestAddCommands:
         assert mock_open_writer.call_args.args[1] == "out.parquet"
 
     def test_add_bbox_custom_name_alongside_existing_writes_output(
-        self, places_with_covering_file, temp_output_file
+        self, places_with_covering_file, temp_output_file, monkeypatch
     ):
         """A different --bbox-name is not a conflict, so it is computed (#728).
 
@@ -164,6 +164,34 @@ class TestAddCommands:
         geo = _read_geo_metadata(temp_output_file)
         primary = geo["primary_column"]
         assert geo["columns"][primary]["covering"]["bbox"]["xmin"][0] == "bounds"
+
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.add.bbox import add_bbox_column
+        from geoparquet_io.core.geo_metadata import read_raw_geo
+
+        source_table = pq.read_table(places_with_covering_file)
+        monkeypatch.setattr(
+            "geoparquet_io.core.streaming.read_arrow_stream", lambda: source_table.to_reader()
+        )
+        for stdin in (False, True):
+            for stdout in (False, True):
+                captured = []
+                monkeypatch.setattr(
+                    "geoparquet_io.core.stream_io.write_arrow_stream",
+                    lambda reader, captured=captured: captured.append(reader.read_all()),
+                )
+                add_bbox_column(
+                    "-" if stdin else places_with_covering_file,
+                    "-" if stdout else temp_output_file,
+                    bbox_column_name="bounds",
+                    overwrite=True,
+                )
+                actual = captured[0] if stdout else pq.read_table(temp_output_file)
+                assert "bounds" in actual.column_names, (stdin, stdout)
+                assert actual["bbox"].to_pylist() == source_table["bbox"].to_pylist()
+                block = read_raw_geo(actual.schema.metadata).value
+                assert block["columns"][primary]["covering"]["bbox"]["xmin"] == ["bounds", "xmin"]
 
     def test_add_bbox_explicit_write_option_beats_the_copy(
         self, places_test_file, temp_output_file
@@ -1239,21 +1267,21 @@ class TestAddBboxMetadataPreservesFileProperties:
 
 
 class TestStreamingGeometryColumnFallback:
-    """`_make_streaming_bbox_query` on a source with no geometry column refuses it
+    """`prepare_streaming_bbox` on a source with no geometry column refuses it
     with the shared error rather than guessing the literal 'geometry' (#1367).
     """
 
     def test_refuses_a_source_with_no_geometry_column(self):
         import duckdb
 
-        from geoparquet_io.core.add.bbox import _make_streaming_bbox_query
+        from geoparquet_io.core.add.bbox import prepare_streaming_bbox
         from geoparquet_io.core.geometry_detection import GeometryColumnNotFoundError
 
         con = duckdb.connect()
         con.execute("CREATE TABLE t AS SELECT 1 AS id, 'x' AS label")
 
         with pytest.raises(GeometryColumnNotFoundError):
-            _make_streaming_bbox_query("t", con, "bbox", force=False)
+            prepare_streaming_bbox("t", con, "bbox", force=False)
 
 
 class TestPreviewCopyWithoutOutputPath:

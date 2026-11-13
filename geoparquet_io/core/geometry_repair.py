@@ -26,6 +26,7 @@ policy each one applies belongs to ``core/edges``; gathering a file's or a
 table's declaration is this module's half.
 """
 
+from geoparquet_io.core.arrow_types import view_offset_type
 from geoparquet_io.core.column_selection import find_column
 from geoparquet_io.core.duckdb_utils import (
     as_wkb_sql,
@@ -359,11 +360,6 @@ def _refuse_unmeasurable(con, query: str, geometry_column: str) -> None:
         debug(f"Could not measure {geometry_column!r} before repair: {e}")
 
 
-# Offset-based layouts ``if_else`` can patch; a view column is patched as its
-# offset-based twin and cast back (pyarrow 25 has no ``if_else`` for views).
-_VIEW_TWINS = {"binary_view": "large_binary", "string_view": "large_string"}
-
-
 def _repaired_rows(con, read):
     """The repaired WKB for each invalid row, NULL for every other row (one scan).
 
@@ -391,7 +387,7 @@ def _if_else_chunk(chunk, fixed):
 
     extension = chunk.type if isinstance(chunk.type, pa.ExtensionType) else None
     storage = chunk.storage if extension is not None else chunk
-    twin = _VIEW_TWINS.get(str(storage.type))
+    twin = view_offset_type(storage.type)
     work = storage.cast(twin) if twin else storage
     patched = pc.if_else(pc.is_valid(fixed), fixed.cast(work.type), work)
     if twin:

@@ -1172,7 +1172,12 @@ def _rewrite_geo_metadata(metadata: dict | None, rewrite) -> dict | None:
 
 
 def compose_carried_geo(
-    metadata: dict | None, schema: pa.Schema, version: str, verbose: bool = False
+    metadata: dict | None,
+    schema: pa.Schema,
+    version: str,
+    verbose: bool = False,
+    *,
+    custom_metadata: dict | None = None,
 ) -> dict | None:
     """A Parquet KV ``metadata`` dict with its carried block composed for ``schema``.
 
@@ -1196,7 +1201,12 @@ def compose_carried_geo(
             return geo
         return compose_geo_block(
             SchemaSource(schema, with_geo_key(None, geo)),
-            GeoBlockOptions(geometry_column=primary, version=version, verbose=verbose),
+            GeoBlockOptions(
+                geometry_column=primary,
+                version=version,
+                verbose=verbose,
+                custom_metadata=custom_metadata,
+            ),
         )
 
     return _rewrite_geo_metadata(metadata, _compose)

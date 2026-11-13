@@ -33,18 +33,19 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     query_schema,
     quote_identifier,
-    sql_path,
 )
 from geoparquet_io.core.edges import declared_edges
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import get_first_parquet_file, is_partition_path
 from geoparquet_io.core.geo_metadata import (
     QuerySource,
     backfill_derived_stats,
     compose_carried_geo,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
+    strip_derived_stats,
 )
 from geoparquet_io.core.geometry_detection import (
+    _query_with_native_geometry,
     create_geometry_view,
     native_geometry_types_from_query,
     primary_geometry_column,
@@ -54,6 +55,7 @@ from geoparquet_io.core.parquet_writer import (
     WriteOptions,
     resolve_output_geoparquet_version,
 )
+from geoparquet_io.core.partition.reader import build_read_parquet_expr
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
     STREAM_BATCH_ROWS,
@@ -85,6 +87,8 @@ def open_input(
     verbose: bool = False,
     *,
     stream_output: bool = False,
+    preserve_wkb: bool = False,
+    allow_schema_diff: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """
     Open input source (file or stream) and prepare for DuckDB processing.
@@ -97,6 +101,8 @@ def open_input(
         con: Optional existing DuckDB connection (one will be created if None)
         verbose: Whether to print verbose output
         stream_output: Carry native field descriptions for an IPC producer
+        preserve_wkb: Keep stream WKB as stored bytes for operations such as sorting
+        allow_schema_diff: Merge dataset columns by name
 
     Yields:
         Tuple of (source_reference, original_metadata, is_streaming, connection)
@@ -110,14 +116,18 @@ def open_input(
             result = con.execute(f"SELECT * FROM {source}")
     """
     if is_stdin(path):
-        yield from _open_stdin_input(con, verbose)
+        yield from _open_stdin_input(con, verbose, preserve_wkb=preserve_wkb)
     else:
-        yield from _open_file_input(path, con, verbose, stream_output=stream_output)
+        yield from _open_file_input(
+            path, con, verbose, stream_output=stream_output, allow_schema_diff=allow_schema_diff
+        )
 
 
 def _open_stdin_input(
     con: duckdb.DuckDBPyConnection | None,
     verbose: bool,
+    *,
+    preserve_wkb: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """Handle streaming input from stdin."""
     from geoparquet_io.core.file_utils import unlink_released_file
@@ -131,7 +141,7 @@ def _open_stdin_input(
                 describe_query(connection, f"SELECT * FROM {source}"),
                 geo=sanitized_carried_geo(metadata),
             )
-            if geom_col:
+            if geom_col and not preserve_wkb:
                 source = create_geometry_view(connection, source, geom_col)
             yield source, metadata, True, connection
     finally:
@@ -144,11 +154,11 @@ def _open_file_input(
     verbose: bool,
     *,
     stream_output: bool = False,
+    allow_schema_diff: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """Handle file-based input."""
     import geoarrow.pyarrow  # noqa: F401 - retain native geo field descriptions
 
-    raw_url = resolve_file_url(path, verbose=verbose)
     file_metadata, schema = get_parquet_metadata(path, verbose=verbose)
 
     created_connection = con is None
@@ -163,9 +173,12 @@ def _open_file_input(
             con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
 
     try:
-        source = f"read_parquet({sql_path(raw_url)})"
+        source = build_read_parquet_expr(path, allow_schema_diff=allow_schema_diff, verbose=verbose)
         if stream_output:
-            file_metadata = _file_stream_metadata(con, source, path, schema, file_metadata)
+            witness = get_first_parquet_file(path) if is_partition_path(path) else path
+            file_metadata = _file_stream_metadata(con, source, witness, schema, file_metadata)
+            if is_partition_path(path):
+                file_metadata = strip_derived_stats(file_metadata)
         yield source, file_metadata, False, con
     finally:
         if created_connection:
@@ -202,6 +215,10 @@ def write_output(
     geoparquet_version: str | None = None,
     extra_kv_metadata: dict[str, str] | None = None,
     memory_limit: str | None = None,
+    *,
+    preserve_wkb: bool = False,
+    input_file: str | None = None,
+    invalidate_derived_stats: bool = False,
 ) -> pa.Table | None:
     """
     Execute query and write result to file or stream.
@@ -236,7 +253,20 @@ def write_output(
     """
     validate_output(output_path)
 
+    output_schema = describe_query(con, query)
+    original_metadata = prune_geo_metadata_to_columns(
+        original_metadata, [name for name, _ in output_schema], repoint_primary=True
+    )
+    carried = sanitized_carried_geo(original_metadata)
+    geometry_column = primary_geometry_column(
+        output_schema,
+        geo=carried,
+        preferred=geometry_column,
+    )
+
     if should_stream_output(output_path):
+        if invalidate_derived_stats:
+            original_metadata = strip_derived_stats(original_metadata)
         # --write-memory governs final Parquet output; internal stats snapshots
         # follow the connection's existing memory and spill policy.
         if memory_limit is not None:
@@ -244,7 +274,14 @@ def write_output(
                 "--write-memory is ignored when streaming to stdout "
                 "(it only applies to file outputs)."
             )
-        return _write_stream_output(con, query, original_metadata, geometry_column)
+        return _write_stream_output(
+            con,
+            query,
+            original_metadata,
+            geometry_column,
+            custom_metadata,
+            preserve_wkb=preserve_wkb,
+        )
     else:
         _write_file_output(
             con,
@@ -261,6 +298,9 @@ def write_output(
             geoparquet_version,
             extra_kv_metadata,
             memory_limit,
+            geometry_column=geometry_column,
+            input_file=input_file,
+            invalidate_derived_stats=invalidate_derived_stats,
         )
         return None
 
@@ -270,6 +310,9 @@ def _write_stream_output(
     query: str,
     original_metadata: dict | None,
     geometry_column: str | None,
+    custom_metadata: dict | None = None,
+    *,
+    preserve_wkb: bool = False,
 ) -> pa.Table:
     """Write output as Arrow IPC stream to stdout.
 
@@ -278,10 +321,7 @@ def _write_stream_output(
     - CRS preservation through the pipeline
     - Automatic native Parquet geometry when written to file
     """
-    # Auto-detect geometry column if not provided
     carried = sanitized_carried_geo(original_metadata)
-    if geometry_column is None:
-        geometry_column = primary_geometry_column(describe_query(con, query), geo=carried)
 
     # Convert geometry to WKB (DuckDB's Arrow export uses native format)
     native_columns = native_geometry_types_from_query(con, query)
@@ -290,6 +330,20 @@ def _write_stream_output(
     # Resolve field metadata without holding data. Stats and rows must describe
     # the same selection even for random(), sampling and unordered LIMIT.
     schema = query_schema(con, stream_query)
+    if not carried:
+        description = schema.empty_table().replace_schema_metadata(original_metadata)
+        for name in dict.fromkeys([*native_columns, geometry_column]):
+            if name is not None and name in schema.names:
+                description = apply_geoarrow_extension_type(description, name, None)
+        original_metadata = _stream_input_metadata(
+            description,
+            version=resolve_output_geoparquet_version(
+                None,
+                original_metadata=original_metadata,
+                table=description.select(list(native_columns)),
+            ),
+        )
+        carried = sanitized_carried_geo(original_metadata)
     needs_stats = any(
         name in schema.names and (not entry.get("geometry_types") or "bbox" not in entry)
         for name, entry in carried.get("columns", {}).items()
@@ -312,7 +366,9 @@ def _write_stream_output(
             entry = columns.get(name)
             edges = declared_edges(entry)
             column_models[name] = (crs, edges)
-            table = apply_geoarrow_extension_type(table, name, crs, edges=edges)
+            table = apply_geoarrow_extension_type(
+                table, name, crs, edges=edges, preserve_wkb=preserve_wkb
+            )
 
         # Apply metadata to output table, the way the file path does (#722):
         # first drop entries for columns a projection removed -- a dropped secondary
@@ -327,11 +383,17 @@ def _write_stream_output(
         # struct the spec forbids -- is no more writable here than there (#1172),
         # and a 1.0 input upgrades and declares its bbox column as a file does.
         if original_metadata:
-            original_metadata = prune_geo_metadata_to_columns(original_metadata, table.column_names)
-            original_metadata = backfill_derived_stats(original_metadata, QuerySource(con, query))
+            original_metadata = backfill_derived_stats(
+                original_metadata,
+                QuerySource(
+                    con, _query_with_native_geometry(con, query, columns, native_output=True)
+                ),
+            )
             # A stream takes no version option: auto mode, the facade's answer.
             version = resolve_output_geoparquet_version(None, original_metadata=original_metadata)
-            original_metadata = compose_carried_geo(original_metadata, table.schema, version)
+            original_metadata = compose_carried_geo(
+                original_metadata, table.schema, version, custom_metadata=custom_metadata
+            )
             table = apply_metadata_to_table(table, original_metadata)
 
         output_schema = table.schema
@@ -343,7 +405,9 @@ def _write_stream_output(
                 for batch in reader:
                     chunk = pa.Table.from_batches([batch])
                     for name, (crs, edges) in column_models.items():
-                        chunk = apply_geoarrow_extension_type(chunk, name, crs, edges=edges)
+                        chunk = apply_geoarrow_extension_type(
+                            chunk, name, crs, edges=edges, preserve_wkb=preserve_wkb
+                        )
                     yield from chunk.cast(output_schema).to_batches()
 
             write_arrow_stream(pa.RecordBatchReader.from_batches(output_schema, batches()))
@@ -382,6 +446,10 @@ def _write_file_output(
     geoparquet_version: str | None,
     extra_kv_metadata: dict[str, str] | None = None,
     memory_limit: str | None = None,
+    *,
+    geometry_column: str | None = None,
+    input_file: str | None = None,
+    invalidate_derived_stats: bool = False,
 ) -> None:
     """Write output to Parquet file.
 
@@ -393,6 +461,7 @@ def _write_file_output(
         query,
         output_path,
         original_metadata=original_metadata,
+        geometry_info={"primary": geometry_column} if geometry_column else None,
         compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_size_mb,
@@ -403,6 +472,8 @@ def _write_file_output(
         geoparquet_version=geoparquet_version,
         extra_kv_metadata=extra_kv_metadata,
         memory_limit=memory_limit,
+        input_file=input_file,
+        invalidate_derived_stats=invalidate_derived_stats,
     )
 
 

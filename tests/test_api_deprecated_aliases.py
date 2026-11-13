@@ -26,6 +26,7 @@ import pytest
 import geoparquet_io as gpio
 from geoparquet_io.api import _deprecation, ops
 from geoparquet_io.api.table import Table
+from geoparquet_io.core import deprecation
 from geoparquet_io.core import extract_bigquery as core_bigquery
 from geoparquet_io.core.process import overview as core_overview
 from tests import parity_registry as reg
@@ -42,15 +43,15 @@ def fresh_deprecations():
     to, too, or it passes only because an earlier test warned first. The same
     contract tests/test_remote_options.py works under.
     """
-    saved = set(_deprecation._warned_aliases)
-    _deprecation._warned_aliases.clear()
+    saved = set(deprecation._warned)
+    deprecation._warned.clear()
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             yield caught
     finally:
-        _deprecation._warned_aliases.clear()
-        _deprecation._warned_aliases.update(saved)
+        deprecation._warned.clear()
+        deprecation._warned.update(saved)
 
 
 def deprecations(caught):
@@ -114,6 +115,12 @@ def test_the_alias_warns_once_per_process(old, alias, canonical, call):
             call(name)
         messages = deprecations(caught)
     assert len(messages) == 1, messages
+    assert caught[0].category is DeprecationWarning
+    assert caught[0].filename == __file__
+    source, first_line = inspect.getsourcelines(call)
+    assert caught[0].lineno == first_line + next(
+        index for index, line in enumerate(source) if "getattr(" in line
+    )
     assert messages[0] == (
         f"{old}() is deprecated and will be removed in the next minor release; "
         f"call {reg.DEPRECATED_ALIASES[old][0]}() instead"

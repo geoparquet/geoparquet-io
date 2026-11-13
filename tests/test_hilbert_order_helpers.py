@@ -7,57 +7,29 @@ import pytest
 
 
 class TestHilbertV11Warning:
-    """Tests for v1.1 Hilbert sorting warning."""
+    """Both spatial sorts get their unchanged advisory from the shared owner."""
 
-    def test_warns_when_version_is_1_1(self, tmp_path, places_test_file):
-        """Hilbert sorting to v1.1 should warn about no filter pushdown benefit."""
-        from unittest.mock import patch
+    def test_version_advisory_comes_from_the_sort_owner(self, tmp_path, places_test_file):
+        from geoparquet_io.core.hilbert_order import hilbert_order
+        from geoparquet_io.core.str_order import str_order
 
-        output = str(tmp_path / "out.parquet")
-        with patch("geoparquet_io.core.hilbert_order.warn") as mock_warn:
-            from geoparquet_io.core.hilbert_order import hilbert_order
-
-            hilbert_order(places_test_file, output, geoparquet_version="1.1")
-
-        mock_warn.assert_any_call(
-            "Hilbert sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
-            "Consider using --geoparquet-version 2.0 to enable native geo_bbox row group statistics."
-        )
-
-    def test_warns_when_version_is_default_none(self, tmp_path, places_test_file):
-        """Hilbert sorting with default version (None, resolves to 1.1) should warn."""
-        from unittest.mock import patch
-
-        output = str(tmp_path / "out.parquet")
-        with patch("geoparquet_io.core.hilbert_order.warn") as mock_warn:
-            from geoparquet_io.core.hilbert_order import hilbert_order
-
-            hilbert_order(places_test_file, output, geoparquet_version=None)
-
-        mock_warn.assert_any_call(
-            "Hilbert sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
-            "Consider using --geoparquet-version 2.0 to enable native geo_bbox row group statistics."
-        )
-
-    def test_no_warning_when_version_is_2_0(self, tmp_path, places_test_file):
-        """Hilbert sorting to v2.0 should NOT warn."""
-        from unittest.mock import patch
-
-        output = str(tmp_path / "out.parquet")
-        with patch("geoparquet_io.core.hilbert_order.warn") as mock_warn:
-            from geoparquet_io.core.hilbert_order import hilbert_order
-
-            hilbert_order(places_test_file, output, geoparquet_version="2.0")
-
-        # Check that warn was never called with the v1.1 message
-        for call in mock_warn.call_args_list:
-            assert "no spatial filter pushdown" not in str(call)
+        for sort, label in ((hilbert_order, "Hilbert"), (str_order, "STR")):
+            for version in ("1.1", None, "2.0"):
+                output = str(tmp_path / f"{label}-{version}.parquet")
+                with patch("geoparquet_io.core.sort_common.warn") as mock_warn:
+                    sort(places_test_file, output, geoparquet_version=version)
+                advisory = (
+                    f"{label} sorting to GeoParquet v1.1 provides no spatial filter pushdown benefit. "
+                    "Consider using --geoparquet-version 2.0 to enable native geo_bbox row group statistics."
+                )
+                messages = [call.args[0] for call in mock_warn.call_args_list]
+                assert messages.count(advisory) == (0 if version == "2.0" else 1)
 
 
 class TestHilbertRgSizeGuidance:
     """Tests for row group size guidance when Hilbert sorting with v2.0."""
 
-    @patch("geoparquet_io.core.hilbert_order._hilbert_order_file_based")
+    @patch("geoparquet_io.core.hilbert_order.run_sort")
     def test_large_rg_with_v20_shows_guidance(self, _mock_file_based, caplog):
         """Large RG size + v2.0 should show spatial guidance."""
         from geoparquet_io.core.hilbert_order import hilbert_order
@@ -76,7 +48,7 @@ class TestHilbertRgSizeGuidance:
         # either -- it moved to 49,152 in #961.
         assert f"{DEFAULT_ROW_GROUP_ROWS:,}" in caplog.text
 
-    @patch("geoparquet_io.core.hilbert_order._hilbert_order_file_based")
+    @patch("geoparquet_io.core.hilbert_order.run_sort")
     def test_large_rg_with_pgo_shows_guidance(self, _mock_file_based, caplog):
         """Large RG size + parquet-geo-only should show spatial guidance."""
         from geoparquet_io.core.hilbert_order import hilbert_order
@@ -90,7 +62,7 @@ class TestHilbertRgSizeGuidance:
             )
         assert "row group" in caplog.text.lower() or "row-group" in caplog.text.lower()
 
-    @patch("geoparquet_io.core.hilbert_order._hilbert_order_file_based")
+    @patch("geoparquet_io.core.hilbert_order.run_sort")
     def test_small_rg_with_v20_no_guidance(self, _mock_file_based, caplog):
         """Small RG size + v2.0 should NOT show guidance."""
         from geoparquet_io.core.hilbert_order import hilbert_order
@@ -104,7 +76,7 @@ class TestHilbertRgSizeGuidance:
             )
         assert "spatial filter pushdown" not in caplog.text
 
-    @patch("geoparquet_io.core.hilbert_order._hilbert_order_file_based")
+    @patch("geoparquet_io.core.hilbert_order.run_sort")
     def test_large_rg_with_v11_no_guidance(self, _mock_file_based, caplog):
         """Large RG size + v1.1 should NOT show RG guidance (v1.1 has no geo stats anyway)."""
         from geoparquet_io.core.hilbert_order import hilbert_order
@@ -120,7 +92,7 @@ class TestHilbertRgSizeGuidance:
         # Note: v1.1 warning about "no spatial filter pushdown benefit" IS expected
         assert "Smaller row groups" not in caplog.text
 
-    @patch("geoparquet_io.core.hilbert_order._hilbert_order_file_based")
+    @patch("geoparquet_io.core.hilbert_order.run_sort")
     def test_no_rg_rows_specified_no_guidance(self, _mock_file_based, caplog):
         """No row_group_rows specified should NOT show guidance."""
         from geoparquet_io.core.hilbert_order import hilbert_order

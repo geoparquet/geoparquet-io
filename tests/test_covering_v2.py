@@ -263,7 +263,7 @@ def test_auto_mode_on_v2_input_does_not_advise_upgrading_to_v2(tmp_path):
     src = _write_v2_wkb(tmp_path / "in.parquet")
     out = tmp_path / "out.parquet"
 
-    with patch("geoparquet_io.core.hilbert_order.warn") as mock_warn:
+    with patch("geoparquet_io.core.sort_common.warn") as mock_warn:
         from geoparquet_io.core.hilbert_order import hilbert_order
 
         hilbert_order(src, str(out), geoparquet_version=None)
@@ -443,28 +443,13 @@ def test_bbox_shaped_columns_gpio_did_not_compute_stay_undeclared(tmp_path, bbox
 # ---------------------------------------------------------------------------
 
 
-def test_advised_output_version_is_silent_for_stdin():
-    """A stdin stream's version is not knowable here, so nothing is claimed.
+def test_advised_output_version_only_claims_a_known_version(tmp_path):
+    """Stdin and failed reads are unknown; an explicit version is authoritative (#738)."""
+    from geoparquet_io.core.sort_common import advised_output_version
 
-    Returning the default instead made `sort hilbert -` advise "consider
-    --geoparquet-version 2.0" while it was already writing 2.0 (#738).
-    """
-    from geoparquet_io.core.hilbert_order import _advised_output_version
-
-    assert _advised_output_version("-", None, verbose=False) is None
-
-
-def test_advised_output_version_is_silent_for_an_unreadable_input(tmp_path):
-    """A failed read is not evidence of a 1.1 input."""
-    from geoparquet_io.core.hilbert_order import _advised_output_version
-
-    assert _advised_output_version(str(tmp_path / "nope.parquet"), None, verbose=False) is None
-
-
-def test_advised_output_version_honours_an_explicit_version():
-    from geoparquet_io.core.hilbert_order import _advised_output_version
-
-    assert _advised_output_version("-", "2.0", verbose=False) == "2.0"
+    assert advised_output_version("-", None, verbose=False) is None
+    assert advised_output_version(str(tmp_path / "nope.parquet"), None, verbose=False) is None
+    assert advised_output_version("-", "2.0", verbose=False) == "2.0"
 
 
 def test_a_non_bbox_covering_survives_a_write_that_adds_a_bbox_covering(tmp_path):

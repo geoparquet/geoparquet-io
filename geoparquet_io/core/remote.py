@@ -8,13 +8,13 @@ in cloud object storage (S3, GCS, Azure) and HTTP/HTTPS endpoints.
 from __future__ import annotations
 
 import os
-import warnings
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
 
+from geoparquet_io.core.deprecation import warn_deprecated
 from geoparquet_io.core.exceptions import (
     FailureKind,
     InvalidParameterError,
@@ -288,9 +288,6 @@ _CLI_SPELLINGS = {
     "s3_no_ssl": "s3_use_ssl",
 }
 
-#: One warning per deprecated spelling per process, keyed ``"<entry point>.<keyword>"``.
-_warned_spellings: set[str] = set()
-
 
 @dataclass(frozen=True, kw_only=True)
 class RemoteOptions:
@@ -463,55 +460,16 @@ def remote_options_from_keywords(
         raise TypeError(
             f"{where}() got {named} both in remote= and as a keyword; set each field in one place"
         )
-    _warn_deprecated_spellings(where, asked)
+    warn_deprecated(
+        {
+            name: (
+                f"{where}({name}=...)",
+                f"pass remote=gpio.RemoteOptions({_KEYWORD_FIELDS[name]}=...) instead",
+            )
+            for name in asked
+        }
+    )
     return base.merge(RemoteOptions.pick(fields_asked))
-
-
-def _caller_stacklevel() -> int:
-    """Frames from :func:`_warn_deprecated_spellings` up to the code that called gpio.
-
-    ``stacklevel`` is a count of frames, and the count differs by entry point:
-    ``Table.write`` and ``gpio.convert`` call
-    :func:`remote_options_from_keywords` themselves, while
-    ``WriteOptions(profile=...)`` reaches it through the dataclass's generated
-    ``__init__`` and ``__post_init__`` -- two frames further down, so a fixed
-    level blamed ``<string>``, the generated ``__init__``, for the caller's
-    keyword. Counting frames until the first one outside ``geoparquet_io`` is
-    right for every door, and stays right if another is added.
-    """
-    import sys
-
-    level = 1
-    frame: Any = sys._getframe(1)
-    while frame is not None:
-        name = frame.f_globals.get("__name__", "")
-        if name != "geoparquet_io" and not name.startswith("geoparquet_io."):
-            return level
-        level += 1
-        frame = frame.f_back
-    return level
-
-
-def _warn_deprecated_spellings(where: str, asked: Iterable[str]) -> None:
-    """Warn once per process for each deprecated keyword *where* was given.
-
-    The replacement names the ``RemoteOptions`` *field*, which is not always the
-    old keyword: ``gpio.read_partition(aws_profile=...)`` becomes
-    ``remote=gpio.RemoteOptions(profile=...)``.
-    """
-    stacklevel = _caller_stacklevel()
-    for name in sorted(asked):
-        key = f"{where}.{name}"
-        if key in _warned_spellings:
-            continue
-        _warned_spellings.add(key)
-        warnings.warn(
-            f"{where}({name}=...) is deprecated and will be removed in the next "
-            f"minor release; pass "
-            f"remote=gpio.RemoteOptions({_KEYWORD_FIELDS[name]}=...) instead",
-            DeprecationWarning,
-            stacklevel=stacklevel,
-        )
 
 
 def show_remote_read_message(file_path, verbose=False):

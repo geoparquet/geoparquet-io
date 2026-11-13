@@ -34,7 +34,7 @@ from geoparquet_io.cli.decorators import (
     verbose_option,
     write_strategy_option,
 )
-from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT
+from geoparquet_io.core.carto import CARTO_REQUEST_TIMEOUT, STATUS_PROBE_TIMEOUT
 from geoparquet_io.core.edges import PLANAR, SPHERICAL
 from geoparquet_io.core.extract import extract as extract_impl
 from geoparquet_io.core.file_utils import validate_parquet_extension
@@ -1106,7 +1106,12 @@ def extract_wfs_cmd(
 )
 @timeout_option(
     default=CARTO_REQUEST_TIMEOUT,
-    help=f"Request timeout in seconds (default: {CARTO_REQUEST_TIMEOUT})",
+    help=(
+        f"HTTP request timeout in seconds (default: {CARTO_REQUEST_TIMEOUT}). "
+        "The GeoJSON GDAL read is not bounded by this timeout; "
+        f"its status probe is capped at {STATUS_PROBE_TIMEOUT:g} seconds. "
+        "Use --limit or --where to reduce large reads."
+    ),
 )
 @click.option(
     "--skip-hilbert",

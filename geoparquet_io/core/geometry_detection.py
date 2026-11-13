@@ -258,6 +258,7 @@ def primary_geometry_column(
     source,
     *,
     geo=None,
+    preferred: str | None = None,
     extra_names=(),
     con=None,
     verbose: bool = False,
@@ -282,6 +283,11 @@ def primary_geometry_column(
     ``extra_names`` are a source's own candidate names, tried after the
     standard ones (BigQuery's ``geo``/``geography``); never a second list.
 
+    ``preferred`` is a stored input identity used when the output schema still
+    has it; a projection that dropped it falls through to the normal rule.
+    Unlike ``resolve_geometry_column(named=...)``, it is a hint, not an explicit
+    user request whose absence is an error.
+
     The rule, one for every source and every caller:
 
     1. the block's primary (``primary_column``, or the legacy list form's
@@ -302,6 +308,10 @@ def primary_geometry_column(
     """
     geo, label, columns = _source_schema(source, geo, con, verbose)
     primary = _block_primary(geo, label)
+    if preferred is not None and columns is not None:
+        present = find_column(preferred, [name for name, _ in columns])
+        if present is not None:
+            primary = present
     resolved = _resolve_primary(primary, _block_declared(geo), columns, extra_names)
     if verbose:
         debug(
@@ -687,6 +697,23 @@ def resolve_geometry_read(
     source = raw_url if relation else f"read_parquet({sql_path(raw_url)})"
     described = describe_query(con, f"SELECT * FROM {source}")
     return GeometryRead.for_type(column, _find_described_type(described, column))
+
+
+def _query_with_native_geometry(con, query: str, columns, *, native_output: bool) -> str:
+    """Decode surviving WKB/WKT declarations before native output or query statistics."""
+    if not native_output:
+        return query
+    types = dict(describe_query(con, query))
+    replacements = []
+    for name in sorted(column for column in columns if column in types):
+        read = GeometryRead.for_type(name, types[name])
+        if read.kind == "wkb":
+            replacements.append(f"{read.expr} AS {read.quoted}")
+        elif read.duckdb_type == "VARCHAR":
+            replacements.append(f"ST_GeomFromText({read.quoted}) AS {read.quoted}")
+    if not replacements:
+        return query
+    return f"SELECT * REPLACE ({', '.join(replacements)}) FROM ({query})"
 
 
 def create_geometry_view(con, relation: str, column: str, view: str | None = None) -> str:

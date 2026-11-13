@@ -75,12 +75,42 @@ class TestGetDatasetBounds:
         assert xmin < xmax
         assert ymin < ymax
 
-    def test_get_bounds_with_specific_geometry_column(self, buildings_test_file):
+    def test_get_bounds_with_specific_geometry_column(self, buildings_test_file, tmp_path):
         """Test getting bounds with specified geometry column."""
         bounds = dataset_bounds(buildings_test_file, geometry_column="geometry", verbose=False)
 
         assert bounds is not None
         assert len(bounds) == 4
+
+        import struct
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.add.bbox import add_bbox_table
+        from geoparquet_io.core.geo_metadata import with_geo_block
+
+        secondary = pa.table(
+            {
+                "geometry": [struct.pack("<BIdd", 1, 1, 1, 2)],
+                "footprint": [struct.pack("<BIdd", 1, 1, 101, 202)],
+            }
+        )
+        secondary = with_geo_block(
+            secondary,
+            {
+                "version": "1.1.0",
+                "primary_column": "geometry",
+                "columns": {
+                    name: {"encoding": "WKB", "geometry_types": ["Point"]}
+                    for name in ("geometry", "footprint")
+                },
+            },
+        )
+        path = tmp_path / "two.parquet"
+        pq.write_table(add_bbox_table(secondary), path)
+        assert dataset_bounds(str(path), "footprint") == (101, 202, 101, 202)
+        assert dataset_bounds(str(path), "geometry") == (1, 2, 1, 2)
 
     def test_get_bounds_verbose_output(self, buildings_test_file, caplog):
         """Test verbose output when calculating bounds."""
