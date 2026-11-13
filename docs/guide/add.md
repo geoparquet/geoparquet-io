@@ -812,9 +812,10 @@ The `--vecorel` flag:
 
 !!! note "Overture: per-level cache and simplified boundaries"
     The Overture dataset uses a **per-level cache**: country and region
-    boundaries are cached as separate files by `process aggregate` and `overview`.
-    `add admin-divisions` reuses an existing level cache; otherwise it reads
-    remote boundaries within the input's extent without populating the cache.
+    boundaries are cached as separate files. Existing complete caches are reused.
+    Cold joins read only the input extent when footer statistics predict most
+    geometry bytes can be skipped; otherwise they build a complete level cache.
+    `process aggregate` and `overview` also populate complete caches.
 
     The country level covers **dependent territories** as well as sovereign
     states, each attributed to its own ISO 3166-1 alpha-2 code — `GF` for
@@ -837,7 +838,7 @@ The `--vecorel` flag:
 Caching depends on the dataset:
 
 - **GAUL**: Downloads and caches the full dataset on first use; subsequent runs use the cache.
-- **Overture**: Reuses existing per-level caches. A cold level is read remotely within the input's extent on every run, without writing a cache. Only `process aggregate` and `overview` populate these caches.
+- **Overture**: Reuses complete per-level caches. Cold joins compare overlapping and skipped geometry bytes from row-group footers: read inline when more bytes can be skipped than fetched; otherwise build the complete cache. Completed source objects survive interrupted builds. `process aggregate` and `overview` also populate these caches.
 - **Cache location**: `~/.geoparquet-io/cache/admin/`
 - **Warning**: Shown if cache is older than 6 months
 
@@ -861,7 +862,7 @@ Caching depends on the dataset:
     import geoparquet_io as gpio
     from geoparquet_io.core.admin_datasets import get_cache_dir, clear_cache
 
-    # Reuses cached Overture levels, or reads the input extent remotely
+    # Reuses cached levels, or chooses a bounded read / full cache from footers
     gpio.read('input.parquet').add_admin_divisions(
         dataset='overture',
         levels=['country', 'region']

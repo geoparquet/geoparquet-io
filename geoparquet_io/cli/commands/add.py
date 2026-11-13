@@ -54,16 +54,18 @@ def _clear_admin_cache_interactively(cache_dir, clear_admin_cache):
     no OS tmp reaper will ever collect it. Reporting only ``*.parquet`` told the
     user there was nothing there and then deleted nothing (#977).
     """
-    from geoparquet_io.core.admin_datasets import cache_spill_dirs, spill_dir_bytes
+    from geoparquet_io.core.admin_datasets import _cache_inventory, spill_dir_bytes
     from geoparquet_io.core.logging_config import info, success
 
     if not cache_dir.exists():
         click.echo("No cache directory found.")
         return
 
-    parquet_files = list(cache_dir.glob("*.parquet"))
-    spill_dirs = cache_spill_dirs()
-    if not parquet_files and not spill_dirs:
+    entries = _cache_inventory(cache_dir)
+    parquet_files = entries["files"]
+    spill_dirs = entries["spill_dirs"]
+    staging_dirs = entries["staging_dirs"]
+    if not parquet_files and not spill_dirs and not staging_dirs:
         click.echo("No cached datasets found.")
         return
 
@@ -74,6 +76,11 @@ def _clear_admin_cache_interactively(cache_dir, clear_admin_cache):
         click.echo(
             f"Leftover spill directories: {len(spill_dirs)} "
             f"({spill_dir_bytes(spill_dirs) / ONE_MB:.2f} MB)"
+        )
+    if staging_dirs:
+        click.echo(
+            f"Leftover staging directories: {len(staging_dirs)} "
+            f"({spill_dir_bytes(staging_dirs) / ONE_MB:.2f} MB)"
         )
 
     if not click.confirm("Delete all cached admin datasets?"):
@@ -91,6 +98,13 @@ def _clear_admin_cache_interactively(cache_dir, clear_admin_cache):
         success(
             f"plus {swept} leftover spill {noun}, "
             f"{result['spill_bytes_freed'] / ONE_MB:.2f} MB freed"
+        )
+    staged = result["staging_dirs_deleted"]
+    if staged:
+        noun = "directory" if staged == 1 else "directories"
+        success(
+            f"plus {staged} leftover staging {noun}, "
+            f"{result['staging_bytes_freed'] / ONE_MB:.2f} MB freed"
         )
 
 
@@ -228,9 +242,9 @@ def add_admin_divisions(
     Cache location: ~/.geoparquet-io/cache/admin/
 
     - GAUL: Downloads and caches the full dataset on first use; later runs reuse it
-    - Overture: Reuses existing level caches; cold levels are read remotely within
-      the input extent on every run without writing a cache. Only process aggregate
-      and overview populate these caches
+    - Overture: Reuses existing level caches. Cold levels read the input extent
+      when footer statistics predict most geometry bytes can be skipped; otherwise
+      they build complete level caches, resuming at completed source objects
     - Warning shown if cache is older than 6 months
     - Use --no-cache to skip cache or --clear-cache to delete cached data
 

@@ -17,6 +17,7 @@ from pathlib import Path, PurePath
 from urllib.parse import urlsplit
 
 from geoparquet_io.core.duckdb_utils import (
+    _SPILL_LOCK_NAME,
     _process_is_alive,
     _spill_base_lock,
     _spill_lock,
@@ -479,7 +480,7 @@ def _publish_sidecars(stage_dir: Path, staged: Path, final: Path, suffixes: Iter
     """Move every file the writer left beside *staged*, and drop the old set's leftovers."""
     published = {part.name for part in stage_dir.iterdir()}
     for sidecar in sorted(stage_dir.iterdir()):
-        if sidecar != staged and sidecar.name != ".gpio-owner.lock":
+        if sidecar != staged and sidecar.name != _SPILL_LOCK_NAME:
             os.replace(sidecar, final.parent / sidecar.name)
     for stale in suffixes:
         old = final.parent / f"{final.stem}{stale}"
@@ -491,6 +492,8 @@ def _sweep_orphaned_dirs(
     base_dir: str | os.PathLike,
     candidates: Callable[[], Iterable[tuple[str, int]]],
     minimum_age: float,
+    *,
+    dry_run: bool = False,
 ) -> list[str]:
     """Shared collector: enumerate under the base lock, hold ownership through deletion.
 
@@ -508,10 +511,15 @@ def _sweep_orphaned_dirs(
                         continue
                     if minimum_age and time.time() - directory.stat().st_mtime < minimum_age:
                         continue
+                    if dry_run and not (directory / _SPILL_LOCK_NAME).is_file():
+                        if not _process_is_alive(pid):
+                            removed.append(path)
+                        continue
                     marker = _spill_lock(path)
                     if marker is None and _process_is_alive(pid):
                         continue
-                    shutil.rmtree(path)
+                    if not dry_run:
+                        shutil.rmtree(path)
                     removed.append(path)
                 except OSError:
                     continue
@@ -523,7 +531,7 @@ def _sweep_orphaned_dirs(
     return removed
 
 
-def _sweep_orphaned_staging_dirs(base_dir: Path) -> list[str]:
+def _sweep_orphaned_staging_dirs(base_dir: Path, *, dry_run: bool = False) -> list[str]:
     """Collect stages older than a day, only while holding their ownership lock.
 
     Reuse spill ownership across PID namespaces; age alone cannot protect a slow
@@ -537,7 +545,7 @@ def _sweep_orphaned_staging_dirs(base_dir: Path) -> list[str]:
             if (match := re.fullmatch(r"\.gpio-stage-(\d+)-[a-z0-9_]{8}", stage.name))
         )
 
-    return _sweep_orphaned_dirs(base_dir, candidates, 24 * 60 * 60)
+    return _sweep_orphaned_dirs(base_dir, candidates, 24 * 60 * 60, dry_run=dry_run)
 
 
 @contextlib.contextmanager

@@ -124,7 +124,11 @@ class TestAtomicWrite:
             assert file_utils._sweep_orphaned_staging_dirs(tmp_path) == []
             os.utime(stage, (old, old))
             monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
-            admin_datasets.clear_cache(confirm=True)
+            assert file_utils._sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == [str(stage)]
+            assert stage.exists(), "pricing must not delete an abandoned stage"
+            result = admin_datasets.clear_cache(confirm=True)
+            assert result["staging_dirs_deleted"] == 1
+            assert result["staging_bytes_freed"] == len(b"partial")
             assert not stage.exists()
             assert not (tmp_path / "killed.parquet").exists()
             with atomic_write(str(tmp_path / "killed.parquet")) as staged:

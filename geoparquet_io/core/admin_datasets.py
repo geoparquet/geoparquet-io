@@ -21,7 +21,7 @@ import duckdb
 from geoparquet_io.core import duckdb_utils
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import reproject_to_source_sql, transform_geom_sql
-from geoparquet_io.core.duckdb_metadata import get_per_row_group_bbox_stats
+from geoparquet_io.core.duckdb_metadata import _row_group_geometry_scan_stats
 from geoparquet_io.core.duckdb_utils import (
     build_spatial_join_condition,
     build_spatial_join_query,
@@ -294,7 +294,7 @@ def spill_dir_bytes(paths: Iterable[Path]) -> int:
     return total
 
 
-def cache_spill_dirs() -> list[Path]:
+def cache_spill_dirs(cache_dir: Path | None = None) -> list[Path]:
     """Leftover spill directories in the admin cache, priced before deletion.
 
     ``gpio add admin-divisions`` and ``gpio partition admin`` spill onto the
@@ -304,7 +304,28 @@ def cache_spill_dirs() -> list[Path]:
     exited are listed; a concurrent run's scratch space is not ours to price or
     delete.
     """
-    return [Path(p) for p in orphaned_spill_dirs(get_cache_dir())]
+    return [
+        Path(p) for p in orphaned_spill_dirs(get_cache_dir() if cache_dir is None else cache_dir)
+    ]
+
+
+def _cache_inventory(cache_dir: Path) -> dict[str, list[Path]]:
+    """The cache entries confirmation prices and cleanup removes."""
+    roots = [cache_dir] + [
+        path
+        for path in cache_dir.glob(".overture-*-parts")
+        if path.is_dir() and not path.is_symlink()
+    ]
+    return {
+        "roots": roots,
+        "files": [path for root in roots for path in root.glob("*.parquet")],
+        "spill_dirs": cache_spill_dirs(cache_dir),
+        "staging_dirs": [
+            Path(path)
+            for root in roots
+            for path in _sweep_orphaned_staging_dirs(root, dry_run=True)
+        ],
+    }
 
 
 def clear_cache(confirm: bool = False) -> dict | None:
@@ -317,7 +338,8 @@ def clear_cache(confirm: bool = False) -> dict | None:
     Returns:
         Dictionary with deletion stats: ``files_deleted``/``bytes_freed`` for the
         cached datasets and object parts, ``spill_dirs_deleted``/``spill_bytes_freed`` for the
-        leftovers of interrupted runs. The two are counted apart because a spill
+        leftovers of interrupted runs; staging_dirs_deleted/staging_bytes_freed
+        report eligible staging residue. The groups are counted apart because a spill
         directory is not a cached dataset: it is a bug's residue, and saying so
         is the point of reporting it at all.
         Returns None or {"cancelled": True} if confirm is False.
@@ -332,6 +354,8 @@ def clear_cache(confirm: bool = False) -> dict | None:
         "bytes_freed": 0,
         "spill_dirs_deleted": 0,
         "spill_bytes_freed": 0,
+        "staging_dirs_deleted": 0,
+        "staging_bytes_freed": 0,
     }
     if not cache_dir.exists():
         return empty
@@ -339,39 +363,33 @@ def clear_cache(confirm: bool = False) -> dict | None:
     files_deleted = 0
     bytes_freed = 0
 
-    # Only delete .parquet files
-    cache_files = list(cache_dir.glob("*.parquet"))
-    object_dirs = list(cache_dir.glob(".overture-*-parts"))
-    for object_dir in object_dirs:
-        if object_dir.is_dir() and not object_dir.is_symlink():
-            cache_files.extend(object_dir.glob("*.parquet"))
-            _sweep_orphaned_staging_dirs(object_dir)
-    for cache_file in cache_files:
+    entries = _cache_inventory(cache_dir)
+    sizes = {
+        path: spill_dir_bytes([path]) for path in entries["spill_dirs"] + entries["staging_dirs"]
+    }
+    for cache_file in entries["files"]:
         try:
             bytes_freed += cache_file.stat().st_size
             cache_file.unlink()
             files_deleted += 1
         except OSError:
-            pass  # Ignore deletion errors
-    for object_dir in object_dirs:
+            pass  # Ignore deletion errors.
+
+    removed = sweep_orphaned_spill_dirs(cache_dir)
+    stages = [path for root in entries["roots"] for path in _sweep_orphaned_staging_dirs(root)]
+    for object_dir in entries["roots"][1:]:
         try:
             object_dir.rmdir()
         except OSError:
             pass  # A live stage or another writer still owns the directory.
-
-    # ...and the spill directories an interrupted run left behind, which the
-    # ``*.parquet`` glob above reported as nothing and deleted nothing of. Price
-    # them first: after the sweep there is nothing left to measure, and only
-    # what the sweep actually removed is counted as freed.
-    sizes = {path: spill_dir_bytes([path]) for path in cache_spill_dirs()}
-    removed = sweep_orphaned_spill_dirs(cache_dir)
-    _sweep_orphaned_staging_dirs(cache_dir)
 
     return {
         "files_deleted": files_deleted,
         "bytes_freed": bytes_freed,
         "spill_dirs_deleted": len(removed),
         "spill_bytes_freed": sum(sizes.get(Path(path), 0) for path in removed),
+        "staging_dirs_deleted": len(stages),
+        "staging_bytes_freed": sum(sizes.get(Path(path), 0) for path in stages),
     }
 
 
@@ -1163,34 +1181,46 @@ class OvertureAdminDataset(AdminDataset):
                 # A global cache key must never hold only one command's extent.
                 # Read the bounded relation directly, retaining cache simplification.
                 source = self.get_default_source()
-                if self._extent_prunes_row_groups(source, extent):
+                if self._extent_prunes_most_geometry(source, extent):
                     relation = f"({self._build_level_cache_query(level, source, extent)})"
                     return relation, relation
         return super()._source_for_join(level, no_cache, extent)
 
-    def _extent_prunes_row_groups(
+    def _extent_prunes_most_geometry(
         self, source: str, extent: tuple[float, float, float, float]
     ) -> bool:
-        """Bounded reads win only if the footer proves some groups can be skipped.
+        """Read inline when two estimated remote scans cost less than one complete scan.
 
-        With no pruning, each invocation would scan the whole level again;
-        build the reusable cache instead. Missing statistics prove no savings.
+        Compare geometry chunk bytes, not geographic area or row-group counts.
+        Unknown bounds count as fetched; unknown sizes cannot prove savings.
         """
         xmin, xmax, ymin, ymax = extent
+        fetched = pruned = 0
         with s3_config_scope(self.get_s3_config()):
-            con = get_duckdb_connection(load_httpfs=True)
+            con = get_duckdb_connection(load_spatial=False, load_httpfs=True)
             try:
                 objects = glob_matches(source) if has_glob_pattern(source) else [source]
                 for obj in objects:
-                    if any(
-                        row["xmin"] > xmax
-                        or row["xmax"] < xmin
-                        or row["ymin"] > ymax
-                        or row["ymax"] < ymin
-                        for row in get_per_row_group_bbox_stats(obj, con=con)
+                    for row in _row_group_geometry_scan_stats(
+                        obj, self.get_geometry_column(), "bbox", con
                     ):
-                        return True
-                return False
+                        size = row["geometry_bytes"]
+                        if size is None:
+                            return False
+                        known = all(
+                            row[key] is not None for key in ("xmin", "xmax", "ymin", "ymax")
+                        )
+                        outside = known and (
+                            row["xmin"] > xmax
+                            or row["xmax"] < xmin
+                            or row["ymin"] > ymax
+                            or row["ymax"] < ymin
+                        )
+                        if outside:
+                            pruned += size
+                        else:
+                            fetched += size
+                return pruned > fetched
             finally:
                 con.close()
 

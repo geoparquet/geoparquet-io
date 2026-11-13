@@ -1033,6 +1033,23 @@ def _bbox_stats_aggregates(bbox_column: str) -> str:
                     FILTER (WHERE path_in_schema = {field("ymax")}) as ymax"""
 
 
+def _row_group_geometry_scan_stats(
+    parquet_file: str, geometry_column: str, bbox_column: str, con=None
+) -> list[dict]:
+    """Geometry chunk bytes and bounds; retain unknown bounds for conservative costing."""
+    return _parquet_metadata_rows(
+        parquet_file,
+        con,
+        lambda source: (
+            f"SELECT row_group_id, {_bbox_stats_aggregates(bbox_column)}, "
+            "SUM(total_compressed_size) FILTER "
+            f"(WHERE path_in_schema = {sql_literal(geometry_column)}) AS geometry_bytes "
+            f"FROM {source} GROUP BY row_group_id"
+        ),
+        load_spatial=False,
+    )
+
+
 def get_per_row_group_bbox_stats(
     parquet_file: str, bbox_column: str = "bbox", con=None, *, metadata_table: str | None = None
 ) -> list[dict]:

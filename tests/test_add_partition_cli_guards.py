@@ -191,32 +191,49 @@ class TestAddAdminDivisionsClearCache:
         assert not orphan.exists()
         assert not gaul.exists()
 
-    def test_a_spill_directory_alone_is_still_worth_clearing(
+    def test_cache_residue_alone_is_still_worth_clearing(
         self, admin_cache_dir, places_test_file, tmp_path, dead_pid
     ):
-        """No cached datasets but a multi-GB orphan is not "nothing to delete"."""
+        """Parts and staging residue count even without a published level cache."""
+        import os
+        import time
+
         admin_cache_dir.mkdir(parents=True)
-        orphan = admin_cache_dir / f"gpio-spill-{dead_pid}-abcdef123456"
-        orphan.mkdir()
-        _write_mb(orphan / "duckdb_temp_storage_S192K-0.tmp")
+        for kind in ("spill", "parts", "staging"):
+            if kind == "spill":
+                orphan = admin_cache_dir / f"gpio-spill-{dead_pid}-abcdef123456"
+            elif kind == "parts":
+                orphan = admin_cache_dir / ".overture-fixture-country-land-parts"
+            else:
+                orphan = admin_cache_dir / f".gpio-stage-{dead_pid}-abcdefgh"
+            orphan.mkdir()
+            _write_mb(orphan / ("part.parquet" if kind == "parts" else "partial.tmp"))
+            if kind == "staging":
+                (orphan / ".gpio-owner.lock").touch()
+                old = time.time() - 2 * 24 * 60 * 60
+                os.utime(orphan, (old, old))
 
-        runner = CliRunner()
-        with patch.object(admin_divisions, "add_admin_divisions_multi"):
-            result = runner.invoke(
-                add,
-                [
-                    "admin-divisions",
-                    places_test_file,
-                    str(tmp_path / "out.parquet"),
-                    "--clear-cache",
-                ],
-                input="y\n",
-            )
+            runner = CliRunner()
+            with patch.object(admin_divisions, "add_admin_divisions_multi"):
+                result = runner.invoke(
+                    add,
+                    [
+                        "admin-divisions",
+                        places_test_file,
+                        str(tmp_path / "out.parquet"),
+                        "--clear-cache",
+                    ],
+                    input="y\n",
+                )
 
-        assert result.exit_code == 0, result.output
-        assert "No cached datasets found." not in result.output
-        assert "Leftover spill directories: 1 (1.00 MB)" in result.output
-        assert not orphan.exists()
+            assert result.exit_code == 0, result.output
+            assert "No cached datasets found." not in result.output, kind
+            if kind == "parts":
+                assert "Cleared cache: 1 files, 1.00 MB freed" in result.output
+            else:
+                assert f"Leftover {kind} directories: 1 (1.00 MB)" in result.output
+                assert f"plus 1 leftover {kind} directory, 1.00 MB freed" in result.output
+            assert not orphan.exists()
 
 
 class TestAddAdminDivisionsArgumentGuards:

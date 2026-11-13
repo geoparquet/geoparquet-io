@@ -1193,7 +1193,7 @@ class TestClearCache:
             assert result["bytes_freed"] == 0
 
     def test_clear_cache_on_an_absent_directory_reports_the_same_shape(self):
-        """Callers read four keys off the result; a no-op must still carry them."""
+        """A no-op reports the same accounting keys as a populated cache."""
         with tempfile.TemporaryDirectory() as tmpdir:
             missing = Path(tmpdir) / "never-created"
             with patch("geoparquet_io.core.admin_datasets.get_cache_dir") as mock_get_cache:
@@ -1205,6 +1205,8 @@ class TestClearCache:
                 "bytes_freed": 0,
                 "spill_dirs_deleted": 0,
                 "spill_bytes_freed": 0,
+                "staging_dirs_deleted": 0,
+                "staging_bytes_freed": 0,
             }
 
     def test_clear_cache_leaves_a_running_process_spill_directory(self):
@@ -1820,7 +1822,7 @@ class TestDownloadPerLevelCachesHousekeeping:
 
 
 def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, monkeypatch):
-    """A bounded cold join must not COPY a global level before its bbox filter."""
+    """Selective cold reads stay inline; reading most geometry builds a reusable cache."""
     from http.server import BaseHTTPRequestHandler
 
     from geoparquet_io.core import admin_datasets
@@ -1831,7 +1833,8 @@ def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, m
     inp = tmp_path / "input.parquet"
     con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
     con.execute(
-        f"COPY (SELECT ST_Buffer(ST_Point((i//2048)*10, (i%2048)/4096.0), 0.1) geometry, "
+        f"COPY (SELECT ST_Buffer(ST_Point((i//2048)*10, (i%2048)/4096.0), 0.1, "
+        "CASE WHEN i//2048 >= 12 THEN 128 ELSE 8 END) geometry, "
         "'US' country, 'country' subtype, true is_land, "
         "{'xmin': (i//2048)*10-0.1, 'xmax': (i//2048)*10+0.1, "
         "'ymin': (i%2048)/4096.0-0.1, 'ymax': (i%2048)/4096.0+0.1} bbox "
@@ -1873,7 +1876,7 @@ def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, m
                 ("US",)
             ]
             assert counts["requests"] > 0
-            assert counts["bytes"] < source.stat().st_size // 4, counts
+            assert counts["bytes"] < min(source.stat().st_size // 4, 1_000_000), counts
             assert spies.counts["parquet_writes"] == 0
             assert not list(cache.glob("*.parquet"))
             assert not list(cache.glob(".gpio-stage-*"))
@@ -1887,12 +1890,20 @@ def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, m
             assert "is_land" not in dataset.get_subtype_filter(["country"], inline_source)
             assert "is_land" not in con.sql(f"SELECT * FROM {inline_relation}").columns
             cache_path.unlink()
-            # With no prunable groups, build once instead of rereading globally.
+            # Twelve small groups overlap, but most geometry bytes are skipped.
+            sparse_source, _ = dataset._source_for_join("country", False, (-1, 111, -1, 2))
+            assert sparse_source.startswith("(SELECT ")
+            assert not cache_path.exists()
+            # Four dense groups hold most geometry bytes, despite their small
+            # share of row groups and geographic extent. Cache the whole level.
             bounded_bytes = counts["bytes"]
             with CallSpies() as global_spies:
-                global_source, _ = dataset._source_for_join("country", False, (-180, 180, -90, 90))
+                global_source, _ = dataset._source_for_join("country", False, (119, 151, -1, 2))
             assert global_source == str(cache_path)
             assert cache_path.stat().st_size > 0
+            assert con.execute(f"SELECT count(*) FROM {sql_path(cache_path)}").fetchall() == [
+                (32768,)
+            ]
             assert global_spies.counts["parquet_writes"] == 1
             assert counts["bytes"] - bounded_bytes > source.stat().st_size // 2
             before = counts.copy()

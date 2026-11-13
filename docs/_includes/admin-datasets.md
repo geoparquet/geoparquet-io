@@ -31,11 +31,15 @@ The tool automatically transforms Overture's native region codes (e.g., "US-CA")
 
 `add admin-divisions` and `partition admin` prefer an existing complete level
 cache. On a cold cache, they inspect the Parquet row-group bbox statistics before
-reading geometry. If those statistics prove that at least one row group cannot
-overlap the input extent, they read the bounded extent directly without creating
-a global cache. Otherwise they build the complete level cache, which subsequent
-runs reuse. This rule uses actual row-group overlap, with no geographic area
-threshold; missing statistics cannot prove pruning. Only requested levels are built.
+reading geometry. They sum the compressed geometry bytes in row groups whose
+bbox statistics overlap the input extent to estimate remote read cost. If those
+bytes are at least as large as the bytes that could be skipped, they build the
+complete level cache: one complete remote scan is then estimated to cost no more
+than a bounded scan and its first repeat. Otherwise they read the bounded extent
+directly without creating a global cache. This compares
+actual row-group byte sizes, with no geographic area threshold. Unknown bounds
+count as overlapping; unknown sizes cannot prove savings. Only requested levels
+are built.
 
 A complete level is built one source object at a time. Each object's filtered,
 simplified rows publish atomically into a release- and level-specific parts
