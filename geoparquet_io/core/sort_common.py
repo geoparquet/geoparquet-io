@@ -157,7 +157,7 @@ def run_sort(
     if not stream_output:
         handle_output_overwrite(output_path, overwrite, input_path, remove=False)
     validate_profile_for_urls(write.remote_access().profile, input_path, output_path)
-    if not is_stdin(input_path) and allow_schema_diff is None:
+    if not stream_output and not is_stdin(input_path) and allow_schema_diff is None:
         require_single_file(input_path, command)
     if stream_output:
         verbose = False
@@ -170,11 +170,14 @@ def run_sort(
                     stack.callback(unlink_released_file, working_input)
                 working_input, temp_file = prepare_input(working_input, verbose)
                 stack.callback(unlink_released_file, temp_file)
+            file_source = not streaming or (
+                not is_stdin(working_input) and allow_schema_diff is not None
+            )
             context = (
                 open_input(
                     working_input, verbose=verbose, stream_output=stream_output, preserve_wkb=True
                 )
-                if streaming
+                if not file_source
                 else _file_source(
                     working_input,
                     verbose,
@@ -183,11 +186,13 @@ def run_sort(
                 )
             )
             opened = stack.enter_context(context)
-            if streaming:
+            if not file_source:
                 source, metadata, _, con = opened
                 working = None
             else:
                 source, metadata, con, working = opened
+                if streaming:
+                    working = None
             described = describe_query(con, f"SELECT * FROM {source}")
             primary = (
                 primary_geometry_column(described, geo=sanitized_carried_geo(metadata))
@@ -229,7 +234,7 @@ def run_sort(
                 verbose=verbose,
                 custom_metadata=custom_metadata,
                 input_file=working_input if not is_stdin(working_input) else None,
-                invalidate_derived_stats=is_partition_path(input_path) if not streaming else False,
+                invalidate_derived_stats=is_partition_path(input_path),
                 **write.funnel_kwargs(),
             )
             if not stream_output:

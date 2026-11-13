@@ -882,3 +882,90 @@ class TestZeroRowStreams:
 
         assert result.returncode == 0, result.stderr.decode(errors="replace")
         assert self._read_stream(result.stdout).num_rows == 0
+
+
+def test_dataset_sort_file_stdout_parity(tmp_path):
+    """Dataset readers and measured extents must agree at both destinations."""
+    import json
+    import struct
+
+    from click.testing import CliRunner
+
+    from geoparquet_io.cli.commands.sort import sort
+
+    for differing_schema in (False, True):
+        parts = tmp_path / str(differing_schema)
+        parts.mkdir()
+        for index, coordinate in enumerate((1.0, 90.0)):
+            table = pa.table(
+                {
+                    "id": [index],
+                    "quadkey": [f"12{index}"],
+                    "geometry": [
+                        struct.pack("<BIdd", 1, 1, coordinate, coordinate)
+                        if not index
+                        else struct.pack("<BII4d", 1, 2, 2, 1.0, 1.0, coordinate, coordinate)
+                    ],
+                }
+            )
+            if differing_schema and index:
+                table = table.append_column("note", pa.array(["later"]))
+            geo = {
+                "version": "1.1.0",
+                "primary_column": "geometry",
+                "columns": {
+                    "geometry": {
+                        "encoding": "WKB",
+                        "geometry_types": ["LineString" if index else "Point"],
+                        "bbox": [1.0, 1.0, coordinate, coordinate],
+                    }
+                },
+            }
+            pq.write_table(
+                table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}),
+                parts / f"{index}.parquet",
+            )
+        for source in (str(parts), str(parts / "*.parquet")):
+            for method in ("column", "quadkey", "hilbert", "str"):
+                tables = []
+                for stdout in (False, True):
+                    dest = tmp_path / "sorted.parquet"
+                    args = [method, source, "-" if stdout else str(dest), "--overwrite"]
+                    if method == "column":
+                        args += ["note" if differing_schema else "id"]
+                    if differing_schema and method in ("hilbert", "str"):
+                        continue
+                    if differing_schema:
+                        args += ["--allow-schema-diff"]
+                    result = CliRunner().invoke(sort, args)
+                    if method in ("hilbert", "str") and not stdout:
+                        assert result.exit_code != 0
+                        assert "requires a single parquet file" in result.output
+                        continue
+                    assert result.exit_code == 0, result.output
+                    table = (
+                        pa.ipc.open_stream(result.stdout_bytes).read_all()
+                        if stdout
+                        else pq.read_table(dest)
+                    )
+                    for field, column in zip(table.schema, table.columns, strict=True):
+                        if isinstance(field.type, pa.ExtensionType):
+                            table = table.set_column(
+                                table.schema.get_field_index(field.name),
+                                field.name,
+                                pa.chunked_array([chunk.storage for chunk in column.chunks]),
+                            )
+                    assert table.num_rows == 2
+                    assert ("note" in table.column_names) == differing_schema
+                    block = json.loads(table.schema.metadata[b"geo"])
+                    assert block["columns"]["geometry"]["bbox"] == [1, 1, 90, 90]
+                    assert set(block["columns"]["geometry"]["geometry_types"]) == {
+                        "Point",
+                        "LineString",
+                    }
+                    tables.append((table, block))
+                if len(tables) == 2:
+                    left, right = tables
+                    assert left[0].column_names == right[0].column_names
+                    assert left[0].to_pydict() == right[0].to_pydict()
+                    assert left[1] == right[1]

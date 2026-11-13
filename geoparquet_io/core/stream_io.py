@@ -43,6 +43,7 @@ from geoparquet_io.core.geo_metadata import (
     compose_carried_geo,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
+    strip_derived_stats,
 )
 from geoparquet_io.core.geometry_detection import (
     _query_with_native_geometry,
@@ -257,6 +258,8 @@ def write_output(
     )
 
     if should_stream_output(output_path):
+        if invalidate_derived_stats:
+            original_metadata = strip_derived_stats(original_metadata)
         # --write-memory governs final Parquet output; internal stats snapshots
         # follow the connection's existing memory and spill policy.
         if memory_limit is not None:
