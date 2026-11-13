@@ -276,6 +276,10 @@ def test_non_url_text_is_preserved(text, kept):
         raw = f"password={quote}prefix\\{quote}SECRET{quote}"
         assert clean_error_text(raw) == "password=***"
         assert clean_error_text(raw[:-1]) == "password=***"
+    for quote in ('"', "'"):
+        for closing in (quote, ""):
+            raw = f"password={quote}prefix" + "\\\n" + "SECRET" + closing
+            assert clean_error_text(raw) == "password=***"
     for scheme in ("Bearer", "Basic"):
         for quote in ('"', "'", ""):
             raw = f"Authorization: {scheme} {quote}SECRET{quote}"
