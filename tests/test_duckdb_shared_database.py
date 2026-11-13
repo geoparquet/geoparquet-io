@@ -255,7 +255,7 @@ def one_point_geojson(tmp_path):
 
 
 def test_factory_shares_spatial_and_eager_reads_isolate_limits(
-    production_factory, spatial_loads, one_point_geojson, tmp_path
+    production_factory, spatial_loads, one_point_geojson, tmp_path, monkeypatch
 ):
     for _ in range(4):
         with production_factory() as con:
@@ -264,13 +264,17 @@ def test_factory_shares_spatial_and_eager_reads_isolate_limits(
     assert spatial_loads == ["spatial"]
 
     import geoparquet_io as gpio
+    from geoparquet_io.core import convert
 
+    bounded = Mock(wraps=convert.open_bounded_connection)
+    monkeypatch.setattr(convert, "open_bounded_connection", bounded)
     with production_factory() as observer:
         before = _settings(observer)
         for index in range(2):
             out = tmp_path / f"chain_{index}.parquet"
             gpio.convert(str(one_point_geojson)).add_bbox().sort_hilbert().write(str(out))
             assert out.exists()
+            assert bounded.call_args.kwargs["per_thread"] == 8 * 1024**3
             assert _settings(observer) == before
             # Each bounded eager read owns a private database; its policy must
             # not alter the shared database used by the remaining API chain.

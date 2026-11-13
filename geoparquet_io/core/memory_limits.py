@@ -193,9 +193,12 @@ def default_memory_limit() -> str | None:
 #: Measured on a 4M-polygon Hilbert COPY: ~250MB per thread spilled reliably,
 #: under ~170MB raised OutOfMemoryException with a temp_directory set.
 _BYTES_PER_THREAD = 512 * BYTES_PER_MIB
-# Ordered eager reads retain buffers; use the upper end of DuckDB’s 1–4 GB/thread guidance.
+# Ordered snapshots and replay retain buffers; use DuckDB’s upper tuning budget.
 # https://duckdb.org/docs/stable/guides/performance/how_to_tune_workloads.html
 _MATERIALIZED_BYTES_PER_THREAD = 4 * 1024**3
+# Full ordered Arrow materialization retains more buffers than batched replay;
+# measured on 1M polygons and Connecticut, including DuckDB 2's larger read peak.
+_EAGER_BYTES_PER_THREAD = 8 * 1024**3
 
 
 def _thread_cap(limit_bytes: int, per_thread: int = _BYTES_PER_THREAD) -> int:
@@ -259,7 +262,7 @@ def open_bounded_connection(
     share of the ceiling is half rather than DuckDB's 80% (the share's own
     rationale is on :data:`DEFAULT_MEMORY_FRACTION`).
 
-    ``per_thread`` opts measured eager reads into a larger concurrency budget;
+    ``per_thread`` opts measured buffered reads into a larger concurrency budget;
     ordinary analysis queries retain the spilling budget. This is not an RSS
     bound: the result itself and native allocations can exceed it.
 
