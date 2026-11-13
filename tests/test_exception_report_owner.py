@@ -28,8 +28,8 @@ def test_logging_redacts_credentials_once(caplog):
     from geoparquet_io.core.logging_config import CLIFormatter, error, warn
 
     with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-        warn("could not read s3://k:secret@bucket/x.parquet (api_key=SECRETKEY)")
-        error("failed with token: SECRETTOKEN on s3://bucket/y.parquet")
+        warn("could not read s3://k:secret@bucket/x.parquet https://h/x?api_key=SECRETKEY")
+        error("failed with s3://bucket/y.parquet?token=SECRETTOKEN")
     output = "\n".join(CLIFormatter(use_colors=False).format(r) for r in caplog.records)
     assert "secret@" not in output and "SECRETKEY" not in output
     assert "SECRETTOKEN" not in output

@@ -24,7 +24,7 @@ from geoparquet_io.core.streaming import StreamingError
 from geoparquet_io.core.wfs import WFSError
 
 SECRET = "SUPERSECRETKEY123"
-LEAK = f"boom reading https://h.example/x.parquet?X-Amz-Signature={SECRET} api_key={SECRET}"
+LEAK = f"boom reading https://h.example/x.parquet?X-Amz-Signature={SECRET} https://h/x?api_key={SECRET}"
 
 CMD = "geoparquet_io.cli.commands"
 

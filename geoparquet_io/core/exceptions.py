@@ -49,7 +49,9 @@ def _url_without_credentials(url: str) -> str:
                 token = token[:start] + "[redacted]"
             else:
                 token = token[:start] + "[redacted]@" + token[last_at + 1 :]
-        parts[i] = token.split("?", 1)[0].split("#", 1)[0]
+        path, query, parameters = token.partition("?")
+        # A question mark in a filename glob is not a parameter list.
+        parts[i] = (path if query and "=" in parameters else token).split("#", 1)[0]
     return "".join(parts)
 
 
@@ -91,34 +93,15 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
-#: ``name=value`` / ``name: value`` credential pairs in free text. A server's
-#: error body often echoes the request it rejected, ``api_key=...`` included,
-#: and that text is not inside a URL, so the URL pass cannot see it.
-_CREDENTIAL_PAIR = re.compile(
-    r"(?i)\b((?:[a-z0-9_.-]*(?:api[_-]?key|apikey|token|secret|password|passwd|signature|"
-    r"credential|authorization))(?:\s*[=:]\s*)|key=)"
-    r"(?:(?:bearer|basic)\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s&'\"<>,;]+)"
-)
-
-
 def redact_credentials(text: str) -> str:
-    """Replace credential values in free text, leaving everything else intact.
-
-    The single redaction both the error path (`clean_error_text`)
-    and the log path (``logging_config.warn`` / ``error``) use: ``name=value``
-    / ``name: value`` credential pairs, and the password of ``scheme://user:pw@host``.
-    URLs are otherwise untouched, so a log line still names the file it is about.
-    """
-    if not text:
-        return text
-    text = _url_without_credentials(text)
-    return _CREDENTIAL_PAIR.sub(lambda m: f"{m.group(1)}***", text)
+    """Remove URL userinfo and query parameters; preserve non-URL text and paths."""
+    return _url_without_credentials(text) if text else text
 
 
 def clean_error_text(text: str) -> str:
     """The one policy for text that reaches a user, a log line or a gpio error.
 
-    Three things can ride into an error message from outside gpio, and none is
+    Two things can ride into an error message from outside gpio, and none is
     safe to echo verbatim:
 
     * **Credentials in URLs.** DuckDB names the URL it failed on, query string and
@@ -126,9 +109,6 @@ def clean_error_text(text: str) -> str:
       Userinfo and the query string (where a presigned URL's signature and an
       Azure SAS ``sig=`` ride) are removed; the rest of the URL is kept, because
       a gpio error that names the destination on purpose must not elide it.
-    * **Echoed credential pairs.** ``api_key=...``, ``token: ...``,
-      ``password=...``, ``user:pw@host`` in the text itself (a server body quoting
-      the request) have their value replaced by ``***`` (:func:`redact_credentials`).
     * **Control characters.** DuckDB quotes the offending value back in a
       conversion or parse error, so a value a *file* chose reaches the terminal.
       ANSI escapes in it can rewrite the line, so an input could author a clean

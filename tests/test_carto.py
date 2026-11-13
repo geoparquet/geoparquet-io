@@ -1818,8 +1818,8 @@ def test_carto_request_and_probe_never_log_credentials(monkeypatch, caplog):
     )
     http.respond(
         "/sql",
-        json_reply({"error": [f"bad api_key={secret}"]}, status=400),
-        httpx.ConnectError(f"failed api_key={secret}"),
+        json_reply({"error": [f"bad https://h/x?api_key={secret}"]}, status=400),
+        httpx.ConnectError(f"failed https://h/x?api_key={secret}"),
     )
     conn = _AttemptCountingConnection(RuntimeError("IO Error: Could not open GDAL dataset"))
     monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)

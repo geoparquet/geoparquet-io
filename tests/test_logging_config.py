@@ -368,7 +368,7 @@ def test_every_log_level_sanitizes_url_and_query_credentials(caplog):
         "https://[invalid/x?token=SORTSECRET",
         "https://SORTSECRET:SORTSECRET@example.test/x",
         "https://example.test/x?X-Amz-Credential=SORTSECRET&X-Amz-Signature=SORTSECRET",
-        "SELECT * FROM 'https://example.test/x?token=SORTSECRET' WHERE api_key='SORTSECRET'",
+        "SELECT * FROM 'https://example.test/x?token=SORTSECRET' WHERE id=1",
     ]
     with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
         for emit in (debug, info, progress, success, warn, error):
@@ -378,3 +378,16 @@ def test_every_log_level_sanitizes_url_and_query_credentials(caplog):
     formatter = CLIFormatter(use_colors=False)
     assert all("SORTSECRET" not in formatter.format(record) for record in caplog.records)
     assert all("SORTSECRET" in record.getMessage() for record in caplog.records)
+
+    for path in (
+        ".../key=7/part-?.parquet",
+        "/tmp/token=7/part-?.parquet",
+        "s3://bucket/out/key=7/part-?.parquet",
+        "https://host/out/api_key=7/part-?.parquet",
+        "Sorting by key=value",
+        "api_key=value token=value",
+    ):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+            progress(path)
+        assert formatter.format(caplog.records[-1]) == path
