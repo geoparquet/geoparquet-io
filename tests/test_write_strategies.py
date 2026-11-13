@@ -119,13 +119,28 @@ class TestAtomicWrite:
             assert file_utils.sweep_orphaned_staging_dirs(tmp_path) == []
             proc.kill()
             proc.wait(timeout=10)
+            # Reaping alone cannot prevent PID reuse on a host without locks.
+            real_check = file_utils._process_is_alive
+            monkeypatch.setattr(
+                file_utils, "_process_is_alive", lambda pid: pid != proc.pid and real_check(pid)
+            )
             # A fresh abandoned stage waits for the age guard.
             os.utime(stage, None)
             assert file_utils.sweep_orphaned_staging_dirs(tmp_path) == []
             os.utime(stage, (old, old))
             monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
+            # Without locks or psutil, even a reaped writer must be kept.
+            with monkeypatch.context() as windows:
+                windows.setattr(file_utils, "_spill_lock", lambda path: None)
+                windows.setattr(file_utils, "_process_is_alive", lambda pid: True)
+                assert file_utils.sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == []
+                assert admin_datasets.clear_cache(confirm=True)["staging_dirs_deleted"] == 0
+                assert stage.exists()
+
             assert file_utils.sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == [str(stage)]
             assert stage.exists(), "pricing must not delete an abandoned stage"
+            # Exercise collection without fcntl on every platform as well.
+            monkeypatch.setattr(file_utils, "_spill_lock", lambda path: None)
             result = admin_datasets.clear_cache(confirm=True)
             assert result["staging_dirs_deleted"] == 1
             assert result["staging_bytes_freed"] == len(b"partial")
