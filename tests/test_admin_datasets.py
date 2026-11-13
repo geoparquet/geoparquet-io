@@ -1815,82 +1815,93 @@ class TestDownloadPerLevelCachesHousekeeping:
         mock_con.close.assert_called_once()
 
     def test_live_parts_survive_housekeeping_and_finishing_sibling(self, tmp_path, monkeypatch):
-        from unittest.mock import MagicMock
+        from geoparquet_io.core import file_utils
 
-        from geoparquet_io.core import admin_datasets, file_utils
+        for locking in (True, False):
+            with monkeypatch.context() as patches:
+                if not locking:
+                    patches.setattr(file_utils, "_spill_lock", lambda path: None)
+                from unittest.mock import MagicMock
 
-        monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
-        monkeypatch.setattr(admin_datasets, "open_bounded_connection", lambda **kw: MagicMock())
-        dataset = OvertureAdminDataset()
-        monkeypatch.setattr(dataset, "get_version", lambda: "fixture")
-        monkeypatch.setattr(dataset, "get_default_source", lambda: "unused")
-        final = dataset.get_cached_path_for_level("country")
-        final.write_bytes(b"published by sibling")
-        owned = tmp_path / ".overture-old-country-land-parts"
-        owned.mkdir()
-        unowned = tmp_path / ".overture-older-country-land-parts"
-        unowned.mkdir()
-        marker = file_utils._spill_lock(str(owned))
-        try:
-            admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
-            assert owned.exists() == (marker is not None)
-            assert not unowned.exists()
-            dataset._download_per_level_caches(["country"])
-            assert owned.exists() == (marker is not None)
-            assert final.read_bytes() == b"published by sibling"
-            (owned / "live.parquet").write_bytes(b"owned object")
-            unowned.mkdir()
-            (unowned / "old.parquet").write_bytes(b"old object")
-            admin_datasets.clear_cache(confirm=True)
-            assert (owned / "live.parquet").exists() == (marker is not None)
-            assert not unowned.exists()
-        finally:
-            if marker is not None:
-                marker.close()
-        admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
-        assert not owned.exists()
+                from geoparquet_io.core import admin_datasets, file_utils
 
-        # A waiting builder must re-check the cache after its sibling publishes.
-        from concurrent.futures import ThreadPoolExecutor
-        from threading import Event
+                patches.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
+                patches.setattr(admin_datasets, "open_bounded_connection", lambda **kw: MagicMock())
+                dataset = OvertureAdminDataset()
+                patches.setattr(dataset, "get_version", lambda: "fixture")
+                patches.setattr(dataset, "get_default_source", lambda: "unused")
+                final = dataset.get_cached_path_for_level("country")
+                final.write_bytes(b"published by sibling")
+                owned = tmp_path / ".overture-old-country-land-parts"
+                owned.mkdir()
+                unowned = tmp_path / ".overture-older-country-land-parts"
+                unowned.mkdir()
+                marker = file_utils._spill_lock(str(owned))
+                try:
+                    admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
+                    assert owned.exists() == (marker is not None)
+                    assert not unowned.exists()
+                    dataset._download_per_level_caches(["country"])
+                    assert owned.exists() == (marker is not None)
+                    assert final.read_bytes() == b"published by sibling"
+                    owned.mkdir(exist_ok=True)
+                    (owned / "live.parquet").write_bytes(b"owned object")
+                    unowned.mkdir()
+                    (unowned / "old.parquet").write_bytes(b"old object")
+                    admin_datasets.clear_cache(confirm=True)
+                    assert (owned / "live.parquet").exists() == (marker is not None)
+                    assert not unowned.exists()
+                finally:
+                    if marker is not None:
+                        marker.close()
+                admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
+                assert not owned.exists()
 
-        parts = tmp_path / f".{final.stem}-parts"
-        parts.mkdir()
-        final.unlink(missing_ok=True)
-        marker = file_utils._spill_lock(str(parts))
-        waiting = Event()
-        sleep = file_utils.time.sleep
+                # A waiting builder must re-check the cache after its sibling publishes.
+                from concurrent.futures import ThreadPoolExecutor
+                from threading import Event
 
-        def wait(seconds):
-            waiting.set()
-            sleep(seconds)
+                parts = tmp_path / f".{final.stem}-parts"
+                parts.mkdir()
+                final.unlink(missing_ok=True)
+                marker = file_utils._spill_lock(str(parts))
+                waiting = Event()
+                sleep = file_utils.time.sleep
 
-        monkeypatch.setattr(file_utils.time, "sleep", wait)
-        monkeypatch.setattr(dataset, "_cache_source_objects", lambda *args: pytest.fail("rebuild"))
-        if marker is None:  # Windows has no ownership locking.
-            final.write_bytes(b"sibling result")
-        with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(dataset._download_per_level_caches, ["country"])
-            try:
-                if marker is not None:
-                    assert waiting.wait(5), "second builder did not wait for ownership"
-                    assert parts.exists()
-                    assert not future.done()
+                def wait(seconds, waiting=waiting, sleep=sleep):
+                    waiting.set()
+                    sleep(seconds)
+
+                patches.setattr(file_utils.time, "sleep", wait)
+                patches.setattr(
+                    dataset, "_cache_source_objects", lambda *args: pytest.fail("rebuild")
+                )
+                if marker is None:  # Windows has no ownership locking.
                     final.write_bytes(b"sibling result")
-            finally:
-                if marker is not None:
-                    marker.close()
-            future.result(timeout=5)
-        assert final.read_bytes() == b"sibling result"
-        assert not parts.exists()
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(dataset._download_per_level_caches, ["country"])
+                    try:
+                        if marker is not None:
+                            assert waiting.wait(5), "second builder did not wait for ownership"
+                            assert parts.exists()
+                            assert not future.done()
+                            final.write_bytes(b"sibling result")
+                    finally:
+                        if marker is not None:
+                            marker.close()
+                    future.result(timeout=5)
+                assert final.read_bytes() == b"sibling result"
+                assert not parts.exists()
 
-        # Parts have no PID identity; Windows cleanup needs no optional psutil.
-        with monkeypatch.context() as windows:
-            windows.setattr(file_utils, "_spill_lock", lambda path: None)
-            windows.setattr(file_utils, "_process_is_alive", lambda pid: pytest.fail("PID probe"))
-            unowned.mkdir()
-            admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
-            assert not unowned.exists()
+                # Parts have no PID identity; Windows cleanup needs no optional psutil.
+                with patches.context() as windows:
+                    windows.setattr(file_utils, "_spill_lock", lambda path: None)
+                    windows.setattr(
+                        file_utils, "_process_is_alive", lambda pid: pytest.fail("PID probe")
+                    )
+                    unowned.mkdir()
+                    admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
+                    assert not unowned.exists()
 
     def test_requested_level_retry_preserves_completed_cache_and_objects(
         self, tmp_path, monkeypatch
