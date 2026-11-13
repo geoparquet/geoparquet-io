@@ -291,7 +291,8 @@ def write_output(
     carried = sanitized_carried_geo(original_metadata)
     geometry_column = primary_geometry_column(
         describe_query(con, query),
-        geo={**carried, "primary_column": geometry_column} if geometry_column else carried,
+        geo=carried,
+        preferred=geometry_column,
     )
 
     if should_stream_output(output_path):

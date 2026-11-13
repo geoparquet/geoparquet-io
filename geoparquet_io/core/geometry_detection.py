@@ -258,6 +258,7 @@ def primary_geometry_column(
     source,
     *,
     geo=None,
+    preferred: str | None = None,
     extra_names=(),
     con=None,
     verbose: bool = False,
@@ -282,6 +283,11 @@ def primary_geometry_column(
     ``extra_names`` are a source's own candidate names, tried after the
     standard ones (BigQuery's ``geo``/``geography``); never a second list.
 
+    ``preferred`` is a stored input identity used when the output schema still
+    has it; a projection that dropped it falls through to the normal rule.
+    Unlike ``resolve_geometry_column(named=...)``, it is a hint, not an explicit
+    user request whose absence is an error.
+
     The rule, one for every source and every caller:
 
     1. the block's primary (``primary_column``, or the legacy list form's
@@ -302,6 +308,10 @@ def primary_geometry_column(
     """
     geo, label, columns = _source_schema(source, geo, con, verbose)
     primary = _block_primary(geo, label)
+    if preferred is not None and columns is not None:
+        present = find_column(preferred, [name for name, _ in columns])
+        if present is not None:
+            primary = present
     resolved = _resolve_primary(primary, _block_declared(geo), columns, extra_names)
     if verbose:
         debug(
