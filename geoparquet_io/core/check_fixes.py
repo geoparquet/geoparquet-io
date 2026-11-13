@@ -634,10 +634,7 @@ def _fix_bbox_and_spatial_ordering(parquet_file, output_file, verbose, profile, 
         get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(raw_url))
     ) as con:
         read = resolve_geometry_read(con, raw_url, primary)
-        version = resolve_output_geoparquet_version(None, input_file=parquet_file)
-        bbox_name = resolve_bbox_name(
-            get_usable_column_names(raw_url, con), version, requested="bbox"
-        )
+        bbox_name = resolve_bbox_name(get_usable_column_names(raw_url, con), None, requested="bbox")
         source = sql_path(raw_url)
         ordered = hilbert_order_query(
             source,
