@@ -60,9 +60,13 @@ def _scans(monkeypatch) -> Counter:
 
     for name in ("geometry_stats_of", "geometry_types_of"):
         monkeypatch.setattr(duckdb_kv, name, counting(getattr(duckdb_kv, name)))
-    monkeypatch.setattr(
-        derive_geo_from_file, "geometry_stats_of", counting(derive_geo_from_file.geometry_stats_of)
-    )
+    original = derive_geo_from_file._file_stats_many
+
+    def batch(path, columns):
+        seen.update(columns.keys())
+        return original(path, columns)
+
+    monkeypatch.setattr(derive_geo_from_file, "_file_stats_many", batch)
     return seen
 
 
@@ -154,7 +158,7 @@ class TestEmptiedGeometryTypesAreRecomputed:
         assert boundary["bbox"] == [-0.5, -0.5, 2.5, 2.5]
 
     def test_a_genuinely_empty_file_keeps_the_sentinel_quietly(self, tmp_path, caplog, monkeypatch):
-        """[] is also the honest answer for zero rows: one scan per column, no warning."""
+        """[] is also the honest answer for zero rows: each column measured once, no warning."""
         input_file = tmp_path / "in.parquet"
         output_file = tmp_path / "out.parquet"
         _write_two_geometry_file(input_file, rows=False, geometry_types=[])

@@ -399,11 +399,14 @@ def _sample_file(parquet_file, raw_url, geometry_column, limit_rows, random_samp
         return _sample_distances(
             con, raw_url, geometry_column, limit_rows, random_sample_size, verbose
         )
-    except duckdb.Error as e:
+    except BaseException as e:
         if is_interrupt(e):
-            # The user stopping the run (Ctrl-C), not a verdict on the file.
+            # Python's SIGINT exception can leave DuckDB workers running at close().
+            con.interrupt()
             raise
-        return f"could not read geometry column {geometry_column!r} ({e})"
+        if isinstance(e, duckdb.Error):
+            return f"could not read geometry column {geometry_column!r} ({e})"
+        raise
     finally:
         con.close()
 

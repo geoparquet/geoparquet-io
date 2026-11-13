@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import struct
+from unittest.mock import Mock, call
 
 import duckdb
 import pyarrow as pa
@@ -382,16 +383,54 @@ class TestDictionaryColumnWithBadValue:
         assert "could not run" not in result.output
 
 
-def test_spatial_order_lets_an_interrupt_through(null_geometry_file, monkeypatch):
-    """An interrupt is a duckdb.Error subclass, and it must not become a verdict."""
+def test_spatial_order_sampling_cleanup(null_geometry_file, monkeypatch):
+    """Cancel interrupted sampling before close; preserve other outcomes and verdicts."""
     from geoparquet_io.core import check_spatial_order as spatial_mod
 
-    def interrupted(*_args, **_kwargs):
-        raise duckdb.InterruptException("INTERRUPT Error: Interrupted!")
+    con = Mock()
+    sample = Mock()
+    monkeypatch.setattr(spatial_mod, "get_duckdb_connection", Mock(return_value=con))
+    monkeypatch.setattr(spatial_mod, "disable_geoparquet_conversion", Mock())
+    monkeypatch.setattr(spatial_mod, "_sample_distances", sample)
 
-    monkeypatch.setattr(spatial_mod, "_sample_distances", interrupted)
-    with pytest.raises(duckdb.InterruptException):
+    for exc in (
+        KeyboardInterrupt(),
+        RuntimeError("Query interrupted"),
+        duckdb.InterruptException("INTERRUPT Error: Interrupted!"),
+    ):
+        con.reset_mock()
+        sample.side_effect = exc
+        with pytest.raises(type(exc)) as raised:
+            check_spatial_order(null_geometry_file, 10, 1000, False, return_results=True)
+        assert raised.value is exc
+        assert con.mock_calls == [call.interrupt(), call.close()]
+        assert sample.call_args.args[0] is con
+
+    con.reset_mock()
+    exc = RuntimeError("sampling failed")
+    sample.side_effect = exc
+    with pytest.raises(RuntimeError) as raised:
         check_spatial_order(null_geometry_file, 10, 1000, False, return_results=True)
+    assert raised.value is exc
+    assert con.mock_calls == [call.close()]
+
+    con.reset_mock()
+    sample.side_effect = duckdb.InvalidInputException("bad WKB")
+    result = check_spatial_order(null_geometry_file, 10, 1000, False, return_results=True)
+    assert result == spatial_mod._errored_results(
+        "could not read geometry column 'geometry' (bad WKB)"
+    )
+    assert result["passed"] is False
+    assert result["error"] == "could not read geometry column 'geometry' (bad WKB)"
+    assert con.mock_calls == [call.close()]
+
+    con.reset_mock()
+    sample.side_effect = None
+    sample.return_value = (1.0, 4.0)
+    result = check_spatial_order(null_geometry_file, 10, 1000, False, return_results=True)
+    assert result == spatial_mod._build_results_dict(0.25, 1.0, 4.0)
+    assert result["passed"] is True
+    assert con.mock_calls == [call.close()]
 
 
 @pytest.mark.parametrize("subcommand", ["spatial", "all"])

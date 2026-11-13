@@ -367,7 +367,7 @@ class TestStreamIO:
 
         from geoparquet_io.core.memory_limits import (
             _MATERIALIZED_BYTES_PER_THREAD,
-            open_bounded_connection,
+            scoped_bounded_connection,
         )
         from geoparquet_io.core.stream_io import open_input
 
@@ -378,8 +378,8 @@ class TestStreamIO:
 
         with (
             mock.patch(
-                "geoparquet_io.core.memory_limits.open_bounded_connection",
-                wraps=open_bounded_connection,
+                "geoparquet_io.core.memory_limits.scoped_bounded_connection",
+                wraps=scoped_bounded_connection,
             ) as bounded,
             open_input(str(test_file), stream_output=True) as (source, metadata, is_stream, con),
         ):
@@ -418,13 +418,13 @@ class TestStreamIO:
 
         from geoparquet_io.core.memory_limits import (
             _MATERIALIZED_BYTES_PER_THREAD,
-            open_bounded_connection,
+            scoped_bounded_connection,
         )
 
         with (
             mock.patch(
-                "geoparquet_io.core.memory_limits.open_bounded_connection",
-                wraps=open_bounded_connection,
+                "geoparquet_io.core.memory_limits.scoped_bounded_connection",
+                wraps=scoped_bounded_connection,
             ) as bounded,
             open_input("-") as (source, metadata, is_stream, con),
         ):
@@ -828,7 +828,7 @@ class TestStreamIO:
                     assert "Geometry" in logical
                     assert "srid:0" in logical
 
-    def test_projected_survivors_native_types_all_strategies(self, tmp_path):
+    def test_projected_survivors_native_types_all_strategies(self, tmp_path, monkeypatch):
         from itertools import product
 
         import pyarrow.parquet as pq
@@ -839,10 +839,42 @@ class TestStreamIO:
         source = tmp_path / "source.parquet"
         dest = tmp_path / "projected.parquet"
         # Two declarations survive: every strategy must type both, with their own CRS.
+        import weakref
+        from pathlib import Path
+
         from geoparquet_io.core.crs_utils import crs_equal
         from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
         from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
         from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+
+        readers = []
+        parquet_file = pq.ParquetFile
+
+        def record_reader(path, *args, **kwargs):
+            reader = parquet_file(path, *args, **kwargs)
+            readers.append((str(path), weakref.ref(reader)))
+            return reader
+
+        monkeypatch.setattr(pq, "ParquetFile", record_reader)
+
+        def assert_output_released():
+            # Windows refuses COPY's replacement while the preceding read is open.
+            live_readers = [
+                path
+                for path, ref in readers
+                if path == str(dest) and (reader := ref()) is not None and not reader.closed
+            ]
+            live_fds = []
+            descriptors = Path("/proc/self/fd")
+            if descriptors.is_dir():
+                for fd in descriptors.iterdir():
+                    try:
+                        path = fd.readlink()
+                    except FileNotFoundError:
+                        continue  # The directory iterator's own descriptor has closed.
+                    if path.parent == dest.parent and dest.name in path.name:
+                        live_fds.append(str(path))
+            assert not (live_readers or live_fds), (live_readers, live_fds)
 
         table = pa.table({"id": [1], "geometry": [wkb], "secondary": [wkb], "tertiary": [wkb]})
         columns = {
@@ -877,6 +909,7 @@ class TestStreamIO:
                         f"SELECT id, secondary, tertiary FROM read_parquet({sql_path(str(source))})"
                     )
                 )
+                assert_output_released()
                 write_parquet_with_metadata(
                     con,
                     query,
@@ -887,21 +920,23 @@ class TestStreamIO:
                     geoparquet_version=version,
                     write_strategy=strategy,
                 )
-            pf = pq.ParquetFile(dest)
-            for index, name in enumerate(("secondary", "tertiary"), start=1):
-                logical = parse_geometry_logical_type(str(pf.schema.column(index).logical_type))
-                assert logical is not None, (strategy, version, stdin, name)
-                if name == "secondary":
-                    assert crs_equal(logical["crs"], columns[name]["crs"])
+            with pq.ParquetFile(dest) as pf:
+                for index, name in enumerate(("secondary", "tertiary"), start=1):
+                    logical = parse_geometry_logical_type(str(pf.schema.column(index).logical_type))
+                    assert logical is not None, (strategy, version, stdin, name)
+                    if name == "secondary":
+                        assert crs_equal(logical["crs"], columns[name]["crs"])
+                    else:
+                        assert logical["crs"] == "srid:0"
+                geo = read_raw_geo(pf.schema_arrow.metadata).value
+                if version == "parquet-geo-only":
+                    assert geo is None
                 else:
-                    assert logical["crs"] == "srid:0"
-            geo = read_raw_geo(pf.schema_arrow.metadata).value
-            if version == "parquet-geo-only":
-                assert geo is None
-            else:
-                assert set(geo["columns"]) == {"secondary", "tertiary"}
-                assert crs_equal(geo["columns"]["secondary"]["crs"], columns["secondary"]["crs"])
-                assert geo["columns"]["tertiary"]["crs"] is None
+                    assert set(geo["columns"]) == {"secondary", "tertiary"}
+                    assert crs_equal(
+                        geo["columns"]["secondary"]["crs"], columns["secondary"]["crs"]
+                    )
+                    assert geo["columns"]["tertiary"]["crs"] is None
 
     def test_execute_transform_dry_run(self, tmp_path, sample_geo_table, geo_metadata):
         """Test execute_transform with dry_run=True."""

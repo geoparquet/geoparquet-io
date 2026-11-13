@@ -215,11 +215,37 @@ def test_a_gpio_error_arrives_sanitized():
 
     import time
 
-    for text in ("x" * (3 * 1024 * 1024), "https://" + "@=" * 10000 + "PRIVATE@host/x"):
-        start = time.perf_counter()
-        cleaned = clean_error_text(text)
-        assert time.perf_counter() - start < 0.8
-        assert "PRIVATE" not in cleaned
+    # Calibrate to 50 ms; five batch minima reduce clock and scheduling noise.
+    # At 32x input, 180x separates linear (~32x) from quadratic (~1024x).
+    for make_text in (
+        lambda n: "x" * n,
+        lambda n: "https://" + "@=" * n + "PRIVATE@host/x",
+    ):
+
+        def batch(text, count):
+            start = time.perf_counter()
+            for _ in range(count):
+                cleaned = clean_error_text(text)
+            elapsed = time.perf_counter() - start
+            assert elapsed < 15, "redaction exceeded the hang guard"
+            assert "PRIVATE" not in cleaned
+            return elapsed
+
+        small = make_text(4096)
+        count = 1
+        for _ in range(8):
+            elapsed = batch(small, count)
+            if elapsed >= 0.05 or count == 4096:
+                break
+            count = min(4096, int(count * 0.05 / elapsed) + 1 if elapsed else 2 * count)
+        timings = [
+            min(batch(make_text(size), calls) for _ in range(5)) / calls
+            for size, calls in ((4096, count), (32 * 4096, max(1, (count + 31) // 32)))
+        ]
+        assert timings[0] > 0, f"zero redaction baseline: {timings}"
+        assert timings[1] < 180 * timings[0], f"nonlinear redaction: {timings}"
+
+    assert clean_error_text("x" * (3 * 1024 * 1024)) == "x" * (3 * 1024 * 1024)
 
     from geoparquet_io.core.wfs import _clip_to_area_of_use
 

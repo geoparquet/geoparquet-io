@@ -5,6 +5,7 @@ import gc
 import os
 import re
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 import duckdb
@@ -87,7 +88,7 @@ from geoparquet_io.core.geometry_repair import (
     repair_query_geometry,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
-from geoparquet_io.core.memory_limits import _EAGER_BYTES_PER_THREAD, open_bounded_connection
+from geoparquet_io.core.memory_limits import _EAGER_BYTES_PER_THREAD, scoped_bounded_connection
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version, version_to_describe
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
@@ -2443,17 +2444,20 @@ def read_spatial_to_arrow(
     if is_parquet and is_partition_path(input_file):
         require_single_file(input_file, "read_spatial_to_arrow")
 
-    con = open_bounded_connection(
-        load_spatial=True,
-        load_httpfs=needs_httpfs(input_file),
-        preserve_insertion_order=True,
-        per_thread=_EAGER_BYTES_PER_THREAD,
-        verbose=verbose,
-    )
-
     # Determine CRS
     user_specified_crs = not crs_equal(crs, "EPSG:4326")
     detected_crs = None
+
+    lifetime = ExitStack()
+    con = lifetime.enter_context(
+        scoped_bounded_connection(
+            load_spatial=True,
+            load_httpfs=needs_httpfs(input_file),
+            preserve_insertion_order=True,
+            per_thread=_EAGER_BYTES_PER_THREAD,
+            verbose=verbose,
+        )
+    )
 
     try:
         # A plain Parquet file with WKT or lat/lon columns reads like a CSV.
@@ -2624,7 +2628,7 @@ def read_spatial_to_arrow(
         raise _conversion_failure(e, input_file, layer, "Reading failed") from e
 
     finally:
-        con.close()
+        lifetime.close()
         _collect_after_read(con, is_csv, is_parquet)
 
 

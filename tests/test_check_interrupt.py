@@ -326,7 +326,12 @@ def test_structure_stage_failure_fails_the_file_and_fixes_nothing(
     ids=["runtime", "duckdb-error"],
 )
 def test_spatial_order_lets_query_interrupted_through(fixable_file, monkeypatch, exc):
+    from unittest.mock import Mock, call
+
     from geoparquet_io.core import check_spatial_order as spatial_mod
+
+    con = Mock()
+    monkeypatch.setattr(spatial_mod, "get_duckdb_connection", lambda **kwargs: con)
 
     def interrupted(*_args, **_kwargs):
         raise exc
@@ -334,6 +339,8 @@ def test_spatial_order_lets_query_interrupted_through(fixable_file, monkeypatch,
     monkeypatch.setattr(spatial_mod, "_sample_distances", interrupted)
     with pytest.raises(type(exc), match=QUERY_INTERRUPTED):
         check_spatial_order(fixable_file, 10, 1000, False, return_results=True)
+    # A Python signal exception leaves DuckDB workers running until cancelled.
+    assert con.method_calls[-2:] == [call.interrupt(), call.close()]
 
 
 class _InterruptingConnection:
