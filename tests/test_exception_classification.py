@@ -214,9 +214,9 @@ def test_a_gpio_error_arrives_sanitized():
 @pytest.mark.parametrize(
     ("text", "kept"),
     [
-        ("bad request api_key=SECRET", "bad request api_key=SECRET"),
-        ("Authorization: Bearer SECRET", "Authorization: Bearer SECRET"),
-        ("X-Amz-Signature=SECRET&x=1", "X-Amz-Signature=SECRET&x=1"),
+        ("bad request api_key=SECRET", "bad request api_key=***"),
+        ("Authorization: Bearer SECRET", "Authorization: ***"),
+        ("X-Amz-Signature=SECRET&x=1", "X-Amz-Signature=***&x=1"),
         ("the key is missing", "the key is missing"),
         ("duplicate key: 5", "duplicate key: 5"),
     ],
@@ -225,6 +225,26 @@ def test_non_url_text_is_preserved(text, kept):
     from geoparquet_io.core.exceptions import clean_error_text
 
     assert clean_error_text(text) == kept
+    for name in (
+        "api_key",
+        "api-key",
+        "apikey",
+        "token",
+        "access_token",
+        "password",
+        "secret",
+        "signature",
+        "passwd",
+        "credential",
+        "authorization",
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
+    ):
+        assert clean_error_text(f"bad request {name.upper()}=PRIVATEVALUE") == (
+            f"bad request {name.upper()}=***"
+        )
+        assert clean_error_text(f"my_{name}=ordinary") == f"my_{name}=ordinary"
 
 
 def test_click_error_for_sanitizes_any_exception():

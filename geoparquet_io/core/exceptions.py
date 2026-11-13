@@ -93,9 +93,24 @@ _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
+# URL tokens are handled first and excluded from free-text pair matching.
+_CREDENTIAL_PAIR = re.compile(
+    r"\S+://\S+|"
+    r"(?i:(?<![\w.-])((?:api[_-]?key|apikey|token|access_token|secret|password|"
+    r"passwd|signature|credential|authorization|x-amz-signature|x-amz-credential|"
+    r"x-amz-security-token)\s*[=:]\s*)"
+    r"(?:(?:bearer|basic)\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s&'\"<>,;]+))"
+)
+
+
 def redact_credentials(text: str) -> str:
-    """Remove URL userinfo and query parameters; preserve non-URL text and paths."""
-    return _url_without_credentials(text) if text else text
+    """Remove URL secrets and explicit free-text credential pairs, preserving paths."""
+    if not text:
+        return text
+    text = _url_without_credentials(text)
+    return _CREDENTIAL_PAIR.sub(
+        lambda match: f"{match.group(1)}***" if match.group(1) else match.group(), text
+    )
 
 
 def clean_error_text(text: str) -> str:

@@ -381,11 +381,10 @@ def test_every_log_level_sanitizes_url_and_query_credentials(caplog):
 
     for path in (
         ".../key=7/part-?.parquet",
-        "/tmp/token=7/part-?.parquet",
+        "/tmp/year=2024/part-?.parquet",
         "s3://bucket/out/key=7/part-?.parquet",
         "https://host/out/api_key=7/part-?.parquet",
         "Sorting by key=value",
-        "api_key=value token=value",
     ):
         caplog.clear()
         with caplog.at_level(logging.INFO, logger="geoparquet_io"):

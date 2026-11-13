@@ -46,9 +46,7 @@ def _wfs(out, *extra):
 def test_wfs_http_error_does_not_echo_the_api_key(monkeypatch, tmp_path):
     http = FakeTransport.install(monkeypatch)
     wfs_capabilities(monkeypatch, CAPABILITIES, SCHEMA)
-    http.respond(
-        lambda r: True, error_reply(400, body=f"bad request https://h/x?api_key={SECRET}".encode())
-    )
+    http.respond(lambda r: True, error_reply(400, body=f"bad request api_key={SECRET}".encode()))
 
     result = _wfs(tmp_path / "out.parquet")
 
