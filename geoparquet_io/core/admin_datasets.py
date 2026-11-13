@@ -10,6 +10,7 @@ or remote URLs, with automatic caching and error handling.
 
 import hashlib
 import os
+import shutil
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
@@ -189,6 +190,11 @@ def _remove_stale_level_caches(cache_dir: Path, version: str, level: str, cache_
             stale.unlink()
         except OSError:
             pass  # A cache we cannot delete is not worth failing the run over.
+
+    current_parts = cache_dir / f".{cache_path.stem}-parts"
+    for parts in cache_dir.glob(f".overture-*-{level}*-parts"):
+        if parts != current_parts or cache_path.exists():
+            shutil.rmtree(parts, ignore_errors=True)
 
 
 def _overture_level_predicate(level: str) -> str | None:
@@ -1298,6 +1304,9 @@ class OvertureAdminDataset(AdminDataset):
                             raise FileNotFoundGeoParquetError(source, "Overture source objects")
                     query = self._cache_source_objects(con, level, objects, cache_path)
                     self._copy_to_cache(con, query, cache_path)
+                    shutil.rmtree(
+                        cache_path.parent / f".{cache_path.stem}-parts", ignore_errors=True
+                    )
                     info(f"Cached {level} dataset at: {cache_path}")
             finally:
                 con.close()

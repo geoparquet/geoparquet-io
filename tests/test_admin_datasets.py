@@ -1800,8 +1800,14 @@ class TestDownloadPerLevelCachesHousekeeping:
         stale = tmp_path / f"overture-{version}-country-land.parquet"
         stale.write_bytes(b"stale")
 
+        old_parts = tmp_path / ".overture-2025-01-country-land-parts"
+        old_parts.mkdir()
+        current_parts = tmp_path / f".{fresh['country'].stem}-parts"
+        current_parts.mkdir()
         dataset._download_per_level_caches()
 
+        assert not old_parts.exists()
+        assert not current_parts.exists()
         assert not stale.exists()
         for path in fresh.values():
             assert path.exists()
@@ -1852,12 +1858,11 @@ class TestDownloadPerLevelCachesHousekeeping:
             assert not dataset.get_cached_path_for_level("country").exists()
             completed = list(cache.rglob("*.parquet"))
             assert len(completed) == 1
-            stamp = completed[0].stat().st_mtime_ns
             assert not list(cache.rglob(".gpio-stage-*"))
             (source / "part-b.parquet").unlink()
             write_part("part-b.parquet", "CA")
             final = dataset.get_source_for_level("country")
-            assert completed[0].stat().st_mtime_ns == stamp
+            assert not completed[0].parent.exists()
             assert reads.count(str(source / "part-a.parquet")) == 1
             assert reads.count(str(source / "part-b.parquet")) == 2
             assert con.execute(
