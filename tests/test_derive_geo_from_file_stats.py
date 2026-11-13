@@ -88,10 +88,21 @@ def test_derive_v2_geo_metadata_describes_a_native_geography_column(tmp_path):
 
     from geoparquet_io.core.derive_geo_from_file import derive_v2_geo_metadata
 
-    wkb = ga.as_wkb(["POINT (1 2)", "POINT (3 4)"]).storage
-    geography = ga.wkb().with_edge_type(ga.EdgeType.SPHERICAL).wrap_array(wkb)
+    wkb = ga.as_wkb(["LINESTRING (170 0, -170 0)", "POINT (175 2)"]).storage
+    from geoparquet_io.core.parquet_footer import patch_or_rewrite
+    from geoparquet_io.core.write_funnels import rewrite_footer_kv
+
+    geography = ga.wkb().wrap_array(wkb)
     path = tmp_path / "geography.parquet"
-    pq.write_table(pa.table({"id": [1, 2], "geometry": geography}), str(path))
+    pq.write_table(pa.table({"id": [1, 2], "geometry": geography}), str(path), row_group_size=1)
+    # PyArrow omits spherical statistics; supply the geodesic extents when retyping.
+    patch_or_rewrite(
+        str(path),
+        {},
+        rewrite=rewrite_footer_kv,
+        geography={"geometry": "spherical"},
+        geography_bbox={"geometry": [(170, 0, -170, 0), (175, 2, 175, 2)]},
+    )
     logical = str(pq.ParquetFile(str(path)).metadata.schema.column(1).logical_type)
     assert logical == "Geography(crs=, algorithm=spherical)"
 
@@ -104,3 +115,11 @@ def test_derive_v2_geo_metadata_describes_a_native_geography_column(tmp_path):
     # implies no orientation (#1367 T3e audit 2, finding A -- a regression the
     # `edges=` spelling introduced, undone).
     assert "orientation" not in block["columns"]["geometry"]
+
+    # A native GEOGRAPHY must fold longitude the same way on rebuild and refresh.
+    import json
+
+    assert block["columns"]["geometry"]["bbox"] == [170, 0, -170, 2]
+    patch_or_rewrite(str(path), {"geo": json.dumps(block)}, rewrite=rewrite_footer_kv)
+    refreshed = derive_v2_geo_metadata(str(path), refresh_stats=True)
+    assert refreshed["columns"]["geometry"]["bbox"] == block["columns"]["geometry"]["bbox"]

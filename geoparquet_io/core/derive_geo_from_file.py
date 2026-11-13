@@ -31,11 +31,18 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
-from geoparquet_io.core.edges import declares_edges, edges_of, logical_type_edges, set_edges
+from geoparquet_io.core.edges import (
+    declares_edges,
+    edges_of,
+    is_nonplanar,
+    logical_type_edges,
+    set_edges,
+)
 from geoparquet_io.core.geo_metadata import (
     KEEP_CRS,
     GeoBlockOptions,
     SchemaSource,
+    _file_footer_stats,
     compose_geo_block,
     geometry_stats_of,
     read_raw_geo,
@@ -305,12 +312,17 @@ def written_geo_block(path: str, metadata: dict | None, options: GeoBlockOptions
         *(written.get("columns") or {}),
         *((options.geometry_info or {}).get("secondary") or []),
     }
-    stats = {
-        name: {"bbox": measured.bbox, "geometry_types": measured.geometry_types}
-        for name in sorted(names)
-        if name in schema.names
-        for measured in [geometry_stats_of(path, name)]
-    }
+    stats = {}
+    for name in sorted(names & set(schema.names)):
+        geographic = is_nonplanar(edges_of((written.get("columns") or {}).get(name)))
+        measured = (
+            _file_footer_stats(path, name, None, need_bbox=True, geographic=True)
+            if geographic
+            else None
+        )
+        if measured is None:
+            measured = geometry_stats_of(path, name, antimeridian=geographic)
+        stats[name] = {"bbox": measured.bbox, "geometry_types": measured.geometry_types}
     options = replace(
         options,
         stats=stats,

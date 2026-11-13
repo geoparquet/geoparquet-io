@@ -2745,7 +2745,12 @@ def _footer_stats(
 
 
 def _file_footer_stats(
-    path: str, geometry_column: str, bbox_column: str | None, *, need_bbox: bool
+    path: str,
+    geometry_column: str,
+    bbox_column: str | None,
+    *,
+    need_bbox: bool,
+    geographic: bool = False,
 ) -> GeometryStats | None:
     """Read one listed file's footer without classifying its path again."""
     from geoparquet_io.core.duckdb_metadata import (
@@ -2769,13 +2774,11 @@ def _file_footer_stats(
     ):
         return None
     # A wrapped spherical range cannot supply Cartesian min/max to this API.
-    if need_bbox and any(c["xmin"] > c["xmax"] for c in chunks):
+    if need_bbox and not geographic and any(c["xmin"] > c["xmax"] for c in chunks):
         return None
     if bbox_column is None and any(not c.get("geometry_types") for c in chunks):
         return None
-    # Ordinary file scans measure Cartesian min/max; antimeridian wrapping is
-    # requested separately and must retain its data scan.
-    return row_group_geometry_stats(chunks, geographic=False)
+    return row_group_geometry_stats(chunks, geographic=geographic)
 
 
 def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
