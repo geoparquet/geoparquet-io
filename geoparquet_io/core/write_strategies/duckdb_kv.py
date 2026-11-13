@@ -47,7 +47,7 @@ from geoparquet_io.core.geo_metadata import (
     geometry_types_of,
     sanitized_carried_geo,
 )
-from geoparquet_io.core.geometry_detection import GeometryRead
+from geoparquet_io.core.geometry_detection import GeometryRead, resolve_geometry_read
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
@@ -94,8 +94,11 @@ def _native_typed_query(
     columns = geo_meta.get("columns") or {}
     type_crs = input_crs
     primary_type_crs = type_crs_for(columns.get(geometry_column))
-    if is_unknown_type_crs(primary_type_crs):
+    if type_crs is None or is_unknown_type_crs(primary_type_crs):
         type_crs = primary_type_crs
+    read = resolve_geometry_read(con, f"({query})", geometry_column, relation=True)
+    if read.kind == "wkb":
+        query = f"SELECT * REPLACE ({read.expr} AS {read.quoted}) FROM ({query})"
     typed = _wrap_query_with_crs(query, geometry_column, type_crs, geoparquet_version)
     return wrap_query_with_secondary_crs(con, typed, columns, geometry_column, geoparquet_version)
 

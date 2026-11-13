@@ -288,9 +288,13 @@ def write_output(
     """
     validate_output(output_path)
 
+    output_schema = describe_query(con, query)
+    original_metadata = prune_geo_metadata_to_columns(
+        original_metadata, [name for name, _ in output_schema], repoint_primary=True
+    )
     carried = sanitized_carried_geo(original_metadata)
     geometry_column = primary_geometry_column(
-        describe_query(con, query),
+        output_schema,
         geo=carried,
         preferred=geometry_column,
     )

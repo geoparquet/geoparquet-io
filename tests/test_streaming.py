@@ -746,37 +746,72 @@ class TestStreamIO:
             assert result["id"].to_pylist()[0] == 1
 
     def test_stdin_extract_projection_resolves_output_geometry(self, tmp_path, monkeypatch):
+        from itertools import product
+
         import pyarrow.parquet as pq
+        from pyproj import CRS
 
         from geoparquet_io.core.extract import extract
 
         wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
         entry = {"encoding": "WKB", "geometry_types": ["Point"]}
-        for secondary, excluded in (
-            (False, "geometry"),
-            (True, "geometry"),
-            (True, "geometry,secondary"),
+        declarations = (
+            {},
+            {"crs": CRS.from_epsg(3857).to_json_dict()},
+            {"crs": None},
+            {"edges": "spherical"},
+        )
+        for extra, secondary, excluded in product(
+            declarations, (False, True), ("geometry", "geometry,secondary")
         ):
+            if not secondary and excluded != "geometry":
+                continue
             table = pa.table({"id": [1], "geometry": [wkb]})
             columns = {"geometry": entry}
             if secondary:
                 table = table.append_column("secondary", table["geometry"])
-                columns["secondary"] = entry
+                columns["secondary"] = {**entry, **extra}
             table = with_geo_block(
                 table, {"version": "1.1.0", "primary_column": "geometry", "columns": columns}
             )
+            source = tmp_path / "source.parquet"
+            pq.write_table(table, source)
             monkeypatch.setattr(
                 "geoparquet_io.core.stream_io.read_arrow_stream", lambda table=table: table
             )
-            dest = tmp_path / "projected.parquet"
-            extract("-", str(dest), exclude_cols=excluded, overwrite=True)
-            result = pq.read_table(dest)
-            geo = read_raw_geo(result.schema.metadata).value
-            if secondary and excluded == "geometry":
-                assert geo["primary_column"] == "secondary"
-                assert set(geo["columns"]) == {"secondary"}
-            else:
-                assert geo is None
+            captured = []
+            monkeypatch.setattr("geoparquet_io.core.stream_io.write_arrow_stream", captured.append)
+            expected_geo = {}
+            versions = (None, "2.0") if extra == {"crs": None} else (None,)
+            for version, stdin, stdout in product(versions, (False, True), (False, True)):
+                dest = tmp_path / "projected.parquet"
+                extract(
+                    "-" if stdin else str(source),
+                    "-" if stdout else str(dest),
+                    exclude_cols=excluded,
+                    overwrite=True,
+                    geoparquet_version=version,
+                )
+                result = captured[-1] if stdout else pq.read_table(dest)
+                geo = read_raw_geo(result.schema.metadata).value
+                if secondary and excluded == "geometry":
+                    assert geo["primary_column"] == "secondary"
+                    assert set(geo["columns"]) == {"secondary"}
+                    for key, value in extra.items():
+                        assert key in geo["columns"]["secondary"]
+                        assert geo["columns"]["secondary"][key] == value
+                else:
+                    assert geo is None
+                if not stdin:
+                    expected_geo[version, stdout] = geo
+
+                assert geo == expected_geo[version, stdout]
+                if version is None:
+                    assert geo == expected_geo[version, False]
+                if version == "2.0" and not stdout and secondary and excluded == "geometry":
+                    logical = str(pq.ParquetFile(dest).schema.column(1).logical_type)
+                    assert "Geometry" in logical
+                    assert "srid:0" in logical
 
     def test_execute_transform_dry_run(self, tmp_path, sample_geo_table, geo_metadata):
         """Test execute_transform with dry_run=True."""
