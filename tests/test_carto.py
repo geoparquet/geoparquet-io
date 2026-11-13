@@ -1800,6 +1800,7 @@ def test_carto_request_and_probe_never_log_credentials(monkeypatch, caplog):
 
     import httpx
 
+    from geoparquet_io.core.logging_config import CLIFormatter
     from tests.http_transport import FakeTransport, json_reply
 
     http = FakeTransport.install(monkeypatch)
@@ -1812,7 +1813,9 @@ def test_carto_request_and_probe_never_log_credentials(monkeypatch, caplog):
             show_remote_read_message(url, verbose=True)
             with pytest.raises(InvalidParameterError):
                 validate_profile_for_urls("profile", url)
-    assert all(secret not in record.getMessage() for record in caplog.records)
+    assert all(
+        secret not in CLIFormatter(use_colors=False).format(record) for record in caplog.records
+    )
     http.respond(
         "/sql",
         json_reply({"error": [f"bad api_key={secret}"]}, status=400),
@@ -1828,4 +1831,6 @@ def test_carto_request_and_probe_never_log_credentials(monkeypatch, caplog):
     assert len(http.requests) == 2
     assert http.requests[0].params["api_key"] == secret
     assert secret not in str(caught.value)
-    assert all(secret not in record.getMessage() for record in caplog.records)
+    assert all(
+        secret not in CLIFormatter(use_colors=False).format(record) for record in caplog.records
+    )

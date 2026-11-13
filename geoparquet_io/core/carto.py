@@ -40,8 +40,6 @@ from geoparquet_io.core.exceptions import (
     GeoParquetError,
     InvalidParameterError,
     classify_failure,
-    redact_credentials,
-    sanitize_url_for_logging,
     status_message,
 )
 from geoparquet_io.core.file_utils import handle_output_overwrite
@@ -775,10 +773,7 @@ def _probe_request_status(full_url: str, timeout: float) -> _CartoStatus:
         # one, and Windows runners, where a SYN to a closed loopback port is
         # dropped rather than refused, reported "Request timed out ... try
         # --limit" for a connection that was never made.
-        debug(
-            f"Status probe failed ({redact_credentials(str(probe_error))}); "
-            "treating the failure as retryable"
-        )
+        debug(f"Status probe failed ({probe_error}); treating the failure as retryable")
         return _CartoStatus(None, False)
 
 
@@ -922,7 +917,7 @@ def _fetch_with_retry(
     else:
         read_expr = f"read_csv_auto({sql_path(full_url)})"
 
-    debug(f"Request URL: {sanitize_url_for_logging(full_url)[:100]}...")
+    debug(f"Request URL: {full_url}")
 
     started = time.monotonic()
 

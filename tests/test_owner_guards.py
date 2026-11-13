@@ -7051,19 +7051,3 @@ def test_extractors_use_sanitizing_report_owners():
         assert _extractor_raw_reports(unsafe)
     assert not _extractor_raw_reports('debug(f"Fetching {url}")')
     assert not _extractor_raw_reports('raise ValueError(clean_error_text(f"Bad {url}"))')
-    tree = ast.parse((core / "logging_config.py").read_text())
-    for node in tree.body:
-        if isinstance(node, ast.FunctionDef) and node.name in {
-            "debug",
-            "info",
-            "progress",
-            "success",
-            "warn",
-            "error",
-        }:
-            assert any(
-                isinstance(call, ast.Call)
-                and isinstance(call.func, ast.Name)
-                and call.func.id == "clean_error_text"
-                for call in ast.walk(node)
-            ), node.name

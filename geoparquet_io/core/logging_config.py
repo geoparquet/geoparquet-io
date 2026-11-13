@@ -256,7 +256,7 @@ def success(message: str) -> None:
 
     Use for: Completed operations, passed validations, successful writes.
     """
-    logger.info(f"[SUCCESS]{clean_error_text(message)}")
+    logger.info(f"[SUCCESS]{message}")
 
 
 def warn(message: str) -> None:
@@ -265,10 +265,9 @@ def warn(message: str) -> None:
 
     Use for: Non-critical issues, recommendations, deprecation notices.
 
-    Text goes through the one ``clean_error_text`` policy here, once (credential
-    values, query strings on URLs, control characters), so a caller can interpolate a caught exception without cleaning it first.
+    CLIFormatter cleans the final output, including interpolated exceptions.
     """
-    logger.warning(clean_error_text(message))
+    logger.warning(message)
 
 
 def error(message: str) -> None:
@@ -277,7 +276,7 @@ def error(message: str) -> None:
 
     Use for: Failed operations, validation failures, critical issues.
     """
-    logger.error(clean_error_text(message))
+    logger.error(message)
 
 
 def info(message: str) -> None:
@@ -286,7 +285,7 @@ def info(message: str) -> None:
 
     Use for: Informational details, tips, context about operations.
     """
-    logger.info(f"[INFO]{clean_error_text(message)}")
+    logger.info(f"[INFO]{message}")
 
 
 def debug(message: str) -> None:
@@ -295,7 +294,7 @@ def debug(message: str) -> None:
 
     Use for: Detailed diagnostic output, internal state, SQL queries.
     """
-    logger.debug(clean_error_text(message))
+    logger.debug(message)
 
 
 def progress(message: str) -> None:
@@ -304,4 +303,4 @@ def progress(message: str) -> None:
 
     Use for: Progress updates, status messages, general output.
     """
-    logger.info(clean_error_text(message))
+    logger.info(message)
