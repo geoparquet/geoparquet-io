@@ -210,6 +210,25 @@ geoparquet_io/
    `--write-memory` > a stricter limit the caller set on their connection >
    gpio's default > DuckDB's own. Never add a second ceiling detector or
    default (#1156, #1174, #1179).
+7. **One spatial-extension load per process. This has regressed repeatedly.**
+   A new DuckDB database loads spatial again, verifying its signature by
+   hashing about 100 MB with a thread per MiB. On a 4-core CI runner this
+   caused the hour-long fast leg (#1402), fixed by one load per process
+   (#1425). #1457 reintroduced it with an isolated database per statistics
+   scan and per eager read: Ubuntu 3.13 fast-lane time rose from 393 s to
+   948 s with no new tests, so the collected-count ratchet did not see it.
+   Get connections from `get_duckdb_connection`, which returns cursors on
+   the shared database. Bound shared work with `scoped_write_memory_limit`
+   or `scoped_bounded_connection`; use `open_bounded_connection` only where
+   an independent lifetime is needed. Measure all geometry columns in one
+   scan. The guard in `tests/test_duckdb_shared_database.py`,
+   `test_factory_and_command_chains_load_spatial_once`, has no allow-list:
+   it permits one database and one spatial load across representative local
+   writes, eager conversion, read chains and check fixes. Do not create a new
+   database with `duckdb.connect()` or `isolated=True` for those operations.
+   A PR touching connection creation states spatial loads per command before
+   and after, and compares its CI leg minutes with main before merge; a green
+   run taking twice as long is a regression.
 
 ### Critical Rules
 
