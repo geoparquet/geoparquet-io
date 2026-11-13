@@ -96,7 +96,8 @@ _CREDENTIAL_PAIR = re.compile(
     r"(?i:(?<![\w.-])([\"']?(?:api[_-]?key|token|access_token|secret|password|"
     r"passwd|signature|credential|authorization|x-amz-signature|x-amz-credential|"
     r"x-amz-security-token)[\"']?\s*[=:]\s*)"
-    r"(?:bearer\s+|basic\s+)?(?:\"[^\"]*(?:\"|$)|'[^']*(?:'|$)|"
+    r"(?:bearer\s+|basic\s+)?(?:\"(?:[^\"\\]|\\(?:.|$))*(?:\"|$)|"
+    r"'(?:[^'\\]|\\(?:.|$))*(?:'|$)|"
     r"[^\s\"',;&\]}>]+))"
 )
 
