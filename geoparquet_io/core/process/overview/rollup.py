@@ -22,7 +22,7 @@ import gc
 import pyarrow as pa
 
 from geoparquet_io.core.admin_datasets import resolve_admin_dataset
-from geoparquet_io.core.duckdb_utils import as_wkb_sql, fetch_one, quote_identifier, register_arrow
+from geoparquet_io.core.duckdb_utils import as_wkb_sql, quote_identifier, register_arrow
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.geo_metadata import (
     bbox_column_to_declare,
@@ -153,14 +153,16 @@ def build_admin_rollup_sql(
     )
 
 
-def get_admin_country_context(con, verbose: bool = False) -> tuple[str, str, str]:
+def get_admin_country_context(
+    con, verbose: bool = False, memory_limit: str | None = None
+) -> tuple[str, str, str]:
     """Return (country_ref, code_col, geom_expr) for the Overture country cache."""
 
     dataset, _boundary_columns, _ = resolve_admin_dataset(
         "overture",
         ["country"],
         cache=False,
-        memory_limit=str(fetch_one(con.execute("SELECT current_setting('memory_limit')"))[0]),
+        memory_limit=memory_limit,
         verbose=verbose,
     )
     path = dataset.get_source_for_level("country")
@@ -196,12 +198,14 @@ def validate_level(info: AggregateInfo, level: int | str) -> int | str:
     return level_int
 
 
-def build_level_sql(con, info: AggregateInfo, source_sql: str, level: int | str) -> str:
+def build_level_sql(
+    con, info: AggregateInfo, source_sql: str, level: int | str, memory_limit: str | None = None
+) -> str:
     """Build the full rollup SQL for one validated overview level."""
     if info.scheme == ADMIN_SCHEME:
         if info.out_geometry == "none":
             return build_admin_rollup_sql(info, source_sql, None, None, None)
-        country_ref, code_col, geom_expr = get_admin_country_context(con)
+        country_ref, code_col, geom_expr = get_admin_country_context(con, memory_limit=memory_limit)
         return build_admin_rollup_sql(info, source_sql, country_ref, code_col, geom_expr)
     return build_grid_rollup_sql(info, source_sql, int(level))
 
@@ -235,7 +239,9 @@ def rollup_table(
         # the base level, so no extra ensure_grid_extension call is needed.
         info = detect_aggregate_info(con, "__overview_input", cell_column, scheme)
         level = validate_level(info, level)
-        sql = build_level_sql(con, info, "SELECT * FROM __overview_input", level)
+        sql = build_level_sql(
+            con, info, "SELECT * FROM __overview_input", level, memory_limit=memory_limit
+        )
         # The input's bbox column comes along, rebuilt over the parent cells (#1121).
         bbox_field = None
         if info.out_geometry != "none":

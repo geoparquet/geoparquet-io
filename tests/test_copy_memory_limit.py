@@ -981,8 +981,10 @@ class TestDirectCopyRegressions:
         seen.clear()
         con = memory_limits.open_bounded_connection(memory_limit="700MB")
         try:
-            with pytest.raises(Stop):
-                get_admin_country_context(con)
-            assert seen == [_setting(con, "memory_limit")]
+            for limit in (None, "700MB"):
+                seen.clear()
+                with pytest.raises(Stop):
+                    get_admin_country_context(con, memory_limit=limit)
+                assert seen == [limit]
         finally:
             con.close()
