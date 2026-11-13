@@ -72,11 +72,12 @@ def test_api_read_partition_keeps_aws_profile_env(previous_profile, monkeypatch)
     """The Python API's aws_profile= reaches DuckDB without touching the environment."""
     import geoparquet_io as gpio
 
+    read_partition = gpio.read_partition  # resolve lazy imports before patching their dependency
     seen: list = []
     monkeypatch.setattr(duckdb_utils, "get_duckdb_connection", _recorder(seen))
 
     with pytest.raises(_Stop):
-        gpio.read_partition("s3://bucket/data.parquet", aws_profile="prod")
+        read_partition("s3://bucket/data.parquet", aws_profile="prod")
 
     assert seen == [{"env": previous_profile, "profile": "prod"}]
     assert os.environ.get("AWS_PROFILE") == previous_profile
@@ -615,4 +616,14 @@ def test_staging_callers_keep_profile_scope_through_publication():
             )
             if staged and not scoped:
                 missing.append(f"{path.name}:{node.name}")
+            if path.name == "write_funnels.py" and node.name in (
+                "rewrite_file_through_funnel",
+                "_rewrite_parquet",
+            ):
+                assert not any(
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == "upload_if_remote"
+                    for call in ast.walk(node)
+                ), f"{node.name}: repair staging must own final upload"
     assert not missing, missing

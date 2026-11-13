@@ -260,14 +260,17 @@ def test_a_failed_move_keeps_the_original_and_discards_the_rewrite(tmp_path, mon
 
 def test_a_remote_in_place_fix_stages_before_the_facade(monkeypatch):
     """The facade refuses equal paths; the rewrite owner stages and uploads remote output."""
+    from geoparquet_io.core import remote
+
     seen: list[str] = []
     uploads = []
-    monkeypatch.setattr(write_funnels, "upload_if_remote", lambda *a, **kw: uploads.append(a))
-    monkeypatch.setattr(
-        write_funnels,
-        "write_parquet_with_metadata",
-        lambda con, query, output_file, **kwargs: seen.append(output_file),
-    )
+    monkeypatch.setattr(remote, "upload_if_remote", lambda *a, **kw: uploads.append(a))
+
+    def write_output(con, query, output_file, **kwargs):
+        seen.append(output_file)
+        Path(output_file).write_bytes(b"completed output")
+
+    monkeypatch.setattr(write_funnels, "write_parquet_with_metadata", write_output)
     monkeypatch.setattr(write_funnels, "get_duckdb_connection", lambda **kwargs: duckdb.connect())
 
     write_funnels.rewrite_file_through_funnel(
@@ -279,7 +282,7 @@ def test_a_remote_in_place_fix_stages_before_the_facade(monkeypatch):
     )
 
     assert len(seen) == 1 and not seen[0].startswith("s3://")
-    assert uploads and uploads[0][1] == "s3://bucket/key.parquet"
+    assert len(uploads) == 1 and uploads[0][1] == "s3://bucket/key.parquet"
     assert not Path(seen[0]).exists()
 
 

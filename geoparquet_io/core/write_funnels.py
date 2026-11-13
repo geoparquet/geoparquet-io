@@ -1052,32 +1052,31 @@ def rewrite_file_through_funnel(
     """
     import duckdb  # deferred: the embeddable import surface defers duckdb (#1307)
 
-    with remote_write_context(destination, verbose=verbose) as (local, remote):
-        with atomic_write(local, mode_from=source if not is_remote_url(source) else None) as staged:
-            con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(source))
-            try:
-                write_parquet_with_metadata(
-                    con=con,
-                    query=query,
-                    output_file=staged,
-                    original_metadata=original_metadata,
-                    compression=None,
-                    compression_level=None,
-                    row_group_rows=row_group_rows,
-                    verbose=verbose,
-                    profile=profile,
-                    geoparquet_version=geoparquet_version,
-                    input_file=source,
-                )
-            except duckdb.IOException as e:
-                if is_remote_url(source):
-                    hints = get_remote_error_hint(e, source)
-                    raise RemoteAccessError(source, f"{hints}\n\nOriginal error: {str(e)}") from e
-                raise
-            finally:
-                con.close()
-        if remote:
-            upload_if_remote(local, destination, profile=profile, verbose=verbose)
+    with atomic_write(
+        destination, mode_from=source if not is_remote_url(source) else None
+    ) as staged:
+        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(source))
+        try:
+            write_parquet_with_metadata(
+                con=con,
+                query=query,
+                output_file=staged,
+                original_metadata=original_metadata,
+                compression=None,
+                compression_level=None,
+                row_group_rows=row_group_rows,
+                verbose=verbose,
+                profile=profile,
+                geoparquet_version=geoparquet_version,
+                input_file=source,
+            )
+        except duckdb.IOException as e:
+            if is_remote_url(source):
+                hints = get_remote_error_hint(e, source)
+                raise RemoteAccessError(source, f"{hints}\n\nOriginal error: {str(e)}") from e
+            raise
+        finally:
+            con.close()
 
 
 def _footer_keys(pf: pq.ParquetFile) -> dict[bytes, bytes]:
@@ -1159,41 +1158,34 @@ def _rewrite_parquet(
     write_kwargs = resolve_codec(
         write.compression, write.compression_level, context="write"
     ).pyarrow_kwargs()
-    with remote_write_context(destination, verbose=verbose) as (local, _):
-        with atomic_write(local) as staged:
-            # Every handle on *source* closes before the swap: Windows refuses
-            # to replace a file that is still open.
-            with contextlib.ExitStack() as stack:
-                handle = stack.enter_context(open_url(source)) if is_remote_url(source) else source
-                # pre_buffer off: pyarrow's pre-buffer cache keeps every column
-                # chunk `iter_batches` has read until the file closes, which grew
-                # to roughly the whole compressed file instead of one row group.
-                pf = stack.enter_context(pq.ParquetFile(handle, pre_buffer=False))
-                metadata = output_schema_metadata(
-                    _carried_with_updates(_footer_keys(pf), updates), None
+    with atomic_write(destination) as staged:
+        # Every handle on *source* closes before the swap: Windows refuses
+        # to replace a file that is still open.
+        with contextlib.ExitStack() as stack:
+            handle = stack.enter_context(open_url(source)) if is_remote_url(source) else source
+            # pre_buffer off: pyarrow's pre-buffer cache keeps every column
+            # chunk `iter_batches` has read until the file closes, which grew
+            # to roughly the whole compressed file instead of one row group.
+            pf = stack.enter_context(pq.ParquetFile(handle, pre_buffer=False))
+            metadata = output_schema_metadata(
+                _carried_with_updates(_footer_keys(pf), updates), None
+            )
+            schema = pf.schema_arrow.with_metadata(metadata)
+            if verbose:
+                debug(f"Rewriting with footer keys: {[key.decode() for key in metadata]}")
+            with open_parquet_writer(staged, schema, write_kwargs) as writer:
+                # Read at the row count when there is one, so each batch
+                # is one group; a byte target is sized by the facade on
+                # the leading batches (sized_stream).
+                count = resolve_row_group_rows(write.row_group_rows, write.row_group_size_mb)
+                batches = pf.iter_batches(batch_size=count) if count else pf.iter_batches()
+                chunks, rows = sized_stream(
+                    batches, write.row_group_rows, write.row_group_size_mb, pf.schema_arrow
                 )
-                schema = pf.schema_arrow.with_metadata(metadata)
-                if verbose:
-                    debug(f"Rewriting with footer keys: {[key.decode() for key in metadata]}")
-                with open_parquet_writer(staged, schema, write_kwargs) as writer:
-                    # Read at the row count when there is one, so each batch
-                    # is one group; a byte target is sized by the facade on
-                    # the leading batches (sized_stream).
-                    count = resolve_row_group_rows(write.row_group_rows, write.row_group_size_mb)
-                    batches = pf.iter_batches(batch_size=count) if count else pf.iter_batches()
-                    chunks, rows = sized_stream(
-                        batches, write.row_group_rows, write.row_group_size_mb, pf.schema_arrow
+                for group in regroup(chunks, _layout or rows):
+                    writer.write_table(
+                        pa.Table.from_batches([group]), row_group_size=group.num_rows
                     )
-                    for group in regroup(chunks, _layout or rows):
-                        writer.write_table(
-                            pa.Table.from_batches([group]), row_group_size=group.num_rows
-                        )
-        upload_if_remote(
-            local,
-            destination,
-            profile=write.remote.profile if write.remote else None,
-            verbose=verbose,
-        )
 
 
 def _carries_more_than_duckdb_generates(geo_dict: dict) -> bool:
