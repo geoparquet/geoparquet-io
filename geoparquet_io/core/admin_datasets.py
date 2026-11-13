@@ -54,6 +54,11 @@ from geoparquet_io.core.remote import is_remote_url
 # Cache Configuration
 # =============================================================================
 
+
+class _BoundedAdminSource(str):
+    """SQL relation already filtered and simplified for one input extent."""
+
+
 # Cache age threshold in seconds (6 months)
 CACHE_AGE_THRESHOLD_SECONDS = 6 * 30 * 24 * 60 * 60  # ~180 days
 
@@ -1027,7 +1032,7 @@ class OvertureAdminDataset(AdminDataset):
             return True
         if source is None:
             return False
-        return source.startswith("(SELECT ") or Path(source).parent == get_cache_dir()
+        return isinstance(source, _BoundedAdminSource) or Path(source).parent == get_cache_dir()
 
     def get_subtype_filter(self, levels: list[str], source: str | None = None) -> str | None:
         """The row filter that selects the requested admin levels.
@@ -1183,7 +1188,7 @@ class OvertureAdminDataset(AdminDataset):
                 source = self.get_default_source()
                 if self._extent_prunes_most_geometry(source, extent):
                     relation = f"({self._build_level_cache_query(level, source, extent)})"
-                    return relation, relation
+                    return _BoundedAdminSource(relation), relation
         return super()._source_for_join(level, no_cache, extent)
 
     def _extent_prunes_most_geometry(
@@ -1726,6 +1731,13 @@ class AdminJoinStep:
     query: str
     target: str | None
     per_level: bool
+
+    @property
+    def source_description(self) -> str:
+        """A single line for status and executable dry-run comments."""
+        if isinstance(self.source, _BoundedAdminSource):
+            return "Overture boundaries within the input extent (uncached)"
+        return str(self.source).replace("\n", " ").replace("\r", " ")
 
 
 def _admin_join_steps(

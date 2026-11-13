@@ -1860,6 +1860,27 @@ def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, m
     try:
         with serve_workload(source) as url:
             monkeypatch.setattr(dataset, "get_default_source", lambda: url)
+            from click.testing import CliRunner
+
+            from geoparquet_io.cli.main import add
+
+            monkeypatch.setattr(OvertureAdminDataset, "get_default_source", lambda self: url)
+            monkeypatch.setattr(OvertureAdminDataset, "get_version", lambda self: "fixture")
+            dry = CliRunner().invoke(
+                add,
+                [
+                    "admin-divisions",
+                    str(inp),
+                    str(tmp_path / "dry.parquet"),
+                    "--dataset",
+                    "overture",
+                    "--levels",
+                    "country",
+                    "--dry-run",
+                ],
+            )
+            assert dry.exit_code == 0, dry.output
+            assert len(con.extract_statements(dry.output[dry.output.index("-- Step") :])) == 1
             with CallSpies() as spies:
                 admin_datasets.run_admin_join(
                     con,
