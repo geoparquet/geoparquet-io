@@ -237,9 +237,9 @@ VECTORS = json.loads(
 
 
 class TestSharedVectors:
-    """The vectors the Portolan spec, rashid and gpio all pin (PORTO-FMT-054).
+    """The vectors the Portolan spec, rashid and gpio all pin (spatial-order.md test vectors).
 
-    Vendored byte-for-byte from ``specs/portolan/abstract-tests/spatial-metric-vectors.json``
+    Vendored byte-for-byte from ``specs/incubating/spatial-order/spatial-metric-vectors.json``
     in portolan-spec (#188). Only the ``layouts`` apply here. Their ``verdict``
     is the spec's footer check, which gpio runs: ``row-check`` means the footer
     check gives no verdict, so gpio withholds. The ``rows`` section and its
@@ -291,7 +291,7 @@ class TestVerdictFunction:
         assert _spatial_order_verdict(FLOOR, 0.64)[:2] == (False, True)
 
     def test_below_the_floor_even_a_shuffled_file_is_not_judged(self):
-        """The retired clear-fail band (PORTO-FMT-059): the row check owns these files."""
+        """The retired clear-fail band: the row check owns these files."""
         for n in (1, 2, 3, FLOOR - 1):
             passed, judged, warnings = _spatial_order_verdict(n, 0.0)
 
@@ -407,7 +407,7 @@ class TestClosedForm:
         assert _spatial_locality_metrics(unsorted(9))["bbox_area_sum"] == pytest.approx(9.0)
 
     def test_read_profile_and_largest_boxes_are_reported(self):
-        """The spec's reporting extras (PORTO-FMT-061)."""
+        """The spec's reporting extras (spatial-order.md, Reporting)."""
         boxes = tiling(7) + [dict(UNIT)]
 
         m = _spatial_locality_metrics(boxes)
@@ -693,7 +693,7 @@ def _run(args):
 
 
 class TestNoSizeFloor:
-    """The retired 5 MB floor (PORTO-FMT-058): a small file is judged like any other."""
+    """The retired 5 MB floor: a small file is judged like any other."""
 
     def test_a_kilobyte_shuffled_file_with_enough_groups_fails(self, tmp_path):
         path = _write_bbox_file(tmp_path / "small.parquet", 4000, 40, shuffle_seed=0)
@@ -894,6 +894,50 @@ class TestBatchFixLeavesUnjudgedSoundFilesAlone:
         assert not _batch_sort_wanted({"judged": False, "skip_rate_efficiency": None})
         assert not _batch_sort_wanted({"judged": False})
         assert not _batch_sort_wanted({"judged": False, "skip_rate_efficiency": 0.9})
+
+    @pytest.mark.parametrize(
+        ("spatial", "combined"),
+        [
+            ({"judged": True, "passed": False, "fix_available": True}, True),
+            ({"judged": False, "skip_rate_efficiency": 0.9, "fix_available": True}, False),
+        ],
+        ids=["judged-failure", "withheld-sound"],
+    )
+    def test_the_combined_bbox_and_sort_step_asks_the_same_rule(
+        self, tmp_path, monkeypatch, spatial, combined
+    ):
+        """The one-write bbox and sort path sorts only what the batch rule allows."""
+        import contextlib
+
+        from geoparquet_io.core import check_fixes
+
+        calls = []
+
+        def unchanged(*args, **kwargs):
+            return args[1], []
+
+        monkeypatch.setattr(check_fixes, "_apply_cover_fix", unchanged)
+        monkeypatch.setattr(check_fixes, "_apply_bbox_column_fix", unchanged)
+        monkeypatch.setattr(check_fixes, "_apply_bbox_metadata_fix", unchanged)
+        monkeypatch.setattr(check_fixes, "_apply_spatial_ordering_fix", unchanged)
+        monkeypatch.setattr(check_fixes, "_apply_compression_fix", lambda *a, **k: [])
+        monkeypatch.setattr(
+            check_fixes,
+            "_fix_bbox_and_spatial_ordering",
+            lambda *a, **k: calls.append("combined"),
+        )
+        check_results = {"bbox": {"needs_bbox_column": True}, "spatial": spatial}
+        with contextlib.ExitStack() as scratch:
+            check_fixes._run_fix_chain(
+                check_results,
+                str(tmp_path / "in.parquet"),
+                str(tmp_path / "out.parquet"),
+                None,
+                scratch,
+                False,
+                None,
+            )
+        assert ("combined" in calls) is combined
 
 
 class TestFixKeepsTheFileJudgeable:

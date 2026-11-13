@@ -606,7 +606,7 @@ class TestHilbertDetectionAndWarnings:
         )
 
         # One large row group, under the footer check's eight: the verdict is
-        # withheld (PORTO-FMT-044), which is not a failure -- and not a judged
+        # withheld (spatial-order.md, Footer check), which is not a failure -- and not a judged
         # pass either, so a requested fix still sorts.
         result = check_spatial_order(output_file, 100, 500, False, return_results=True, quiet=True)
 

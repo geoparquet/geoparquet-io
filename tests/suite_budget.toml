@@ -108,7 +108,8 @@
 # CLI/fix behavior pins, with #1458's two-path alignment tests.
 # +3 (#1149): isolate requested-level retry from housekeeping, pin failed
 # default COPY publication, and count HTTP bytes for cold bounded admin joins.
-max_collected = 15067
+# +2: the combined bbox and sort fix asks the batch rule (judged and withheld).
+max_collected = 15069
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

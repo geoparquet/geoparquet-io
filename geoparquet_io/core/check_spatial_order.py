@@ -46,17 +46,17 @@ from geoparquet_io.core.remote import needs_httpfs
 # 0.65 comes from the 2026-11 registry survey and its Hilbert-sort control:
 # the 32 sorted copies eligible for a footer pass scored 0.696 to 0.944, so a
 # 0.70 bar rejected an already-sorted file while 0.65 accepts every tested
-# sorted copy and still fails the shuffled band (PORTO-FMT-050).
+# sorted copy and still fails the shuffled band (spatial-order.md, Footer check).
 SPATIAL_ORDER_MIN_EFFICIENCY = 0.65
 #: The spec's footer check needs at least this many row groups
-#: (PORTO-FMT-044/050). Below it the spec applies its row check, which a
+#: (spatial-order.md, Footer check). Below it the spec applies its row check, which a
 #: conformance validator such as rashid runs. gpio only runs the footer check,
 #: so it withholds its verdict there and reports the statistics.
 SPATIAL_ORDER_MIN_ROW_GROUPS = 8
 
 _SKIP_RATE_THRESHOLD = 0.5
 _DEFAULT_QUERY_FRACTION = 0.1
-#: The windows the verdict reports the read share for (PORTO-FMT-060/061).
+#: The windows the verdict reports the read share for (spatial-order.md, Reporting).
 _REPORT_FRACTIONS = (0.01, _DEFAULT_QUERY_FRACTION, 0.25)
 #: Accumulated float dust on an exact 0 or 1; also the "reference skips
 #: nothing" cutoff under which the efficiency is undefined.
@@ -220,7 +220,7 @@ def _print_bbox_stats_results(ratio, overlap_count, total_pairs, passed, judged,
 def _locality_summary(metrics: dict) -> str:
     """One line with every number the verdict rests on, the absolute cost first.
 
-    The spec's reporting rules (PORTO-FMT-060/061): lead with the share of the
+    The spec's reporting rules (spatial-order.md, Reporting): lead with the share of the
     bytes a typical query reads, then the achievable rate, the efficiency, the
     1% and 25% window profile, and the area sum.
     """
@@ -282,8 +282,8 @@ def _spatial_order_verdict(
     """The spec's footer check: ``(passed, judged, warnings)``.
 
     At eight or more row groups with a defined efficiency the 0.65 bar decides
-    (PORTO-FMT-050). Fewer row groups must not be judged by their boxes
-    (PORTO-FMT-044), and the spec sends them, a file without row-group
+    (spatial-order.md, Footer check). Fewer row groups must not be judged by their boxes
+    (spatial-order.md, Footer check), and the spec sends them, a file without row-group
     statistics, and an undefined efficiency to its row check. gpio has no row
     check, so it withholds the verdict there and ``warnings`` says why.
     """
@@ -669,7 +669,7 @@ def _weighted_skip_rate(
     extent nor fail a sorted one. Each box then counts by its share of the
     bytes, because what a reader saves is bytes, not a count of row groups.
     A closed form over the boxes: O(n^2), footer only, no seed, the same
-    number from every implementation (the spec's PORTO-FMT-050).
+    number from every implementation (the footer check of spatial-order.md).
     """
     if not boxes:
         return 0.0
@@ -699,7 +699,7 @@ def _weighted_skip_rate(
 
 
 def _full_tiling_bboxes(extent: dict, num_row_groups: int) -> list[dict]:
-    """The reference layout: the near-square grid the spec pins (PORTO-FMT-053).
+    """The reference layout: the near-square grid the spec pins (spatial-order.md, reference grid).
 
     ``ceil(sqrt(n))`` columns, ``ceil(n / cols)`` rows, laid row by row, with
     the last row's cells stretched so it too spans the full width -- the grid
@@ -744,7 +744,7 @@ def _spatial_locality_metrics(
     the expected read share at the 1%, 10% and 25% windows, and
     ``largest_row_groups`` the ids of the up-to-three boxes largest against
     the extent, so a failure can say whether one outlier or the whole file is
-    at fault (PORTO-FMT-060/061).
+    at fault (spatial-order.md, Reporting).
     """
     extent = _compute_data_extent(row_group_bboxes, geographic=geographic)
     estimated = _weighted_skip_rate(row_group_bboxes, rows, sizes, query_fraction)

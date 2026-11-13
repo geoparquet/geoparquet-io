@@ -480,7 +480,7 @@ class TestSpatialLocalitySecondaryCheck:
             {"row_group_id": 7, "xmin": 2.0, "ymin": 3.0, "xmax": 98.0, "ymax": 97.0},
         ]
 
-        # Eight groups: the footer check judges from eight up (PORTO-FMT-050).
+        # Eight groups: the footer check judges from eight up (spatial-order.md, Footer check).
         result = _check_spatial_order_from_row_group_bboxes(
             row_group_bboxes,
             parquet_file="test_unsorted.parquet",

@@ -1,7 +1,7 @@
 {
  "_comment": [
-  "Abstract test vectors for the pruning-efficiency metric in specs/portolan/formats.md (Geospatial Parquet, Pruning efficiency).",
-  "Under PORTO-FMT-054, a validator MUST reproduce every expected value. rashid and geoparquet-io vendor this file verbatim.",
+  "Abstract test vectors for the pruning-efficiency metric in specs/incubating/spatial-order.md (Method, Pruning efficiency).",
+  "A validator that follows the method MUST reproduce every expected value. rashid and geoparquet-io vendor this file verbatim.",
   "Boxes use [xmin, ymin, xmax, ymax]. The metric chooses box i with probability rows_i/N.",
   "It places the window centre uniformly within that box. The window spans 10% of each dimension of the box.",
   "The skip rate weights each box by its share of the bytes.",
@@ -11,7 +11,7 @@
   "area_sum is null when the extent has no area (0/0). It is never 0.0 in that case.",
   "below_bar is null wherever efficiency is null.",
   "The layouts entries score sets of boxes directly. The rows entries list per-row boxes in file order.",
-  "A null entry represents a row without a bbox covering. The test splits rows into ten chunks by floor(k*N/10) <= i < floor((k+1)*N/10).",
+  "A null entry represents a row without a box: a null bbox covering, or a null or empty geometry. The test splits rows into ten chunks by floor(k*N/10) <= i < floor((k+1)*N/10).",
   "A null row keeps its chunk position and does not extend the chunk box. The test omits chunks with no boxed rows.",
   "Each chunk uses its count of boxed rows for both row and byte weights. The number of chunks with a box is n.",
   "expected_chunks lists the chunk boxes.",

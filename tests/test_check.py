@@ -43,7 +43,7 @@ class TestCheckCommands:
             "SNAPPY compression on geometry column 'geometry' (ZSTD recommended)" in result.output
         )
         # Spatial order: one row group, under the footer check's eight, so
-        # gpio withholds the verdict and names the row check (PORTO-FMT-044).
+        # gpio withholds the verdict and names the row check (spatial-order.md, Footer check).
         assert "Spatial ordering not judged" in result.output
         assert "rashid judges smaller files by their rows" in result.output
         # Spec validation passes.
