@@ -401,16 +401,18 @@ def test_fix_refuses_an_existing_output_unless_overwrite(tmp_path, unsorted_copy
 
 
 def test_fix_to_a_remote_output_copies_through_the_object_store(monkeypatch, unsorted_copy):
-    """A remote output is copied with the cloud-aware ``copy_file``, not ``shutil``."""
+    """A remote output uploads the completed local stage through the upload owner."""
     from geoparquet_io.api import table as table_module
-    from geoparquet_io.core import check_fixes
+    from geoparquet_io.core import remote
 
     landed = {}
 
-    def fake_copy(source, dest, verbose=False):
+    def fake_upload(source, dest):
+        assert dest not in landed, "publish the remote result once"
         landed[dest] = pq.read_table(source).num_rows
+        return True
 
-    monkeypatch.setattr(check_fixes, "copy_file", fake_copy, raising=False)
+    monkeypatch.setattr(remote, "upload_if_remote", fake_upload)
     monkeypatch.setattr(table_module, "read", lambda path: path)
 
     gpio.read(unsorted_copy).fix(checks=["spatial"], output="s3://bucket/out.parquet")
