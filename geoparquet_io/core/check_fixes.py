@@ -293,7 +293,7 @@ def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
 
     with atomic_write(
         output_file,
-        mode_from=parquet_file if not is_remote_url(parquet_file) else None,
+        mode_from=parquet_file,
     ) as destination:
         add_bbox_column(
             input_parquet=parquet_file,
@@ -424,7 +424,7 @@ def fix_bbox_all(
 
     with atomic_write(
         output_file,
-        mode_from=parquet_file if not is_remote_url(parquet_file) else None,
+        mode_from=parquet_file,
     ) as destination:
         if needs_column:
             # add_bbox_column writes the covering with the column, so a
@@ -466,7 +466,7 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
     )
     with atomic_write(
         output_file,
-        mode_from=parquet_file if not is_remote_url(parquet_file) else None,
+        mode_from=parquet_file,
     ) as destination:
         hilbert_order(
             input_parquet=parquet_file,
@@ -653,9 +653,7 @@ def _fix_bbox_and_spatial_ordering(parquet_file, output_file, verbose, profile, 
         query = computed_column_query(
             f"({ordered})", bbox_name, bbox_struct_sql(read.shape_expr, primary, read)
         )
-        with atomic_write(
-            output_file, mode_from=parquet_file if not is_remote_url(parquet_file) else None
-        ) as destination:
+        with atomic_write(output_file, mode_from=parquet_file) as destination:
             write_parquet_with_metadata(
                 con,
                 query,

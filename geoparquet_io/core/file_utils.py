@@ -458,7 +458,7 @@ def unlink_released_file(path: str | os.PathLike | None) -> None:
 
 def _take_mode(staged: Path, source: Path | str | None) -> None:
     """Give *staged* the permission bits of *source* before publishing private data."""
-    if source is None:
+    if source is None or is_remote_url(str(source)):
         return
     shutil.copymode(source, staged)
 

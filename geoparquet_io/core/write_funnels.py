@@ -1051,9 +1051,7 @@ def rewrite_file_through_funnel(
     """
     import duckdb  # deferred: the embeddable import surface defers duckdb (#1307)
 
-    with atomic_write(
-        destination, mode_from=source if not is_remote_url(source) else None
-    ) as staged:
+    with atomic_write(destination, mode_from=source) as staged:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(source))
         try:
             write_parquet_with_metadata(
