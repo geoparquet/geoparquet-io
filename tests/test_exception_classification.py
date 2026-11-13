@@ -264,6 +264,10 @@ def test_non_url_text_is_preserved(text, kept):
     ):
         prefix = raw.split("=", 1)[0] + "=" if "=" in raw else "Authorization: "
         assert clean_error_text(raw) == prefix + "***"
+    for scheme in ("Bearer", "Basic"):
+        for quote in ('"', "'", ""):
+            raw = f"Authorization: {scheme} {quote}SECRET{quote}"
+            assert clean_error_text(raw) == "Authorization: ***"
     for name in (
         "api_key",
         "api-key",
