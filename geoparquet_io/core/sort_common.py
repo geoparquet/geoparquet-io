@@ -94,8 +94,8 @@ def advised_output_version(
 
 
 @contextmanager
-def _file_source(input_path, verbose, allow_schema_diff):
-    if allow_schema_diff is None:
+def _file_source(input_path, verbose, allow_schema_diff, *, advise):
+    if allow_schema_diff is None and advise:
         advice = get_bbox_advice(input_path, "bounds_calculation", verbose)
         if advice["needs_warning"]:
             warn(f"\nWarning: {advice['message']}")
@@ -178,6 +178,7 @@ def run_sort(
                     working_input,
                     verbose,
                     allow_schema_diff,
+                    advise=not add_bbox_flag and command != "sort hilbert",
                 )
             )
             opened = stack.enter_context(context)

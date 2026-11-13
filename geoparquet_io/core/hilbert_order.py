@@ -264,7 +264,9 @@ def hilbert_order(
         command="sort hilbert",
         label="Hilbert curve",
         effective_version=effective_version,
-        build_query=_hilbert_query,
+        build_query=lambda con, source, geom_col, verbose, working: _hilbert_query(
+            con, source, geom_col, verbose, working, advise=not add_bbox_flag
+        ),
         geometry_column=geometry_column,
         add_bbox_flag=add_bbox_flag,
         verbose=verbose,
@@ -273,7 +275,7 @@ def hilbert_order(
     )
 
 
-def _hilbert_query(con, source, geom_col, verbose, working):
+def _hilbert_query(con, source, geom_col, verbose, working, *, advise=True):
     key_expr = resolve_geometry_read(con, source, geom_col, relation=True).expr
     (empty_count,) = fetch_one(
         con.execute(
@@ -286,7 +288,7 @@ def _hilbert_query(con, source, geom_col, verbose, working):
             "These will be placed at the end of the sorted output."
         )
     bounds = (
-        dataset_bounds(working, geom_col, verbose=verbose)
+        dataset_bounds(working, geom_col, verbose=verbose, advise=advise)
         if working
         else bounds_of(QuerySource(con, f"SELECT * FROM {source}"), geom_col)
     )

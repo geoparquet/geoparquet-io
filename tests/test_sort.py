@@ -49,6 +49,8 @@ class TestSortCommands:
         """Test Hilbert sort on buildings file."""
         runner = CliRunner()
         result = runner.invoke(sort, ["hilbert", buildings_test_file, temp_output_file])
+        assert result.output.count("No bbox column") == 1
+        assert result.output.count("Tip:") == 1
         assert result.exit_code == 0
         assert os.path.exists(temp_output_file)
 
@@ -97,6 +99,8 @@ class TestSortCommands:
         result = runner.invoke(
             sort, ["hilbert", buildings_test_file, temp_output_file, "--add-bbox"]
         )
+        assert "No bbox column" not in result.output
+        assert "Add a bbox column" not in result.output
         assert result.exit_code == 0
         assert os.path.exists(temp_output_file)
 
