@@ -15,7 +15,7 @@ Key abstractions:
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -161,22 +161,27 @@ def _open_file_input(
 
     file_metadata, schema = get_parquet_metadata(path, verbose=verbose)
 
+    lifetime = ExitStack()
     created_connection = con is None
     if created_connection:
         if stream_output:
             from geoparquet_io.core.memory_limits import (
                 _MATERIALIZED_BYTES_PER_THREAD,
-                open_bounded_connection,
+                scoped_bounded_connection,
             )
 
-            con = open_bounded_connection(
-                load_spatial=True,
-                load_httpfs=needs_httpfs(path),
-                preserve_insertion_order=True,
-                per_thread=_MATERIALIZED_BYTES_PER_THREAD,
+            con = lifetime.enter_context(
+                scoped_bounded_connection(
+                    load_spatial=True,
+                    load_httpfs=needs_httpfs(path),
+                    preserve_insertion_order=True,
+                    per_thread=_MATERIALIZED_BYTES_PER_THREAD,
+                )
             )
         else:
-            con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
+            con = lifetime.enter_context(
+                get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
+            )
 
     try:
         source = build_read_parquet_expr(path, allow_schema_diff=allow_schema_diff, verbose=verbose)
@@ -188,7 +193,7 @@ def _open_file_input(
         yield source, file_metadata, False, con
     finally:
         if created_connection:
-            con.close()
+            lifetime.close()
 
 
 def _file_stream_metadata(con, source, path, schema, metadata) -> dict:

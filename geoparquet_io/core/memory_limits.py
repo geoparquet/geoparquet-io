@@ -11,8 +11,10 @@ and the limit collapsed to the 128MB floor (#1153).
 The same rule bounds work that is not a write. :func:`scoped_write_memory_limit`
 wraps one statement on a connection the caller owns, which suits a COPY; the
 aggregate and overview queries instead end in ``.arrow().read_all()``, with no
-statement to wrap, so :func:`open_bounded_connection` applies the rule when the
-connection is *opened* (#1179). Both draw the number from the same place.
+statement to wrap, so :func:`open_bounded_connection` bounds their independent
+connection lifetime (#1179). Sequential eager reads and statistics scans use
+:func:`scoped_bounded_connection` to reuse the process database. All draw the
+number from the same place.
 """
 
 from __future__ import annotations
@@ -291,6 +293,34 @@ def open_bounded_connection(
     return con
 
 
+@contextmanager
+def scoped_bounded_connection(
+    *,
+    memory_limit: str | None = None,
+    load_spatial: bool = True,
+    load_httpfs: bool | None = None,
+    verbose: bool = False,
+    preserve_insertion_order: bool = False,
+    per_thread: int = _BYTES_PER_THREAD,
+) -> Iterator[duckdb.DuckDBPyConnection]:
+    """Bound a sequential read on the process database, restoring settings on exit.
+
+    Like scoped writes, these reads serialize resource changes, not arbitrary
+    statements on sibling cursors. Other readers can observe the active limit.
+    Use open_bounded_connection for an independent, unstructured lifetime or
+    a private spill volume. The bound covers DuckDB buffers, not result RSS.
+    """
+    with get_duckdb_connection(load_spatial=load_spatial, load_httpfs=load_httpfs) as con:
+        with scoped_write_memory_limit(
+            con,
+            memory_limit,
+            verbose,
+            pinned={"preserve_insertion_order": preserve_insertion_order},
+            per_thread=per_thread,
+        ):
+            yield con
+
+
 def _resolve_limit(con: duckdb.DuckDBPyConnection, memory_limit: str | None) -> str | None:
     """The limit to SET for one write, or None to leave the session's in place.
 
@@ -325,6 +355,8 @@ def scoped_write_memory_limit(
     memory_limit: str | None,
     verbose: bool,
     pinned: dict[str, int | bool] | None = None,
+    *,
+    per_thread: int = _BYTES_PER_THREAD,
 ) -> Iterator[None]:
     """Bound one DuckDB write by a memory limit, then restore the session's settings.
 
@@ -349,7 +381,9 @@ def scoped_write_memory_limit(
                 # The cap follows the limit now in force -- the one just SET, or a
                 # stricter one the caller had -- as DuckDB reports it.
                 limit_bytes = parse_size_string(str(_current_setting(con, "memory_limit")))
-                _apply_memory_limit(con, None, _thread_cap(cast(int, limit_bytes)), verbose)
+                _apply_memory_limit(
+                    con, None, _thread_cap(cast(int, limit_bytes), per_thread), verbose
+                )
             with pin_duckdb_settings(con, pinned):
                 yield
         finally:

@@ -152,7 +152,7 @@ def test_derive_v2_geo_metadata_describes_a_native_geography_column(tmp_path):
     assert column["geometry_types"] == ["LineString"]
 
 
-def test_refresh_explicit_primary_overrides_carried_primary(tmp_path):
+def test_refresh_explicit_primary_overrides_carried_primary(tmp_path, monkeypatch):
     import json
 
     import geoarrow.pyarrow as ga
@@ -170,17 +170,55 @@ def test_refresh_explicit_primary_overrides_carried_primary(tmp_path):
         },
     }
     path = tmp_path / "different-primary.parquet"
+    import duckdb
+
+    execute = duckdb.DuckDBPyConnection.execute
+    scans = []
+
+    def observed(con, query, *args, **kwargs):
+        if "read_parquet(" in str(query).lower() and "min(" in str(query).lower():
+            scans.append(query)
+        return execute(con, query, *args, **kwargs)
+
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "execute", observed)
+    for native in (True, False):
+        pq.write_table(
+            pa.table(
+                {
+                    "centroid": (
+                        ga.as_wkb(["POINT (1 2)"]) if native else ga.as_wkb(["POINT (1 2)"]).storage
+                    ),
+                    "geometry": (
+                        ga.as_wkb(["POINT (3 4)"]) if native else ga.as_wkb(["POINT (3 4)"]).storage
+                    ),
+                }
+            ).replace_schema_metadata({b"geo": json.dumps(carried).encode()}),
+            path,
+        )
+        assert json.loads(pq.read_metadata(path).metadata[b"geo"])["primary_column"] == "centroid"
+        scans.clear()
+        refreshed = derive_v2_geo_metadata(str(path), primary_column="geometry", refresh_stats=True)
+        assert len(scans) == (0 if native else 1), "all geometry columns must share one data scan"
+        assert refreshed["primary_column"] == "geometry"
+        assert refreshed["columns"]["centroid"]["bbox"] == [1, 2, 1, 2]
+        assert refreshed["columns"]["geometry"]["bbox"] == [3, 4, 3, 4]
+
+    # Footer-backed columns and scanned columns retain the same JSON key order.
+    from geoparquet_io.core.derive_geo_from_file import written_geo_block
+    from geoparquet_io.core.geo_metadata import GeoBlockOptions
+
+    carried["columns"]["z_native"] = {"encoding": "WKB", "geometry_types": ["Point"]}
     pq.write_table(
         pa.table(
             {
-                "centroid": ga.as_wkb(["POINT (1 2)"]),
-                "geometry": ga.as_wkb(["POINT (3 4)"]),
+                "centroid": ga.as_wkb(["POINT (1 2)"]).storage,
+                "geometry": ga.as_wkb(["POINT (3 4)"]).storage,
+                "z_native": ga.as_wkb(["POINT (5 6)"]),
             }
         ).replace_schema_metadata({b"geo": json.dumps(carried).encode()}),
         path,
     )
-    assert json.loads(pq.read_metadata(path).metadata[b"geo"])["primary_column"] == "centroid"
-    refreshed = derive_v2_geo_metadata(str(path), primary_column="geometry", refresh_stats=True)
-    assert refreshed["primary_column"] == "geometry"
-    assert refreshed["columns"]["centroid"]["bbox"] == [1, 2, 1, 2]
-    assert refreshed["columns"]["geometry"]["bbox"] == [3, 4, 3, 4]
+    block = written_geo_block(
+        str(path), None, GeoBlockOptions(geometry_column="geometry", version="1.1")
+    )
+    assert list(block["columns"]) == ["geometry", "centroid", "z_native"]

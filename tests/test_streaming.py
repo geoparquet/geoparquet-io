@@ -367,7 +367,7 @@ class TestStreamIO:
 
         from geoparquet_io.core.memory_limits import (
             _MATERIALIZED_BYTES_PER_THREAD,
-            open_bounded_connection,
+            scoped_bounded_connection,
         )
         from geoparquet_io.core.stream_io import open_input
 
@@ -378,8 +378,8 @@ class TestStreamIO:
 
         with (
             mock.patch(
-                "geoparquet_io.core.memory_limits.open_bounded_connection",
-                wraps=open_bounded_connection,
+                "geoparquet_io.core.memory_limits.scoped_bounded_connection",
+                wraps=scoped_bounded_connection,
             ) as bounded,
             open_input(str(test_file), stream_output=True) as (source, metadata, is_stream, con),
         ):
@@ -418,13 +418,13 @@ class TestStreamIO:
 
         from geoparquet_io.core.memory_limits import (
             _MATERIALIZED_BYTES_PER_THREAD,
-            open_bounded_connection,
+            scoped_bounded_connection,
         )
 
         with (
             mock.patch(
-                "geoparquet_io.core.memory_limits.open_bounded_connection",
-                wraps=open_bounded_connection,
+                "geoparquet_io.core.memory_limits.scoped_bounded_connection",
+                wraps=scoped_bounded_connection,
             ) as bounded,
             open_input("-") as (source, metadata, is_stream, con),
         ):

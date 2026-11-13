@@ -1825,7 +1825,8 @@ def get_duckdb_connection(
     Defaults and extensions are initialized once on the retained root. TEMP
     objects and Arrow registrations belong to each session. Explicit resource
     limits use a private database for the connection lifetime. Scoped writes
-    serialize resource changes on the shared database. Other readers can observe
+    and scoped_bounded_connection reads serialize resource changes on the shared
+    database, reusing its extension load and restoring settings on exit. Other readers can observe
     the active scoped limits. Persistent catalog changes require isolated=True.
     Explicit temp directories and authenticated S3 credentials are isolated.
 

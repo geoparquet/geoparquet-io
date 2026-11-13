@@ -2305,12 +2305,22 @@ def _geometry_rows_sql(con, query: str, geometry_column: str, bbox_column: str |
     not in the query's output; a query that cannot be bound raises, as it
     would at the write it is measured for.
     """
-    from geoparquet_io.core.geometry_detection import GeometryRead
-
     target = bbox_column or geometry_column
     col_type = dict(describe_query(con, query)).get(target)
     if col_type is None:
         return None
+    type_expr, env, geom = _geometry_stats_columns(target, col_type, bbox_column)
+    return f"""
+        SELECT * FROM (
+            SELECT {type_expr} AS __t, {", ".join(env)}, {geom} AS __g
+            FROM ({query})
+        ) AS __m(__t, __x0, __y0, __x1, __y1, __g)
+    """
+
+
+def _geometry_stats_columns(target, col_type, bbox_column):
+    from geoparquet_io.core.geometry_detection import GeometryRead
+
     quoted = quote_identifier(target)
     if bbox_column is not None:
         type_expr, env = (
@@ -2322,12 +2332,7 @@ def _geometry_rows_sql(con, query: str, geometry_column: str, bbox_column: str |
         read = GeometryRead.for_type(target, col_type)
         type_expr, env = _envelope_columns(read)
         geom = "NULL::GEOMETRY" if read.kind == "geoarrow" else read.shape_expr
-    return f"""
-        SELECT * FROM (
-            SELECT {type_expr} AS __t, {", ".join(env)}, {geom} AS __g
-            FROM ({query})
-        ) AS __m(__t, __x0, __y0, __x1, __y1, __g)
-    """
+    return type_expr, env, geom
 
 
 _FINITE_SQL = _finite_sql("__x0", "__y0", "__x1", "__y1")
@@ -2360,7 +2365,11 @@ def _query_stats(
         FROM ({measured})
         GROUP BY 1
     """).fetchall()
-    if need_bbox and any(r[5] for r in rows):
+    return _stats_from_rows(con, rows, located, geometry_column)
+
+
+def _stats_from_rows(con, rows, located, geometry_column):
+    if any(r[5] for r in rows):
         example = fetch_one(
             con.execute(f"""
             SELECT COALESCE(ST_AsText(__g),
@@ -2381,6 +2390,51 @@ def _query_stats(
         max(r[4] for r in rows),
     ]
     return GeometryStats(bbox, types), located
+
+
+def _query_stats_many(con, query: str, columns: dict[str, bool]) -> dict[str, GeometryStats]:
+    """Measure all requested columns in one projected aggregate over the file."""
+    if len(columns) == 1:
+        name, need_bbox = next(iter(columns.items()))
+        return {name: _query_stats(con, query, name, None, need_bbox)[0]}
+    types = dict(describe_query(con, query))
+    measured, aggregates = [], []
+    for index, (name, need_bbox) in enumerate(columns.items()):
+        type_expr, env, _ = _geometry_stats_columns(name, types[name], None)
+        aliases = [f"__c{index}_{part}" for part in ("t", "x0", "y0", "x1", "y1")]
+        measured.extend(
+            f"{expr} AS {alias}" for expr, alias in zip((type_expr, *env), aliases, strict=True)
+        )
+        t, x0, y0, x1, y1 = aliases
+        located = _located_sql(x0, y0, x1, y1)
+        aggregates.append(f"list(DISTINCT {t})")
+        if need_bbox:
+            aggregates.extend(
+                f"{op}({col}) FILTER (WHERE {located})"
+                for op, col in (("min", x0), ("min", y0), ("max", x1), ("max", y1))
+            )
+            aggregates.append(
+                f"COUNT(*) FILTER (WHERE {located} AND NOT ({_finite_sql(x0, y0, x1, y1)}))"
+            )
+        else:
+            # Geodesic edges cannot be bounded by a planar vertex envelope.
+            aggregates.extend(("NULL", "NULL", "NULL", "NULL", "0"))
+    row = fetch_one(
+        con.execute(
+            f"SELECT {', '.join(aggregates)} FROM (SELECT {', '.join(measured)} FROM ({query}))"
+        )
+    )
+    result = {}
+    for index, name in enumerate(columns):
+        names, *bounds = row[index * 6 : (index + 1) * 6]
+        rows = [(type_, *bounds) for type_ in (names or [])]
+        located = None
+        if bounds[-1]:
+            # Only an error needs the diagnostic query over offending geometries.
+            measured_sql = _geometry_rows_sql(con, query, name, None)
+            located = f"SELECT * FROM ({measured_sql}) WHERE {_located_sql('__x0', '__y0', '__x1', '__y1')}"
+        result[name], _ = _stats_from_rows(con, rows, located, name)
+    return result
 
 
 #: The widest longitude gap between the parts of the located geometries, by a
@@ -2810,7 +2864,7 @@ def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
     from geoparquet_io.core.duckdb_utils import disable_geoparquet_conversion, sql_path
     from geoparquet_io.core.file_utils import resolve_file_url
     from geoparquet_io.core.geometry_detection import primary_geometry_column
-    from geoparquet_io.core.memory_limits import open_bounded_connection
+    from geoparquet_io.core.memory_limits import scoped_bounded_connection
     from geoparquet_io.core.remote import needs_httpfs
 
     path = str(path)
@@ -2827,14 +2881,38 @@ def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
         kwargs["bbox_column"] = None
     # This aggregate retains only distinct types and four bounds. A small
     # analysis budget also caps parallel decompression buffers on large hosts.
-    con = open_bounded_connection(memory_limit="256MB", load_httpfs=needs_httpfs(path))
-    try:
+    with scoped_bounded_connection(memory_limit="256MB", load_httpfs=needs_httpfs(path)) as con:
         # Inspect stored WKB through the guarded geometry reader, including malformed values.
         disable_geoparquet_conversion(con)
         query = f"SELECT * FROM read_parquet({sql_path(resolve_file_url(path, verbose=False))})"
         return _stats(QuerySource(con, query), geometry_column, **kwargs)
-    finally:
-        con.close()
+
+
+def _file_stats_many(path: str, columns: dict[str, bool]) -> dict[str, GeometryStats]:
+    """Footer facts first, then one bounded scan for all incomplete columns.
+
+    Values say whether Cartesian bounds are safe; False requests types only.
+    Spherical footer bounds are handled by the completed-file owner first.
+    """
+    from geoparquet_io.core.duckdb_utils import disable_geoparquet_conversion, sql_path
+    from geoparquet_io.core.file_utils import resolve_file_url
+    from geoparquet_io.core.memory_limits import scoped_bounded_connection
+    from geoparquet_io.core.remote import needs_httpfs
+
+    result = {}
+    pending = {}
+    for name, need_bbox in columns.items():
+        footer = _footer_stats(path, name, None, need_bbox=need_bbox)
+        if footer is None:
+            pending[name] = need_bbox
+        else:
+            result[name] = footer if need_bbox else GeometryStats(None, footer.geometry_types)
+    if pending:
+        with scoped_bounded_connection(memory_limit="256MB", load_httpfs=needs_httpfs(path)) as con:
+            disable_geoparquet_conversion(con)
+            query = f"SELECT * FROM read_parquet({sql_path(resolve_file_url(path, verbose=False))})"
+            result.update(_query_stats_many(con, query, pending))
+    return result
 
 
 def geometry_stats_of(

@@ -311,6 +311,22 @@ def test_file_scan_bounds_working_memory_at_the_owner(tmp_path, monkeypatch):
         assert parse_size_string(limit) <= 256 * 1024 * 1024
         assert not preserve_order
 
+    # The batched path shares the same empty, NULL, EMPTY and non-finite policy.
+    for case, (geoms, bbox, types, _) in CASES.items():
+        table = _table(geoms)
+        table = table.append_column('secondary "geometry', table.column("geometry"))
+        multi = tmp_path / f"{case}.parquet"
+        pq.write_table(table, multi)
+        measured = owner._file_stats_many(
+            str(multi), {"geometry": True, 'secondary "geometry': False}
+        )
+        assert measured["geometry"] == GeometryStats(bbox, types)
+        assert measured['secondary "geometry'] == GeometryStats(None, types)
+    bad = _table([_pt(INF, 2)]).append_column("secondary", pa.array([_pt(1, 2)]))
+    pq.write_table(bad, multi)
+    with pytest.raises(GeometryError, match="geometry"):
+        owner._file_stats_many(str(multi), {"geometry": True, "secondary": True})
+
 
 @pytest.mark.parametrize(
     "source", ["s3://bucket/year=2024/data.parquet", "s3://bucket/year=*/data.parquet"]

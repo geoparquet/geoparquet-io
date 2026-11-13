@@ -43,12 +43,10 @@ from geoparquet_io.core.edges import (
 from geoparquet_io.core.geo_metadata import (
     KEEP_CRS,
     GeoBlockOptions,
-    GeometryStats,
     SchemaSource,
     _file_footer_stats,
+    _file_stats_many,
     compose_geo_block,
-    geometry_stats_of,
-    geometry_types_of,
     read_raw_geo,
     row_group_geometry_stats,
     sanitized_carried_geo,
@@ -317,6 +315,7 @@ def written_geo_block(path: str, metadata: dict | None, options: GeoBlockOptions
         *((options.geometry_info or {}).get("secondary") or []),
     }
     stats = {}
+    pending = {}
     for name in sorted(names & set(schema.names)):
         field = schema.field(name)
         geographic = is_nonplanar(
@@ -328,16 +327,14 @@ def written_geo_block(path: str, metadata: dict | None, options: GeoBlockOptions
             else None
         )
         if measured is None:
-            if geographic:
-                # Vertex envelopes cannot bound geodesic edges. Keep types,
-                # but omit the optional bbox without complete spherical stats.
-                measured = GeometryStats(None, geometry_types_of(path, name))
-            else:
-                measured = geometry_stats_of(path, name)
+            pending[name] = not geographic
+        else:
+            stats[name] = {"bbox": measured.bbox, "geometry_types": measured.geometry_types}
+    for name, measured in _file_stats_many(path, pending).items():
         stats[name] = {"bbox": measured.bbox, "geometry_types": measured.geometry_types}
     options = replace(
         options,
-        stats=stats,
+        stats=dict(sorted(stats.items())),
         encoding=(written.get("columns") or {}).get(primary, {}).get("encoding"),
     )
     return compose_geo_block(SchemaSource(schema, metadata), options)

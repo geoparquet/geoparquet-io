@@ -11,12 +11,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import duckdb
 import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.decorators import parse_row_group_options
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core import memory_limits
 from geoparquet_io.core.duckdb_utils import fetch_one
 from geoparquet_io.core.parquet_writer import (
     align_to_writer_vector,
@@ -214,13 +214,14 @@ def test_min_size_no_match_reports_the_threshold_given(one_and_a_half_mb_dir):
 def _limits_seen_by_writes(monkeypatch) -> list[str]:
     """The memory_limit DuckDB reports while each scoped write runs."""
     seen: list[str] = []
-    original = memory_limits.restore_duckdb_settings
+    original = duckdb.DuckDBPyConnection.execute
 
-    def recording(con, saved, verbose=False):
-        seen.append(fetch_one(con.execute("SELECT current_setting('memory_limit')"))[0])
-        return original(con, saved, verbose)
+    def recording(con, query, *args, **kwargs):
+        if str(query).lstrip().upper().startswith("COPY "):
+            seen.append(fetch_one(original(con, "SELECT current_setting('memory_limit')"))[0])
+        return original(con, query, *args, **kwargs)
 
-    monkeypatch.setattr(memory_limits, "restore_duckdb_settings", recording)
+    monkeypatch.setattr(duckdb.DuckDBPyConnection, "execute", recording)
     return seen
 
 
