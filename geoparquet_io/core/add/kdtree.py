@@ -493,6 +493,7 @@ def add_kdtree_column(
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB')
+        report: Report completion; nested repairs report after final publication.
     """
     configure_verbose(verbose)
 

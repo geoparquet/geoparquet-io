@@ -334,6 +334,8 @@ def hilbert_order(
     geoparquet_version: str | None = None,
     overwrite: bool = False,
     memory_limit: str | None = None,
+    *,
+    report: bool = True,
 ) -> None:
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
@@ -402,10 +404,11 @@ def hilbert_order(
         overwrite,
     )
 
-    if reordered:
-        success(f"Successfully reordered data using Hilbert curve to: {output_parquet}")
-    else:
-        success(f"Wrote data without Hilbert ordering to: {output_parquet}")
+    if report:
+        if reordered:
+            success(f"Successfully reordered data using Hilbert curve to: {output_parquet}")
+        else:
+            success(f"Wrote data without Hilbert ordering to: {output_parquet}")
 
 
 def _hilbert_order_streaming(
@@ -626,8 +629,6 @@ def _hilbert_order_file_based(
             if verbose:
                 debug("Hilbert ordering completed successfully")
 
-            if verbose:
-                debug(f"Successfully wrote ordered data to: {output_parquet}")
         except duckdb.IOException as e:
             con.close()
             if is_remote_url(input_parquet):

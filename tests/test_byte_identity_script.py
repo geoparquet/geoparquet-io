@@ -305,6 +305,18 @@ for name in ("bbox", "all", "compression", "row-group", "spatial"):
             )
         )
 
+for name in ("all", "spatial"):
+    for inplace in (False, True):
+        CASES.append(
+            matrix.Case(
+                f"check_{name}_rewrite_{'inplace' if inplace else 'output'}",
+                ("check", name, "{in}", "--fix") + (() if inplace else ("--fix-output", "{out}")),
+                ("shuffled.parquet",),
+                "out.parquet",
+                inplace=inplace,
+            )
+        )
+
 
 @pytest.fixture(scope="module")
 def write_message_side(tmp_path_factory):
@@ -330,6 +342,9 @@ def write_message_side(tmp_path_factory):
         table.append_column("category", pa.array(["one"] * table.num_rows)),
         side.inputs / "messages.parquet",
     )
+    shuffled = pa.concat_tables([table] * 4)
+    shuffled = shuffled.take(pa.array(np.random.default_rng(42).permutation(shuffled.num_rows)))
+    pq.write_table(shuffled, side.inputs / "shuffled.parquet", row_group_size=64)
     return side
 
 
