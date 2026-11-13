@@ -7,7 +7,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3, init_group_context
+from geoparquet_io.cli._shared import activate_remote, init_group_context
 from geoparquet_io.cli.decorators import (
     DEFAULT_KDTREE_APPROX,
     DEFAULT_KDTREE_TARGET_ROWS,
@@ -139,7 +139,7 @@ def partition_admin(
     Requires internet connection. Input data must have valid geometries in WGS84 or
     compatible CRS.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         # If preview mode, output_folder is not required
         if not preview and not output_folder:
             raise click.UsageError("OUTPUT_FOLDER is required unless using --preview")
@@ -228,7 +228,7 @@ def partition_string(
         # Use Hive-style partitioning
         gpio partition string input.parquet output/ --column region --hive
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         from geoparquet_io.core.streaming import StreamingError
 
         # If preview mode, output_folder is not required
@@ -744,7 +744,7 @@ def partition_kdtree(
         # Partition with custom sample size
         gpio partition kdtree input.parquet output/ --approx 200000
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         iterations, sample_size, auto_target = resolve_kdtree_options(
             partitions, auto, approx, exact, ctx.get_parameter_source("approx")
         )
@@ -967,7 +967,7 @@ def _partition_cell_index(
     # A directory run writes each partition with the codec only (its row groups
     # and memory are the defaults), as it always has.
     codec = WriteOptions(compression=write.compression, compression_level=write.compression_level)
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         # Handle directory input with --min-size
         if handle_directory_sub_partition(
             input_parquet=input_parquet,

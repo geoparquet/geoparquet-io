@@ -34,6 +34,7 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
+from geoparquet_io.core.geometry_repair import warn_planar_math_for_file
 from geoparquet_io.core.index_ops import get_index_spec, load_index
 from geoparquet_io.core.logging_config import configure_verbose, debug, success
 from geoparquet_io.core.logging_config import info as log_info
@@ -298,6 +299,11 @@ def create_overviews(
     """
     compression_level = resolve_codec(compression, compression_level, context="process").level
     configure_verbose(verbose)
+    # The rollup is planar: cell geometries are unioned and centroided on the
+    # plane. It still runs on a non-planar input -- the answer is the planar
+    # one -- but it says so now, through the same guard every other planar
+    # operation goes through (#1289); only aggregate and simplify announced it.
+    warn_planar_math_for_file("overview", input_parquet)
     with aggregate_connection(input_parquet, verbose, memory_limit) as (con, relation):
         info = detect_aggregate_info(con, relation, cell_column, scheme)
         target_levels = _plan_levels(

@@ -758,6 +758,14 @@ NOT_TABLE_IN_TABLE_OUT: dict[str, str] = {
     # the CLI by the call-parity scaffold's `pmtiles create`/`pmtiles pyramid`.
     "create_pmtiles": "PMTiles out through tippecanoe; call parity in the scaffold",
     "create_pmtiles_pyramid": "banded PMTiles out; call parity in the scaffold",
+    # The two names #1436 collapsed onto one canonical spelling each. Both legs
+    # now enter the shared surface, and neither is a table-in/table-out core call.
+    "from_bigquery": "reader: fetches a BigQuery table or query, so there is no input "
+    "table; call parity in the scaffold's `extract bigquery` case",
+    "create_overviews": "the ops door writes one GeoParquet sibling per coarser level "
+    "and the Table door returns the single level it can hold in memory, so there is no "
+    "shared in-memory core call; call parity in the scaffold's `process overview` case, "
+    "and the rollup itself in tests/test_process_overview.py",
 }
 
 
@@ -839,8 +847,6 @@ OPS_ONLY_SURFACE: dict[str, str] = {
     "create_overview_file": "file in, one levelled overview GeoParquet out: the whole "
     "point is the on-disk row-group layout the format requires, which a table "
     "handed back in memory cannot carry",
-    "create_overviews": "`Table.overview` <-> `ops.create_overviews`, differently spelled "
-    "twin: the method rolls one level in memory, the function writes a whole pyramid",
     "from_arcgis": "reader: fetches a service over the network, no input table",
     "from_carto": "reader: fetches a service over the network, no input table",
     "from_wfs_layers": "reader: writes many layers to a directory, so there is no single "
@@ -850,7 +856,8 @@ OPS_ONLY_SURFACE: dict[str, str] = {
     "get_row_group_geo_stats": "inspection helper: reads row-group stats off a path",
     "preview_bbox_filter": "inspection helper: previews a bbox read off a path's "
     "row-group statistics before anything is read; there is no table on either end",
-    "read_bigquery": "`Table.from_bigquery` <-> `ops.read_bigquery`, differently spelled twin",
+    "read_bigquery": "deprecated alias of `ops.from_bigquery` (#1436), kept importable for "
+    "one minor release; `Table` never carried the old spelling",
     # Directory sub-partitioning (#853) is deliberately `Table`-twin-less: the
     # unit of work is a directory of files on disk, splitting each oversized one
     # into a sibling tree -- there is no in-memory table on either end to wrap.
@@ -872,11 +879,11 @@ TABLE_ONLY_SURFACE: dict[str, str] = {
     "check_spatial_pushdown": "returns a CheckResult, not a table",
     "fix": "repairs the file the Table measures: the checks it acts on are file facts, "
     "and the file-level repair is `gpio check <cmd> --fix`",
-    "from_bigquery": "`Table.from_bigquery` <-> `ops.read_bigquery`, differently spelled twin",
     "head": "row preview off the wrapped table; `ops` callers can slice the pa.Table",
     "info": "prints a summary of the wrapped table",
     "metadata": "reads metadata off the wrapped table",
-    "overview": "`Table.overview` <-> `ops.create_overviews`, differently spelled twin",
+    "overview": "deprecated alias of `Table.create_overviews` (#1436), kept for one minor "
+    "release; `ops` never carried the old spelling",
     "stats": "computes statistics on the wrapped table",
     "tail": "row preview off the wrapped table; `ops` callers can slice the pa.Table",
     "to_arrow": "exit door of the fluent API; `ops` already speaks pa.Table",
@@ -1062,8 +1069,11 @@ class TestFrontDoorDelegation:
         `_shared_front_door_surface` is an *intersection*, so the guard above
         cannot see a one-sided name: a new `ops.add_foo` with no `Table` twin
         never enters it, and neither does a twin the two doors spell differently
-        (`Table.from_bigquery`/`ops.read_bigquery` and two more). Pinning both
-        one-sided sets makes every such name an explicit decision.
+        (`Table.to_geojson`/`ops.convert_to_geojson`, the one such pair left once
+        #1436 collapsed the other two). Pinning both one-sided sets makes every
+        such name an explicit decision -- and in the parity census,
+        `test_table_and_ops_twins_share_one_name` fails a *new* differently
+        spelled pair unless its reason is recorded in `TWIN_NAMES`.
         """
         ops_public = _ops_public_surface()
         table_public = _table_public_surface()
@@ -1463,19 +1473,25 @@ class TestTableUpload:
             assert call_args.kwargs["destination"] == "s3://test-bucket/test.parquet"
 
     def test_upload_with_s3_endpoint(self, sample_table):
-        """Test upload() with custom S3 endpoint."""
+        """Test upload() with custom S3 endpoint.
+
+        The endpoint travels as one ``RemoteOptions`` since #1436; the
+        deprecated per-keyword spelling still reaches it.
+        """
+        import geoparquet_io as gpio
+
         with patch("geoparquet_io.core.upload.upload") as mock_upload:
             mock_upload.return_value = None
 
             sample_table.upload(
                 "s3://test-bucket/test.parquet",
-                s3_endpoint="minio.example.com:9000",
-                s3_use_ssl=False,
+                remote=gpio.RemoteOptions(s3_endpoint="minio.example.com:9000", s3_use_ssl=False),
             )
 
             call_args = mock_upload.call_args
-            assert call_args.kwargs["s3_endpoint"] == "minio.example.com:9000"
-            assert call_args.kwargs["s3_use_ssl"] is False
+            assert call_args.kwargs["remote"] == gpio.RemoteOptions(
+                s3_endpoint="minio.example.com:9000", s3_use_ssl=False
+            )
 
     def test_upload_cleans_up_temp_file(self, sample_table):
         """Test that upload() cleans up temp file even on error."""

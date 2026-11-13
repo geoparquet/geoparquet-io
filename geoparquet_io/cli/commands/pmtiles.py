@@ -9,9 +9,9 @@ import click
 
 from geoparquet_io.cli.decorators import (
     SingleFileCommand,
-    aws_profile_option,
     column_list_option,
     overwrite_option,
+    remote_options,
     repair_geometry_option,
     verbose_option,
     write_memory_option,
@@ -123,7 +123,7 @@ def pmtiles(ctx):
 )
 @repair_geometry_option
 @verbose_option
-@aws_profile_option
+@remote_options
 def pmtiles_create(
     input_file,
     output_file,
@@ -137,7 +137,7 @@ def pmtiles_create(
     src_crs,
     attribution,
     verbose,
-    aws_profile,
+    remote,
     layer_by_column,
     simplify_only_low_zooms,
     no_simplification_of_shared_nodes,
@@ -184,7 +184,7 @@ def pmtiles_create(
             include_cols=include_cols,
             precision=precision,
             verbose=verbose,
-            profile=aws_profile,
+            profile=remote.profile,
             src_crs=src_crs,
             attribution=attribution,
             layer_by_column=layer_by_column,

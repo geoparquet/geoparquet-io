@@ -448,7 +448,7 @@ def reproject_impl(
 
     write = write or WriteOptions()
     # Validate profile usage
-    validate_profile_for_urls(write.profile, input_parquet, output_parquet)
+    validate_profile_for_urls(write.remote.profile, input_parquet, output_parquet)
 
     # Resolve an unknown CRS before DuckDB reads the file: raise a friendly
     # error without --src-crs or --assume-crs84, or sanitize to a temp copy with
@@ -606,7 +606,7 @@ def reproject_impl(
                     upload_if_remote(
                         actual_output,
                         str(out_path),
-                        profile=write.profile,
+                        profile=write.remote.profile,
                         is_directory=False,
                         verbose=verbose,
                     )

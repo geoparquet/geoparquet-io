@@ -125,7 +125,11 @@ geoparquet_io/
    auto-mode output version (`resolve_output_geoparquet_version`), and whether a
    `geo` key is written at all (`apply_output_kv_metadata`). A new write path
    calls those; it must not re-derive a row-group number, re-implement auto
-   version detection, or copy a table's schema metadata through verbatim.
+   version detection, or copy a table's schema metadata through verbatim. A
+   path that cuts its own row groups also calls
+   `write_funnels.ensure_located_row_groups` once the file is written, so no
+   group holds only null or empty geometry while the file has located rows
+   (#1146) — both funnels and `process simplify`'s streamed pass do.
 6. **One memory policy**: `core/memory_limits.py` owns the cgroup-aware memory
    ceiling and the share of it DuckDB gets (`default_memory_limit`, 50%).
    `get_duckdb_connection` applies that default to every connection, so work
@@ -295,21 +299,22 @@ copies or compatibility wrappers. The guard set is in ADR-0008 and
 
 | Concept | Owner module | Public entry points |
 |---|---|---|
-| Final Parquet write policy | `geoparquet_io/core/parquet_writer.py`, `geoparquet_io/core/write_funnels.py`, `geoparquet_io/core/compression.py` | `WriteOptions`, `resolve_output_geoparquet_version`, `resolve_row_group_rows`, `resolve_codec`, `write_parquet_with_metadata`, `write_geoparquet_table` |
+| Final Parquet write policy | `geoparquet_io/core/parquet_writer.py`, `geoparquet_io/core/write_funnels.py`, `geoparquet_io/core/compression.py` | `WriteOptions`, `resolve_output_geoparquet_version`, `resolve_row_group_rows`, `resolve_codec`, `write_parquet_with_metadata`, `write_geoparquet_table`, `located_row_group_layout`, `ensure_located_row_groups` |
 | Footer patch or rewrite | `geoparquet_io/core/parquet_footer.py` | `patch_or_rewrite` |
 | Geo block decoding | `geoparquet_io/core/geo_metadata.py` | `read_raw_geo`, `sanitized_carried_geo`, `declared_version` |
 | Geo block composition and covering | `geoparquet_io/core/geo_metadata.py`, `geoparquet_io/core/bbox_structure.py` | `compose_geo_block`, `GeoBlockOptions`, `build_bbox_covering`, `bbox_struct_child_names_match`, `covering_bbox_refs` |
 | Geometry statistics and bounds | `geoparquet_io/core/geo_metadata.py` | `geometry_stats_of`, `bounds_of`, `geometry_types_of`, `merged_geometry_stats`, `bbox_xy` |
-| Non-planar edges | `geoparquet_io/core/edges.py` | `detect_edges`, `edges_for_version`, `carry_edges`, `representative_point_sql`, `geoarrow_type_edges` |
+| Non-planar edges | `geoparquet_io/core/edges.py`, `geoparquet_io/core/geometry_repair.py` | `detect_edges`, `edges_for_version`, `carry_edges`, `representative_point_sql`, `geoarrow_type_edges`, `require_planar_export`, `require_planar_export_file` |
 | Geometry identity and read expressions | `geoparquet_io/core/geometry_detection.py` | `primary_geometry_column`, `resolve_geometry_column`, `resolve_geometry_read`, `require_geometry_column`, `create_geometry_view` |
 | CRS | `geoparquet_io/core/crs_utils.py` | `crs_of`, `is_geographic`, `is_projected`, `crs_equal`, `projjson_for_label`, `load_crs` |
 | Memory ceilings and byte sizes | `geoparquet_io/core/memory_limits.py`, `geoparquet_io/core/sizing.py` | `open_bounded_connection`, `scoped_write_memory_limit`, `parse_size_string`, `format_size`, `format_memory_limit`, `mb_to_bytes` |
 | SQL escaping and native type probes | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `sql_literal`, `sql_path`, `quote_identifier`, `native_geo_type`, `is_native_geo_column` |
-| Paths, overwrite and staging | `geoparquet_io/core/remote.py`, `geoparquet_io/core/file_utils.py` | `is_remote_url`, `has_glob_pattern`, `is_partition_path`, `handle_output_overwrite`, `atomic_write`, `scratch_file`, `scratch_path`, `scratch_dir` |
+| Paths, remote access, overwrite and staging | `geoparquet_io/core/remote.py`, `geoparquet_io/core/file_utils.py` | `RemoteOptions`, `remote_options_from_keywords`, `is_remote_url`, `has_glob_pattern`, `is_partition_path`, `handle_output_overwrite`, `atomic_write`, `scratch_file`, `scratch_path`, `scratch_dir` |
 | Column-name resolution | `geoparquet_io/core/column_selection.py` | `fold`, `find_column`, `matching_columns`, `unique_name`, `exclude_columns`, `resolve_columns_against_schema` |
 | Index add and partition workflows | `geoparquet_io/core/index_ops.py` | `IndexSpec`, `add_index_column`, `ensure_index_column`, `index_expression`, `index_point` |
 | HTTP retries | `geoparquet_io/core/http_retry.py` | `make_request_with_retry`, `run_with_retry`, `retry_wait`, `parse_retry_after` |
 | CLI options and report formatting | `geoparquet_io/cli/decorators.py`, `geoparquet_io/core/bbox_parse.py`, `geoparquet_io/core/json_output.py`, `geoparquet_io/cli/commands/check.py` | `overwrite_option`, `refuse_together`, `parse_bbox`, `BBox`, `dumps_json`, `MultiFileCheckRunner` |
+| What a check looks at and what its fix writes | `geoparquet_io/core/check_options.py` | `CheckOptions`, `check_options_from_keywords`, `FIXABLE_CHECKS` |
 | Spatial joins | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/admin_datasets.py` | `build_spatial_join_condition`, `build_spatial_join_query`, `build_admin_subquery`, `admin_match_order` |
 | Query schema and row-group statistics | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `query_schema`, `describe_query`, `get_row_group_bbox_stats`, `get_row_group_sizes` |
 | Error classification and CLI translation | `geoparquet_io/core/exceptions.py`, `geoparquet_io/cli/exception_handler.py` | `classify_failure`, `redact_credentials`, `status_message`, `error_boundary` |

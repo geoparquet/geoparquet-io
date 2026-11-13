@@ -292,6 +292,12 @@ ignore_missing_imports = true
 # These suppress errors in complex modules until they are incrementally fixed.
 # TODO: Remove overrides as type annotations are added to each module.
 #
+# The public Python API -- `api.table`, `api.ops`, `api.check` -- is NOT on this
+# list and must not go back on it: it is the surface the py.typed marker
+# promises, and tests/test_mypy.py type-checks a consumer's module against the
+# installed package to prove the promise holds. Typing the core modules behind
+# it is #1012.
+#
 # `arrow_geo_metadata`, `derive_geo_from_file` and `write_funnels` were carved out
 # of `geoparquet_io.core.common`, which is on this list: their errors were always
 # suppressed, by their old address. Listing them relocates that suppression
@@ -302,12 +308,9 @@ ignore_missing_imports = true
 # `int | None`), not annotation noise.
 [[tool.mypy.overrides]]
 module = [
-    "geoparquet_io.api.check",
     "geoparquet_io.core.arrow_geo_metadata",
     "geoparquet_io.core.derive_geo_from_file",
     "geoparquet_io.core.write_funnels",
-    "geoparquet_io.api.ops",
-    "geoparquet_io.api.table",
     "geoparquet_io.benchmarks.profile_report",
     "geoparquet_io.cli.decorators",
     "geoparquet_io.core.add.a5",

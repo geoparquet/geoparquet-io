@@ -45,12 +45,14 @@ def init_group_context(ctx: click.Context) -> None:
     setup_cli_logging(verbose=False, show_timestamps=ctx.obj.get("timestamps", False))
 
 
-@contextmanager
-def _activate_s3(ctx, aws_profile=None, s3_endpoint=None, s3_region=None, s3_no_ssl=False):
-    """Resolve and activate S3 config from ctx + per-command overrides.
+#: The root ``gpio`` group's remote-access flags, as ``cli/main.py`` stores them in
+#: ``ctx.obj``. This is the only module that reads them back, so the root options
+#: and a command's own are layered in exactly one place (#1436).
+_ROOT_REMOTE_KEYS = ("aws_profile", "s3_endpoint", "s3_region", "s3_no_ssl")
 
-    The profile travels in the ambient S3 config, never in ``os.environ``, so
-    DuckDB and obstore read it explicitly and nothing leaks past the scope (#1055).
+
+def root_remote_options(ctx):
+    """The root ``gpio`` group's ``--aws-profile``/``--s3-*`` as one ``RemoteOptions``.
 
     ``ctx.obj`` is primed here rather than relied upon. The root ``gpio`` group
     fills it, so every real CLI path already arrives with a dict -- but a group
@@ -60,17 +62,29 @@ def _activate_s3(ctx, aws_profile=None, s3_endpoint=None, s3_region=None, s3_no_
     Enforcing the precondition in the one helper that has it keeps every group
     correct, instead of depending on each group callback to remember.
     """
-    from geoparquet_io.core.duckdb_utils import s3_config_scope
-    from geoparquet_io.core.remote import resolve_s3_config
+    from geoparquet_io.core.remote import RemoteOptions
 
     ctx.ensure_object(dict)
-    config = resolve_s3_config(
-        s3_endpoint=s3_endpoint or ctx.obj.get("s3_endpoint"),
-        s3_region=s3_region or ctx.obj.get("s3_region"),
-        s3_no_ssl=s3_no_ssl or ctx.obj.get("s3_no_ssl", False),
-        aws_profile=aws_profile or ctx.obj.get("aws_profile"),
-    )
-    with s3_config_scope(config):
+    return RemoteOptions.from_cli(**{key: ctx.obj.get(key) for key in _ROOT_REMOTE_KEYS})
+
+
+@contextmanager
+def activate_remote(ctx, remote=None):
+    """Activate the root group's remote access with *remote*'s own asks on top.
+
+    The one place the two layers meet (#1436): the root ``gpio`` group's
+    ``--aws-profile``/``--s3-endpoint``/``--s3-region``/``--s3-no-ssl`` are the
+    base, and the ``RemoteOptions`` a command's own flags were packed into
+    (``cli.decorators.pack_remote_options``) wins field by field. A command
+    with no remote flags of its own passes nothing.
+
+    Yields the resolved S3 config dict, for a caller that has to hand the
+    individual values to a non-DuckDB client (obstore, in ``upload``).
+
+    The profile travels in the ambient S3 config, never in ``os.environ``, so
+    DuckDB and obstore read it explicitly and nothing leaks past the scope (#1055).
+    """
+    with root_remote_options(ctx).merge(remote).activate() as config:
         yield config
 
 

@@ -12,6 +12,7 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,16 +24,23 @@ from geoparquet_io.core.crs_utils import (
     is_unknown_type_crs,
 )
 from geoparquet_io.core.duckdb_utils import (
+    _get_query_column_type,
     describe_query,
     duckdb_type_is_geometry,
     quote_identifier,
     sql_literal,
 )
 from geoparquet_io.core.geo_metadata import (
+    GEOARROW_ENCODINGS,
     GEOPARQUET_VERSIONS,
     NATIVE_GEOMETRY_VERSIONS,
+    geoarrow_geometry_types,
+    geoarrow_primary_encoding,
     read_raw_geo,
+    sanitized_carried_geo,
 )
+from geoparquet_io.core.geoarrow_encoding import WKB_EXTENSION_NAMES, arrow_extension_name
+from geoparquet_io.core.geometry_detection import GeometryRead
 from geoparquet_io.core.parquet_writer import carried_geoparquet_version
 
 if TYPE_CHECKING:
@@ -167,6 +175,105 @@ def wrap_query_with_secondary_crs(
     if not replacements:
         return query
     return f"SELECT * REPLACE ({', '.join(replacements)}) FROM ({query})"
+
+
+def wkb_export_query(con, query: str, geometry_column: str | None) -> str:
+    """``query`` with ``geometry_column`` exported as WKB, unless it has none to export.
+
+    DuckDB's Arrow export hands a GEOMETRY over in its own format, so a write
+    that crosses into Arrow converts it with ``ST_AsWKB``
+    (``duckdb_utils._wrap_query_with_wkb_conversion``). Only a column the owner
+    reads as a GEOMETRY type has one to convert: a GeoArrow coordinate struct
+    crosses as itself, ``ST_AsWKB`` does not take one, and handing it over
+    anyway was a binder error on every native input (#1438). The same decision
+    duckdb-kv makes about ``ST_GeomFromWKB`` in the other direction (#1437).
+    """
+    from geoparquet_io.core.duckdb_utils import _wrap_query_with_wkb_conversion
+
+    if not geometry_column:
+        return query
+    col_type = dict(describe_query(con, query)).get(geometry_column)
+    if GeometryRead.for_type(geometry_column, col_type).kind == "geoarrow":
+        return query
+    return _wrap_query_with_wkb_conversion(query, geometry_column)
+
+
+def query_geoarrow_encoding(
+    con,
+    query: str,
+    geometry_column: str | None,
+    *,
+    metadata: Mapping | None = None,
+    geometry_info: dict | None = None,
+) -> str | None:
+    """The native GeoArrow encoding the query's geometry column holds, else None.
+
+    Two witnesses, and both are needed. The owner's read kind
+    (``GeometryRead.kind``) says *whether* the column is a coordinate struct --
+    DESCRIBE alone, no scan: ``STRUCT(x DOUBLE, y DOUBLE)[][]`` for a polygon is
+    ``geoarrow``, while GEOMETRY, BLOB, VARCHAR and any other nested shape are
+    not (#1176, #1367). It cannot say *which* of the six encodings it is, since
+    ``multipoint`` and ``linestring`` are both ``STRUCT(x, y)[]``; the input's
+    own declaration answers that -- ``convert``'s ``geometry_info``, else the
+    carried ``geo`` block, else the ambiguous depth reading as a last resort.
+    """
+    if not geometry_column:
+        return None
+    col_type = _get_query_column_type(con, query, geometry_column)
+    read = GeometryRead.for_type(geometry_column, col_type)
+    if read.kind != "geoarrow":
+        return None
+    declared = (((geometry_info or {}).get("metadata") or {}).get(geometry_column) or {}).get(
+        "encoding"
+    )
+    if declared and declared.lower() in GEOARROW_ENCODINGS:
+        return declared.lower()
+    return geoarrow_primary_encoding(sanitized_carried_geo(metadata)) or read.geoarrow_encoding
+
+
+def geoarrow_encoding_of(
+    schema: pa.Schema, geometry_column: str | None, carried_geo: dict | None
+) -> str | None:
+    """The native GeoArrow encoding ``geometry_column`` holds in ``schema``, else None.
+
+    Two witnesses, as on the query side (``write_funnels._query_geoarrow_encoding``).
+    ``carried_geo`` -- read before any pass that may drop the ``geo`` key -- names
+    which of the six encodings the column is, because the Arrow type cannot:
+    ``multipoint`` and ``linestring`` are both ``list<struct<x, y>>``. The type
+    says whether the column really holds a coordinate struct, so a stale
+    declaration over WKB bytes (what a transform leaves behind) does not make a
+    write pass them through as native (#1438).
+    """
+    if not geometry_column or geometry_column not in schema.names:
+        return None
+    field = schema.field(geometry_column)
+    declared = geoarrow_primary_encoding(carried_geo) or ""
+    name = arrow_extension_name(field) or ""
+    if name.startswith("geoarrow.") and name not in WKB_EXTENSION_NAMES:
+        declared = declared or name.removeprefix("geoarrow.")
+    return declared if geoarrow_geometry_types(declared, field.type) else None
+
+
+def with_declared_primary_encoding(
+    geometry_info: dict | None, geometry_column: str | None, encoding: str | None
+) -> dict | None:
+    """``geometry_info`` naming ``encoding`` as the primary column's, for the composer.
+
+    At 1.1-geoarrow the primary passes through untouched, so the encoding the
+    write produces is the one the input declares. The composer reads it from
+    ``geometry_info`` (``geo_metadata._primary_encoding``, step 3) because the
+    carried block reaching a write has had its step keys stripped; without it
+    the block said ``WKB`` over a coordinate struct (#1437, #1438).
+    """
+    if not encoding or not geometry_column:
+        return geometry_info
+    info = geometry_info or {"secondary": [], "metadata": {}}
+    declared = (info.get("metadata") or {}).get(geometry_column) or {}
+    metadata = {
+        **(info.get("metadata") or {}),
+        geometry_column: {**declared, "encoding": encoding},
+    }
+    return {**info, "primary": geometry_column, "metadata": metadata}
 
 
 def written_block_encoding(geoparquet_version: str) -> str | None:

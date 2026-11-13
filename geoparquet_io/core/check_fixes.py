@@ -42,7 +42,7 @@ from geoparquet_io.core.parquet_writer import (
     resolve_output_geoparquet_version,
     resolve_row_group_rows_for_rewrite,
 )
-from geoparquet_io.core.remote import is_remote_url
+from geoparquet_io.core.remote import RemoteOptions, is_remote_url
 from geoparquet_io.core.write_funnels import (
     rewrite_file_through_funnel,
     rewrite_footer_kv,
@@ -252,7 +252,9 @@ def fix_bboxless_cover(parquet_file, output_file, verbose=False, profile=None):
         {"geo": geo_key_value(repaired)},
         output_file=output_file,
         rewrite=functools.partial(
-            rewrite_footer_kv, write=WriteOptions(profile=profile), verbose=verbose
+            rewrite_footer_kv,
+            write=WriteOptions(remote=RemoteOptions(profile=profile)),
+            verbose=verbose,
         ),
         verbose=verbose,
     )

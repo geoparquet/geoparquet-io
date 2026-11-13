@@ -7,7 +7,7 @@ dependency runs one way, ``main`` -> ``commands`` -> ``_shared``/``decorators``.
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3, init_group_context, prepare_output
+from geoparquet_io.cli._shared import activate_remote, init_group_context, prepare_output
 from geoparquet_io.cli.decorators import (
     DEFAULT_KDTREE_APPROX,
     DEFAULT_KDTREE_TARGET_ROWS,
@@ -447,7 +447,7 @@ def add_bbox(
         # Force replace existing bbox
         gpio add bbox input.parquet output.parquet --force
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         prepare_output(output_parquet, any_extension)
 
         try:
@@ -493,7 +493,7 @@ def add_bbox_metadata_cmd(ctx, parquet_file, bbox_name, verbose):
 
     If you need to add both the bbox column and metadata, use 'add bbox' instead.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         from geoparquet_io.core.remote import validate_profile_for_urls
 
         # Validate profile is only used with S3
@@ -547,7 +547,7 @@ def add_stac_metadata_cmd(
     footer that cannot be patched falls back, with a warning, to a rewrite at
     gpio's default codec and row groups.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         add_stac_metadata_impl(
             input_parquet,
             collection,
@@ -603,7 +603,7 @@ def add_h3(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         prepare_output(output_parquet, any_extension)
 
         try:
@@ -667,7 +667,7 @@ def add_a5(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         prepare_output(output_parquet, any_extension)
 
         try:
@@ -731,7 +731,7 @@ def add_s2(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         prepare_output(output_parquet, any_extension)
 
         try:
@@ -827,7 +827,7 @@ def add_kdtree(
 
     Use --verbose to track progress with iteration-by-iteration updates.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         # Validate .parquet extension
         validate_parquet_extension(output_parquet, any_extension)
 
@@ -906,7 +906,7 @@ def add_quadkey(
 
     Supports both local and remote (S3, GCS, Azure) inputs and outputs.
     """
-    with _activate_s3(ctx):
+    with activate_remote(ctx):
         prepare_output(output_parquet, any_extension)
 
         try:

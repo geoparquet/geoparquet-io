@@ -29,6 +29,7 @@ from geoparquet_io.core.geo_metadata import QuerySource, bounds_of, sanitized_ca
 from geoparquet_io.core.geometry_detection import (
     register_geometry_column,
     resolve_geometry_column,
+    resolve_geometry_read,
 )
 from geoparquet_io.core.logging_config import debug, info, success, warn
 from geoparquet_io.core.optional_deps import load_module
@@ -249,14 +250,19 @@ def hilbert_order_table(
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         read = register_geometry_column(con, "__input_table", table, geom_col, row_index=idx_col)
-        # One projection of the parsed geometry, shared by both queries below.
-        source_ref = f"(SELECT {quoted_idx}, {read.shape_expr} AS __g FROM __input_table)"
+        # One projection of the sort key, shared by both queries below. The
+        # owner's read expression, not the raw column: a GeoArrow coordinate
+        # struct is no argument to ST_IsEmpty or ST_Hilbert, and `expr` hands
+        # those its representative point instead of dying on it (#1438).
+        source_ref = f"(SELECT {quoted_idx}, {read.expr} AS __g FROM __input_table)"
 
-        # The empty/NULL count, then the owner's bounds of everything else.
+        # The empty/NULL count, then the owner's bounds of everything else. The
+        # bounds are measured on the column itself, so a GeoArrow extent is the
+        # geometry's and not its representative point's.
         (empty_count,) = fetch_one(
             con.execute(f"SELECT COUNT(*) FROM {source_ref} WHERE __g IS NULL OR ST_IsEmpty(__g)")
         )
-        bbox = bounds_of(QuerySource(con, f"SELECT __g FROM {source_ref}"), "__g")
+        bbox = bounds_of(QuerySource(con, "SELECT * FROM __input_table"), geom_col)
 
         if empty_count > 0:
             warn(
@@ -416,7 +422,9 @@ def _hilbert_order_streaming(
         geom_col = resolve_geometry_column(
             described, geometry_column, geo=sanitized_carried_geo(metadata), where=input_path
         )
-        quoted_geom = quote_identifier(geom_col)
+        # The owner's read expression for the sort key: a GeoArrow coordinate
+        # struct is no argument to ST_IsEmpty or ST_Hilbert (#1438).
+        key_expr = resolve_geometry_read(con, source, geom_col, relation=True).expr
 
         if verbose:
             debug(f"Using geometry column: {geom_col}")
@@ -426,7 +434,7 @@ def _hilbert_order_streaming(
         empty_count_result = fetch_one(
             con.execute(f"""
             SELECT COUNT(*) FROM {source}
-            WHERE {quoted_geom} IS NULL OR ST_IsEmpty({quoted_geom})
+            WHERE {key_expr} IS NULL OR ST_IsEmpty({key_expr})
         """)
         )
         empty_count = empty_count_result[0] if empty_count_result else 0
@@ -468,13 +476,13 @@ def _hilbert_order_streaming(
         query = f"""
             WITH non_empty AS (
                 SELECT * FROM {source}
-                WHERE {quoted_geom} IS NOT NULL AND NOT ST_IsEmpty({quoted_geom})
-                ORDER BY ST_Hilbert({quoted_geom},
+                WHERE {key_expr} IS NOT NULL AND NOT ST_IsEmpty({key_expr})
+                ORDER BY ST_Hilbert({key_expr},
                     ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax})))
             ),
             empty_or_null AS (
                 SELECT * FROM {source}
-                WHERE {quoted_geom} IS NULL OR ST_IsEmpty({quoted_geom})
+                WHERE {key_expr} IS NULL OR ST_IsEmpty({key_expr})
             )
             SELECT * FROM non_empty
             UNION ALL
@@ -520,7 +528,7 @@ def _hilbert_order_file_based(
         input_parquet, add_bbox_flag, verbose
     )
 
-    validate_profile_for_urls(write.profile, input_parquet, output_parquet)
+    validate_profile_for_urls(write.remote.profile, input_parquet, output_parquet)
     show_remote_read_message(working_parquet, verbose)
 
     working_url = resolve_file_url(working_parquet, verbose)
@@ -537,6 +545,12 @@ def _hilbert_order_file_based(
 
     con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
 
+    # The owner's read expression for the sort key: a GeoArrow coordinate struct
+    # is no argument to ST_IsEmpty or ST_Hilbert, and asking the owner hands
+    # those its representative point instead of dying on it (#1438). The bounds
+    # below stay the column's own, measured by the stats owner.
+    key_expr = resolve_geometry_read(con, working_url, geometry_column).expr
+
     if verbose:
         debug("Calculating dataset bounds for Hilbert ordering...")
 
@@ -544,7 +558,7 @@ def _hilbert_order_file_based(
     empty_count_result = fetch_one(
         con.execute(f"""
         SELECT COUNT(*) FROM {sql_path(working_url)}
-        WHERE {quote_identifier(geometry_column)} IS NULL OR ST_IsEmpty({quote_identifier(geometry_column)})
+        WHERE {key_expr} IS NULL OR ST_IsEmpty({key_expr})
     """)
     )
     empty_count = empty_count_result[0] if empty_count_result else 0
@@ -587,13 +601,13 @@ def _hilbert_order_file_based(
     order_query = f"""
         WITH non_empty AS (
             SELECT * FROM {sql_path(working_url)}
-            WHERE {quote_identifier(geometry_column)} IS NOT NULL AND NOT ST_IsEmpty({quote_identifier(geometry_column)})
-            ORDER BY ST_Hilbert({quote_identifier(geometry_column)},
+            WHERE {key_expr} IS NOT NULL AND NOT ST_IsEmpty({key_expr})
+            ORDER BY ST_Hilbert({key_expr},
                 ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax})))
         ),
         empty_or_null AS (
             SELECT * FROM {sql_path(working_url)}
-            WHERE {quote_identifier(geometry_column)} IS NULL OR ST_IsEmpty({quote_identifier(geometry_column)})
+            WHERE {key_expr} IS NULL OR ST_IsEmpty({key_expr})
         )
         SELECT * FROM non_empty
         UNION ALL

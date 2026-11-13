@@ -202,7 +202,7 @@ import geoparquet_io as gpio
 gpio.read('local_data.parquet') \
     .add_bbox() \
     .sort_hilbert() \
-    .upload('s3://my-bucket/data.parquet', profile='my-aws')
+    .upload('s3://my-bucket/data.parquet', remote=gpio.RemoteOptions(profile='my-aws'))
 ```
 
 ---

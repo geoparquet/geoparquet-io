@@ -27,7 +27,7 @@ import tempfile
 import threading
 import uuid
 import weakref
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -81,7 +81,7 @@ _F = TypeVar("_F", bound=Callable[..., Any])
 
 
 def uses_aws_profile(func: _F) -> _F:
-    """Run ``func`` with its ``profile`` (or ``write.profile``) as the ambient AWS profile.
+    """Run ``func`` with its ``profile`` (or ``remote``/``write.remote``) as the ambient profile.
 
     The profile goes into :func:`s3_config_scope`, which DuckDB's
     ``credential_chain`` secret and the obstore store read explicitly. Nothing is
@@ -97,15 +97,20 @@ def uses_aws_profile(func: _F) -> _F:
     (``contextvars.copy_context().run``) if a worker opens an S3 connection.
     """
     signature = inspect.signature(func)
-    if "profile" not in signature.parameters and "write" not in signature.parameters:
-        raise TypeError(f"{func.__qualname__} has no 'profile' or 'write' parameter")
+    if not {"profile", "remote", "write"} & set(signature.parameters):
+        raise TypeError(f"{func.__qualname__} has no 'profile', 'remote' or 'write' parameter")
 
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         arguments = signature.bind_partial(*args, **kwargs).arguments
-        # A driver that takes the write options (parquet_writer.WriteOptions)
-        # carries the profile there instead of in a parameter of its own.
-        profile = arguments.get("profile") or getattr(arguments.get("write"), "profile", None)
+        # A driver that takes the remote options (remote.RemoteOptions), or the
+        # write options (parquet_writer.WriteOptions, which carries one since
+        # #1436), finds the profile there rather than in a parameter of its own.
+        profile = (
+            arguments.get("profile")
+            or getattr(arguments.get("remote"), "profile", None)
+            or getattr(getattr(arguments.get("write"), "remote", None), "profile", None)
+        )
         if not profile or not _any_s3_url(arguments.values()):
             return func(*args, **kwargs)
         with s3_config_scope({"profile": profile, "profile_from_env": False}):
@@ -2456,9 +2461,66 @@ def query_schema(con, sql: str, params=None) -> pa.Schema:
     try:
         return _zero_row_schema(con, f"SELECT * FROM {_as_subquery(sql)} LIMIT 0", params)
     except OSError as exc:
-        if "Unsupported Arrow type VARIANT" not in str(exc):
+        if not is_variant_export_error(exc):
             raise
         return _query_schema_without_variant(con, sql, params)
+
+
+#: DuckDB's own text for "I have no Arrow type for VARIANT" (1.5; 2.0 exports it
+#: as the ``arrow.parquet.variant`` extension struct and never says this).
+_VARIANT_EXPORT_FAILURE = "Unsupported Arrow type VARIANT"
+
+
+def is_variant_export_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is this DuckDB refusing to export a VARIANT column over Arrow.
+
+    The one reader of DuckDB's text for it, shared by the schema probe's
+    sentinel fallback and :func:`variant_export_guard`'s message (#1352, #1370).
+    """
+    return _VARIANT_EXPORT_FAILURE in str(exc)
+
+
+def variant_columns(con, sql: str, params=None) -> list[str]:
+    """The output columns of ``sql`` whose type carries the ``VARIANT`` keyword.
+
+    ``DESCRIBE`` never crosses Arrow, so this is safe on the very query whose
+    export just failed. Nested matching is the point: ``STRUCT(a VARIANT)`` and
+    ``VARIANT[]`` cannot cross Arrow on DuckDB 1.5 any more than a top-level
+    ``VARIANT`` can (:func:`_type_contains_variant`).
+    """
+    described = describe_query(con, f"SELECT * FROM {_as_subquery(sql)} LIMIT 0", params)
+    return [name for name, type_ in described if _type_contains_variant(type_)]
+
+
+@contextmanager
+def variant_export_guard(
+    con, sql: str, *, strategy: str, geoparquet_version: str | None = None
+) -> Iterator[None]:
+    """Turn "this DuckDB cannot export VARIANT" into an error that names the column.
+
+    A write strategy that hands the *data* to Arrow -- ``.arrow()`` or
+    ``to_arrow_reader()`` -- dies on DuckDB 1.5 with a bare ``OSError`` naming
+    no column and no way out (#1370). The export is what fails, so the check is
+    here rather than up front: the happy path pays nothing, and the ``DESCRIBE``
+    that names the columns runs only once something has gone wrong. Any other
+    failure is re-raised untouched.
+
+    ``geoparquet_version`` is passed only when that version is what chose this
+    strategy (see :class:`~geoparquet_io.core.exceptions.VariantExportError`).
+    """
+    from geoparquet_io.core.exceptions import VariantExportError
+
+    try:
+        yield
+    except OSError as exc:
+        if not is_variant_export_error(exc):
+            raise
+        raise VariantExportError(
+            variant_columns(con, sql),
+            strategy,
+            geoparquet_version,
+            duckdb_capabilities().version,
+        ) from exc
 
 
 def _zero_row_schema(con, sql: str, params=None) -> pa.Schema:

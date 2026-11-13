@@ -105,7 +105,7 @@ EXPECTED_COUNTS = {
     "G3.pylint": 14,
     "G13.options": 11,
     "G13.bbox_parsers": 0,
-    "G4.whitelist": 148,
+    "G4.whitelist": 149,
     "G4.tests_whitelist": 90,
 }
 
@@ -6335,10 +6335,12 @@ def test_size_limit_setter_guard_sees_each_spelling(tmp_path):
 query__PROBE_SQL = re.compile(r"\bLIMIT\s+0\b|\bDESCRIBE\b|\b(?i:typeof)\s*\(")
 
 #: The probe owner's own functions: the only code allowed to spell a schema probe.
-#: ``_query_schema_without_variant`` is ``query_schema``'s VARIANT fallback.
+#: ``_query_schema_without_variant`` is ``query_schema``'s VARIANT fallback, and
+#: ``variant_columns`` the same DESCRIBE read, for naming those columns in the
+#: error a failed Arrow export raises (#1370).
 query_PROBE_OWNER = "geoparquet_io/core/duckdb_utils.py"
 query_PROBE_OWNER_FUNCTIONS = frozenset(
-    {"describe_query", "query_schema", "_query_schema_without_variant"}
+    {"describe_query", "query_schema", "_query_schema_without_variant", "variant_columns"}
 )
 
 #: ``LIMIT 0`` / ``DESCRIBE`` literals left outside the owner functions, per file.

@@ -9,16 +9,16 @@ from pathlib import Path
 
 import click
 
-from geoparquet_io.cli._shared import _activate_s3, init_group_context, prepare_output
+from geoparquet_io.cli._shared import activate_remote, init_group_context, prepare_output
 from geoparquet_io.cli.decorators import (
     SingleFileCommand,
     any_extension_option,
-    aws_profile_option,
     geoparquet_version_option,
     linearize_curves_options,
     output_format_options,
     overwrite_option,
     pack_write_options,
+    remote_options,
     repair_geometry_option,
     show_sql_option,
     spatial_filter_options,
@@ -195,7 +195,7 @@ def convert(ctx):
 @geoparquet_version_option
 @verbose_option
 @output_format_options
-@aws_profile_option
+@remote_options
 @any_extension_option
 @show_sql_option
 @click.pass_context
@@ -222,7 +222,7 @@ def convert_to_geoparquet_cmd(
     max_angle_deg,
     write,
     verbose,
-    aws_profile,
+    remote,
     any_extension,
     show_sql,
 ):
@@ -252,7 +252,7 @@ def convert_to_geoparquet_cmd(
     prepare_output(output_file, any_extension)
 
     # Check for streaming output
-    with _activate_s3(ctx, aws_profile=aws_profile):
+    with activate_remote(ctx, remote):
         if should_stream_output(output_file):
             # Suppress verbose for streaming
             verbose = False
@@ -267,7 +267,7 @@ def convert_to_geoparquet_cmd(
                 crs=crs,
                 skip_invalid=skip_invalid,
                 allow_no_geometry=allow_no_geometry,
-                profile=aws_profile,
+                profile=remote.profile,
                 write=write,
                 repair_geometry=repair_geometry,
                 linearize_curves=linearize_curves,
@@ -292,7 +292,7 @@ def convert_to_geoparquet_cmd(
                 crs=crs,
                 skip_invalid=skip_invalid,
                 allow_no_geometry=allow_no_geometry,
-                profile=aws_profile,
+                profile=remote.profile,
                 repair_geometry=repair_geometry,
                 linearize_curves=linearize_curves,
                 max_angle_deg=max_angle_deg,
@@ -377,7 +377,6 @@ def _reproject_impl_cli(
     src_crs,
     overwrite,
     verbose,
-    aws_profile,
     write,
     assume_crs84=False,
 ):
@@ -443,7 +442,7 @@ def _reproject_impl_cli(
 )
 @overwrite_option
 @verbose_option
-@aws_profile_option
+@remote_options
 @output_format_options
 @geoparquet_version_option
 @any_extension_option
@@ -459,7 +458,7 @@ def convert_reproject(
     assume_crs84,
     overwrite,
     verbose,
-    aws_profile,
+    remote,
     write,
     any_extension,
     show_sql,
@@ -483,7 +482,7 @@ def convert_reproject(
     # Validate .parquet extension
     validate_parquet_extension(output_file, any_extension)
 
-    with _activate_s3(ctx, aws_profile=aws_profile):
+    with activate_remote(ctx, remote):
         _reproject_impl_cli(
             input_file,
             output_file,
@@ -491,7 +490,6 @@ def convert_reproject(
             src_crs,
             overwrite,
             verbose,
-            aws_profile,
             write,
             assume_crs84=assume_crs84,
         )
@@ -547,7 +545,7 @@ def convert_reproject(
 )
 @repair_geometry_option
 @verbose_option
-@aws_profile_option
+@remote_options
 @show_sql_option
 @click.pass_context
 def convert_geojson(
@@ -565,7 +563,7 @@ def convert_geojson(
     keep_crs,
     repair_geometry,
     verbose,
-    aws_profile,
+    remote,
     show_sql,
 ):
     """
@@ -613,10 +611,10 @@ def convert_geojson(
 
     configure_verbose(verbose)
 
-    # Validate aws_profile is only used with S3
-    validate_profile_for_urls(aws_profile, input_file, output_file)
+    # Validate the AWS profile is only used with S3
+    validate_profile_for_urls(remote.profile, input_file, output_file)
 
-    with _activate_s3(ctx, aws_profile=aws_profile):
+    with activate_remote(ctx, remote):
         if output_file:
             # File mode - use write_geojson which handles no-geometry case
             write_geojson(
@@ -630,7 +628,7 @@ def convert_geojson(
                 keep_crs=keep_crs,
                 overwrite=overwrite,
                 verbose=verbose,
-                profile=aws_profile,
+                profile=remote.profile,
                 repair_geometry=repair_geometry,
             )
         else:
@@ -646,7 +644,7 @@ def convert_geojson(
                 seq=not no_seq,
                 pretty=pretty,
                 verbose=verbose,
-                profile=aws_profile,
+                profile=remote.profile,
                 keep_crs=keep_crs,
                 repair_geometry=repair_geometry,
             )
@@ -664,7 +662,7 @@ def convert_geojson(
 @spatial_filter_options
 @where_option
 @verbose_option
-@aws_profile_option
+@remote_options
 @show_sql_option
 @click.pass_context
 def convert_geopackage(
@@ -678,7 +676,7 @@ def convert_geopackage(
     use_first_geometry,
     where,
     verbose,
-    aws_profile,
+    remote,
     show_sql,
 ):
     """
@@ -720,7 +718,7 @@ def convert_geopackage(
         # Generate output filename
         output_file = default_output_name(input_file, "geopackage")
 
-    with _activate_s3(ctx, aws_profile=aws_profile):
+    with activate_remote(ctx, remote):
         write_geopackage(
             input_path=input_file,
             output_path=output_file,
@@ -731,7 +729,7 @@ def convert_geopackage(
             where=where,
             use_first_geometry=use_first_geometry,
             verbose=verbose,
-            profile=aws_profile,
+            profile=remote.profile,
         )
 
 
@@ -742,7 +740,7 @@ def convert_geopackage(
 @spatial_filter_options
 @where_option
 @verbose_option
-@aws_profile_option
+@remote_options
 @show_sql_option
 @click.pass_context
 def convert_flatgeobuf(
@@ -755,7 +753,7 @@ def convert_flatgeobuf(
     use_first_geometry,
     where,
     verbose,
-    aws_profile,
+    remote,
     show_sql,
 ):
     """
@@ -787,7 +785,7 @@ def convert_flatgeobuf(
         # Generate output filename
         output_file = default_output_name(input_file, "flatgeobuf")
 
-    with _activate_s3(ctx, aws_profile=aws_profile):
+    with activate_remote(ctx, remote):
         write_flatgeobuf(
             input_path=input_file,
             output_path=output_file,
@@ -797,7 +795,7 @@ def convert_flatgeobuf(
             where=where,
             use_first_geometry=use_first_geometry,
             verbose=verbose,
-            profile=aws_profile,
+            profile=remote.profile,
         )
 
 
@@ -818,7 +816,7 @@ def convert_flatgeobuf(
 @spatial_filter_options
 @where_option
 @verbose_option
-@aws_profile_option
+@remote_options
 @show_sql_option
 @click.pass_context
 def convert_csv(
@@ -833,7 +831,7 @@ def convert_csv(
     use_first_geometry,
     where,
     verbose,
-    aws_profile,
+    remote,
     show_sql,
 ):
     """
@@ -870,7 +868,7 @@ def convert_csv(
     if output_file is None:
         output_file = default_output_name(input_file, "csv")
 
-    with _activate_s3(ctx, aws_profile=aws_profile):
+    with activate_remote(ctx, remote):
         write_csv(
             input_path=input_file,
             output_path=output_file,
@@ -882,7 +880,7 @@ def convert_csv(
             where=where,
             use_first_geometry=use_first_geometry,
             verbose=verbose,
-            profile=aws_profile,
+            profile=remote.profile,
         )
 
 
@@ -897,7 +895,7 @@ def convert_csv(
     help="Character encoding for attribute data",
 )
 @verbose_option
-@aws_profile_option
+@remote_options
 @show_sql_option
 @click.pass_context
 def convert_shapefile(
@@ -907,7 +905,7 @@ def convert_shapefile(
     overwrite,
     encoding,
     verbose,
-    aws_profile,
+    remote,
     show_sql,
 ):
     """
@@ -943,12 +941,12 @@ def convert_shapefile(
         # Generate output filename
         output_file = default_output_name(input_file, "shapefile")
 
-    with _activate_s3(ctx, aws_profile=aws_profile):
+    with activate_remote(ctx, remote):
         write_shapefile(
             input_path=input_file,
             output_path=output_file,
             overwrite=overwrite,
             encoding=encoding,
             verbose=verbose,
-            profile=aws_profile,
+            profile=remote.profile,
         )
