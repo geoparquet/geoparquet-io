@@ -22,7 +22,7 @@ import gc
 import pyarrow as pa
 
 from geoparquet_io.core.admin_datasets import resolve_admin_dataset
-from geoparquet_io.core.duckdb_utils import as_wkb_sql, quote_identifier, register_arrow
+from geoparquet_io.core.duckdb_utils import as_wkb_sql, fetch_one, quote_identifier, register_arrow
 from geoparquet_io.core.exceptions import InvalidParameterError
 from geoparquet_io.core.geo_metadata import (
     bbox_column_to_declare,
@@ -157,7 +157,11 @@ def get_admin_country_context(con, verbose: bool = False) -> tuple[str, str, str
     """Return (country_ref, code_col, geom_expr) for the Overture country cache."""
 
     dataset, _boundary_columns, _ = resolve_admin_dataset(
-        "overture", ["country"], cache=False, verbose=verbose
+        "overture",
+        ["country"],
+        cache=False,
+        memory_limit=str(fetch_one(con.execute("SELECT current_setting('memory_limit')"))[0]),
+        verbose=verbose,
     )
     path = dataset.get_source_for_level("country")
     country_ref = dataset.table_reference(path)

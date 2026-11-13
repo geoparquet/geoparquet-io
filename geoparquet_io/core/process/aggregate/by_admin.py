@@ -261,7 +261,7 @@ def aggregate_by_admin(
     )
 
     admin_dataset, _boundary_columns, _ = resolve_admin_dataset(
-        dataset, [level], cache=False, verbose=verbose
+        dataset, [level], cache=False, memory_limit=memory_limit, verbose=verbose
     )
     mapping = admin_dataset.get_level_column_mapping()
     code_col = mapping[level]

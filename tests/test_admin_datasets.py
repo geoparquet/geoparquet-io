@@ -1487,7 +1487,7 @@ class TestDownloadToCache:
             raise OSError("interrupted")
 
         con.execute.side_effect = interrupted
-        monkeypatch.setattr(admin_datasets, "get_duckdb_connection", lambda **kwargs: con)
+        monkeypatch.setattr(admin_datasets, "open_bounded_connection", lambda **kwargs: con)
         monkeypatch.setattr(admin_datasets, "scoped_write_memory_limit", lambda *a: nullcontext())
         with pytest.raises(OSError, match="interrupted"):
             dataset._download_to_cache(cache_path)
@@ -1783,7 +1783,7 @@ class TestDownloadPerLevelCachesHousekeeping:
         version = "2026-07-22.0"
         monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
         mock_con = MagicMock()
-        monkeypatch.setattr(admin_datasets, "get_duckdb_connection", lambda **kwargs: mock_con)
+        monkeypatch.setattr(admin_datasets, "open_bounded_connection", lambda **kwargs: mock_con)
 
         dataset = OvertureAdminDataset()
         # Keep version/source resolution offline and deterministic.

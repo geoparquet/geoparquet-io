@@ -746,8 +746,6 @@ class TestDirectCopyMemoryLimit:
         dataset.memory_limit = write_memory
         monkeypatch.setattr(dataset, "get_default_source", lambda: str(tmp_path / "src.parquet"))
         monkeypatch.setattr(dataset, "get_s3_config", lambda: {})
-        # No remote read in this test: keep the connection free of httpfs.
-        monkeypatch.setattr(ad, "get_duckdb_connection", lambda **kwargs: get_duckdb_connection())
         seen = []
         self._spy_scoped_limit(monkeypatch, ad, seen)
 
@@ -775,7 +773,7 @@ class TestDirectCopyMemoryLimit:
 
         monkeypatch.setattr(ad, "get_cache_dir", lambda: tmp_path)
         mock_con = MagicMock()
-        monkeypatch.setattr(ad, "get_duckdb_connection", lambda **kwargs: mock_con)
+        monkeypatch.setattr(ad, "open_bounded_connection", lambda **kwargs: mock_con)
         dataset = ad.OvertureAdminDataset()
         monkeypatch.setattr(dataset, "get_version", lambda: "2026-07-22.0")
         monkeypatch.setattr(dataset, "get_default_source", lambda: "s3://stub/divisions")
@@ -965,3 +963,19 @@ class TestDirectCopyRegressions:
                 places_test_file, "gaul", None, ["country"], False, memory_limit="700MB"
             )
         assert seen == ["700MB"]
+
+        from geoparquet_io.core.process.aggregate.by_admin import aggregate_by_admin
+        from geoparquet_io.core.process.overview.rollup import get_admin_country_context
+
+        seen.clear()
+        with pytest.raises(Stop):
+            aggregate_by_admin(places_test_file, "unused.parquet", memory_limit="700MB")
+        assert seen == ["700MB"]
+        seen.clear()
+        con = memory_limits.open_bounded_connection(memory_limit="700MB")
+        try:
+            with pytest.raises(Stop):
+                get_admin_country_context(con)
+            assert seen == [_setting(con, "memory_limit")]
+        finally:
+            con.close()

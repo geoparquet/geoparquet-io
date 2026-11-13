@@ -540,9 +540,12 @@ class AdminDataset(ABC):
             # (todo 013). A private leaf under it, never the cache dir itself:
             # DuckDB's spill filenames carry no connection identity, so two runs
             # sharing this well-known directory overwrite each other's blocks.
-            con = get_duckdb_connection(
+            con = open_bounded_connection(
                 load_spatial=True,
                 load_httpfs=True,
+                memory_limit=self.memory_limit,
+                verbose=self.verbose,
+                preserve_insertion_order=True,
                 temp_directory=spill_directory(cache_path.parent),
             )
             try:
@@ -1268,8 +1271,13 @@ class OvertureAdminDataset(AdminDataset):
             # Spill onto the cache volume so the remote scan + simplification of
             # the ~4.5GB dataset bounds peak memory rather than OOM-ing (todo
             # 013), into a leaf of its own so concurrent runs cannot collide.
-            con = get_duckdb_connection(
-                load_spatial=True, load_httpfs=True, temp_directory=spill_directory(cache_dir)
+            con = open_bounded_connection(
+                load_spatial=True,
+                load_httpfs=True,
+                memory_limit=self.memory_limit,
+                verbose=self.verbose,
+                preserve_insertion_order=True,
+                temp_directory=spill_directory(cache_dir),
             )
             version = self.get_version()
             objects = None
