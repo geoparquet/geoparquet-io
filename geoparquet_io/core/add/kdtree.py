@@ -46,12 +46,8 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.sizing import bytes_to_mb
 from geoparquet_io.core.stream_io import write_output
-from geoparquet_io.core.streaming import (
-    is_stdin,
-    read_stdin_to_temp_file,
-    should_stream_output,
-)
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+from geoparquet_io.core.streaming import is_stdin, should_stream_output
+from geoparquet_io.core.write_funnels import read_stdin_to_temp_file, write_parquet_with_metadata
 
 #: Rows per partition that `gpio add kdtree` / `gpio partition kdtree` aim for
 #: when neither `--partitions` nor `--auto` is given, and the default the Python
@@ -456,6 +452,8 @@ def add_kdtree_column(
     geoparquet_version: str | None = None,
     overwrite: bool = False,
     memory_limit: str | None = None,
+    *,
+    report: bool = True,
 ) -> None:
     """
     Add a KD-tree cell ID column to a GeoParquet file.
@@ -491,6 +489,7 @@ def add_kdtree_column(
         profile: AWS profile name (S3 only, optional)
         geoparquet_version: GeoParquet version to write (1.0, 1.1, 2.0, parquet-geo-only)
         memory_limit: DuckDB memory limit for the write (e.g., '2GB', '512MB')
+        report: Report completion; nested repairs report after final publication.
     """
     configure_verbose(verbose)
 
@@ -517,7 +516,7 @@ def add_kdtree_column(
 
     # File-based mode
     # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet)
 
     # Check for partition input (not supported)
     require_single_file(input_parquet, "add kdtree")
@@ -679,7 +678,7 @@ def add_kdtree_column(
 
     con.close()
 
-    if not dry_run:
+    if report and not dry_run:
         success(
             f"Added KD-tree column '{kdtree_column_name}' ({partition_count} partitions) to: {output_parquet}"
         )

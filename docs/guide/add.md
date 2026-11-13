@@ -693,7 +693,7 @@ Input in a non-CRS84 CRS is reprojected to the boundaries' CRS (OGC:CRS84) befor
 
 For native-geometry inputs (GeoParquet 2.0 and GeoParquet 1.1 with geoarrow encoding), the spatial join relies on native Parquet column statistics to skip irrelevant data, but this is not quite working yet, so expect those to be a bit slower until [#462](https://github.com/geoparquet/geoparquet-io/issues/462) is implemented. For non-native inputs (GeoParquet 1.x that carry a `bbox` column), a cheap bbox-overlap test is applied before `ST_Intersects` to prune candidates, and using it will be 5-10x faster.
 
-The join is a `LEFT JOIN` whose every step can spill to disk, so it scales to very large inputs (hundreds of millions of features) with bounded memory. Each input feature comes out exactly once, in input order. A feature is attributed to the admin polygon it intersects; where it intersects more than one at a level (a polygon straddling a border, or a sliver where the independently simplified caches overlap), it is assigned to the one with the smallest admin code. `gpio partition admin` and `gpio process aggregate admin` use the same rule, so a feature is never written to two partitions or counted in two regions.
+The `LEFT JOIN` can spill its input-row grouping keys and final sort to disk when needed. Memory use also depends on the admin geometries and DuckDB's spatial index; the DuckDB memory limit is not a process RSS ceiling. Each input feature comes out exactly once, in input order. A feature is attributed to the admin polygon it intersects; where it intersects more than one at a level (a polygon straddling a border, or a sliver where the independently simplified caches overlap), it is assigned to the one with the smallest admin code. `gpio partition admin` and `gpio process aggregate admin` use the same rule, so a feature is never written to two partitions or counted in two regions.
 
 ### Quick Start
 
@@ -812,8 +812,10 @@ The `--vecorel` flag:
 
 !!! note "Overture: per-level cache and simplified boundaries"
     The Overture dataset uses a **per-level cache**: country and region
-    boundaries are downloaded and cached as separate files rather than one
-    combined file.
+    boundaries are cached as separate files. Existing complete caches are reused.
+    Cold joins read only the input extent when footer statistics predict most
+    geometry bytes can be skipped; otherwise they build a complete level cache.
+    `process aggregate` and `overview` also populate complete caches.
 
     The country level covers **dependent territories** as well as sovereign
     states, each attributed to its own ISO 3166-1 alpha-2 code — `GF` for
@@ -833,10 +835,10 @@ The `--vecorel` flag:
 
 ### Caching
 
-Admin datasets (GAUL, Overture) are automatically cached locally on first use:
+Caching depends on the dataset:
 
-- **First run**: Downloads and caches the full dataset (~5-50MB depending on dataset)
-- **Subsequent runs**: Uses cached version (instant startup)
+- **GAUL**: Downloads and caches the full dataset on first use; subsequent runs use the cache.
+- **Overture**: Reuses complete per-level caches. Cold joins compare overlapping and skipped geometry bytes from row-group footers: read inline when more bytes can be skipped than fetched; otherwise build the complete cache. Completed source objects survive interrupted builds and are reused when that level's cache build resumes. Without a finite extent (including empty or all-NULL geometry), the command builds the complete requested levels. A small uncached extent needs the network on every run; bounded reads do not assemble a cache from object parts. To populate complete caches before repeated or offline use, run `process aggregate admin` or `process overview` for the needed levels. Completed level caches are then reused locally.
 - **Cache location**: `~/.geoparquet-io/cache/admin/`
 - **Warning**: Shown if cache is older than 6 months
 
@@ -860,7 +862,7 @@ Admin datasets (GAUL, Overture) are automatically cached locally on first use:
     import geoparquet_io as gpio
     from geoparquet_io.core.admin_datasets import get_cache_dir, clear_cache
 
-    # Default: uses cached datasets automatically
+    # Reuses cached levels, or chooses a bounded read / full cache from footers
     gpio.read('input.parquet').add_admin_divisions(
         dataset='overture',
         levels=['country', 'region']

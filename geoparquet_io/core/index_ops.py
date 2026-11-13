@@ -271,6 +271,8 @@ def add_index_column(
     use_centroid=False,
     allow_schema_diff=False,
     hive_input=None,
+    *,
+    report=True,
 ):
     configure_verbose(verbose)
     write = write or WriteOptions()
@@ -287,7 +289,7 @@ def add_index_column(
             write,
             use_centroid=use_centroid,
         )
-    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet)
     if not spec.multiple_files:
         require_single_file(input_parquet, f"add {spec.name}")
     validate_profile_for_urls(write.remote_access().profile, input_parquet, output_parquet)
@@ -327,7 +329,7 @@ def add_index_column(
         progress_message=f"Adding {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution})...",
         **write.funnel_kwargs(),
     )
-    if dry_run:
+    if dry_run or not report:
         return
     success(
         f"Successfully added {spec.label} column '{column_name}' ({spec.display_unit or spec.unit} {resolution}) to: {output_parquet}"
@@ -480,6 +482,7 @@ def ensure_index_column(
             column_name,
             resolution,
             verbose=verbose,
+            report=False,
             write=WriteOptions(remote=RemoteOptions(profile=profile)),
             use_centroid=use_centroid,
             allow_schema_diff=allow_schema_diff,
@@ -609,7 +612,7 @@ def partition_index(
         partition_by_column,
         raise_if_no_rows,
     )
-    from geoparquet_io.core.streaming import read_stdin_to_temp_file
+    from geoparquet_io.core.write_funnels import read_stdin_to_temp_file
 
     write = write or WriteOptions()
     validate_partition_arguments(spec, resolution, partition_resolution, auto)

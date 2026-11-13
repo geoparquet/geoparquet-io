@@ -78,7 +78,7 @@ class CLIFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         """Format log record with optional colors."""
-        message = super().format(record)
+        message = clean_error_text(super().format(record))
 
         if self.use_colors:
             message = self._apply_colors(message, record)
@@ -138,6 +138,14 @@ class DynamicStreamHandler(logging.StreamHandler):
         except Exception:
             self.handleError(record)
 
+    def handleError(self, record):
+        """Never let logging's failure diagnostics dump a raw shared record."""
+        if logging.raiseExceptions and sys.stderr:
+            try:
+                sys.stderr.write(f"logging error ({type(sys.exc_info()[1]).__name__})\n")
+            except Exception:
+                pass
+
 
 def setup_cli_logging(
     verbose: bool = False, show_timestamps: bool = False, use_colors: bool | None = None
@@ -157,6 +165,15 @@ def setup_cli_logging(
     handler.setFormatter(CLIFormatter(show_timestamps=show_timestamps, use_colors=use_colors))
 
     level = logging.DEBUG if verbose else logging.INFO
+
+    root = logging.getLogger()
+    for existing in list(root.handlers):
+        if isinstance(existing, DynamicStreamHandler):
+            root.removeHandler(existing)
+    third_party = DynamicStreamHandler()
+    third_party.setFormatter(handler.formatter)
+    third_party.addFilter(lambda record: not record.name.startswith("geoparquet_io"))
+    root.addHandler(third_party)
 
     logger.setLevel(level)
     logger.handlers.clear()
@@ -198,17 +215,18 @@ def _bootstrap_default_handler(verbose: bool) -> None:
       Installing a second stream handler here made every gpio message appear
       twice in an embedding application.
     * Nothing has configured logging at all — a bare script importing gpio.
-      Install the CLI handler so output is not silently dropped, but put back a
-      level the caller explicitly chose for the ``geoparquet_io`` logger.
+      Install a package handler so output is not silently dropped. The root
+      logger remains available for the host to configure later.
     """
     if logging.getLogger().handlers:
         logger.addHandler(logging.NullHandler())
         return
 
-    chosen_level = logger.level  # NOTSET unless something explicitly set it
-    setup_cli_logging(verbose=verbose, show_timestamps=False, use_colors=False)
-    if chosen_level != logging.NOTSET:
-        logger.setLevel(chosen_level)
+    handler = DynamicStreamHandler()
+    handler.setFormatter(CLIFormatter(show_timestamps=False, use_colors=False))
+    logger.addHandler(handler)
+    if logger.level == logging.NOTSET:
+        logger.setLevel(logging.DEBUG if verbose else logging.INFO)
 
 
 def configure_verbose(verbose: bool) -> None:
@@ -236,6 +254,7 @@ def configure_verbose(verbose: bool) -> None:
 
 # ============================================================================
 # Helper functions for styled output
+# Clean for host handlers too; token redaction is idempotent with CLI formatter cleaning.
 # These map to the current click.echo patterns used throughout the codebase
 # ============================================================================
 
@@ -246,7 +265,7 @@ def success(message: str) -> None:
 
     Use for: Completed operations, passed validations, successful writes.
     """
-    logger.info(f"[SUCCESS]{message}")
+    logger.info(f"[SUCCESS]{clean_error_text(message)}")
 
 
 def warn(message: str) -> None:
@@ -255,8 +274,7 @@ def warn(message: str) -> None:
 
     Use for: Non-critical issues, recommendations, deprecation notices.
 
-    Text goes through the one ``clean_error_text`` policy here, once (credential
-    values, query strings on URLs, control characters), so a caller can interpolate a caught exception without cleaning it first.
+    The CLI formatter also cleans interpolated and third-party records.
     """
     logger.warning(clean_error_text(message))
 
@@ -276,7 +294,7 @@ def info(message: str) -> None:
 
     Use for: Informational details, tips, context about operations.
     """
-    logger.info(f"[INFO]{message}")
+    logger.info(f"[INFO]{clean_error_text(message)}")
 
 
 def debug(message: str) -> None:
@@ -285,7 +303,7 @@ def debug(message: str) -> None:
 
     Use for: Detailed diagnostic output, internal state, SQL queries.
     """
-    logger.debug(message)
+    logger.debug(clean_error_text(message))
 
 
 def progress(message: str) -> None:
@@ -294,4 +312,4 @@ def progress(message: str) -> None:
 
     Use for: Progress updates, status messages, general output.
     """
-    logger.info(message)
+    logger.info(clean_error_text(message))

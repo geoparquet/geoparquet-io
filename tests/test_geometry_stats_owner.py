@@ -230,3 +230,121 @@ def test_types_and_bounds_share_query_geometry_evaluation(tmp_path):
         assert len(calls) <= len(geoms), f"{len(calls)} evaluations for {len(geoms)} rows"
     finally:
         con.close()
+
+
+def test_multifile_statistics_include_every_file(tmp_path):
+    for name, x, y in (("a", 1.0, 2.0), ("b", 30.0, 40.0)):
+        table = _table([_pt(x, y)]).append_column(
+            "bbox", pa.array([{"xmin": x, "ymin": y, "xmax": x, "ymax": y}])
+        )
+        pq.write_table(table, tmp_path / f"{name}.parquet")
+    for source in (str(tmp_path), str(tmp_path / "*.parquet")):
+        assert bounds_of(source, "geometry", bbox_column="bbox") == [1, 2, 30, 40]
+
+
+def test_bounds_keep_xy_contract_with_native_xyz_footer(tmp_path):
+    import geoarrow.pyarrow as ga
+
+    path = tmp_path / "xyz.parquet"
+    geometry = ga.as_wkb(["POINT Z (1 2 3)", "POINT Z (4 5 6)"])
+    pq.write_table(pa.table({"geometry": geometry}), path)
+    assert geometry_stats_of(str(path), "geometry").bbox == [1, 2, 3, 4, 5, 6]
+    assert bounds_of(str(path), "geometry") == [1, 2, 4, 5]
+
+
+def test_wrapped_footer_bounds_fall_back_to_cartesian_scan(tmp_path, monkeypatch):
+    import geoparquet_io.core.duckdb_metadata as footer
+
+    path = _file(tmp_path, [_line(170, 10, -170, 10), _line(175, 12, 178, 12)])
+    monkeypatch.setattr(footer, "get_file_metadata", lambda _: {"num_row_groups": 2})
+    monkeypatch.setattr(
+        footer,
+        "get_native_geo_stats_by_row_group",
+        lambda *args: [
+            {"xmin": 170, "ymin": 10, "xmax": -170, "ymax": 10, "geometry_types": ["LineString"]},
+            {"xmin": 175, "ymin": 12, "xmax": 178, "ymax": 12, "geometry_types": ["LineString"]},
+        ],
+    )
+    assert bounds_of(path, "geometry") == [-170, 10, 178, 12]
+    table = pq.read_table(path).append_column(
+        "bbox",
+        pa.array(
+            [
+                {"xmin": 170.0, "ymin": 10.0, "xmax": -170.0, "ymax": 10.0},
+                {"xmin": 175.0, "ymin": 12.0, "xmax": 178.0, "ymax": 12.0},
+            ]
+        ),
+    )
+    pq.write_table(table, path)
+    chunks = [
+        {"xmin": 170, "ymin": 10, "xmax": -170, "ymax": 10},
+        {"xmin": 175, "ymin": 12, "xmax": 178, "ymax": 12},
+    ]
+    monkeypatch.setattr(footer, "get_row_group_bbox_stats", lambda *a, **kw: (chunks, None))
+    assert bounds_of(path, "geometry", bbox_column="bbox") == [-170, 10, 178, 12]
+    pq.write_table(table.slice(0, 1), path)
+    assert bounds_of(path, "geometry", bbox_column="bbox") == [-170, 10, 170, 10]
+
+
+def test_file_scan_bounds_working_memory_at_the_owner(tmp_path, monkeypatch):
+    import geoparquet_io.core.geo_metadata as owner
+    from geoparquet_io.core.memory_limits import parse_size_string
+
+    original = owner._query_stats
+    observed = []
+
+    def measure(con, *args):
+        settings = con.execute(
+            "SELECT current_setting('threads'), current_setting('memory_limit'), "
+            "current_setting('preserve_insertion_order')"
+        ).fetchall()[0]
+        observed.append(settings)
+        return original(con, *args)
+
+    monkeypatch.setattr(owner, "_query_stats", measure)
+    path = _file(tmp_path, [_pt(1, 2), _pt(3, 4)])
+    assert geometry_types_of(path, "geometry") == ["Point"]
+    assert bounds_of(path, "geometry") == [1, 2, 3, 4]
+    assert observed
+    for threads, limit, preserve_order in observed:
+        assert threads == 1
+        assert parse_size_string(limit) <= 256 * 1024 * 1024
+        assert not preserve_order
+
+    # The batched path shares the same empty, NULL, EMPTY and non-finite policy.
+    for case, (geoms, bbox, types, _) in CASES.items():
+        table = _table(geoms)
+        table = table.append_column('secondary "geometry', table.column("geometry"))
+        multi = tmp_path / f"{case}.parquet"
+        pq.write_table(table, multi)
+        measured = owner._file_stats_many(
+            str(multi), {"geometry": True, 'secondary "geometry': False}
+        )
+        assert measured["geometry"] == GeometryStats(bbox, types)
+        assert measured['secondary "geometry'] == GeometryStats(None, types)
+    bad = _table([_pt(INF, 2)]).append_column("secondary", pa.array([_pt(1, 2)]))
+    pq.write_table(bad, multi)
+    with pytest.raises(GeometryError, match="geometry"):
+        owner._file_stats_many(str(multi), {"geometry": True, "secondary": True})
+
+
+@pytest.mark.parametrize(
+    "source", ["s3://bucket/year=2024/data.parquet", "s3://bucket/year=*/data.parquet"]
+)
+def test_remote_hive_members_are_read_once(source, monkeypatch):
+    import geoparquet_io.core.duckdb_metadata as footer
+    import geoparquet_io.core.file_utils as files
+
+    member = "s3://bucket/year=2024/data.parquet"
+    expanded = []
+    monkeypatch.setattr(
+        files, "get_all_parquet_files", lambda path: expanded.append(path) or [member]
+    )
+    monkeypatch.setattr(footer, "get_file_metadata", lambda path: {"num_row_groups": 1})
+    monkeypatch.setattr(
+        footer,
+        "get_native_geo_stats_by_row_group",
+        lambda *args: [{"xmin": 1, "ymin": 2, "xmax": 3, "ymax": 4, "geometry_types": ["Point"]}],
+    )
+    assert geometry_stats_of(source, "geometry") == GeometryStats([1, 2, 3, 4], ["Point"])
+    assert expanded == [source]

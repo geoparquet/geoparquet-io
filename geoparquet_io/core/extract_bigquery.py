@@ -36,7 +36,7 @@ from geoparquet_io.core.duckdb_utils import (
     where_condition_fragment,
 )
 from geoparquet_io.core.edges import SPHERICAL
-from geoparquet_io.core.exceptions import ValidationError
+from geoparquet_io.core.exceptions import ValidationError, clean_error_text
 from geoparquet_io.core.file_utils import handle_output_overwrite
 from geoparquet_io.core.geometry_detection import GEOGRAPHY_SOURCE_NAMES, primary_geometry_column
 from geoparquet_io.core.geometry_repair import repair_arrow_table_geometry
@@ -85,7 +85,7 @@ def _quote_bigquery_identifier(name: str) -> str:
     if not name:
         raise ValueError("Cannot quote an empty BigQuery identifier")
     if "\x00" in name:
-        raise ValueError(f"BigQuery identifier contains a NUL byte: {name!r}")
+        raise ValueError(clean_error_text(f"BigQuery identifier contains a NUL byte: {name!r}"))
     escaped = name.replace("\\", "\\\\").replace("`", "\\`")
     return f"`{escaped}`"
 
@@ -106,9 +106,11 @@ def _validate_project_id(project: str) -> str:
 
     if not re.match(_PROJECT_ID_PATTERN, project):
         raise ValueError(
-            f"Invalid GCP project ID: '{project}'. "
-            "Project IDs must be 6-30 characters, start with a lowercase letter, "
-            "and contain only lowercase letters, digits, and hyphens."
+            clean_error_text(
+                f"Invalid GCP project ID: '{project}'. "
+                "Project IDs must be 6-30 characters, start with a lowercase letter, "
+                "and contain only lowercase letters, digits, and hyphens."
+            )
         )
     return project
 
@@ -130,8 +132,10 @@ def _validate_table_part(part: str, part_name: str) -> str:
 
     if not re.match(_TABLE_PART_PATTERN, part):
         raise ValueError(
-            f"Invalid BigQuery {part_name}: '{part}'. "
-            "Must contain only alphanumeric characters, underscores, and hyphens."
+            clean_error_text(
+                f"Invalid BigQuery {part_name}: '{part}'. "
+                "Must contain only alphanumeric characters, underscores, and hyphens."
+            )
         )
     return part
 
@@ -175,16 +179,20 @@ def _normalize_table_id(table_id: str, project: str | None = None) -> str:
 
         if not project:
             raise ValueError(
-                f"Table ID '{table_id}' uses dataset.table format but no project was specified. "
-                "Either use project.dataset.table format or provide --project."
+                clean_error_text(
+                    f"Table ID '{table_id}' uses dataset.table format but no project was specified. "
+                    "Either use project.dataset.table format or provide --project."
+                )
             )
         _validate_project_id(project)
         return f"{project}.{dataset}.{table}"
 
     else:
         raise ValueError(
-            f"Invalid BigQuery table ID: '{table_id}'. "
-            "Expected format: dataset.table or project.dataset.table"
+            clean_error_text(
+                f"Invalid BigQuery table ID: '{table_id}'. "
+                "Expected format: dataset.table or project.dataset.table"
+            )
         )
 
 
@@ -240,7 +248,9 @@ class BigQueryConnection:
             if self.credentials_file:
                 expanded_path = os.path.expanduser(self.credentials_file)
                 if not os.path.exists(expanded_path):
-                    raise FileNotFoundError(f"Credentials file not found: {expanded_path}")
+                    raise FileNotFoundError(
+                        clean_error_text(f"Credentials file not found: {expanded_path}")
+                    )
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = expanded_path
                 self._creds_modified = True
 
@@ -311,7 +321,7 @@ def _googlesql_string(value: str) -> str:
         ValueError: If the value contains a NUL byte.
     """
     if "\x00" in value:
-        raise ValueError(f"GoogleSQL string contains a NUL byte: {value!r}")
+        raise ValueError(clean_error_text(f"GoogleSQL string contains a NUL byte: {value!r}"))
     escaped = value.replace("\\", "\\\\").replace("'", "\\'")
     return f"'{escaped}'"
 
@@ -660,8 +670,10 @@ def _detect_geometry_column_from_schema(
         # Check column exists (for better error messages later)
         if not has_column(all_cols, geography_column):
             raise ValueError(
-                f"Column '{geography_column}' not found in table '{table_id}'. "
-                f"Available columns: {all_cols}."
+                clean_error_text(
+                    f"Column '{geography_column}' not found in table '{table_id}'. "
+                    f"Available columns: {all_cols}."
+                )
             )
         # Column exists but isn't GEOMETRY type - return None so caller
         # can handle it as VARCHAR with WKT/GeoJSON parsing
@@ -1251,7 +1263,7 @@ def extract_bigquery(
 
     # Check if output file exists and handle overwrite (fixes issue #278)
     if output_parquet and not dry_run:
-        handle_output_overwrite(output_parquet, overwrite, remove=False)
+        handle_output_overwrite(output_parquet, overwrite)
 
     # Handle dry_run without connecting to BigQuery
     if dry_run:

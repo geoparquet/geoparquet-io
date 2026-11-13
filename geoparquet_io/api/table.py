@@ -3689,7 +3689,7 @@ class Table:
             # The CLI repair path's policy (_copy_to_fix_output): the old file
             # survives until the repaired one replaces it.
             handle_output_overwrite(
-                os.fspath(output), overwrite, self._source_path, flag="overwrite=True", remove=False
+                os.fspath(output), overwrite, self._source_path, flag="overwrite=True"
             )
 
         def repair(path: str, target: str) -> None:

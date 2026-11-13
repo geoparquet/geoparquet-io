@@ -15,7 +15,8 @@ from geoparquet_io.core.partition.common import (
     raise_if_no_rows,
     readable_geoparquet,
 )
-from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
+from geoparquet_io.core.streaming import is_stdin
+from geoparquet_io.core.write_funnels import read_stdin_to_temp_file
 
 
 def validate_column_exists(parquet_file: str, column_name: str, verbose: bool = False):

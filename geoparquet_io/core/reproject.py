@@ -75,9 +75,10 @@ from geoparquet_io.core.remote import (
     validate_profile_for_urls,
 )
 from geoparquet_io.core.stream_io import write_output
-from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file, should_stream_output
+from geoparquet_io.core.streaming import is_stdin, should_stream_output
 from geoparquet_io.core.write_funnels import (
     collect_nonplanar_edges,
+    read_stdin_to_temp_file,
     rewrite_footer_kv,
     write_parquet_with_metadata,
 )
@@ -601,6 +602,8 @@ def reproject_impl(
                         invalidate_derived_stats_columns={geom_col},
                         drop_nonplanar_edges_columns=drop_edges_columns,
                     )
+                    # Publication must wait for the reader, including on Windows.
+                    con.close()
 
                 if is_remote:
                     upload_if_remote(

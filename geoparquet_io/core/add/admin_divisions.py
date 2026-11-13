@@ -261,7 +261,7 @@ class _AdminAddRun:
         if not self.verbose:
             return
         if step.per_level:
-            debug(f"Spatial join: adding {step.levels[0]} from {step.source}...")
+            debug(f"Spatial join: adding {step.levels[0]} from {step.source_description}...")
         else:
             debug("Performing spatial join with admin boundaries...")
 
@@ -271,7 +271,7 @@ class _AdminAddRun:
             progress(
                 f"\n-- Step {step.index + 1}: Add {output_col} from {step.levels[0]} boundaries"
             )
-            progress(f"-- Source: {step.source}")
+            progress(f"-- Source: {step.source_description}")
             progress(step.query)
             return
         _print_dry_run_header(
@@ -358,7 +358,7 @@ def add_admin_divisions_multi(
     effective_prefix = "vecorel" if vecorel else prefix
 
     # Check if output file exists and handle overwrite (fixes issue #278)
-    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet)
 
     # Check for partition input (not supported)
     require_single_file(input_parquet, "add admin-divisions")

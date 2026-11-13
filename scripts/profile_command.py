@@ -61,7 +61,9 @@ class CallSpies:
 
             def read_all(self):
                 counts["arrow_read_all"] += 1
-                return self.reader.read_all()
+                table = self.reader.read_all()
+                counts["arrow_nonempty_read_all"] += bool(table.num_rows)
+                return table
 
             def __getattr__(self, name):
                 return getattr(self.reader, name)
@@ -80,7 +82,9 @@ class CallSpies:
 
         def read_all(owner, *args, **kwargs):
             counts["arrow_read_all"] += 1
-            return original_read(owner, *args, **kwargs)
+            table = original_read(owner, *args, **kwargs)
+            counts["arrow_nonempty_read_all"] += bool(table.num_rows)
+            return table
 
         self.patches.enter_context(patch.object(ipc.RecordBatchStreamReader, "read_all", read_all))
         for cls in (duckdb.DuckDBPyConnection, duckdb.DuckDBPyRelation):
@@ -421,6 +425,15 @@ def peak_rss_bytes():
         import psutil
 
         return psutil.Process().memory_info().peak_wset
+
+    if sys.platform.startswith("linux"):
+        # rusage can retain a parent's pre-exec peak; procfs tracks this image.
+        try:
+            for line in Path("/proc/self/status").read_text().splitlines():
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+        except (OSError, ValueError, IndexError):
+            pass
 
     import resource
 

@@ -9,9 +9,11 @@ Tests the Strategy Pattern for GeoParquet writes including:
 
 import json
 import logging
+import os
 import struct
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -88,25 +90,164 @@ class TestWriteStrategyFactory:
 class TestAtomicWrite:
     """Tests for atomic_write context manager."""
 
-    def test_successful_write(self):
+    def test_successful_write(self, monkeypatch, caplog):
         """Successful write atomically renames file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "output.parquet"
 
             with atomic_write(str(output_path)) as temp_path:
-                Path(temp_path).write_text("test content")
+                Path(temp_path).write_text("test content", encoding="utf-8")
 
             assert output_path.exists()
-            assert output_path.read_text() == "test content"
+            assert output_path.read_text(encoding="utf-8") == "test content"
+
+            pinned = 1_700_000_000_000_000_000
+            os.utime(output_path, ns=(pinned, pinned))
+            for _ in range(2):
+                previous = output_path.stat().st_mtime_ns // 1_000_000_000
+                with atomic_write(str(output_path)) as temp_path:
+                    Path(temp_path).write_text("test content", encoding="utf-8")
+                    os.utime(temp_path, ns=(pinned, pinned))
+                assert output_path.stat().st_mtime_ns // 1_000_000_000 > previous
+
+            from unittest.mock import patch
+
+            future = time.time_ns() + 60_000_000_000
+            os.utime(output_path, ns=(future, future))
+            for failure in (OSError, KeyboardInterrupt):
+                original = output_path.stat().st_mtime_ns
+                with pytest.raises(failure, match="timestamp update"):
+                    with patch("os.utime", side_effect=failure("timestamp update")):
+                        with atomic_write(str(output_path)) as temp_path:
+                            Path(temp_path).write_bytes(b"replacement")
+                assert output_path.read_bytes() == b"test content"
+                assert output_path.stat().st_mtime_ns == original
+                assert not list(Path(tmpdir).glob(".gpio-stage-*"))
+
+        from geoparquet_io.core import remote
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+            with remote.remote_write_context("s3://bucket/output.parquet", verbose=True):
+                pass
+        assert "gpio_" not in caplog.text
+
+        uploaded = []
+        monkeypatch.setattr(
+            remote,
+            "upload_if_remote",
+            lambda local, destination: uploaded.append(
+                (Path(local).suffix, Path(local).read_bytes(), destination)
+            ),
+        )
+        destination = "s3://bucket/map.pmtiles"
+        with atomic_write(destination, suffix=".pmtiles") as staged:
+            assert Path(staged).suffix == ".pmtiles"
+            Path(staged).write_bytes(b"tiles")
+        assert uploaded == [(".pmtiles", b"tiles", destination)]
+        with pytest.raises(GeoParquetError, match="sidecar"):
+            with atomic_write(destination, sidecar_suffixes=(".dbf",)):
+                pytest.fail("remote multi-file writes must fail before invoking the writer")
+
+    def test_successful_write_and_orphan_cleanup(self, tmp_path, monkeypatch):
+        """An abruptly exited writer is collectable after aging; a live writer never is (#1149)."""
+        import os
+        import subprocess
+        import time
+        from textwrap import dedent
+
+        from geoparquet_io.core import admin_datasets, file_utils
+
+        script = """
+    import os, sys
+    from pathlib import Path
+    from geoparquet_io.core.file_utils import atomic_write
+    with atomic_write(sys.argv[1], reclaim_staging=True) as staged:
+        Path(staged).write_bytes(b'partial')
+        print(staged, flush=True)
+        sys.stdin.read(1)
+        os._exit(0)
+    """
+        proc = subprocess.Popen(
+            [sys.executable, "-c", dedent(script), str(tmp_path / "killed.parquet")],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            stage = Path(proc.stdout.readline().strip()).parent
+            assert stage.is_dir()
+            owner_pid = int(stage.name.split("-")[-2])
+            old = time.time() - 2 * 24 * 60 * 60
+            os.utime(stage, (old, old))
+            assert file_utils.sweep_orphaned_staging_dirs(tmp_path) == []
+        finally:
+            # A Windows venv launcher can have a different PID: let the writer exit itself.
+            proc.communicate(input="\n", timeout=10)
+        assert proc.returncode == 0
+        # Isolate PID reuse only after the actual writer exits, not after killing its launcher.
+        real_check = file_utils._process_is_alive
+        monkeypatch.setattr(
+            file_utils, "_process_is_alive", lambda pid: pid != owner_pid and real_check(pid)
+        )
+        # A fresh abandoned stage waits for the age guard.
+        os.utime(stage, None)
+        assert file_utils.sweep_orphaned_staging_dirs(tmp_path) == []
+        os.utime(stage, (old, old))
+        monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
+        # Without locks or psutil, even a reaped writer must be kept.
+        with monkeypatch.context() as windows:
+            windows.setattr(file_utils, "_spill_lock", lambda path: None)
+            windows.setattr(file_utils, "_process_is_alive", lambda pid: True)
+            assert file_utils.sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == []
+            assert admin_datasets.clear_cache(confirm=True)["staging_dirs_deleted"] == 0
+            assert stage.exists()
+
+        assert file_utils.sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == [str(stage)]
+        assert stage.exists(), "pricing must not delete an abandoned stage"
+        # Exercise collection without fcntl on every platform as well.
+        monkeypatch.setattr(file_utils, "_spill_lock", lambda path: None)
+        result = admin_datasets.clear_cache(confirm=True)
+        assert result["staging_dirs_deleted"] == 1
+        assert result["staging_bytes_freed"] == len(b"partial")
+        assert not stage.exists()
+        assert not (tmp_path / "killed.parquet").exists()
+        with atomic_write(str(tmp_path / "killed.parquet")) as staged:
+            Path(staged).write_bytes(b"complete")
+        assert (tmp_path / "killed.parquet").read_bytes() == b"complete"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["killed.parquet"]
 
     def test_failed_write_cleanup(self):
         """Failed write cleans up temp file."""
+        import shutil
+        from unittest.mock import patch
+
+        import geoparquet_io.core.file_utils as fu
+
+        # Ordinary writes must not require a readable parent or sweep its entries.
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "output.parquet"
+            with (
+                patch.object(fu, "_spill_base_lock", side_effect=PermissionError("0300")) as lock,
+                patch.object(fu.os, "open", wraps=fu.os.open) as opened,
+                patch.object(fu.os, "scandir", wraps=fu.os.scandir) as scanned,
+                patch.object(Path, "glob", side_effect=AssertionError("parent sweep")),
+            ):
+                with atomic_write(str(output_path)) as staged:
+                    Path(staged).write_bytes(b"complete")
+                # Main's only os.open is rmtree's fd-based cleanup, where supported.
+                assert opened.call_count == int(shutil.rmtree.avoids_symlink_attacks)
+                assert lock.call_count == 0
+                assert all(str(call.args[0]) != tmpdir for call in scanned.call_args_list)
+                with atomic_write(str(output_path), reclaim_staging=True) as staged:
+                    assert not Path(staged).parent.name.split("-")[-2].isdigit()
+                    Path(staged).write_bytes(b"complete")
+            assert output_path.read_bytes() == b"complete"
+            output_path.unlink()
 
             with pytest.raises(RuntimeError):
                 with atomic_write(str(output_path)) as temp_path:
-                    Path(temp_path).write_text("partial")
+                    Path(temp_path).write_text("partial", encoding="utf-8")
                     raise RuntimeError("Simulated failure")
 
             assert not output_path.exists()
@@ -620,31 +761,27 @@ class TestWriteStrategiesNoGeometry:
     def test_disk_rewrite_query_no_geometry_verbose(
         self, duckdb_connection, non_geo_query, output_file, caplog
     ):
-        """The verbose row count on the plain-Parquet path opens the file it just wrote.
+        """An inner writer leaves success reporting to its caller, after publication."""
 
-        Same shape as the geo path's temp-file peek: the handle has to be closed
-        before the work directory is torn down, which on Windows is the
-        difference between a cleaned-up temp dir and a leaked one.
-        """
-        strategy = WriteStrategyFactory.get_strategy(WriteStrategy.DISK_REWRITE)
+        for kind in (WriteStrategy.DISK_REWRITE, WriteStrategy.ARROW_MEMORY):
+            strategy = WriteStrategyFactory.get_strategy(kind)
+            with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+                strategy.write_from_query(
+                    con=duckdb_connection,
+                    query=non_geo_query,
+                    output_path=output_file,
+                    geometry_column=None,
+                    original_metadata=None,
+                    geoparquet_version="1.1",
+                    compression="ZSTD",
+                    compression_level=15,
+                    row_group_size_mb=None,
+                    row_group_rows=None,
+                    input_crs=None,
+                    verbose=True,
+                )
 
-        with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
-            strategy.write_from_query(
-                con=duckdb_connection,
-                query=non_geo_query,
-                output_path=output_file,
-                geometry_column=None,
-                original_metadata=None,
-                geoparquet_version="1.1",
-                compression="ZSTD",
-                compression_level=15,
-                row_group_size_mb=None,
-                row_group_rows=None,
-                input_crs=None,
-                verbose=True,
-            )
-
-        assert "Wrote 3 rows" in caplog.text
+        assert "[SUCCESS]" not in caplog.text
         self._assert_valid_plain_parquet(output_file)
 
     def test_compression_options_honored_no_geometry(self, non_geo_table, output_file):

@@ -51,17 +51,17 @@ def fresh_deprecations():
     start from a clean ledger -- and a test that asserts on its *absence* has
     to, too, or it passes only because an earlier test warned first.
     """
-    from geoparquet_io.core import remote as remote_module
+    from geoparquet_io.core import deprecation as remote_module
 
-    saved = set(remote_module._warned_spellings)
-    remote_module._warned_spellings.clear()
+    saved = set(remote_module._warned)
+    remote_module._warned.clear()
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             yield caught
     finally:
-        remote_module._warned_spellings.clear()
-        remote_module._warned_spellings.update(saved)
+        remote_module._warned.clear()
+        remote_module._warned.update(saved)
 
 
 def deprecations(caught):

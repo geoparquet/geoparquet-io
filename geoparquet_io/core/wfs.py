@@ -30,6 +30,7 @@ import duckdb
 import pyarrow as pa
 
 from geoparquet_io.core.duckdb_utils import as_wkb_sql, geom_from_wkb_sql
+from geoparquet_io.core.exceptions import clean_error_text
 from geoparquet_io.core.geometry_detection import BUILT_GEOMETRY_COLUMN
 from geoparquet_io.core.sizing import BYTES_PER_MIB, bytes_to_mb
 from geoparquet_io.core.wfs_defaults import DEFAULT_WFS_PAGE_SIZE
@@ -3098,7 +3099,9 @@ def _clip_to_area_of_use(
     """
     target = load_crs(crs)
     if target is None:
-        raise ValueError(f"pyproj cannot read the CRS {crs[:200]!r}")
+        raise ValueError(
+            clean_error_text(f"pyproj cannot read the CRS {clean_error_text(crs)[:200]!r}")
+        )
     area = target.area_of_use
     xmin, ymin, xmax, ymax = lon_lat
     if area is None:
@@ -3486,7 +3489,7 @@ def convert_wfs_to_geoparquet(
     """
     configure_verbose(verbose)
 
-    handle_output_overwrite(output_file, overwrite, remove=False)
+    handle_output_overwrite(output_file, overwrite)
 
     # Fetch data
     table = wfs_to_table(
@@ -3659,7 +3662,7 @@ def convert_wfs_layers_to_directory(
     # Every layer's output is checked before the first layer is fetched
     for typename in typenames:
         safe_name = typename.replace(":", "_").replace("/", "_")
-        handle_output_overwrite(str(output_path / f"{safe_name}.parquet"), overwrite, remove=False)
+        handle_output_overwrite(str(output_path / f"{safe_name}.parquet"), overwrite)
 
     progress(
         f"Extracting {len(typenames)} layers to {output_dir} "

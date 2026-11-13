@@ -15,6 +15,7 @@ from urllib.parse import quote, urlparse
 
 import pyarrow as pa
 
+from geoparquet_io.core import http_retry
 from geoparquet_io.core.bbox_parse import BBox, any_piece, parse_optional_bbox
 from geoparquet_io.core.column_selection import (
     exclude_columns,
@@ -317,6 +318,7 @@ def _get_row_count(
     sql = _build_carto_count_query(table_name, where=where, bbox=bbox)
 
     full_url = f"{url}?q={quote(sql)}"
+    debug(f"Request URL: {full_url}")
     if api_key:
         full_url += f"&api_key={quote(api_key)}"
 
@@ -383,6 +385,7 @@ def _carto_sql_json(
         CartoError: On request/parse failure or an API error payload.
     """
     full_url = f"{url}?q={quote(sql)}"
+    debug(f"Request URL: {full_url}")
     if api_key:
         full_url += f"&api_key={quote(api_key)}"
 
@@ -747,10 +750,10 @@ def _probe_request_status(full_url: str, timeout: float) -> _CartoStatus:
         status. A probe that cannot answer must say so rather than guess: no
         status means the retryable class.
     """
-    import httpx
-
+    # The enclosing run_with_retry owns the attempt budget; do not retry the
+    # probe separately or buffer a potentially huge successful response.
     try:
-        with httpx.stream(
+        with http_retry.get_shared_http_client().stream(
             "GET",
             full_url,
             timeout=min(timeout, STATUS_PROBE_TIMEOUT),
@@ -907,6 +910,7 @@ def _fetch_with_retry(
     # Construct full URL with the requested response format
     fmt_param = "GeoJSON" if fmt == "GeoJSON" else "csv"
     full_url = f"{url}?q={quote(sql)}&format={fmt_param}"
+    debug(f"Request URL: {full_url}")
     if api_key:
         full_url += f"&api_key={quote(api_key)}"
 
@@ -915,8 +919,6 @@ def _fetch_with_retry(
         read_expr = f"ST_Read({sql_path(full_url)})"
     else:
         read_expr = f"read_csv_auto({sql_path(full_url)})"
-
-    debug(f"Request URL: {full_url[:100]}...")
 
     started = time.monotonic()
 
@@ -1317,7 +1319,7 @@ def convert_carto_to_geoparquet(
     """
     configure_verbose(verbose)
 
-    handle_output_overwrite(output_file, overwrite, remove=False)
+    handle_output_overwrite(output_file, overwrite)
 
     # Fetch data
     table = carto_to_table(

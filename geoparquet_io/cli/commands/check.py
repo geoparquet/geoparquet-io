@@ -614,7 +614,7 @@ def _echo_no_fix(verdict: Verdict, result: dict, already_fine: str) -> None:
 def _copy_to_fix_output(file_path: str, output: str, overwrite: bool) -> str:
     from geoparquet_io.core.file_utils import copy_file, handle_output_overwrite
 
-    handle_output_overwrite(output, overwrite, file_path, remove=False)
+    handle_output_overwrite(output, overwrite, file_path)
     copy_file(file_path, output)
     return output
 

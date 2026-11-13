@@ -360,7 +360,7 @@ def create_pmtiles_chunked(
             "--chunks needs --max-zoom: tippecanoe would guess a zoom per chunk and the "
             "sparse chunks would have no tiles above their own guess",
         )
-    handle_output_overwrite(output_path, force, flag="--force", remove=False)
+    handle_output_overwrite(output_path, force, flag="--force")
     if not _check_tile_join():
         raise TileJoinNotFoundError()
     scratch = resolve_scratch_directory(tiling.get("temporary_directory"))

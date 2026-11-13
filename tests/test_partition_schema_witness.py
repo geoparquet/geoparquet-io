@@ -164,30 +164,88 @@ def test_every_partition_write_options_names_its_witness():
             )
             sites.append((f"{source}:{node.lineno}", named))
 
+    import inspect
+    import textwrap
+
+    from geoparquet_io.core.partition.staging import PartitionWriteOptions
+
+    kwargs_tree = ast.parse(
+        textwrap.dedent(inspect.getsource(PartitionWriteOptions.write_kwargs.__wrapped__))
+    )
+    assert not any(isinstance(node, ast.IfExp) for node in ast.walk(kwargs_tree))
     assert len(sites) >= 3, sites
     assert all(named for _, named in sites), [site for site, ok in sites if not ok]
 
 
-@pytest.mark.parametrize(
-    "remote",
-    ["s3://bucket/data.parquet", "https://example.com/data.parquet", "gs://bucket/data.parquet"],
-)
-def test_a_remote_witness_is_not_forwarded_to_each_partition(remote):
-    """A remote input is not re-read once per partition.
+@pytest.mark.parametrize("source_fixture", ["projected_conus", "spherical_secondary"])
+def test_remote_witness_is_read_once_per_run(source_fixture, request, tmp_path, monkeypatch):
+    import fsspec
 
-    Every partition write would fetch the remote footer again, several times
-    and on a new connection each (#1013): 100 partitions of an HTTP input went
-    from 5 s to over 5 minutes. A local witness is a pyarrow footer read,
-    about half a millisecond, so only a local one is forwarded.
-    """
-    from geoparquet_io.core.partition.staging import PartitionWriteOptions
+    import geoparquet_io.core.partition.staging as staging
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
 
-    assert PartitionWriteOptions(input_file=remote).as_write_kwargs()["input_file"] is None
+    source = request.getfixturevalue(source_fixture)
+    from geoparquet_io.core.duckdb_metadata import get_kv_metadata, get_schema_info
+
+    reads = []
+    resolutions = []
+    remote = "gs://bucket/data.parquet"
+    if source_fixture == "spherical_secondary":
+        remote = "s3://bucket/parts/*.parquet"
+    concrete = remote.replace("*.parquet", "first.parquet")
+
+    def no_fsspec(*args, **kwargs):
+        raise ImportError("Please install gcsfs")
+
+    def resolve(url):
+        resolutions.append(url)
+        return concrete
+
+    def read_kv(url):
+        reads.append(("kv", url))
+        return get_kv_metadata(str(source))
+
+    def read_schema(url):
+        reads.append(("schema", url))
+        return get_schema_info(str(source))
+
+    monkeypatch.setattr(fsspec, "open", no_fsspec)
+    monkeypatch.setattr(staging, "get_first_parquet_file", resolve)
+    monkeypatch.setattr(staging, "get_kv_metadata", read_kv)
+    monkeypatch.setattr(staging, "get_schema_info", read_schema)
+    options = staging.PartitionWriteOptions(
+        input_file=remote,
+        geoparquet_version="1.1",
+    )
+    con = get_duckdb_connection()
+    try:
+        for i in range(3):
+            directory = tmp_path / f"stage{i}"
+            directory.mkdir()
+            con.execute(
+                f"COPY (SELECT * FROM {sql_path(str(source))}) TO "
+                f"{sql_path(str(directory / 'part.parquet'))} "
+                "(FORMAT PARQUET, GEOPARQUET_VERSION 'NONE')"
+            )
+            output = tmp_path / f"out{i}.parquet"
+            staging.finalize_partition_file(
+                con, str(directory), str(output), {}, False, False, options
+            )
+            if source_fixture == "projected_conus":
+                assert geo_block_crs_id(output) == EPSG_5070
+            else:
+                assert _edges(output, "route") == "spherical"
+        assert sorted(reads) == [("kv", concrete), ("schema", concrete)]
+        assert resolutions == [remote]
+    finally:
+        con.close()
 
 
 def test_a_local_witness_is_forwarded(projected_conus):
     from geoparquet_io.core.partition.staging import PartitionWriteOptions
 
     options = PartitionWriteOptions(input_file=str(projected_conus))
-    assert options.as_write_kwargs()["input_file"] == str(projected_conus)
-    assert PartitionWriteOptions().as_write_kwargs()["input_file"] is None
+    with options.write_kwargs() as kwargs:
+        assert kwargs["input_file"] == str(projected_conus)
+    with PartitionWriteOptions().write_kwargs() as kwargs:
+        assert kwargs["input_file"] is None

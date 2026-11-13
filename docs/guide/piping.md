@@ -14,6 +14,8 @@ gpio add bbox input.parquet | gpio sort hilbert - output.parquet
 gpio extract --limit 1000 input.parquet | gpio add bbox - | gpio add quadkey - output.parquet
 ```
 
+Sorts reading from stdin refuse an existing output file unless you pass `--overwrite`; scripts relying on the old silent replacement need `--overwrite`.
+
 You can also explicitly use `-` for output if preferred:
 
 ```bash
@@ -178,7 +180,7 @@ gpio automatically detects when stdout is piped to another process. You don't ne
 gpio add bbox input.parquet | gpio sort hilbert - output.parquet
 
 # Explicit '-' also works
-gpio add bbox input.parquet - | gpio sort hilbert - output.parquet
+gpio add bbox input.parquet - | gpio sort hilbert - explicit_output.parquet
 ```
 
 When output is omitted and stdout is piped, gpio streams Arrow IPC. When stdout is a terminal, gpio requires an explicit output path.

@@ -57,17 +57,17 @@ FIELDS = (
 @contextmanager
 def fresh_deprecations():
     """Record warnings with an empty "warned once" ledger, then put it back."""
-    from geoparquet_io.core import check_options as module
+    from geoparquet_io.core import deprecation as module
 
-    saved = set(module._warned_spellings)
-    module._warned_spellings.clear()
+    saved = set(module._warned)
+    module._warned.clear()
     try:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             yield caught
     finally:
-        module._warned_spellings.clear()
-        module._warned_spellings.update(saved)
+        module._warned.clear()
+        module._warned.update(saved)
 
 
 def deprecations(caught):

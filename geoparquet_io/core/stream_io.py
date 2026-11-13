@@ -15,12 +15,12 @@ Key abstractions:
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import pyarrow as pa
 
-from geoparquet_io.core.arrow_geo_metadata import table_geometry_info
 from geoparquet_io.core.common import get_parquet_metadata
 from geoparquet_io.core.crs_utils import (
     crs_of,
@@ -32,22 +32,20 @@ from geoparquet_io.core.duckdb_utils import (
     describe_query,
     get_duckdb_connection,
     query_schema,
-    register_arrow,
-    sql_path,
+    quote_identifier,
 )
 from geoparquet_io.core.edges import declared_edges
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import get_first_parquet_file, is_partition_path
 from geoparquet_io.core.geo_metadata import (
-    ArrowTableSource,
-    GeoBlockOptions,
+    QuerySource,
     backfill_derived_stats,
     compose_carried_geo,
-    compose_geo_block,
     prune_geo_metadata_to_columns,
     sanitized_carried_geo,
-    with_geo_block,
+    strip_derived_stats,
 )
 from geoparquet_io.core.geometry_detection import (
+    _query_with_native_geometry,
     create_geometry_view,
     native_geometry_types_from_query,
     primary_geometry_column,
@@ -56,22 +54,23 @@ from geoparquet_io.core.logging_config import progress, warn
 from geoparquet_io.core.parquet_writer import (
     WriteOptions,
     resolve_output_geoparquet_version,
-    version_to_describe,
 )
+from geoparquet_io.core.partition.reader import build_read_parquet_expr
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
+    STREAM_BATCH_ROWS,
     apply_geoarrow_extension_type,
     apply_metadata_to_table,
     is_stdin,
-    read_arrow_stream,
     should_stream_output,
     validate_output,
     write_arrow_stream,
 )
 from geoparquet_io.core.write_funnels import (
+    _stream_input_metadata,
     collect_nonplanar_edges,
     declared_nonplanar_edges,
-    table_nonplanar_edges,
+    read_stdin_to_temp_file,
     write_parquet_with_metadata,
 )
 
@@ -88,18 +87,22 @@ def open_input(
     verbose: bool = False,
     *,
     stream_output: bool = False,
+    preserve_wkb: bool = False,
+    allow_schema_diff: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """
     Open input source (file or stream) and prepare for DuckDB processing.
 
     For files: Returns the file path for direct DuckDB query
-    For streams: Reads Arrow IPC, registers in DuckDB, returns table name
+    For streams: Spools IPC batches to scratch Parquet for replayable DuckDB reads
 
     Args:
         path: Input path (file path or "-" for stdin)
         con: Optional existing DuckDB connection (one will be created if None)
         verbose: Whether to print verbose output
         stream_output: Carry native field descriptions for an IPC producer
+        preserve_wkb: Keep stream WKB as stored bytes for operations such as sorting
+        allow_schema_diff: Merge dataset columns by name
 
     Yields:
         Tuple of (source_reference, original_metadata, is_streaming, connection)
@@ -113,41 +116,36 @@ def open_input(
             result = con.execute(f"SELECT * FROM {source}")
     """
     if is_stdin(path):
-        yield from _open_stdin_input(con, verbose)
+        yield from _open_stdin_input(con, verbose, preserve_wkb=preserve_wkb)
     else:
-        yield from _open_file_input(path, con, verbose, stream_output=stream_output)
+        yield from _open_file_input(
+            path, con, verbose, stream_output=stream_output, allow_schema_diff=allow_schema_diff
+        )
 
 
 def _open_stdin_input(
     con: duckdb.DuckDBPyConnection | None,
     verbose: bool,
+    *,
+    preserve_wkb: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """Handle streaming input from stdin."""
-    import geoarrow.pyarrow  # noqa: F401 - register IPC field types before reading
+    from geoparquet_io.core.file_utils import unlink_released_file
 
-    table = read_arrow_stream()
-    metadata = _stream_input_metadata(table)
-
-    created_connection = con is None
-    if created_connection:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
-
+    path = read_stdin_to_temp_file(verbose)
     try:
-        # Register the Arrow table for SQL queries
-        register_arrow(con, "input_stream", table)
-
-        # Find geometry column and create view with proper geometry type
-        geom_col = primary_geometry_column(table, geo=sanitized_carried_geo(metadata))
-        source_ref = (
-            create_geometry_view(con, "input_stream", geom_col, "input_stream_geom")
-            if geom_col
-            else "input_stream"
-        )
-
-        yield source_ref, metadata, True, con
+        for source, metadata, _, connection in _open_file_input(
+            path, con, verbose, stream_output=True
+        ):
+            geom_col = primary_geometry_column(
+                describe_query(connection, f"SELECT * FROM {source}"),
+                geo=sanitized_carried_geo(metadata),
+            )
+            if geom_col and not preserve_wkb:
+                source = create_geometry_view(connection, source, geom_col)
+            yield source, metadata, True, connection
     finally:
-        if created_connection:
-            con.close()
+        unlink_released_file(path)
 
 
 def _open_file_input(
@@ -156,25 +154,46 @@ def _open_file_input(
     verbose: bool,
     *,
     stream_output: bool = False,
+    allow_schema_diff: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """Handle file-based input."""
     import geoarrow.pyarrow  # noqa: F401 - retain native geo field descriptions
 
-    raw_url = resolve_file_url(path, verbose=verbose)
     file_metadata, schema = get_parquet_metadata(path, verbose=verbose)
 
+    lifetime = ExitStack()
     created_connection = con is None
     if created_connection:
-        con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
+        if stream_output:
+            from geoparquet_io.core.memory_limits import (
+                _MATERIALIZED_BYTES_PER_THREAD,
+                scoped_bounded_connection,
+            )
+
+            con = lifetime.enter_context(
+                scoped_bounded_connection(
+                    load_spatial=True,
+                    load_httpfs=needs_httpfs(path),
+                    preserve_insertion_order=True,
+                    per_thread=_MATERIALIZED_BYTES_PER_THREAD,
+                )
+            )
+        else:
+            con = lifetime.enter_context(
+                get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
+            )
 
     try:
-        source = f"read_parquet({sql_path(raw_url)})"
+        source = build_read_parquet_expr(path, allow_schema_diff=allow_schema_diff, verbose=verbose)
         if stream_output:
-            file_metadata = _file_stream_metadata(con, source, path, schema, file_metadata)
+            witness = get_first_parquet_file(path) if is_partition_path(path) else path
+            file_metadata = _file_stream_metadata(con, source, witness, schema, file_metadata)
+            if is_partition_path(path):
+                file_metadata = strip_derived_stats(file_metadata)
         yield source, file_metadata, False, con
     finally:
         if created_connection:
-            con.close()
+            lifetime.close()
 
 
 def _file_stream_metadata(con, source, path, schema, metadata) -> dict:
@@ -189,47 +208,6 @@ def _file_stream_metadata(con, source, path, schema, metadata) -> dict:
         for name, edges in collect_nonplanar_edges(path).items():
             described = apply_geoarrow_extension_type(described, name, edges=edges)
     return _stream_input_metadata(described.replace_schema_metadata(metadata))
-
-
-def _stream_input_metadata(table: pa.Table) -> dict:
-    """Carry every input geometry's CRS and resolved edges before registration.
-
-    The I/O interface passes KV metadata alongside a DuckDB source, whose Arrow
-    field types are gone. Fill the description from those fields once, using
-    the same block-over-type edge authority as the table write and repair paths.
-    """
-    metadata = dict(table.schema.metadata or {})
-    geo = sanitized_carried_geo(metadata)
-    geometry_info = table_geometry_info(table, None, geo)
-    if geometry_info is None:
-        return metadata
-    inferred_columns = geometry_info["metadata"]
-    # The owner resolves over the geometry columns' own Arrow fields: a
-    # non-geometry column that merely has a standard name cannot win, and every
-    # inferred column is declared by the block or GeoArrow-typed, so one answers.
-    geometry_fields = pa.schema([table.schema.field(name) for name in inferred_columns])
-    primary = primary_geometry_column(geometry_fields, geo=geo)
-    # What each column's field says (its CRS, the "not known" geometry types),
-    # the primary's included, is ``geometry_info``; the data's edges, resolved
-    # block-over-type, are ``column_edges``. The composer lets whatever the
-    # carried block already says win. Edges are recorded, not mapped, for a
-    # description: the write at the other end of the pipe maps them to the
-    # output's version, so a 2.0 output keeps an ellipsoidal algorithm.
-    block = compose_geo_block(
-        ArrowTableSource(table),
-        GeoBlockOptions(
-            geometry_column=primary,
-            version=version_to_describe(table.schema),
-            describe=True,
-            covering=None,
-            column_edges=table_nonplanar_edges(table, primary, None),
-            geometry_info={
-                "secondary": [name for name in inferred_columns if name != primary],
-                "metadata": inferred_columns,
-            },
-        ),
-    )
-    return dict(with_geo_block(table, block).schema.metadata)
 
 
 def write_output(
@@ -248,6 +226,10 @@ def write_output(
     geoparquet_version: str | None = None,
     extra_kv_metadata: dict[str, str] | None = None,
     memory_limit: str | None = None,
+    *,
+    preserve_wkb: bool = False,
+    input_file: str | None = None,
+    invalidate_derived_stats: bool = False,
 ) -> pa.Table | None:
     """
     Execute query and write result to file or stream.
@@ -275,22 +257,42 @@ def write_output(
             ignored for stream output
 
     Returns:
-        Table if streaming output, None if file output
+        Zero-row output-schema table after streaming, None if file output
 
     Raises:
         StreamingError: If no output and stdout is a terminal
     """
     validate_output(output_path)
 
+    output_schema = describe_query(con, query)
+    original_metadata = prune_geo_metadata_to_columns(
+        original_metadata, [name for name, _ in output_schema], repoint_primary=True
+    )
+    carried = sanitized_carried_geo(original_metadata)
+    geometry_column = primary_geometry_column(
+        output_schema,
+        geo=carried,
+        preferred=geometry_column,
+    )
+
     if should_stream_output(output_path):
-        # Arrow IPC to stdout has no DuckDB write engine to configure, so a
-        # memory limit cannot be applied. Say so rather than dropping it silently.
+        if invalidate_derived_stats:
+            original_metadata = strip_derived_stats(original_metadata)
+        # --write-memory governs final Parquet output; internal stats snapshots
+        # follow the connection's existing memory and spill policy.
         if memory_limit is not None:
             warn(
                 "--write-memory is ignored when streaming to stdout "
                 "(it only applies to file outputs)."
             )
-        return _write_stream_output(con, query, original_metadata, geometry_column)
+        return _write_stream_output(
+            con,
+            query,
+            original_metadata,
+            geometry_column,
+            custom_metadata,
+            preserve_wkb=preserve_wkb,
+        )
     else:
         _write_file_output(
             con,
@@ -307,6 +309,9 @@ def write_output(
             geoparquet_version,
             extra_kv_metadata,
             memory_limit,
+            geometry_column=geometry_column,
+            input_file=input_file,
+            invalidate_derived_stats=invalidate_derived_stats,
         )
         return None
 
@@ -316,6 +321,9 @@ def _write_stream_output(
     query: str,
     original_metadata: dict | None,
     geometry_column: str | None,
+    custom_metadata: dict | None = None,
+    *,
+    preserve_wkb: bool = False,
 ) -> pa.Table:
     """Write output as Arrow IPC stream to stdout.
 
@@ -324,54 +332,114 @@ def _write_stream_output(
     - CRS preservation through the pipeline
     - Automatic native Parquet geometry when written to file
     """
-    # Auto-detect geometry column if not provided
     carried = sanitized_carried_geo(original_metadata)
-    if geometry_column is None:
-        geometry_column = primary_geometry_column(describe_query(con, query), geo=carried)
 
     # Convert geometry to WKB (DuckDB's Arrow export uses native format)
     native_columns = native_geometry_types_from_query(con, query)
     stream_query = _wrap_query_with_wkb_conversion(query, list(native_columns))
 
-    result = con.sql(stream_query)
-    table = result.arrow().read_all()
+    # Resolve field metadata without holding data. Stats and rows must describe
+    # the same selection even for random(), sampling and unordered LIMIT.
+    schema = query_schema(con, stream_query)
+    if not carried:
+        description = schema.empty_table().replace_schema_metadata(original_metadata)
+        for name in dict.fromkeys([*native_columns, geometry_column]):
+            if name is not None and name in schema.names:
+                description = apply_geoarrow_extension_type(description, name, None)
+        original_metadata = _stream_input_metadata(
+            description,
+            version=resolve_output_geoparquet_version(
+                None,
+                original_metadata=original_metadata,
+                table=description.select(list(native_columns)),
+            ),
+        )
+        carried = sanitized_carried_geo(original_metadata)
+    needs_stats = any(
+        name in schema.names and (not entry.get("geometry_types") or "bbox" not in entry)
+        for name, entry in carried.get("columns", {}).items()
+        if isinstance(entry, dict)
+    )
+    with _stream_selection(con, query, needs_stats) as query:
+        table = pa.Table.from_batches([], schema=schema)
 
-    # Convert WKB binary to geoarrow extension type for streaming
-    # This enables native geometry performance in downstream operations
-    columns = carried.get("columns", {})
-    geometry_columns = dict.fromkeys([*native_columns, *columns, geometry_column])
-    for name in geometry_columns:
-        if name is None or name not in table.column_names:
-            continue
-        crs = crs_of(table.replace_schema_metadata(original_metadata), geometry_column=name)
-        if entry_crs_is_unknown(columns.get(name)):
-            crs = "srid:0"
-        entry = columns.get(name)
-        edges = declared_edges(entry)
-        table = apply_geoarrow_extension_type(table, name, crs, edges=edges)
+        # Convert WKB binary to geoarrow extension type for streaming
+        # This enables native geometry performance in downstream operations
+        columns = carried.get("columns", {})
+        geometry_columns = dict.fromkeys([*native_columns, *columns, geometry_column])
+        column_models = {}
+        for name in geometry_columns:
+            if name is None or name not in table.column_names:
+                continue
+            crs = crs_of(table.replace_schema_metadata(original_metadata), geometry_column=name)
+            if entry_crs_is_unknown(columns.get(name)):
+                crs = "srid:0"
+            entry = columns.get(name)
+            edges = declared_edges(entry)
+            column_models[name] = (crs, edges)
+            table = apply_geoarrow_extension_type(
+                table, name, crs, edges=edges, preserve_wkb=preserve_wkb
+            )
 
-    # Apply metadata to output table, the way the file path does (#722):
-    # first drop entries for columns a projection removed -- a dropped secondary
-    # geometry column would otherwise leave an orphan `geo.columns` entry -- then
-    # recompute the derived stats a filtering caller stripped, from the rows
-    # actually being written. Without the backfill the stream omits
-    # `geometry_types`, which GeoParquet 1.1 requires and which DuckDB refuses to
-    # read a file without; without the prune the orphan entry has none either.
-    # ... and then compose the block as every file write does. A stream is
-    # read and persisted exactly like a file gpio wrote, so a covering the
-    # pruning has just emptied of its bbox member -- or one declared over a
-    # struct the spec forbids -- is no more writable here than there (#1172),
-    # and a 1.0 input upgrades and declares its bbox column as a file does.
-    if original_metadata:
-        original_metadata = prune_geo_metadata_to_columns(original_metadata, table.column_names)
-        original_metadata = backfill_derived_stats(original_metadata, table)
-        # A stream takes no version option: auto mode, the facade's answer.
-        version = resolve_output_geoparquet_version(None, original_metadata=original_metadata)
-        original_metadata = compose_carried_geo(original_metadata, table.schema, version)
-        table = apply_metadata_to_table(table, original_metadata)
+        # Apply metadata to output table, the way the file path does (#722):
+        # first drop entries for columns a projection removed -- a dropped secondary
+        # geometry column would otherwise leave an orphan `geo.columns` entry -- then
+        # recompute the derived stats a filtering caller stripped, from the rows
+        # actually being written. Without the backfill the stream omits
+        # `geometry_types`, which GeoParquet 1.1 requires and which DuckDB refuses to
+        # read a file without; without the prune the orphan entry has none either.
+        # ... and then compose the block as every file write does. A stream is
+        # read and persisted exactly like a file gpio wrote, so a covering the
+        # pruning has just emptied of its bbox member -- or one declared over a
+        # struct the spec forbids -- is no more writable here than there (#1172),
+        # and a 1.0 input upgrades and declares its bbox column as a file does.
+        if original_metadata:
+            original_metadata = backfill_derived_stats(
+                original_metadata,
+                QuerySource(
+                    con, _query_with_native_geometry(con, query, columns, native_output=True)
+                ),
+            )
+            # A stream takes no version option: auto mode, the facade's answer.
+            version = resolve_output_geoparquet_version(None, original_metadata=original_metadata)
+            original_metadata = compose_carried_geo(
+                original_metadata, table.schema, version, custom_metadata=custom_metadata
+            )
+            table = apply_metadata_to_table(table, original_metadata)
 
-    write_arrow_stream(table)
-    return table
+        output_schema = table.schema
+        stream_query = _wrap_query_with_wkb_conversion(query, list(native_columns))
+        reader = con.sql(stream_query).to_arrow_reader(batch_size=STREAM_BATCH_ROWS)
+        try:
+
+            def batches():
+                for batch in reader:
+                    chunk = pa.Table.from_batches([batch])
+                    for name, (crs, edges) in column_models.items():
+                        chunk = apply_geoarrow_extension_type(
+                            chunk, name, crs, edges=edges, preserve_wkb=preserve_wkb
+                        )
+                    yield from chunk.cast(output_schema).to_batches()
+
+            write_arrow_stream(pa.RecordBatchReader.from_batches(output_schema, batches()))
+        finally:
+            reader.close()
+        return table
+
+
+@contextmanager
+def _stream_selection(con, query, needs_stats):
+    """Freeze rows once when schema statistics need a replayable selection."""
+    if not needs_stats:
+        yield query
+        return
+    snapshot = quote_identifier(f"__gpio_stream_{uuid4().hex}")
+    # Keep native geometry for the stats owner; only exported batches need WKB.
+    con.execute(f"CREATE TEMP TABLE {snapshot} AS {query}").fetchall()
+    try:
+        yield f"SELECT * FROM {snapshot}"
+    finally:
+        con.execute(f"DROP TABLE {snapshot}").fetchall()
 
 
 def _write_file_output(
@@ -389,6 +457,10 @@ def _write_file_output(
     geoparquet_version: str | None,
     extra_kv_metadata: dict[str, str] | None = None,
     memory_limit: str | None = None,
+    *,
+    geometry_column: str | None = None,
+    input_file: str | None = None,
+    invalidate_derived_stats: bool = False,
 ) -> None:
     """Write output to Parquet file.
 
@@ -400,6 +472,7 @@ def _write_file_output(
         query,
         output_path,
         original_metadata=original_metadata,
+        geometry_info={"primary": geometry_column} if geometry_column else None,
         compression=compression,
         compression_level=compression_level,
         row_group_size_mb=row_group_size_mb,
@@ -410,6 +483,8 @@ def _write_file_output(
         geoparquet_version=geoparquet_version,
         extra_kv_metadata=extra_kv_metadata,
         memory_limit=memory_limit,
+        input_file=input_file,
+        invalidate_derived_stats=invalidate_derived_stats,
     )
 
 
@@ -495,7 +570,7 @@ def execute_transform(
             and metadata as well
 
     Returns:
-        Table if streaming output, None if file output or dry_run
+        Zero-row output-schema table after streaming, None if file output or dry_run
 
     Example:
         def make_query(source, con):

@@ -83,23 +83,91 @@ geoparquet_io/
 <!-- BEGIN GENERATED: core-modules -->
 ### Core Modules
 
-| Module | Purpose | Lines |
-|--------|---------|-------|
-| `validate.py` | GeoParquet file validation against specification r... | 4251 |
-| `wfs.py` | WFS (Web Feature Service) to GeoParquet conversion... | 3483 |
-| `convert.py` |  | 2248 |
-| `inspect_utils.py` | Utilities for inspecting GeoParquet files. | 1756 |
-| `arcgis.py` | ArcGIS Feature Service to GeoParquet conversion. | 1642 |
-| `duckdb_metadata.py` | DuckDB-based Parquet metadata extraction. | 1547 |
-| `geo_metadata.py` | GeoParquet metadata handling functions. | 1531 |
-| `extract.py` | Extract columns and rows from GeoParquet files. | 1426 |
-| `crs_utils.py` | CRS (Coordinate Reference System) utilities for Ge... | 1360 |
-| `duckdb_utils.py` | DuckDB connection management utilities. | 1244 |
-| `admin_datasets.py` | Admin partition dataset abstraction layer. | 1219 |
-| `extract_bigquery.py` | BigQuery extraction to GeoParquet. | 1204 |
-| `write_funnels.py` | The write funnels: the two front doors every gpio ... | 1098 |
-| `common.py` | What is left of the old grab-bag after the split. | 749 |
-| ... | *49 more modules* | |
+| Module | Purpose |
+|--------|---------|
+| `admin_datasets.py` | Admin partition dataset abstraction layer. |
+| `arcgis.py` | ArcGIS Feature Service to GeoParquet conversion. |
+| `arrow_geo_metadata.py` | GeoParquet metadata for an Arrow table: work it out, attach it, write it. |
+| `arrow_types.py` | Reconciling Arrow types across tables that should share one schema. |
+| `aws_credentials.py` | Resolve AWS credentials through botocore's standard credential chain. |
+| `bbox_parse.py` | The one parser for a bounding box a user asks for (#1367, concept 15). |
+| `bbox_structure.py` | Does this file carry a bbox covering column, and does its metadata say so? |
+| `benchmark.py` | Benchmark utilities for comparing GeoParquet conversion methods. |
+| `benchmark_report.py` | Report formatting for benchmark results. |
+| `benchmark_suite.py` | Benchmark suite runner for comprehensive performance testing. |
+| `carto.py` | Carto SQL API to GeoParquet conversion. |
+| `check_bbox_values.py` | Do a bbox column's four numbers actually cover the geometry beside them? |
+| `check_fixes.py` |  |
+| `check_optimization.py` | Combined spatial query optimization check. |
+| `check_options.py` | The check-options object: what a check looks at and what its fix writes. |
+| `check_parquet_structure.py` |  |
+| `check_spatial_order.py` |  |
+| `check_verdict.py` | How bad a check result is, and what that does to the exit code (#1241). |
+| `column_selection.py` | Entry-level validation shared by every ``gpio extract`` backend. |
+| `common.py` | What is left of the old grab-bag after the split. |
+| `compression.py` | The one codec list and the one level policy every write path resolves through. |
+| `constants.py` | Shared constants for geoparquet-io. |
+| `convert.py` |  |
+| `crs_utils.py` | CRS (Coordinate Reference System) utilities for GeoParquet files. |
+| `curved_geometry.py` | Detection of curved/non-linear geometry types GeoParquet cannot hold. |
+| `deprecation.py` | Process-wide deprecation warnings, attributed to the caller of gpio. |
+| `derive_geo_from_file.py` | Deriving a ``geo`` block from a Parquet file that was written without one. |
+| `duckdb_metadata.py` | DuckDB-based Parquet metadata extraction. |
+| `duckdb_utils.py` | DuckDB connection management utilities. |
+| `edges.py` | The ``edges`` field: one owner for its vocabulary, version gate and readers. |
+| `exceptions.py` | Framework-agnostic exceptions for geoparquet-io core modules. |
+| `extract.py` | Extract columns and rows from GeoParquet files. |
+| `extract_bigquery.py` | BigQuery extraction to GeoParquet. |
+| `file_type.py` | What kind of geo-bearing Parquet file is this, and is a bbox column wanted? |
+| `file_utils.py` | File path utilities for GeoParquet files. |
+| `format_writers.py` | Writers for converting GeoParquet to various output formats. |
+| `geo_metadata.py` | GeoParquet metadata handling functions. |
+| `geoarrow_compat.py` | Keep a ``srid:N`` type crs readable once ``geoarrow.pyarrow`` is loaded. |
+| `geoarrow_encoding.py` | GeoArrow field introspection, and WKB-to-native conversion for 1.1-geoarrow output. |
+| `geodesic_bbox.py` | Geodesic bounding boxes for GEOGRAPHY columns (#1272). |
+| `geojson_datetimes.py` | GeoJSON dates and times parsed by DuckDB, not by the GDAL bundled with DuckDB spatial. |
+| `geojson_stream.py` | GeoJSON conversion for GeoParquet files. |
+| `geometry_detection.py` | Geometry column detection for GeoParquet files. |
+| `geometry_repair.py` | Invalid-geometry repair helpers (issue #506). |
+| `hilbert_order.py` |  |
+| `http_retry.py` | Shared HTTP request utilities with retry logic. |
+| `index_ops.py` | Shared drivers for spatial index enrichment and partitioning. |
+| `inspect.py` | Core inspect functionality for GeoParquet files. |
+| `inspect_utils.py` | Utilities for inspecting GeoParquet files. |
+| `json_output.py` | The one JSON encoder for gpio's machine-readable reports. |
+| `layers.py` | Layer enumeration for multi-layer spatial formats. |
+| `linearize.py` | Pure-Python linearization of curved WKB geometries. |
+| `logging_config.py` | Logging configuration for geoparquet-io. |
+| `memory_limits.py` | DuckDB memory limits: the process's memory ceiling and the default drawn from it. |
+| `metadata_utils.py` | Utilities for extracting and formatting GeoParquet metadata. |
+| `optional_deps.py` | Lazy import shims for the optional feature dependencies (ADR-0007). |
+| `overture.py` | Overture Maps release utilities. |
+| `parquet_footer.py` | Rewrite a Parquet file's footer key-value metadata without touching the data. |
+| `parquet_schema.py` | Walking the flat Parquet schema listing returned by ``get_schema_info()``. |
+| `parquet_writer.py` | The write facade: the decisions every gpio write shares, owned in one place. |
+| `pmtiles.py` | PMTiles generation using tippecanoe subprocess. |
+| `pmtiles_chunks.py` | Chunked tiling: split a large file into a centroid grid, tile each part, join. |
+| `pmtiles_pyramid.py` | PMTiles pyramid generation: banded multi-level archives via tile-join. |
+| `preview.py` | Preview which row groups a bbox-filtered read would touch, before reading (#1310). |
+| `remote.py` | Remote URL handling for S3, GCS, Azure, and HTTP/HTTPS. |
+| `reproject.py` | Core reprojection logic for GeoParquet files. |
+| `sizing.py` | Byte sizes as humans write them: the one parser and the one formatter (#1367). |
+| `sort_by_column.py` |  |
+| `sort_common.py` | Shared dispatch, staging and writing for all four sorts. |
+| `sort_quadkey.py` |  |
+| `source_text.py` | Source text encoding for GDAL reads: decode what GDAL cannot, refuse what nobody named. |
+| `stac.py` | STAC Item and Collection generation for GeoParquet files. |
+| `stac_check.py` | STAC validation utilities. |
+| `str_order.py` | Sort-Tile-Recursive ordering for spatially compact Parquet row groups. |
+| `stream_io.py` | Unified I/O abstraction for file and stream modes. |
+| `streaming.py` | Arrow IPC streaming utilities for Unix-style piping between gpio commands. |
+| `sub_partition.py` | Sub-partition functionality for processing directories of parquet files. |
+| `tile_join.py` | tile-join: merging PMTiles archives. |
+| `upload.py` | Upload GeoParquet files to cloud object storage. |
+| `validate.py` | GeoParquet file validation against specification requirements. |
+| `wfs.py` | WFS (Web Feature Service) to GeoParquet conversion. |
+| `wfs_defaults.py` | Lightweight defaults shared by WFS clients and CLI options. |
+| `write_funnels.py` | The write funnels: the two front doors every gpio write goes through. |
 <!-- END GENERATED: core-modules -->
 
 <!-- freshness: last-verified: 2026-09-13, maps-to: geoparquet_io/core/common.py, geoparquet_io/core/parquet_writer.py, geoparquet_io/cli/decorators.py, pyproject.toml -->
@@ -136,10 +204,31 @@ geoparquet_io/
    with no statement to wrap is bounded; a statement that is a write wraps
    itself in `scoped_write_memory_limit` (`pinned=` for settings it must force,
    such as duckdb-kv's `threads=1`), and an analysis query that materializes
-   client-side opens through `open_bounded_connection`. Precedence: explicit
+   client-side opens through `open_bounded_connection` when it needs an independent
+   lifetime. Sequential eager reads and statistics use `scoped_bounded_connection`
+   to restore shared settings and reuse the spatial load. Precedence: explicit
    `--write-memory` > a stricter limit the caller set on their connection >
    gpio's default > DuckDB's own. Never add a second ceiling detector or
    default (#1156, #1174, #1179).
+7. **One spatial-extension load per process. This has regressed repeatedly.**
+   A new DuckDB database loads spatial again, verifying its signature by
+   hashing about 100 MB with a thread per MiB. On a 4-core CI runner this
+   caused the hour-long fast leg (#1402), fixed by one load per process
+   (#1425). #1457 reintroduced it with an isolated database per statistics
+   scan and per eager read: Ubuntu 3.13 fast-lane time rose from 393 s to
+   948 s with no new tests, so the collected-count ratchet did not see it.
+   Get connections from `get_duckdb_connection`, which returns cursors on
+   the shared database. Bound shared work with `scoped_write_memory_limit`
+   or `scoped_bounded_connection`; use `open_bounded_connection` only where
+   an independent lifetime is needed. Measure all geometry columns in one
+   scan. The guard in `tests/test_duckdb_shared_database.py`,
+   `test_factory_and_command_chains_load_spatial_once`, has no allow-list:
+   it permits one database and one spatial load across representative local
+   writes, eager conversion, read chains and check fixes. Do not create a new
+   database with `duckdb.connect()` or `isolated=True` for those operations.
+   A PR touching connection creation states spatial loads per command before
+   and after, and compares its CI leg minutes with main before merge; a green
+   run taking twice as long is a regression.
 
 ### Critical Rules
 
@@ -300,6 +389,8 @@ copies or compatibility wrappers. The guard set is in ADR-0008 and
 | Concept | Owner module | Public entry points |
 |---|---|---|
 | Final Parquet write policy | `geoparquet_io/core/parquet_writer.py`, `geoparquet_io/core/write_funnels.py`, `geoparquet_io/core/compression.py` | `WriteOptions`, `resolve_output_geoparquet_version`, `resolve_row_group_rows`, `resolve_codec`, `write_parquet_with_metadata`, `write_geoparquet_table`, `located_row_group_layout`, `ensure_located_row_groups` |
+| Process-wide keyword deprecation warnings | `geoparquet_io/core/deprecation.py` | `warn_deprecated` |
+| Spatial sort orchestration | `geoparquet_io/core/sort_common.py` | `run_sort`, `advised_output_version` |
 | Footer patch or rewrite | `geoparquet_io/core/parquet_footer.py` | `patch_or_rewrite` |
 | Geo block decoding | `geoparquet_io/core/geo_metadata.py` | `read_raw_geo`, `sanitized_carried_geo`, `declared_version` |
 | Geo block composition and covering | `geoparquet_io/core/geo_metadata.py`, `geoparquet_io/core/bbox_structure.py` | `compose_geo_block`, `GeoBlockOptions`, `build_bbox_covering`, `bbox_struct_child_names_match`, `covering_bbox_refs` |
@@ -307,16 +398,16 @@ copies or compatibility wrappers. The guard set is in ADR-0008 and
 | Non-planar edges | `geoparquet_io/core/edges.py`, `geoparquet_io/core/geometry_repair.py` | `detect_edges`, `edges_for_version`, `carry_edges`, `representative_point_sql`, `geoarrow_type_edges`, `require_planar_export`, `require_planar_export_file` |
 | Geometry identity and read expressions | `geoparquet_io/core/geometry_detection.py` | `primary_geometry_column`, `resolve_geometry_column`, `resolve_geometry_read`, `require_geometry_column`, `create_geometry_view` |
 | CRS | `geoparquet_io/core/crs_utils.py` | `crs_of`, `is_geographic`, `is_projected`, `crs_equal`, `projjson_for_label`, `load_crs` |
-| Memory ceilings and byte sizes | `geoparquet_io/core/memory_limits.py`, `geoparquet_io/core/sizing.py` | `open_bounded_connection`, `scoped_write_memory_limit`, `parse_size_string`, `format_size`, `format_memory_limit`, `mb_to_bytes` |
+| Memory ceilings and byte sizes | `geoparquet_io/core/memory_limits.py`, `geoparquet_io/core/sizing.py` | `open_bounded_connection`, `scoped_bounded_connection`, `scoped_write_memory_limit`, `parse_size_string`, `format_size`, `format_memory_limit`, `mb_to_bytes` |
 | SQL escaping and native type probes | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `sql_literal`, `sql_path`, `quote_identifier`, `native_geo_type`, `is_native_geo_column` |
-| Paths, remote access, overwrite and staging | `geoparquet_io/core/remote.py`, `geoparquet_io/core/file_utils.py` | `RemoteOptions`, `remote_options_from_keywords`, `is_remote_url`, `has_glob_pattern`, `is_partition_path`, `handle_output_overwrite`, `atomic_write`, `scratch_file`, `scratch_path`, `scratch_dir` |
+| Paths, remote access, overwrite and staging | `geoparquet_io/core/remote.py`, `geoparquet_io/core/file_utils.py` | `RemoteOptions`, `remote_options_from_keywords`, `is_remote_url`, `has_glob_pattern`, `is_partition_path`, `handle_output_overwrite`, `atomic_write`, `sweep_orphaned_dirs`, `sweep_orphaned_staging_dirs`, `scratch_file`, `scratch_path`, `scratch_dir` |
 | Column-name resolution | `geoparquet_io/core/column_selection.py` | `fold`, `find_column`, `matching_columns`, `unique_name`, `exclude_columns`, `resolve_columns_against_schema` |
 | Index add and partition workflows | `geoparquet_io/core/index_ops.py` | `IndexSpec`, `add_index_column`, `ensure_index_column`, `index_expression`, `index_point` |
 | HTTP retries | `geoparquet_io/core/http_retry.py` | `make_request_with_retry`, `run_with_retry`, `retry_wait`, `parse_retry_after` |
 | CLI options and report formatting | `geoparquet_io/cli/decorators.py`, `geoparquet_io/core/bbox_parse.py`, `geoparquet_io/core/json_output.py`, `geoparquet_io/cli/commands/check.py` | `overwrite_option`, `refuse_together`, `parse_bbox`, `BBox`, `dumps_json`, `MultiFileCheckRunner` |
 | What a check looks at and what its fix writes | `geoparquet_io/core/check_options.py` | `CheckOptions`, `check_options_from_keywords`, `FIXABLE_CHECKS` |
 | Spatial joins | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/admin_datasets.py` | `build_spatial_join_condition`, `build_spatial_join_query`, `build_admin_subquery`, `admin_match_order` |
-| Query schema and row-group statistics | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `query_schema`, `describe_query`, `get_row_group_bbox_stats`, `get_row_group_sizes` |
+| Query schema and row-group statistics | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `query_schema`, `describe_query`, `get_row_group_bbox_stats`, `get_per_row_group_bbox_stats`, `get_row_group_sizes` |
 | Error classification and CLI translation | `geoparquet_io/core/exceptions.py`, `geoparquet_io/cli/exception_handler.py` | `classify_failure`, `redact_credentials`, `status_message`, `error_boundary` |
 | GDAL format writes | `geoparquet_io/core/format_writers.py` | `write_gdal_format` |
 | DuckDB capabilities | `geoparquet_io/core/duckdb_utils.py` | `duckdb_capabilities`, `DuckDBCapabilities`, `complete_without_fetch`, `resolve_load_spatial` |

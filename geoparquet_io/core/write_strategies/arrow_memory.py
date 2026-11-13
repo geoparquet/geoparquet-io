@@ -22,7 +22,7 @@ from geoparquet_io.core.duckdb_utils import (
     _get_query_columns,
     variant_export_guard,
 )
-from geoparquet_io.core.logging_config import configure_verbose, debug, success
+from geoparquet_io.core.logging_config import configure_verbose, debug
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import apply_output_kv_metadata, write_arrow_table
 from geoparquet_io.core.write_strategies.base import BaseWriteStrategy, wkb_export_query
@@ -207,6 +207,3 @@ class ArrowMemoryStrategy(BaseWriteStrategy):
             verbose=verbose,
             extra_kv_metadata=extra_kv_metadata,
         )
-
-        if verbose:
-            success(f"Wrote {table.num_rows:,} rows to {output_path}")

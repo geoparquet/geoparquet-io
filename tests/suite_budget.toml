@@ -106,7 +106,9 @@
 # vectors with their verdicts, the closed-form cross-checks, the two-path
 # withheld semantics on every surface, partial-statistics coverage, and the
 # CLI/fix behavior pins, with #1458's two-path alignment tests.
-max_collected = 15065
+# +3 (#1149): isolate requested-level retry from housekeeping, pin failed
+# default COPY publication, and count HTTP bytes for cold bounded admin joins.
+max_collected = 15067
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",
@@ -227,6 +229,7 @@ slow_mark_sites = [
   "test_process_overview.py::test_level_not_coarser_than_base_errors",
   "test_process_overview.py::test_mixed_resolution_input_errors",
   "test_process_overview.py::test_table_overview_api",
+  "test_rewrite_memory_1268.py::test_eager_rewrite_peak_rss_and_bytes",
   "test_rewrite_memory_1268.py::test_hilbert_past_2_gib_attribute_column",
   "test_streaming.py::TestApplyGeoArrowExtensionType.test_real_overflow_succeeds",
   "test_streaming.py::TestStreamIO",

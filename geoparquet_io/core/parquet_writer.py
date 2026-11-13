@@ -11,6 +11,10 @@ identical CLI request wrote 49,152 (#971), ``convert geoparquet`` documenting
 100k row groups while nothing set any (#981), and every auto-version path but
 ``convert`` downgrading a native-geo-only input to 1.1 WKB (#600).
 
+The query funnel refuses an output resolving to its explicit input witness.
+In-place callers stage through ``file_utils.atomic_write`` first; remote
+rewrites stage locally and upload only after their reader closes (#1040).
+
 This module is the single owner of those shared decisions. It owns exactly
 four, because each one is a fact about the *output file* that no individual
 write path is entitled to answer for itself:
@@ -85,7 +89,7 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geoarrow_encoding import is_geoarrow_extension_field
-from geoparquet_io.core.logging_config import debug, info, success
+from geoparquet_io.core.logging_config import debug, info
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.remote import RemoteOptions, remote_options_from_keywords
 from geoparquet_io.core.sizing import mb_to_bytes
@@ -1083,7 +1087,8 @@ def output_schema_metadata(
       the block that write built. ``parquet-geo-only`` drops it too, as it
       means "carry no GeoParquet metadata".
     * Every other key (fiboa, vecorel, STAC, provenance) survives (#690), and
-      ``extra_kv_metadata`` is merged in last, so the caller's value wins.
+      ``extra_kv_metadata`` is merged in last, except that the generated ``geo``
+      wins and ``parquet-geo-only`` forbids even an explicit ``geo``.
 
     Keys and values come back as ``bytes``, ready for
     ``replace_schema_metadata`` or ``with_metadata``.
@@ -1098,7 +1103,11 @@ def output_schema_metadata(
         if _as_bytes(key) not in dropped
     }
     for key, value in (extra_kv_metadata or {}).items():
-        result[_as_bytes(key)] = _as_bytes(value)
+        encoded_key = _as_bytes(key)
+        if encoded_key == b"geo":
+            if geoparquet_version == "parquet-geo-only" or b"geo" in result:
+                continue
+        result[encoded_key] = _as_bytes(value)
     return result
 
 
@@ -1360,9 +1369,6 @@ def write_arrow_table(
     import pyarrow.parquet as pq
 
     pq.write_table(table, output_path, **write_kwargs)
-
-    if verbose:
-        success(f"Wrote {table.num_rows:,} rows to {output_path}")
 
 
 # ---------------------------------------------------------------------------

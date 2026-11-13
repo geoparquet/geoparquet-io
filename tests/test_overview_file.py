@@ -104,7 +104,6 @@ class TestOverviewFile:
     def test_footer_matches_the_column_across_multi_group_levels(self, tmp_path, monkeypatch):
         """4.1/4.2 with a level that spans several row groups, and a source
         file whose own row groups do not line up with the output's."""
-        monkeypatch.setattr(run_module, "resolve_row_group_rows", lambda *a: 4, raising=False)
         import geoparquet_io.core.process.overview.overview_file as of
 
         monkeypatch.setattr(of, "resolve_row_group_rows", lambda *a: 4)
@@ -322,10 +321,10 @@ class TestCreateOverviewFile:
 
     def test_existing_output_needs_force(self, tmp_path, cells):
         out = tmp_path / "precious.parquet"
-        out.write_text("precious")
+        out.write_text("precious", encoding="utf-8")
         with pytest.raises(GeoParquetError, match="already exists.*\n.*--force"):
             create_overview_file(str(cells), str(out), levels="8")
-        assert out.read_text() == "precious"
+        assert out.read_text(encoding="utf-8") == "precious"
         create_overview_file(str(cells), str(out), levels="8", force=True)
         assert OVERVIEWS_KEY.encode() in pq.read_schema(out).metadata
 

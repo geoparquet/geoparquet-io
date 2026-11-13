@@ -20,7 +20,7 @@ def _refuse_existing_output(path: Path, overwrite: bool) -> None:
     from geoparquet_io.core.file_utils import handle_output_overwrite
 
     try:
-        handle_output_overwrite(str(path), overwrite, flag="overwrite=True", remove=False)
+        handle_output_overwrite(str(path), overwrite, flag="overwrite=True")
     except GeoParquetError as exc:
         raise ValueError(str(exc)) from None
 

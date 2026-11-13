@@ -244,7 +244,6 @@ class TestEveryStrategyHonoursTheLimit:
         """An MB target samples the query before any strategy's scope was entered."""
         from geoparquet_io.core import parquet_writer
         from geoparquet_io.core.write_funnels import write_geoparquet_table
-        from geoparquet_io.core.write_strategies import duckdb_kv
 
         real = parquet_writer.resolve_row_group_rows_for_query
         sampled: list[str] = []
@@ -255,8 +254,6 @@ class TestEveryStrategyHonoursTheLimit:
             return real(con_, query, row_group_rows, *args, **kwargs)
 
         monkeypatch.setattr(parquet_writer, "resolve_row_group_rows_for_query", recording)
-        # A strategy holding its own reference to the sampler is spied too.
-        monkeypatch.setattr(duckdb_kv, "resolve_row_group_rows_for_query", recording, raising=False)
         query = _points_parquet(con, str(tmp_path / "src.parquet"))
         out = str(tmp_path / "out.parquet")
         if table:
@@ -415,6 +412,21 @@ class TestRestoreSettings:
             with memory_limits.pin_duckdb_settings(con, {"threads; DROP TABLE x": 1}):
                 pytest.fail("invalid setting entered the scope")
         assert _setting(con, "threads") == before
+        original = _setting(con, "disabled_optimizers")
+        with pytest.raises(RuntimeError, match="restore"):
+            with memory_limits.pin_duckdb_settings(
+                con, {"disabled_optimizers": "statistics_propagation"}
+            ):
+                assert _setting(con, "disabled_optimizers") == "statistics_propagation"
+                raise RuntimeError("restore")
+        assert _setting(con, "disabled_optimizers") == original
+        with memory_limits.pin_duckdb_settings(con, {"threads": 1}):
+            with pytest.raises(RuntimeError, match="reset"):
+                with memory_limits.pin_duckdb_settings(con, {"threads": None}):
+                    assert int(_setting(con, "threads")) >= 1
+                    raise RuntimeError("reset")
+            assert _setting(con, "threads") == 1
+        assert _setting(con, "threads") == before
 
 
 class TestDisplayedSizeMax:
@@ -436,12 +448,12 @@ class TestDisplayedSizeMax:
 
 def _fake_cgroups(tmp_path, proc_lines: list[str], files: dict[str, str]):
     proc = tmp_path / "proc_self_cgroup"
-    proc.write_text("\n".join(proc_lines) + "\n")
+    proc.write_text("\n".join(proc_lines) + "\n", encoding="utf-8")
     root = tmp_path / "cgroup"
     for rel, value in files.items():
         f = root / rel
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(value + "\n")
+        f.write_text(value + "\n", encoding="utf-8")
     return str(proc), str(root)
 
 
@@ -738,8 +750,6 @@ class TestDirectCopyMemoryLimit:
         dataset.memory_limit = write_memory
         monkeypatch.setattr(dataset, "get_default_source", lambda: str(tmp_path / "src.parquet"))
         monkeypatch.setattr(dataset, "get_s3_config", lambda: {})
-        # No remote read in this test: keep the connection free of httpfs.
-        monkeypatch.setattr(ad, "get_duckdb_connection", lambda **kwargs: get_duckdb_connection())
         seen = []
         self._spy_scoped_limit(monkeypatch, ad, seen)
 
@@ -767,7 +777,7 @@ class TestDirectCopyMemoryLimit:
 
         monkeypatch.setattr(ad, "get_cache_dir", lambda: tmp_path)
         mock_con = MagicMock()
-        monkeypatch.setattr(ad, "get_duckdb_connection", lambda **kwargs: mock_con)
+        monkeypatch.setattr(ad, "open_bounded_connection", lambda **kwargs: mock_con)
         dataset = ad.OvertureAdminDataset()
         monkeypatch.setattr(dataset, "get_version", lambda: "2026-07-22.0")
         monkeypatch.setattr(dataset, "get_default_source", lambda: "s3://stub/divisions")
@@ -957,3 +967,21 @@ class TestDirectCopyRegressions:
                 places_test_file, "gaul", None, ["country"], False, memory_limit="700MB"
             )
         assert seen == ["700MB"]
+
+        from geoparquet_io.core.process.aggregate.by_admin import aggregate_by_admin
+        from geoparquet_io.core.process.overview.rollup import get_admin_country_context
+
+        seen.clear()
+        with pytest.raises(Stop):
+            aggregate_by_admin(places_test_file, "unused.parquet", memory_limit="700MB")
+        assert seen == ["700MB"]
+        seen.clear()
+        con = memory_limits.open_bounded_connection(memory_limit="700MB")
+        try:
+            for limit in (None, "700MB"):
+                seen.clear()
+                with pytest.raises(Stop):
+                    get_admin_country_context(con, memory_limit=limit)
+                assert seen == [limit]
+        finally:
+            con.close()

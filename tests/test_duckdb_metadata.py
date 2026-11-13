@@ -165,12 +165,32 @@ class TestTheBboxColumnName:
 class TestGetPerRowGroupBboxStats:
     """Tests for get_per_row_group_bbox_stats function."""
 
-    def test_with_bbox_column(self, places_test_file):
-        """Test getting bbox stats for file with bbox."""
+    def test_with_bbox_column(self, places_test_file, tmp_path):
+        """Test bbox stats and conservative geometry costs from the same footer."""
         bbox_name = check_bbox_structure(places_test_file)["bbox_column_name"]
         if bbox_name:
             result = get_per_row_group_bbox_stats(places_test_file, bbox_name)
             assert isinstance(result, list)
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        path = tmp_path / "unknown-bounds.parquet"
+        bbox = pa.array(
+            [{"xmin": 0.0, "ymin": 1.0, "xmax": 2.0, "ymax": 3.0}, None],
+            type=pa.struct([(key, pa.float64()) for key in ("xmin", "ymin", "xmax", "ymax")]),
+        )
+        pq.write_table(
+            pa.table({"geom'etry": [b"one", b"two"], "bbox": bbox}), path, row_group_size=1
+        )
+        costs = get_per_row_group_bbox_stats(str(path), geometry_column="geom'etry")
+        footer = pq.read_metadata(path)
+        assert len(costs) == 2
+        assert costs[0]["xmin"] == 0
+        assert costs[1]["xmin"] is None
+        assert [r["geometry_bytes"] for r in costs] == [
+            footer.row_group(i).column(0).total_compressed_size for i in range(2)
+        ]
+        assert len(get_per_row_group_bbox_stats(str(path))) == 1
 
 
 class TestGetBboxFromRowGroupStats:

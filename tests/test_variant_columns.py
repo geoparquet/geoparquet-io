@@ -230,17 +230,18 @@ class TestVariantThroughArrowSchemaProbes:
     ``query_schema``; a local ``LIMIT 0`` Arrow probe raises on DuckDB 1.5."""
 
     def test_streaming_add_bbox_survives_a_variant_column(self, variant_file):
-        from geoparquet_io.core.add.bbox import _make_streaming_bbox_query
+        from geoparquet_io.core.add.bbox import prepare_streaming_bbox
 
         con = get_duckdb_connection()
         try:
             source = f"read_parquet({sql_path(variant_file)})"
-            query, passed_through, name = _make_streaming_bbox_query(source, con, "bbox", False)
+            query, passed_through, name, custom = prepare_streaming_bbox(source, con, "bbox", False)
             columns = [d[0] for d in con.execute(f"SELECT * FROM ({query}) LIMIT 0").description]
         finally:
             con.close()
         assert not passed_through
         assert name == "bbox"
+        assert custom["covering"]["bbox"]["xmin"] == ["bbox", "xmin"]
         assert {"properties", "bbox"} <= set(columns)
 
     def test_stream_input_metadata_survives_a_variant_column(self, variant_file):

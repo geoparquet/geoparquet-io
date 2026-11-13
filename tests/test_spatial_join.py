@@ -189,9 +189,10 @@ def _aggregate_admin(tmp_path, input_file):
 
 
 class TestOneMatchPerInput:
-    def test_native_polygon_overlap_does_not_multiply_with_input_size(self):
+    def test_native_polygon_overlap_does_not_multiply_with_input_size(self, tmp_path):
         """No-bbox native polygons keep one assignment at both scales (#550, #543)."""
-        con = du.get_duckdb_connection(threads=1)
+        con = du.get_duckdb_connection(threads=1, memory_limit="512MB")
+        con.execute("SET preserve_insertion_order=false")
         counts = []
         try:
             con.execute(
@@ -215,6 +216,51 @@ class TestOneMatchPerInput:
                 assert [row[0] for row in rows] == list(range(size))
                 assert all(row[2] == "AA" for row in rows)
             assert counts == [100, 400]
+            # Numbering and matching must read the same volatile input rows.
+            for alias in ("a", "s"):
+                volatile_query = du.build_spatial_join_query(
+                    input_relation=(
+                        "(SELECT 17 AS a, 18 AS s, 19 AS b, "
+                        "ST_Point(random() * 4, 1) geometry FROM range(100))"
+                    ),
+                    target_relation="admins",
+                    target_select="b.code",
+                    condition=du.build_spatial_join_condition(
+                        "geometry", "geometry", input_alias=alias
+                    ),
+                    input_alias=alias,
+                    match_order=["b.code"],
+                )
+                assert con.execute(
+                    "SELECT bool_and(a = 17 AND s = 18 AND b = 19 "
+                    "AND code IS NOT DISTINCT FROM "
+                    "CASE WHEN ST_X(geometry) <= 2 THEN 'AA' "
+                    "WHEN ST_X(geometry) <= 3 THEN 'BB' END) "
+                    f"FROM ({volatile_query})"
+                ).fetchall() == [(True,)]
+            # Large geometry must not live in every DISTINCT ON aggregate state.
+            source = tmp_path / "large-polygons.parquet"
+            con.execute(
+                "COPY (SELECT i AS id, "
+                "ST_Buffer(ST_Point(1.5 + i * 0.00000001, 1), 0.1, 128) AS geometry "
+                f"FROM range(40000) t(i)) TO {du.sql_path(source)} "
+                "(FORMAT PARQUET, ROW_GROUP_SIZE 2048)"
+            )
+            query = du.build_spatial_join_query(
+                input_relation=du.sql_path(source),
+                target_relation="admins",
+                target_select="b.code",
+                condition=du.build_spatial_join_condition("geometry", "geometry"),
+                match_order=["b.code"],
+            )
+            out = tmp_path / "bounded.parquet"
+            con.execute(
+                f"COPY ({query}) TO {du.sql_path(out)} (FORMAT PARQUET, ROW_GROUP_SIZE 2048)"
+            )
+            assert con.execute(
+                f"SELECT count(*), count(DISTINCT id), min(code), max(code) FROM {du.sql_path(out)}"
+            ).fetchall() == [(40000, 40000, "AA", "AA")]
+
         finally:
             con.close()
 
@@ -273,7 +319,7 @@ class TestOwnerQuery:
             match_order=['b."code"'],
         )
         assert "row_number() OVER ()" in sql  # streaming: no PARTITION BY
-        assert "DISTINCT ON (__gpio_input_row)" in sql
+        assert "DISTINCT ON (__gpio_input_row, __gpio_input_values)" in sql
         assert "PARTITION BY" not in sql and "QUALIFY" not in sql
 
     def test_there_is_no_all_matches_flag(self):
@@ -580,7 +626,7 @@ def test_aggregate_admin_opens_the_admin_join_connection(tmp_path, local_admin, 
         calls.append(kwargs)
         return real(**kwargs)
 
-    monkeypatch.setattr(by_admin, "open_admin_join_connection", spy, raising=False)
+    monkeypatch.setattr(by_admin, "open_admin_join_connection", spy)
     src = _write_points(tmp_path / "pts.parquet")
     _aggregate_admin(tmp_path, src)
     assert calls == [
@@ -831,9 +877,7 @@ def test_partition_reports_the_join_strategy_its_sql_runs(
     local_admin()
     if input_rewritten:
         for module in (admin_datasets, admin_hierarchical):
-            monkeypatch.setattr(
-                module, "admin_input_reprojected", lambda crs, bbox: True, raising=False
-            )
+            monkeypatch.setattr(module, "admin_input_reprojected", lambda crs, bbox: True)
     queries = _spy_admin_join_queries(monkeypatch)
     src = _write_points(tmp_path / "pts.parquet", bbox_name="bbox")
     result = _invoke(

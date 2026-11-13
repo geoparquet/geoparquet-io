@@ -118,12 +118,40 @@ class TestSpillDirectoryHelper:
         path = Path(spill_directory(tmp_path))
         assert path.parent == tmp_path
 
-    def test_ownership_marker_precedes_the_first_spill(self, tmp_path):
+    def test_ownership_marker_precedes_the_first_spill(self, tmp_path, monkeypatch):
+        from contextlib import contextmanager
+
+        from geoparquet_io.core import duckdb_utils, file_utils
+
+        original_lock = duckdb_utils._spill_base_lock
+        original_marker = duckdb_utils._spill_lock
+        holding_base = False
+
+        @contextmanager
+        def locked(base):
+            nonlocal holding_base
+            with original_lock(base):
+                holding_base = True
+                try:
+                    yield
+                finally:
+                    holding_base = False
+
+        def marker(path):
+            # Even probing a marker can steal its lock before its creator does.
+            assert holding_base
+            return original_marker(path)
+
+        monkeypatch.setattr(duckdb_utils, "_spill_base_lock", locked)
+        monkeypatch.setattr(file_utils, "_spill_base_lock", locked)
+        monkeypatch.setattr(duckdb_utils, "_spill_lock", marker)
+        monkeypatch.setattr(file_utils, "_spill_lock", marker)
         path = Path(spill_directory(tmp_path))
         if os.name == "nt":
             assert not path.exists()
         else:
             assert (path / ".gpio-owner.lock").is_file()
+            assert duckdb_utils.orphaned_spill_dirs(tmp_path) == []
             assert sweep_orphaned_spill_dirs(tmp_path) == []
 
     def test_is_unique_per_call(self, tmp_path):

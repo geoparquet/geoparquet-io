@@ -411,7 +411,17 @@ class TestHilbertOrderEdgeCases:
         assert sorted(result.column("id").to_pylist()) == [0, 1, 2]
 
     def test_view_typed_columns(self, con):
+        from geoparquet_io.core.arrow_types import view_offset_type
         from geoparquet_io.core.hilbert_order import hilbert_order_table
+
+        for view, offset in [
+            (pa.binary_view(), pa.large_binary()),
+            (pa.string_view(), pa.large_string()),
+        ]:
+            assert view_offset_type(view) == offset
+            values = pa.array([None, "value"], type=view)
+            assert values.cast(offset).cast(view).equals(values)
+        assert view_offset_type(pa.binary()) is None
 
         wkbs = [_wkb(con, f"POINT({x} {x})") for x in (30, 5, 20, 10)]
         table = pa.table(
@@ -653,3 +663,53 @@ def test_registered_dictionary_geometry_reads_flat(con):
         (False, None),
         (True, "POINT (1 2)"),
     ]
+
+
+@pytest.mark.slow
+def test_eager_rewrite_peak_rss_and_bytes(tmp_path):
+    """The 1M-polygon eager rewrite stays below 600 MB, with the same COPY bytes.
+
+    Generate outside the measured process. Fix the policy ceiling so a large
+    build host exercises the same read budget; smaller hosts keep fewer threads.
+    This complements the Arrow-pool gather bound, which cannot see DuckDB buffers.
+    """
+    import json
+    from pathlib import Path
+
+    from scripts.profile_matrix.workloads import generate_workload
+
+    source = generate_workload("W2", tmp_path / "inputs", "full")
+    report = tmp_path / "profile.json"
+    script = textwrap.dedent(
+        """
+        import runpy
+        import sys
+        from geoparquet_io.core import memory_limits
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+        memory_limits.memory_ceiling = lambda: 128 * 1024**3
+        if sys.argv.pop() == 'reference':
+            def unbounded_read(**kwargs):
+                kwargs.pop('preserve_insertion_order', None)
+                kwargs.pop('verbose', None)
+                kwargs.pop('per_thread', None)
+                return get_duckdb_connection(**kwargs)
+            memory_limits.scoped_bounded_connection = unbounded_read
+        sys.argv = ['scripts/profile_command.py', '--child', '--command', 'api-convert',
+                    '--input-path', sys.argv[1], '--work-dir', sys.argv[2],
+                    '--output', sys.argv[3]]
+        runpy.run_path('scripts/profile_command.py', run_name='__main__')
+        """
+    )
+    results = {}
+    for mode in ("reference", "bounded"):
+        completed = subprocess.run(
+            [sys.executable, "-c", script, str(source), str(tmp_path / mode), str(report), mode],
+            cwd=Path(__file__).resolve().parents[1],
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, completed.stderr
+        results[mode] = json.loads(report.read_text(encoding="utf-8"))
+    assert results["bounded"]["peak_rss_bytes"] < 600_000_000, results
+    assert results["bounded"]["raw_output_sha256"] == results["reference"]["raw_output_sha256"]

@@ -332,7 +332,9 @@ class TestParseGeometryInput:
         # Use unique filename to avoid Windows file locking issues
         tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
         try:
-            tmp_path.write_text(json.dumps({"type": "Point", "coordinates": [0, 0]}))
+            tmp_path.write_text(
+                json.dumps({"type": "Point", "coordinates": [0, 0]}), encoding="utf-8"
+            )
             result = parse_geometry_input(f"@{tmp_path}")
             assert "POINT" in result.upper()
         finally:
@@ -343,7 +345,7 @@ class TestParseGeometryInput:
         # Use unique filename to avoid Windows file locking issues
         tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.wkt"
         try:
-            tmp_path.write_text("POINT(0 0)")
+            tmp_path.write_text("POINT(0 0)", encoding="utf-8")
             result = parse_geometry_input(f"@{tmp_path}")
             assert "POINT" in result.upper()
         finally:
@@ -354,7 +356,9 @@ class TestParseGeometryInput:
         # Use unique filename to avoid Windows file locking issues
         tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
         try:
-            tmp_path.write_text(json.dumps({"type": "Point", "coordinates": [0, 0]}))
+            tmp_path.write_text(
+                json.dumps({"type": "Point", "coordinates": [0, 0]}), encoding="utf-8"
+            )
             result = parse_geometry_input(str(tmp_path))
             assert "POINT" in result.upper()
         finally:
@@ -1382,23 +1386,23 @@ class TestRepairInvalidatesCarriedStats:
         result = validate_geoparquet(str(out))
         assert result.is_valid, [c.message for c in result.checks if not c.passed]
 
-    def test_no_repair_keeps_the_carried_stats(self, bowtie_file, tmp_path):
-        """Repair off leaves the rows alone, so the carried stats still describe them."""
+    def test_no_repair_rebuilds_the_carried_stats(self, bowtie_file, tmp_path):
+        """Repair off still rebuilds an input bbox that overstates the rows (#1367)."""
         out = tmp_path / "out.parquet"
         extract(str(bowtie_file), str(out), repair_geometry=False)
 
         col = _geo_column_of_file(out)
         assert col["geometry_types"] == ["Polygon"]
-        assert col["bbox"] == _WORLD_BBOX
+        assert col["bbox"] == [0.0, 0.0, 1.0, 1.0]
 
-    def test_nothing_to_repair_keeps_the_carried_stats(self, square_file, tmp_path):
-        """Repair on but nothing invalid: no rewrite happened, so no rescan either."""
+    def test_nothing_to_repair_rebuilds_the_carried_stats(self, square_file, tmp_path):
+        """Valid geometry still needs fresh output stats instead of input claims (#1367)."""
         out = tmp_path / "out.parquet"
         extract(str(square_file), str(out))
 
         col = _geo_column_of_file(out)
         assert col["geometry_types"] == ["Polygon"]
-        assert col["bbox"] == _WORLD_BBOX
+        assert col["bbox"] == [0.0, 0.0, 1.0, 1.0]
 
     def test_streaming_output_recomputes_stats(self, bowtie_file, monkeypatch):
         """The stdout path strips the stale stats and backfills them from the rows."""

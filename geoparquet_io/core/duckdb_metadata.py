@@ -1034,20 +1034,32 @@ def _bbox_stats_aggregates(bbox_column: str) -> str:
 
 
 def get_per_row_group_bbox_stats(
-    parquet_file: str, bbox_column: str = "bbox", con=None, *, metadata_table: str | None = None
+    parquet_file: str,
+    bbox_column: str = "bbox",
+    con=None,
+    *,
+    metadata_table: str | None = None,
+    geometry_column: str | None = None,
 ) -> list[dict]:
     """
     Get bbox statistics per row group.
 
-    Returns list of dicts with row_group_id, xmin, ymin, xmax, ymax.
+    Returns row_group_id and bounds. With geometry_column, include compressed
+    geometry_bytes and retain unknown bounds for conservative scan costing.
     """
+    geometry_bytes = (
+        ", SUM(total_compressed_size) FILTER "
+        f"(WHERE path_in_schema = {sql_literal(geometry_column)}) AS geometry_bytes"
+        if geometry_column is not None
+        else ""
+    )
     # parquet_metadata() only: no spatial extension, which is most of a connection's cost.
     rows = _parquet_metadata_rows(
         parquet_file,
         con,
         lambda source: (
             f"""
-            SELECT row_group_id, {_bbox_stats_aggregates(bbox_column)}
+            SELECT row_group_id, {_bbox_stats_aggregates(bbox_column)}{geometry_bytes}
             FROM {source}
             GROUP BY row_group_id
             ORDER BY row_group_id
@@ -1056,6 +1068,8 @@ def get_per_row_group_bbox_stats(
         load_spatial=False,
         metadata_table=metadata_table,
     )
+    if geometry_column is not None:
+        return rows
     keys = ("xmin", "ymin", "xmax", "ymax")
     return [
         {"row_group_id": row["row_group_id"], **{k: row[k] for k in keys}}

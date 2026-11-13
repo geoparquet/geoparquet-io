@@ -407,7 +407,7 @@ def test_a_file_that_is_not_parquet_gets_one_answer_from_every_path(tmp_path):
     from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
     bad = tmp_path / "data.parquet"
-    bad.write_text("id,name\n1,x\n")
+    bad.write_text("id,name\n1,x\n", encoding="utf-8")
     expected = not_parquet_file_error(str(bad)).message
 
     for argv in (
@@ -453,3 +453,12 @@ def test_every_reader_and_command_words_a_non_parquet_file_alike(tmp_path, conte
         with pytest.raises(GeoParquetError) as caught:
             reader(str(bad))
         assert caught.value.message == expected
+
+
+def test_permission_error_is_a_user_facing_cli_failure():
+    from geoparquet_io.cli.exception_handler import cli_error_for
+
+    result = cli_error_for(PermissionError(13, "Permission denied", "/readonly/output.parquet"))
+    assert isinstance(result, click.ClickException)
+    assert "Permission denied" in result.format_message()
+    assert "/readonly/output.parquet" in result.format_message()

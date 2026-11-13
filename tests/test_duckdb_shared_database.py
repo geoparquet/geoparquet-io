@@ -14,7 +14,7 @@ import pyarrow as pa
 import pytest
 
 from geoparquet_io.core import duckdb_utils as utils
-from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.memory_limits import scoped_bounded_connection, scoped_write_memory_limit
 
 
 @pytest.fixture
@@ -109,31 +109,38 @@ def test_cursor_objects_settings_and_catalog_isolation(production_factory):
 
 
 def test_overlapping_thread_scopes_do_not_cross_restore(production_factory):
-    start = Barrier(2)
-    attempted = Event()
-    with production_factory() as observer:
-        before = _settings(observer)
+    for read in (False, True):
+        start = Barrier(2)
+        attempted = Event()
+        with production_factory() as observer:
+            before = _settings(observer)
 
-        def worker(index):
-            with production_factory() as con, production_factory() as peer:
-                start.wait(timeout=5)
-                if index:
-                    attempted.set()
-                with scoped_write_memory_limit(
-                    con,
-                    "256MB" if index == 0 else "512MB",
-                    False,
-                    pinned={"threads": index + 1},
-                ):
-                    assert attempted.wait(timeout=5)
-                    assert _settings(peer) == _settings(con)
-                    assert _settings(con)[1] == index + 1
+            def worker(index, start=start, attempted=attempted, read=read):
+                with production_factory() as con, production_factory() as peer:
+                    start.wait(timeout=5)
+                    if index:
+                        attempted.set()
+                    scope = (
+                        scoped_bounded_connection(memory_limit="256MB" if index == 0 else "1GiB")
+                        if read
+                        else scoped_write_memory_limit(
+                            con,
+                            "256MB" if index == 0 else "512MB",
+                            False,
+                            pinned={"threads": index + 1},
+                        )
+                    )
+                    with scope as bounded:
+                        active = bounded if read else con
+                        assert attempted.wait(timeout=5)
+                        assert _settings(peer) == _settings(active)
+                        assert _settings(active)[1] == index + 1
 
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            futures = [pool.submit(worker, index) for index in range(2)]
-            for future in futures:
-                future.result(timeout=10)
-        assert _settings(observer) == before
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                futures = [pool.submit(worker, index) for index in range(2)]
+                for future in futures:
+                    future.result(timeout=10)
+            assert _settings(observer) == before
 
     with production_factory() as first, production_factory() as observer:
         before = _settings(first)
@@ -248,27 +255,52 @@ def one_point_geojson(tmp_path):
                     }
                 ],
             }
-        )
+        ),
+        encoding="utf-8",
     )
     return path
 
 
-def test_factory_and_api_chains_load_spatial_once(
-    production_factory, spatial_loads, one_point_geojson, tmp_path
+def test_factory_and_command_chains_load_spatial_once(
+    production_factory, spatial_loads, one_point_geojson, tmp_path, monkeypatch
 ):
+    from click.testing import CliRunner
+
+    import geoparquet_io as gpio
+    from geoparquet_io.cli.main import cli
+    from geoparquet_io.core import convert
+
+    bounded = Mock(wraps=convert.scoped_bounded_connection)
+    monkeypatch.setattr(convert, "scoped_bounded_connection", bounded)
+    connect = Mock(wraps=duckdb.connect)
+    monkeypatch.setattr(duckdb, "connect", connect)
     for _ in range(4):
         with production_factory() as con:
             utils.load_spatial_extension(con)
             assert utils.fetch_one(con.execute("SELECT ST_X(ST_Point(1, 2))")) == (1.0,)
-    assert spatial_loads == ["spatial"]
 
-    import geoparquet_io as gpio
-
-    for index in range(2):
-        out = tmp_path / f"chain_{index}.parquet"
-        gpio.convert(str(one_point_geojson)).add_bbox().sort_hilbert().write(str(out))
-        assert out.exists()
+    # A WKB write needs measured statistics, then eager conversion and fixes must
+    # reuse the same root. One database is enough for this sequential local chain.
+    source = tmp_path / "source.parquet"
+    with production_factory() as observer:
+        before = _settings(observer)
+        gpio.convert(str(one_point_geojson)).write(
+            str(source), geoparquet_version="1.0", compression="SNAPPY"
+        )
+        for index in range(2):
+            out = tmp_path / f"chain_{index}.parquet"
+            gpio.read(str(source)).add_bbox().write(str(out))
+            gpio.convert(str(source)).add_bbox().sort_hilbert().write(str(out), overwrite=True)
+            fixed = tmp_path / f"fixed_{index}.parquet"
+            result = CliRunner().invoke(
+                cli, ["check", "all", str(source), "--fix", "--fix-output", str(fixed)]
+            )
+            assert result.exit_code == 0, result.output
+            assert fixed.exists()
+            assert bounded.call_args.kwargs["per_thread"] == 16 * 1024**3
+            assert _settings(observer) == before
     assert spatial_loads == ["spatial"]
+    assert connect.call_count == 1
 
 
 def test_gc_only_after_isolated_gdal_read(
@@ -289,9 +321,11 @@ def test_gc_only_after_isolated_gdal_read(
                         case_patch.setenv("GPIO_DUCKDB_PROFILE", str(tmp_path / "profiles"))
                     case_patch.setattr(
                         convert,
-                        "get_duckdb_connection",
+                        "scoped_bounded_connection",
                         lambda isolated=isolated, **kwargs: production_factory(
-                            isolated=isolated, **kwargs
+                            isolated=isolated,
+                            load_spatial=kwargs["load_spatial"],
+                            load_httpfs=kwargs["load_httpfs"],
                         ),
                     )
                     collect = Mock()
@@ -304,9 +338,12 @@ def test_gc_only_after_isolated_gdal_read(
 def test_connection_limits_restore_on_exit_and_allow_out_of_order_close(
     production_factory, monkeypatch, tmp_path
 ):
-    for opening in ["factory", "bounded", "scoped"]:
+    for opening in ["factory", "bounded", "scoped", "scoped_bounded"]:
         for exit_mode in ["close", "exception"]:
-            from geoparquet_io.core.memory_limits import open_bounded_connection
+            from geoparquet_io.core.memory_limits import (
+                open_bounded_connection,
+                scoped_bounded_connection,
+            )
 
             with production_factory() as observer:
                 before = (
@@ -318,15 +355,17 @@ def test_connection_limits_restore_on_exit_and_allow_out_of_order_close(
                     con = production_factory(memory_limit="256MB", threads=1)
                 elif opening == "bounded":
                     con = open_bounded_connection(memory_limit="256MB")
+                elif opening == "scoped_bounded":
+                    con = lifetime.enter_context(scoped_bounded_connection(memory_limit="256MB"))
                 else:
                     con = lifetime.enter_context(production_factory())
                     lifetime.enter_context(scoped_write_memory_limit(con, "256MB", False))
-                if opening != "scoped":
+                if opening not in ("scoped", "scoped_bounded"):
                     lifetime.enter_context(con)
                 assert _settings(con)[0] != before[0]
-                if opening != "scoped":
+                if opening not in ("scoped", "scoped_bounded"):
                     assert _settings(observer) == before[:2]
-                if opening == "bounded":
+                if opening in ("bounded", "scoped_bounded"):
                     assert utils._current_setting(con, "preserve_insertion_order") is False
                 if exit_mode == "close":
                     lifetime.close()

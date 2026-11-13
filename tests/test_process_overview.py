@@ -490,9 +490,9 @@ class TestGridRollupStubbed:
             source_rows = []
             written = {}
 
-            def measured(con, info, source, level):
+            def measured(con, info, source, level, **kwargs):
                 source_rows.append(fetch_one(con.execute(f"SELECT count(*) FROM ({source})"))[0])
-                return original(con, info, source, level)
+                return original(con, info, source, level, **kwargs)
 
             monkeypatch.setattr(run, "build_level_sql", measured)
             monkeypatch.setattr(

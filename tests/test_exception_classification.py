@@ -154,12 +154,122 @@ def test_a_gpio_error_arrives_sanitized():
     from geoparquet_io.core.exceptions import GeoParquetError
     from geoparquet_io.core.wfs import WFSError
 
-    err = WFSError("failed: https://h/a/b/c/d/e?api_key=SECRET body: token=SECRET2 \x1b[31m")
+    err = WFSError(
+        "failed: https://h/a/b/c/d/e?api_key=SECRET body: https://h/x?token=SECRET2 \x1b[31m"
+    )
     assert isinstance(err, GeoParquetError)
     assert "SECRET" not in str(err) and "SECRET2" not in str(err)
     assert "\x1b" not in str(err)
     # the destination a message names on purpose is not elided
     assert "https://h/a/b/c/d/e" in str(err)
+
+    import random
+
+    from geoparquet_io.core.exceptions import (
+        clean_error_text,
+        redact_credentials,
+        sanitize_url_for_logging,
+    )
+
+    rng = random.Random(1034)
+    alphabet = "".join(chr(i) for i in range(33, 127))
+    for _ in range(250):
+        secret = "SECRET" + "".join(rng.choices(alphabet, k=30)) + "END"
+        for url in (
+            f"https://user:{secret}@example.test/x",
+            f"https://[broken/file?token={secret}",
+            f"s3://bucket/x?signature={secret}",
+            f"https://h/x#{secret}",
+        ):
+            for clean in (clean_error_text, redact_credentials, sanitize_url_for_logging):
+                for text in (
+                    url,
+                    f'failed "{url}" next',
+                    f"failed '{url}' next",
+                    f"failed <[{url}]> next",
+                ):
+                    cleaned = clean(text)
+                    assert all(secret[i : i + 4] not in cleaned for i in range(len(secret) - 3))
+                    assert secret not in cleaned
+                    assert "SECRET" not in clean(text)
+                    assert "END" not in clean(text)
+
+    for _ in range(250):
+        secret = "PRIVATE" + "".join(rng.choices("abcdef0123456789", k=30))
+        for text in (
+            f'{{"api_key":"{secret}"}}',
+            f"{{'password': '{secret}'}}",
+            f"api_key={secret},source=https://host/x",
+        ):
+            for clean in (clean_error_text, redact_credentials):
+                assert secret not in clean(text)
+        for control in map(chr, (*range(32), *range(127, 160))):
+            for text in (
+                f"bad request{control}api_key={secret}",
+                f"api_key{control}={secret}",
+                f"api_key={control}{secret}",
+                f"api_key={secret}{control}next",
+            ):
+                assert secret not in clean_error_text(text)
+        assert secret not in clean_error_text(f"api_key\x1b[31m={secret}")
+
+    import time
+
+    # Calibrate to 50 ms; five batch minima reduce clock and scheduling noise.
+    # At 32x input, 180x separates linear (~32x) from quadratic (~1024x).
+    for make_text in (
+        lambda n: "x" * n,
+        lambda n: "https://" + "@=" * n + "PRIVATE@host/x",
+    ):
+
+        def batch(text, count):
+            start = time.perf_counter()
+            for _ in range(count):
+                cleaned = clean_error_text(text)
+            elapsed = time.perf_counter() - start
+            assert elapsed < 15, "redaction exceeded the hang guard"
+            assert "PRIVATE" not in cleaned
+            return elapsed
+
+        small = make_text(4096)
+        count = 1
+        for _ in range(8):
+            elapsed = batch(small, count)
+            if elapsed >= 0.05 or count == 4096:
+                break
+            count = min(4096, int(count * 0.05 / elapsed) + 1 if elapsed else 2 * count)
+        timings = [
+            min(batch(make_text(size), calls) for _ in range(5)) / calls
+            for size, calls in ((4096, count), (32 * 4096, max(1, (count + 31) // 32)))
+        ]
+        assert timings[0] > 0, f"zero redaction baseline: {timings}"
+        assert timings[1] < 180 * timings[0], f"nonlinear redaction: {timings}"
+
+    assert clean_error_text("x" * (3 * 1024 * 1024)) == "x" * (3 * 1024 * 1024)
+
+    from geoparquet_io.core.wfs import _clip_to_area_of_use
+
+    # The complete userinfo must be removed before a diagnostic length cap.
+    crs = "x" * 180 + " https://user:PRIVATEVALUE@host/x"
+    with pytest.raises(ValueError) as caught:
+        _clip_to_area_of_use((0, 0, 1, 1), crs)
+    assert "PRIVAT" not in str(caught.value)
+
+    # Builtin validator errors are not GeoParquetError: the automatic boundary
+    # deliberately leaves them alone. Their API-facing cleaning remains needed.
+    from geoparquet_io.cli.exception_handler import cli_error_for
+    from geoparquet_io.core import arcgis, extract_bigquery, wfs
+
+    url = "https://h/x?token=SECRET"
+    for validate, args in (
+        (extract_bigquery._validate_project_id, (url,)),
+        (arcgis._parse_crs_to_wkid, (url,)),
+        (wfs._clip_to_area_of_use, ((0, 0, 1, 1), url)),
+    ):
+        with pytest.raises(ValueError) as caught:
+            validate(*args)
+        assert "SECRET" not in str(caught.value)
+        assert cli_error_for(caught.value) is None
 
 
 @pytest.mark.parametrize(
@@ -172,16 +282,62 @@ def test_a_gpio_error_arrives_sanitized():
         ("duplicate key: 5", "duplicate key: 5"),
     ],
 )
-def test_echoed_credential_pairs_are_redacted(text, kept):
+def test_non_url_text_is_preserved(text, kept):
     from geoparquet_io.core.exceptions import clean_error_text
 
     assert clean_error_text(text) == kept
+    for raw in (
+        'password="prefix,SUPERSECRETKEY123"',
+        'Authorization: "Bearer SECRET"',
+        'password="prefix SECRET with spaces"',
+        "password='prefix SECRET, with spaces'",
+        'password="prefix SECRET with no closing quote',
+        "password='prefix SECRET with no closing quote",
+        "Authorization: Bearer SECRET",
+        "Authorization: Basic SECRET",
+    ):
+        prefix = raw.split("=", 1)[0] + "=" if "=" in raw else "Authorization: "
+        assert clean_error_text(raw) == prefix + "***"
+    for quote in ('"', "'"):
+        raw = f"password={quote}prefix\\{quote}SECRET{quote}"
+        assert clean_error_text(raw) == "password=***"
+        assert clean_error_text(raw[:-1]) == "password=***"
+    for quote in ('"', "'"):
+        for closing in (quote, ""):
+            raw = f"password={quote}prefix" + "\\\n" + "SECRET" + closing
+            assert clean_error_text(raw) == "password=***"
+    for scheme in ("Bearer", "Basic"):
+        for quote in ('"', "'", ""):
+            raw = f"Authorization: {scheme} {quote}SECRET{quote}"
+            assert clean_error_text(raw) == "Authorization: ***"
+    for name in (
+        "api_key",
+        "api-key",
+        "apikey",
+        "token",
+        "access_token",
+        "password",
+        "secret",
+        "signature",
+        "passwd",
+        "credential",
+        "authorization",
+        "x-amz-signature",
+        "x-amz-credential",
+        "x-amz-security-token",
+    ):
+        assert clean_error_text(f"bad request {name.upper()}=PRIVATEVALUE") == (
+            f"bad request {name.upper()}=***"
+        )
+        assert clean_error_text(f"my_{name}=ordinary") == f"my_{name}=ordinary"
 
 
 def test_click_error_for_sanitizes_any_exception():
     from geoparquet_io.cli.exception_handler import click_error_for
 
-    err = click_error_for(OSError("GET https://h/x?X-Amz-Signature=SECRET failed password=hunter2"))
+    err = click_error_for(
+        OSError("GET https://h/x?X-Amz-Signature=SECRET failed https://h/x?password=hunter2")
+    )
     assert "SECRET" not in err.message and "hunter2" not in err.message
 
 

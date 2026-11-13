@@ -13,13 +13,13 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     query_schema,
     quote_identifier,
-    sql_path,
     uses_aws_profile,
 )
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import get_all_parquet_files, resolve_file_url
 from geoparquet_io.core.logging_config import debug, error, info, progress, warn
 from geoparquet_io.core.parquet_writer import WriteOptions, resolve_output_geoparquet_version
+from geoparquet_io.core.partition.reader import build_read_parquet_expr
 from geoparquet_io.core.partition.staging import (
     PartitionWriteOptions,
     check_output_collision,
@@ -64,7 +64,7 @@ def readable_geoparquet(input_parquet: str):
     pre-flight aggregate in :func:`analyze_partition_strategy` and the schema
     probe in :func:`partition_by_column`. Every gpio writer emits
     ``geometry_types``, and the partition commands spool a piped stream through
-    :func:`~geoparquet_io.core.streaming.read_stdin_to_temp_file`, which fills it
+    :func:`~geoparquet_io.core.write_funnels.read_stdin_to_temp_file`, which fills it
     in, so what reaches here is normally a file written elsewhere. Say which
     column is missing what instead of letting a raw
     ``_duckdb.InvalidInputException`` and its traceback out. Anything else
@@ -337,7 +337,7 @@ def analyze_partition_strategy(
             SELECT
                 {column_expr} as partition_value,
                 COUNT(*) as row_count
-            FROM {sql_path(input_url)}
+            FROM {build_read_parquet_expr(input_url)}
             WHERE {quote_identifier(column_name)} IS NOT NULL
             GROUP BY partition_value
         )
@@ -629,7 +629,7 @@ def preview_partition(
         SELECT
             {column_expr} as partition_value,
             COUNT(*) as record_count
-        FROM {sql_path(input_url)}
+        FROM {build_read_parquet_expr(input_url)}
         WHERE {quote_identifier(column_name)} IS NOT NULL
         GROUP BY partition_value
         ORDER BY record_count DESC
@@ -731,7 +731,7 @@ def _build_staging_select(
 
     projection = "*" if keep_partition_column else f"* EXCLUDE ({qcol})"
 
-    return f"SELECT {projection}, {pexpr} AS {alias} FROM {sql_path(input_url)} WHERE {qcol} IS NOT NULL"
+    return f"SELECT {projection}, {pexpr} AS {alias} FROM {build_read_parquet_expr(input_url)} WHERE {qcol} IS NOT NULL"
 
 
 def _determine_output_path(
@@ -841,7 +841,9 @@ def partition_by_column(
             # so it is the other place a non-conformant input surfaces -- probed
             # before the output directory exists, so a refusal leaves nothing behind.
             with readable_geoparquet(input_parquet):
-                input_cols = query_schema(con, f"SELECT * FROM {sql_path(input_url)}").names
+                input_cols = query_schema(
+                    con, f"SELECT * FROM {build_read_parquet_expr(input_url)}"
+                ).names
             alias = make_partition_aliases(1, input_cols)[0]
 
             # Create output directory

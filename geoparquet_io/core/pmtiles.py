@@ -697,7 +697,7 @@ def create_pmtiles_from_geoparquet(
     scratch = resolve_scratch_directory(temporary_directory)
     # tippecanoe (or tile-join, for --chunks) replaces the archive itself on
     # --force; refused here, before any tiling work, when the flag is absent.
-    handle_output_overwrite(output_path, force, flag="--force", remove=False)
+    handle_output_overwrite(output_path, force, flag="--force")
 
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()

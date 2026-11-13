@@ -120,18 +120,15 @@ class TestGoldenSQL:
         out = tmp_path / "out.gpkg"
         write_geopackage(PLACES, str(out), bbox=BBOX)
 
-        staged = [s for s in recorded_statements if "CREATE OR REPLACE TEMP TABLE" in s]
-        assert len(staged) == 1, recorded_statements
-        sql = staged[0]
+        copies = [s for s in recorded_statements if "FORMAT GDAL" in s]
+        assert len(copies) == 1, recorded_statements
+        sql = copies[0]
         # Four-sided overlap on the quoted covering column, no geometry scan.
         assert '"bbox".xmax >= -0.5 AND "bbox".xmin <= 0.5' in sql
         assert '"bbox".ymax >= 10.0 AND "bbox".ymin <= 11.0' in sql
         assert "ST_Intersects" not in sql
-        # The GDAL COPY reads the staged table, not the source file.
-        copies = [s for s in recorded_statements if "FORMAT GDAL" in s]
-        assert len(copies) == 1
-        assert "__gpio_convert_staged" in copies[0]
-        assert "read_parquet" not in copies[0]
+        assert "read_parquet" in copies[0]
+        assert not any("CREATE OR REPLACE TEMP TABLE" in s for s in recorded_statements)
         assert out.exists()
 
     def test_bbox_without_covering_uses_intersects(
@@ -140,16 +137,16 @@ class TestGoldenSQL:
         out = tmp_path / "out.gpkg"
         write_geopackage(places_no_covering, str(out), bbox=BBOX)
 
-        staged = [s for s in recorded_statements if "CREATE OR REPLACE TEMP TABLE" in s]
-        assert len(staged) == 1
-        assert 'ST_Intersects("geometry", ST_MakeEnvelope(-0.5, 10.0, 0.5, 11.0))' in staged[0]
+        copies = [s for s in recorded_statements if "FORMAT GDAL" in s]
+        assert len(copies) == 1
+        assert 'ST_Intersects("geometry", ST_MakeEnvelope(-0.5, 10.0, 0.5, 11.0))' in copies[0]
 
     def test_where_is_appended_as_its_own_condition(self, tmp_path, recorded_statements):
         out = tmp_path / "out.gpkg"
         write_geopackage(PLACES, str(out), bbox=BBOX, where="name IS NOT NULL")
 
-        staged = [s for s in recorded_statements if "CREATE OR REPLACE TEMP TABLE" in s]
-        assert ") AND (name IS NOT NULL)" in staged[0]
+        copies = [s for s in recorded_statements if "FORMAT GDAL" in s]
+        assert ") AND (name IS NOT NULL)" in copies[0]
 
     def test_csv_filter_lands_in_the_copy_select(self, tmp_path, recorded_statements):
         out = tmp_path / "out.csv"
@@ -413,7 +410,7 @@ class TestCLI:
 
     def test_geometry_from_file(self, runner, tmp_path):
         boundary = tmp_path / "boundary.wkt"
-        boundary.write_text(BBOX_AS_WKT)
+        boundary.write_text(BBOX_AS_WKT, encoding="utf-8")
         out = tmp_path / "out.gpkg"
         result = runner.invoke(
             cli, ["convert", "geopackage", PLACES, str(out), "--geometry", f"@{boundary}"]

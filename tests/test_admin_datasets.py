@@ -3,8 +3,10 @@ Tests for admin dataset abstraction layer.
 """
 
 import os
+import re
 import tempfile
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1153,8 +1155,8 @@ class TestClearCache:
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir)
             (cache_dir / "gaul-2024.parquet").write_bytes(b"parquet")
-            (cache_dir / "readme.txt").write_text("do not delete")
-            (cache_dir / ".gitkeep").write_text("")
+            (cache_dir / "readme.txt").write_text("do not delete", encoding="utf-8")
+            (cache_dir / ".gitkeep").write_text("", encoding="utf-8")
 
             with patch("geoparquet_io.core.admin_datasets.get_cache_dir") as mock_get_cache:
                 mock_get_cache.return_value = cache_dir
@@ -1191,7 +1193,7 @@ class TestClearCache:
             assert result["bytes_freed"] == 0
 
     def test_clear_cache_on_an_absent_directory_reports_the_same_shape(self):
-        """Callers read four keys off the result; a no-op must still carry them."""
+        """A no-op reports the same accounting keys as a populated cache."""
         with tempfile.TemporaryDirectory() as tmpdir:
             missing = Path(tmpdir) / "never-created"
             with patch("geoparquet_io.core.admin_datasets.get_cache_dir") as mock_get_cache:
@@ -1203,6 +1205,8 @@ class TestClearCache:
                 "bytes_freed": 0,
                 "spill_dirs_deleted": 0,
                 "spill_bytes_freed": 0,
+                "staging_dirs_deleted": 0,
+                "staging_bytes_freed": 0,
             }
 
     def test_clear_cache_leaves_a_running_process_spill_directory(self):
@@ -1468,6 +1472,29 @@ class TestDownloadToCache:
             con.close()
         assert count > 0
 
+    def test_failed_copy_never_publishes_partial_cache(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from geoparquet_io.core import admin_datasets
+
+        dataset = GAULAdminDataset()
+        cache_path = tmp_path / "gaul.parquet"
+        con = MagicMock()
+
+        def interrupted(query):
+            destination = Path(re.search(r" TO '([^']+)'", query)[1])
+            destination.write_bytes(b"partial")
+            raise OSError("interrupted")
+
+        con.execute.side_effect = interrupted
+        monkeypatch.setattr(admin_datasets, "open_bounded_connection", lambda **kwargs: con)
+        monkeypatch.setattr(admin_datasets, "scoped_write_memory_limit", lambda *a: nullcontext())
+        with pytest.raises(OSError, match="interrupted"):
+            dataset._download_to_cache(cache_path)
+        assert not cache_path.exists()
+        assert not list(tmp_path.glob(".gpio-stage-*"))
+        con.close.assert_called_once()
+
     def test_download_to_cache_with_read_options(self, tmp_path):
         """Non-empty read_parquet options (e.g. Overture's hive_partitioning) build the options branch."""
         dataset = GAULAdminDataset()
@@ -1561,36 +1588,101 @@ class TestPerLevelJoinKeepsEveryFeatureOnce:
     network access or real cache is involved.
     """
 
-    def test_row_count_preserved(self, tmp_path):
-        import duckdb
+    def test_row_count_preserved(self, tmp_path, monkeypatch):
+        """Bounded and full-level joins agree across levels, policies and CRS."""
+        from geoparquet_io.core import admin_datasets as ad
 
-        from geoparquet_io.core.add.admin_divisions import add_admin_divisions_multi
-
-        con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        admin_file = _write_country_admin_fixture(
-            con,
-            tmp_path,
-            [
-                ("POLYGON((0 0,0 1,1 1,1 0,0 0))", "AA"),
-                ("POLYGON((10 10,10 11,11 11,11 10,10 10))", "BB"),
-            ],
+        con = get_duckdb_connection(load_spatial=True)
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        monkeypatch.setattr(ad, "get_cache_dir", lambda: cache)
+        source = tmp_path / "divisions.parquet"
+        rows = [
+            ("POLYGON((0 0,10 0,10 10,0 10,0 0))", "US", None, "country", True),
+            ("POLYGON((0 0,12 0,12 12,0 12,0 0))", "US", None, "country", False),
+            ("POLYGON((10 0,20 0,20 10,10 10,10 0))", "XS", None, "dependency", True),
+            ("POLYGON((20 0,30 0,30 10,20 10,20 0))", "XK", None, "country", True),
+            ("POLYGON((30 0,40 0,40 10,30 10,30 0))", "AQ", None, "country", True),
+            ("POLYGON((40 0,50 0,50 10,40 10,40 0))", "FR", None, "country", None),
+            ("POLYGON((0 0,5 0,5 10,0 10,0 0))", "US", "US-CA", "region", True),
+            ("POLYGON((5 0,10 0,10 10,5 10,5 0))", "US", "US-NV", "region", True),
+            ("POLYGON((-179 -80,179 -80,179 80,-179 80,-179 -80))", "ZZ", None, "locality", True),
+        ]
+        con.execute(
+            "CREATE TABLE raw(wkt VARCHAR, country VARCHAR, region VARCHAR, subtype VARCHAR, is_land BOOLEAN)"
         )
-        input_file = _write_points_fixture(con, tmp_path, [(0.5, 0.5), (10.5, 10.5)])
-        con.close()
-
-        out = str(tmp_path / "out.parquet")
-        add_admin_divisions_multi(
-            input_parquet=str(input_file),
-            output_parquet=out,
-            dataset_name="overture",
-            levels=["country"],
-            dataset_source=str(admin_file),
-            verbose=False,
+        con.executemany("INSERT INTO raw VALUES (?, ?, ?, ?, ?)", rows)
+        con.execute(
+            f"COPY (SELECT * EXCLUDE(wkt), ST_GeomFromText(wkt) geometry, "
+            "struct_pack(xmin:=ST_XMin(ST_GeomFromText(wkt)), "
+            "ymin:=ST_YMin(ST_GeomFromText(wkt)), xmax:=ST_XMax(ST_GeomFromText(wkt)), "
+            "ymax:=ST_YMax(ST_GeomFromText(wkt))) bbox FROM raw) "
+            f"TO {sql_path(source)} (FORMAT PARQUET)"
         )
-
-        con = duckdb.connect()
-        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM '{out}'"))[0] == 2
+        try:
+            for crs in (None, "EPSG:3857"):
+                inp = tmp_path / f"input-{crs is None}.parquet"
+                geom = (
+                    "geometry"
+                    if crs is None
+                    else "ST_Transform(geometry, 'OGC:CRS84', 'EPSG:3857')"
+                )
+                con.execute(
+                    f"COPY (SELECT id, {geom} geometry FROM (VALUES "
+                    "(1,ST_Point(2,5)),(2,ST_Point(7,5)),(3,ST_Point(15,5)),"
+                    "(4,ST_Point(25,5)),(5,ST_Point(35,5)),(6,ST_Point(45,5)),"
+                    "(7,ST_Point(11,11)),(8,NULL),(9,ST_GeomFromText('POINT EMPTY')),"
+                    "(10,ST_Point(10,5))) t(id,geometry)) "
+                    f"TO {sql_path(inp)} (FORMAT PARQUET)"
+                )
+                for levels in (["country"], ["region"], ["country", "region"]):
+                    results = []
+                    for warm in (False, True):
+                        for file in cache.glob("*.parquet"):
+                            file.unlink()
+                        dataset = OvertureAdminDataset()
+                        monkeypatch.setattr(dataset, "get_version", lambda: "fixture")
+                        monkeypatch.setattr(dataset, "get_default_source", lambda: str(source))
+                        # Tiny fixtures have no prunable row groups; exercise the bounded branch.
+                        monkeypatch.setattr(
+                            dataset, "_extent_prunes_most_geometry", lambda *args: True
+                        )
+                        if warm:
+                            for level in levels:
+                                con.execute(
+                                    f"COPY ({dataset._build_level_cache_query(level, str(source))}) "
+                                    f"TO {sql_path(dataset.get_cached_path_for_level(level))} (FORMAT PARQUET)"
+                                )
+                        ad.run_admin_join(
+                            con,
+                            dataset,
+                            levels,
+                            input_path=str(inp),
+                            input_geom_col="geometry",
+                            input_bbox_col=None,
+                            admin_bbox_col="bbox",
+                            select_for=lambda lv, cols: ", ".join(f"b.{c} AS a_{c}" for c in cols),
+                            final_table="result",
+                            source_crs=crs,
+                        )
+                        results.append(con.execute("SELECT * FROM result ORDER BY id").fetchall())
+                    assert results[0] == results[1]
+                    assert len(results[0]) == 10
+                    if levels == ["country"]:
+                        assert [r[-1] for r in results[0]] == [
+                            "US",
+                            "US",
+                            "BQ",
+                            None,
+                            None,
+                            "FR",
+                            None,
+                            None,
+                            None,
+                            "BQ",
+                        ]
+        finally:
+            con.close()
 
     def test_overlapping_admin_polygons_keep_each_feature_once(self, tmp_path):
         """Two overlapping country polygons both cover one input point. The join
@@ -1691,7 +1783,7 @@ class TestDownloadPerLevelCachesHousekeeping:
         version = "2026-07-22.0"
         monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
         mock_con = MagicMock()
-        monkeypatch.setattr(admin_datasets, "get_duckdb_connection", lambda **kwargs: mock_con)
+        monkeypatch.setattr(admin_datasets, "open_bounded_connection", lambda **kwargs: mock_con)
 
         dataset = OvertureAdminDataset()
         # Keep version/source resolution offline and deterministic.
@@ -1708,10 +1800,342 @@ class TestDownloadPerLevelCachesHousekeeping:
         stale = tmp_path / f"overture-{version}-country-land.parquet"
         stale.write_bytes(b"stale")
 
+        old_parts = tmp_path / ".overture-2025-01-country-land-parts"
+        old_parts.mkdir()
+        current_parts = tmp_path / f".{fresh['country'].stem}-parts"
+        current_parts.mkdir()
         dataset._download_per_level_caches()
 
+        assert not old_parts.exists()
+        assert not current_parts.exists()
         assert not stale.exists()
         for path in fresh.values():
             assert path.exists()
         mock_con.execute.assert_not_called()
         mock_con.close.assert_called_once()
+
+    def test_live_parts_survive_housekeeping_and_finishing_sibling(self, tmp_path, monkeypatch):
+        from geoparquet_io.core import file_utils
+
+        for locking in (True, False):
+            with monkeypatch.context() as patches:
+                if not locking:
+                    patches.setattr(file_utils, "_spill_lock", lambda path: None)
+                from unittest.mock import MagicMock
+
+                from geoparquet_io.core import admin_datasets, file_utils
+
+                patches.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
+                patches.setattr(admin_datasets, "open_bounded_connection", lambda **kw: MagicMock())
+                dataset = OvertureAdminDataset()
+                patches.setattr(dataset, "get_version", lambda: "fixture")
+                patches.setattr(dataset, "get_default_source", lambda: "unused")
+                final = dataset.get_cached_path_for_level("country")
+                final.write_bytes(b"published by sibling")
+                owned = tmp_path / ".overture-old-country-land-parts"
+                owned.mkdir()
+                unowned = tmp_path / ".overture-older-country-land-parts"
+                unowned.mkdir()
+                marker = file_utils._spill_lock(str(owned))
+                try:
+                    admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
+                    assert owned.exists() == (marker is not None)
+                    assert not unowned.exists()
+                    dataset._download_per_level_caches(["country"])
+                    assert owned.exists() == (marker is not None)
+                    assert final.read_bytes() == b"published by sibling"
+                    owned.mkdir(exist_ok=True)
+                    (owned / "live.parquet").write_bytes(b"owned object")
+                    unowned.mkdir()
+                    (unowned / "old.parquet").write_bytes(b"old object")
+                    admin_datasets.clear_cache(confirm=True)
+                    assert (owned / "live.parquet").exists() == (marker is not None)
+                    assert not unowned.exists()
+                finally:
+                    if marker is not None:
+                        marker.close()
+                admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
+                assert not owned.exists()
+
+                # A waiting builder must re-check the cache after its sibling publishes.
+                from concurrent.futures import ThreadPoolExecutor
+                from threading import Event
+
+                parts = tmp_path / f".{final.stem}-parts"
+                parts.mkdir()
+                final.unlink(missing_ok=True)
+                marker = file_utils._spill_lock(str(parts))
+                waiting = Event()
+                sleep = file_utils.time.sleep
+
+                def wait(seconds, waiting=waiting, sleep=sleep):
+                    waiting.set()
+                    sleep(seconds)
+
+                patches.setattr(file_utils.time, "sleep", wait)
+                patches.setattr(
+                    dataset, "_cache_source_objects", lambda *args: pytest.fail("rebuild")
+                )
+                if marker is None:  # Windows has no ownership locking.
+                    final.write_bytes(b"sibling result")
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    future = pool.submit(dataset._download_per_level_caches, ["country"])
+                    try:
+                        if marker is not None:
+                            assert waiting.wait(5), "second builder did not wait for ownership"
+                            assert parts.exists()
+                            assert not future.done()
+                            final.write_bytes(b"sibling result")
+                    finally:
+                        if marker is not None:
+                            marker.close()
+                    future.result(timeout=5)
+                assert final.read_bytes() == b"sibling result"
+                assert not parts.exists()
+
+                # Parts have no PID identity; Windows cleanup needs no optional psutil.
+                with patches.context() as windows:
+                    windows.setattr(file_utils, "_spill_lock", lambda path: None)
+                    windows.setattr(
+                        file_utils, "_process_is_alive", lambda pid: pytest.fail("PID probe")
+                    )
+                    unowned.mkdir()
+                    admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
+                    assert not unowned.exists()
+
+    def test_requested_level_retry_preserves_completed_cache_and_objects(
+        self, tmp_path, monkeypatch
+    ):
+        """A broken second object must not make the next attempt read the first again."""
+        import duckdb
+
+        from geoparquet_io.core import admin_datasets
+        from geoparquet_io.core.duckdb_utils import sql_literal
+
+        source = tmp_path / "source"
+        source.mkdir()
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: cache)
+        dataset = OvertureAdminDataset()
+        monkeypatch.setattr(dataset, "get_version", lambda: "fixture")
+        monkeypatch.setattr(dataset, "get_default_source", lambda: str(source / "part-*.parquet"))
+        con = get_duckdb_connection(load_spatial=True)
+        try:
+
+            def write_part(name, country):
+                con.execute(
+                    f"COPY (SELECT ST_Point(0,0) geometry, {sql_literal(country)} country, "
+                    f"{sql_literal(country + '-X')} region, subtype, true is_land, "
+                    "{'xmin': 0.0, 'xmax': 0.0, 'ymin': 0.0, 'ymax': 0.0} bbox "
+                    "FROM (VALUES ('country'), ('region')) t(subtype)) "
+                    f"TO {sql_path(source / name)} (FORMAT PARQUET)"
+                )
+
+            write_part("part-a.parquet", "US")
+            (source / "part-b.parquet").write_bytes(b"PAR1broken")
+            reads = []
+            original = dataset._build_level_cache_query
+
+            def query(level, path, extent=None):
+                reads.append(Path(path))
+                return original(level, path, extent)
+
+            from geoparquet_io.core.file_utils import _spill_lock
+
+            copy = dataset._copy_to_cache
+
+            def owned_copy(connection, sql, destination):
+                level = "country" if "country" in str(destination) else "region"
+                path = dataset.get_cached_path_for_level(level)
+                parts = path.parent / f".{path.stem}-parts"
+                if os.name != "nt":
+                    with pytest.raises(BlockingIOError):
+                        _spill_lock(str(parts))
+                return copy(connection, sql, destination)
+
+            monkeypatch.setattr(dataset, "_copy_to_cache", owned_copy)
+            monkeypatch.setattr(dataset, "_build_level_cache_query", query)
+            with pytest.raises(duckdb.Error):
+                dataset.get_source_for_level("country")
+            assert not dataset.get_cached_path_for_level("country").exists()
+            completed = list(cache.rglob("*.parquet"))
+            assert len(completed) == 1
+            assert not list(cache.rglob(".gpio-stage-*"))
+            (source / "part-b.parquet").unlink()
+            write_part("part-b.parquet", "CA")
+            final = dataset.get_source_for_level("country")
+            assert not completed[0].parent.exists()
+            assert reads.count(source / "part-a.parquet") == 1
+            assert reads.count(source / "part-b.parquet") == 2
+            assert con.execute(
+                f"SELECT country FROM {sql_path(final)} ORDER BY country"
+            ).fetchall() == [("CA",), ("US",)]
+            assert not dataset.get_cached_path_for_level("region").exists()
+            country_bytes = Path(final).read_bytes()
+            (source / "part-b.parquet").write_bytes(b"PAR1broken")
+            with pytest.raises(duckdb.Error):
+                dataset.get_source_for_level("region")
+            assert Path(final).read_bytes() == country_bytes
+            assert not dataset.get_cached_path_for_level("region").exists()
+            assert not list(cache.rglob(".gpio-stage-*"))
+            (source / "part-b.parquet").unlink()
+            write_part("part-b.parquet", "CA")
+            region = dataset.get_source_for_level("region")
+            assert con.execute(f"SELECT count(*) FROM {sql_path(region)}").fetchall() == [(2,)]
+            monkeypatch.setattr(
+                dataset, "get_default_source", lambda: pytest.fail("warm cache read")
+            )
+            assert dataset.get_source_for_level("country") == final
+            assert dataset.get_source_for_level("region") == region
+            admin_datasets.clear_cache(confirm=True)
+            assert not list(cache.rglob("*.parquet"))
+        finally:
+            con.close()
+
+
+def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, monkeypatch):
+    """Selective cold reads stay inline; reading most geometry builds a reusable cache."""
+    from http.server import BaseHTTPRequestHandler
+
+    from geoparquet_io.core import admin_datasets
+    from scripts.profile_command import CallSpies
+    from scripts.profile_matrix.workloads import serve_workload
+
+    source = tmp_path / "divisions.parquet"
+    inp = tmp_path / "input.parquet"
+    con = get_duckdb_connection(load_spatial=True, load_httpfs=True)
+    con.execute(
+        f"COPY (SELECT ST_Buffer(ST_Point((i//2048)*10, (i%2048)/4096.0), 0.1, "
+        "CASE WHEN i//2048 >= 12 THEN 128 ELSE 8 END) geometry, "
+        "'US' country, 'country' subtype, true is_land, "
+        "{'xmin': (i//2048)*10-0.1, 'xmax': (i//2048)*10+0.1, "
+        "'ymin': (i%2048)/4096.0-0.1, 'ymax': (i%2048)/4096.0+0.1} bbox "
+        f"FROM range(32768) t(i)) TO {sql_path(source)} "
+        "(FORMAT PARQUET, ROW_GROUP_SIZE 2048)"
+    )
+    con.execute(
+        f"COPY (SELECT ST_Point(0,0) geometry, "
+        "{'xmin':0.0,'ymin':0.0,'xmax':0.0,'ymax':0.0} bbox) "
+        f"TO {sql_path(inp)} (FORMAT PARQUET)"
+    )
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: cache)
+    dataset = OvertureAdminDataset()
+    monkeypatch.setattr(dataset, "get_version", lambda: "fixture")
+    counts = {"requests": 0, "bytes": 0}
+    send_header = BaseHTTPRequestHandler.send_header
+
+    def count_response(handler, name, value):
+        if handler.command == "GET" and name.lower() == "content-length":
+            counts["requests"] += 1
+            counts["bytes"] += int(value)
+        return send_header(handler, name, value)
+
+    monkeypatch.setattr(BaseHTTPRequestHandler, "send_header", count_response)
+    try:
+        with serve_workload(source) as url:
+            monkeypatch.setattr(dataset, "get_default_source", lambda: url)
+            from click.testing import CliRunner
+
+            from geoparquet_io.cli.main import add
+
+            monkeypatch.setattr(OvertureAdminDataset, "get_default_source", lambda self: url)
+            monkeypatch.setattr(OvertureAdminDataset, "get_version", lambda self: "fixture")
+            dry = CliRunner().invoke(
+                add,
+                [
+                    "admin-divisions",
+                    str(inp),
+                    str(tmp_path / "dry.parquet"),
+                    "--dataset",
+                    "overture",
+                    "--levels",
+                    "country",
+                    "--dry-run",
+                ],
+            )
+            assert dry.exit_code == 0, dry.output
+            assert len(con.extract_statements(dry.output[dry.output.index("-- Step") :])) == 1
+            con.execute("SET threads=1")
+
+            def check_materialized(step):
+                assert "_gpio_admin_boundaries_0" in step.query
+                assert con.execute("SELECT current_setting('threads')").fetchall() == [(1,)]
+
+            def write_result(step):
+                plan = str(con.execute(f"EXPLAIN (FORMAT JSON) {step.query}").fetchall())
+                assert any(name in plan for name in ("BLOCKWISE_NL_JOIN", "NESTED_LOOP_JOIN")), plan
+                assert "ST_Intersects" in plan and "bbox" in plan, plan
+                con.execute(f"CREATE TEMP TABLE bounded_admin_result AS {step.query}")
+
+            with CallSpies() as spies:
+                admin_datasets.run_admin_join(
+                    con,
+                    dataset,
+                    ["country"],
+                    input_path=str(inp),
+                    input_geom_col="geometry",
+                    input_bbox_col="bbox",
+                    admin_bbox_col="bbox",
+                    select_for=lambda levels, cols: "b.country AS admin_country",
+                    final_step=write_result,
+                    on_step=check_materialized,
+                )
+            assert con.execute("SELECT admin_country FROM bounded_admin_result").fetchall() == [
+                ("US",)
+            ]
+            assert counts["requests"] > 0
+            assert counts["bytes"] < min(source.stat().st_size // 4, 1_000_000), counts
+            assert spies.counts["parquet_writes"] == 0
+            assert spies.counts.get("connections", 0) == 0
+            assert con.execute("SELECT current_setting('disabled_optimizers')").fetchall() == [
+                ("",)
+            ]
+            assert not list(cache.glob("*.parquet"))
+            assert not list(cache.glob(".gpio-stage-*"))
+            # Empty caches remain cold; bounded reads retain simplification.
+            cache_path = dataset.get_cached_path_for_level("country")
+            cache_path.touch()
+            extent = (0, 0, 0, 0)
+            inline_source, inline_relation = dataset._source_for_join("country", False, extent)
+            assert "ST_SimplifyPreserveTopology" in inline_relation
+            assert dataset._is_prefiltered_source(inline_source)
+            assert "is_land" not in dataset.get_subtype_filter(["country"], inline_source)
+            assert "is_land" not in con.sql(f"SELECT * FROM {inline_relation}").columns
+            cache_path.unlink()
+            # Twelve small groups overlap, but most geometry bytes are skipped.
+            sparse_source, _ = dataset._source_for_join("country", False, (-1, 111, -1, 2))
+            assert sparse_source.startswith("(SELECT ")
+            assert not cache_path.exists()
+            # Four dense groups hold most geometry bytes, despite their small
+            # share of row groups and geographic extent. Cache the whole level.
+            bounded_bytes = counts["bytes"]
+            with CallSpies() as global_spies:
+                global_source, _ = dataset._source_for_join("country", False, (119, 151, -1, 2))
+            assert global_source == str(cache_path)
+            assert cache_path.stat().st_size > 0
+            assert con.execute(f"SELECT count(*) FROM {sql_path(cache_path)}").fetchall() == [
+                (32768,)
+            ]
+            assert global_spies.counts["parquet_writes"] == 1
+            assert counts["bytes"] - bounded_bytes > source.stat().st_size // 2
+            before = counts.copy()
+            assert dataset._source_for_join("country", False, extent) == (
+                str(cache_path),
+                dataset.table_reference(str(cache_path)),
+            )
+            assert dataset._source_for_join("country", False, None)[0] == str(cache_path)
+            assert dataset._source_for_join("country", True, extent) == (
+                url,
+                dataset.table_reference(url),
+            )
+            custom = OvertureAdminDataset(source_path=str(source))
+            assert custom._source_for_join("country", False, extent) == (
+                str(source),
+                custom.table_reference(str(source)),
+            )
+            assert counts == before
+    finally:
+        con.close()

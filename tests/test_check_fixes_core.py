@@ -693,3 +693,191 @@ def _detected(check_results):
     """The bbox check's file-type answer, in ``detect_geoparquet_file_type``'s shape."""
     bbox = check_results.get("bbox", {})
     return {"file_type": bbox.get("file_type"), "geo_version": bbox.get("version")}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
+def test_fresh_fix_outputs_inherit_private_input_mode(places_test_file, tmp_path):
+    import stat
+
+    from geoparquet_io.core.check_fixes import (
+        apply_all_fixes,
+        fix_bbox_all,
+        fix_bbox_column,
+        fix_compression,
+        fix_spatial_ordering,
+    )
+
+    source = tmp_path / "private.parquet"
+    source.write_bytes(Path(places_test_file).read_bytes())
+    source.chmod(0o600)
+    previous_umask = os.umask(0o022)
+    try:
+        for name, fix in (
+            ("compression", lambda out: fix_compression(str(source), str(out))),
+            ("column", lambda out: fix_bbox_column(str(source), str(out))),
+            (
+                "chain",
+                lambda out: apply_all_fixes(
+                    str(source),
+                    str(out),
+                    {
+                        "bbox": {"needs_bbox_column": True},
+                    },
+                ),
+            ),
+            (
+                "combined",
+                lambda out: apply_all_fixes(
+                    str(source),
+                    str(out),
+                    {"bbox": {"needs_bbox_column": True}, "spatial": {"fix_available": True}},
+                ),
+            ),
+            ("bbox", lambda out: fix_bbox_all(str(source), str(out), True, True)),
+            ("spatial", lambda out: fix_spatial_ordering(str(source), str(out))),
+        ):
+            output = tmp_path / f"{name}.parquet"
+            fix(output)
+            assert stat.S_IMODE(output.stat().st_mode) == 0o600, name
+
+        for checks in (
+            {},
+            {"bbox": {"needs_bbox_column": True}},
+            {"spatial": {"fix_available": True}},
+            {"compression": {"fix_available": True}},
+            {"row_groups": {"fix_available": True}},
+            {"bbox": {"needs_bbox_column": True}, "spatial": {"fix_available": True}},
+            {
+                "bbox": {"needs_bbox_column": True},
+                "spatial": {"fix_available": True},
+                "compression": {"fix_available": True},
+            },
+            {
+                "bbox": {"needs_bbox_column": True},
+                "spatial": {"fix_available": True},
+                "row_groups": {"fix_available": True},
+            },
+        ):
+            for inplace in (False, True):
+                source.write_bytes(Path(places_test_file).read_bytes())
+                source.chmod(0o600)
+                output = source if inplace else tmp_path / "chain-output.parquet"
+                if not inplace:
+                    output.unlink(missing_ok=True)
+                apply_all_fixes(str(source), str(output), checks)
+                assert stat.S_IMODE(output.stat().st_mode) == 0o600, (checks, inplace)
+    finally:
+        os.umask(previous_umask)
+
+
+def test_permission_copy_failure_never_publishes(places_test_file, tmp_path, monkeypatch):
+    source = Path(places_test_file)
+
+    def denied(*args, **kwargs):
+        raise PermissionError("Cannot preserve private input permissions")
+
+    monkeypatch.setattr(shutil, "copymode", denied)
+    refused = tmp_path / "refused.parquet"
+    with pytest.raises(PermissionError):
+        fix_compression(str(source), str(refused))
+    assert not refused.exists(), "never publish private data with broader permissions"
+
+
+def test_remote_covering_output_refusal_names_fix_output():
+    from geoparquet_io.core.check_fixes import fix_bbox_metadata
+    from geoparquet_io.core.exceptions import GeoParquetError
+
+    with pytest.raises(GeoParquetError, match="--fix-output"):
+        fix_bbox_metadata("local.parquet", "s3://bucket/fixed.parquet")
+
+
+def test_all_fixes_share_one_data_rewrite(tmp_path, monkeypatch):
+    """Keep the staged chain's exact bytes while avoiding intermediate data writes."""
+    import json
+
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+    from scripts.profile_command import CallSpies
+
+    source = tmp_path / "source.parquet"
+    with get_duckdb_connection(load_spatial=True) as con:
+        table = (
+            con.sql(
+                "SELECT i AS id, CASE WHEN i % 13 = 0 THEN NULL ELSE i % 5 END AS value, "
+                "ST_AsWKB(CASE WHEN i % 113 = 0 THEN NULL "
+                "WHEN i % 127 = 0 THEN ST_GeomFromText('POINT EMPTY') "
+                "ELSE ST_Point(((i * 7919) % 10001) / 100.0, i % 7) END) AS geometry "
+                "FROM range(10001) t(i)"
+            )
+            .arrow()
+            .read_all()
+        )
+    for version in ("1.0", "1.1"):
+        geo = {
+            "version": version + ".0",
+            "primary_column": "geometry",
+            "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["Point"]}},
+        }
+        pq.write_table(
+            table.replace_schema_metadata({b"geo": json.dumps(geo).encode()}),
+            source,
+            compression="SNAPPY",
+            row_group_size=1024,
+        )
+        bbox = tmp_path / "bbox.parquet"
+        sorted_file = tmp_path / "sorted.parquet"
+        baseline = tmp_path / "baseline.parquet"
+        fix_bbox_column(str(source), str(bbox))
+        fix_bbox_metadata(str(bbox), str(bbox))
+        fix_spatial_ordering(str(bbox), str(sorted_file))
+        fix_compression(str(sorted_file), str(baseline), geoparquet_version=version)
+        checks = {
+            "bbox": {
+                "needs_bbox_column": True,
+                "needs_bbox_metadata": True,
+                "version": version + ".0",
+                "file_type": "geoparquet_v1",
+            },
+            "spatial": {"fix_available": True},
+            "compression": {"fix_available": True},
+            "row_groups": {"fix_available": True},
+        }
+        output = tmp_path / "output.parquet"
+        with CallSpies() as counters:
+            result = check_fixes.apply_all_fixes(str(source), str(output), checks)
+        assert output.read_bytes() == baseline.read_bytes()
+        assert counters.counts["parquet_writes"] == 1
+        assert counters.counts["arrow_read_all"] == (2 if version == "1.1" else 0)
+        assert result["fixes_applied"] == [
+            "Added bbox column",
+            "Added bbox covering metadata",
+            "Applied Hilbert spatial ordering",
+            "Optimized compression (ZSTD)",
+            "Optimized row groups (49,152 rows/group)",
+        ]
+
+        # Exercise final remote placement after the combined helper returns.
+        from obstore.store import LocalStore
+
+        from geoparquet_io.core.duckdb_utils import get_active_s3_config
+
+        bucket = tmp_path / "bucket"
+        bucket.mkdir(exist_ok=True)
+        uploads = []
+        outer_config = get_active_s3_config().copy()
+
+        def resolve_store(url, profile, *args, bucket=bucket, uploads=uploads):
+            assert url == "s3://private"
+            assert profile == "prod"
+            assert get_active_s3_config().get("profile") == "prod"
+            uploads.append(url + "/result.parquet")
+            return LocalStore(str(bucket)), {}
+
+        with monkeypatch.context() as patch:
+            patch.setattr("geoparquet_io.core.upload._setup_store_and_kwargs", resolve_store)
+            remote_result = check_fixes.apply_all_fixes(
+                str(source), "s3://private/result.parquet", checks, profile="prod"
+            )
+        assert remote_result["success"]
+        assert uploads == ["s3://private/result.parquet"]
+        assert (bucket / "result.parquet").read_bytes() == baseline.read_bytes()
+        assert get_active_s3_config() == outer_config

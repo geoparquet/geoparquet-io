@@ -513,10 +513,13 @@ def dataset_bounds(parquet_file, geometry_column=None, verbose=False, *, advise=
 
     configure_verbose(verbose)
     resolve_file_url(parquet_file, verbose)  # a missing file is reported as one, first
+    primary = primary_geometry_column(parquet_file, verbose=verbose)
     if not geometry_column:
-        geometry_column = primary_geometry_column(parquet_file, verbose=verbose)
+        geometry_column = primary
     bbox_info = check_bbox_structure(parquet_file, verbose)
     bbox_column = bbox_info["bbox_column_name"] if bbox_info["has_bbox_column"] else None
+    if geometry_column != primary:
+        bbox_column = None
     if bbox_column:
         debug(f"Using bbox column '{bbox_column}' for fast bounds calculation")
     elif advise:
