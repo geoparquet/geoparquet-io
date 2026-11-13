@@ -9,6 +9,7 @@ import glob as glob_module
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -458,13 +459,6 @@ def unlink_released_file(path: str | os.PathLike | None) -> None:
             time.sleep(wait)
 
 
-def _take_mode(staged: Path, source: Path | str | None) -> None:
-    """Give *staged* the permission bits of *source* before publishing private data."""
-    if source is None or is_remote_url(str(source)):
-        return
-    shutil.copymode(source, staged)
-
-
 def _publish_sidecars(stage_dir: Path, staged: Path, final: Path, suffixes: Iterable[str]) -> None:
     """Move every file the writer left beside *staged*, and drop the old set's leftovers."""
     published = {part.name for part in stage_dir.iterdir()}
@@ -650,7 +644,8 @@ def atomic_write(
     replaced, and the link stays a link (#1076). The published file takes the
     destination's mode when it replaces one, else *mode_from*'s when given (a
     footer patch's copy takes its input's), else the umask's -- never a temp
-    file's 0600.
+    file's 0600. Replacing an existing file strictly advances its whole-second
+    modification time, so timestamp-validating readers see the new version.
 
     *sidecar_suffixes* publishes a set of files that share the output's stem (a
     Shapefile's ``.shp``/``.shx``/``.dbf``/``.prj``/...): every file the writer
@@ -700,10 +695,26 @@ def atomic_write(
         yield str(staged)
         if not staged.exists():
             return  # the writer decided there was nothing to write
-        _take_mode(staged, final if final.exists() else mode_from)
+        try:
+            previous = final.stat()
+        except FileNotFoundError:
+            previous = None
+        if previous is not None:
+            os.chmod(staged, stat.S_IMODE(previous.st_mode))
+        elif mode_from is not None and not is_remote_url(str(mode_from)):
+            shutil.copymode(mode_from, staged)
         if sidecar_suffixes is not None:
             _publish_sidecars(stage_dir, staged, final, sidecar_suffixes)
         os.replace(staged, final)
+        if previous is not None:
+            published = final.stat()
+            previous_second = previous.st_mtime_ns // 1_000_000_000
+            if published.st_mtime_ns // 1_000_000_000 <= previous_second:
+                # Windows has no file version tag; DuckDB trusts whole-second mtime.
+                os.utime(
+                    final,
+                    ns=(published.st_atime_ns, (previous_second + 1) * 1_000_000_000),
+                )
     finally:
         shutil.rmtree(stage_dir, ignore_errors=True)
         if marker is not None:
@@ -828,29 +839,20 @@ def _copy_destination(dest_path: str, dest_is_remote: bool):
     failure path would replace a good object at the destination key with a
     truncated one, so the writer is closed -- committed -- only when the copy
     body ran to completion. On failure the remote writer is dropped
-    un-committed, which leaves the destination exactly as it was, and a partial
-    local file is unlinked. Cleanup exceptions are suppressed so they cannot
-    mask the copy failure itself.
+    un-committed, and local copies publish through ``atomic_write`` only on
+    success, so either destination keeps its previous version.
     """
-    if dest_is_remote:
-        import obstore as obs
+    if not dest_is_remote:
+        with atomic_write(dest_path) as staged, open(staged, "wb") as handle:
+            yield handle
+        return
 
-        store, key = resolve_object_store(dest_path)
-        handle = obs.open_writer(store, key)
-    else:
-        handle = open(dest_path, "wb")
+    import obstore as obs
 
-    committed = False
-    try:
-        yield handle
-        handle.close()
-        committed = True
-    finally:
-        if not committed and not dest_is_remote:
-            with contextlib.suppress(Exception):
-                handle.close()
-            with contextlib.suppress(OSError):
-                os.unlink(dest_path)
+    store, key = resolve_object_store(dest_path)
+    handle = obs.open_writer(store, key)
+    yield handle
+    handle.close()
 
 
 def resolve_object_store(url: str) -> tuple[object, str]:
@@ -930,7 +932,8 @@ def copy_file(source_path: str, dest_path: str, verbose: bool = False) -> None:
     dest_is_remote = is_remote_url(dest_path)
 
     if not source_is_remote and not dest_is_remote:
-        shutil.copyfile(source_path, dest_path)
+        with atomic_write(dest_path) as staged:
+            shutil.copyfile(source_path, staged)
         return
 
     # Both schemes are checked before a byte moves, so an unsupported destination

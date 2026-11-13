@@ -9,6 +9,7 @@ Tests the Strategy Pattern for GeoParquet writes including:
 
 import json
 import logging
+import os
 import struct
 import sys
 import tempfile
@@ -98,6 +99,15 @@ class TestAtomicWrite:
 
             assert output_path.exists()
             assert output_path.read_text(encoding="utf-8") == "test content"
+
+            pinned = 1_700_000_000_000_000_000
+            os.utime(output_path, ns=(pinned, pinned))
+            for _ in range(2):
+                previous = output_path.stat().st_mtime_ns // 1_000_000_000
+                with atomic_write(str(output_path)) as temp_path:
+                    Path(temp_path).write_text("test content", encoding="utf-8")
+                    os.utime(temp_path, ns=(pinned, pinned))
+                assert output_path.stat().st_mtime_ns // 1_000_000_000 > previous
 
         from geoparquet_io.core import remote
         from geoparquet_io.core.exceptions import GeoParquetError
