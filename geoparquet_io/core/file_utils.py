@@ -520,7 +520,7 @@ def _spill_base_lock(base: str | os.PathLike):
 
 
 @contextlib.contextmanager
-def _staging_directory_owner(path: Path):
+def _staging_directory_owner(path: Path, *, wait: bool = True):
     """Wait for ownership, coordinating directory creation with collectors.
 
     Never wait while holding the base lock: the current owner may need it to
@@ -534,6 +534,8 @@ def _staging_directory_owner(path: Path):
                 marker = _spill_lock(str(path))
             break
         except BlockingIOError:
+            if not wait:
+                raise
             time.sleep(0.05)
     try:
         yield

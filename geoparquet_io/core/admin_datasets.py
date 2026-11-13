@@ -14,6 +14,7 @@ import shutil
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,6 +43,7 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.file_utils import (
+    _SPILL_LOCK_NAME,
     _spill_base_lock,
     _staging_directory_owner,
     atomic_write,
@@ -387,21 +389,30 @@ def clear_cache(confirm: bool = False) -> dict | None:
     sizes = {
         path: spill_dir_bytes([path]) for path in entries["spill_dirs"] + entries["staging_dirs"]
     }
-    for cache_file in entries["files"]:
+    stages = []
+    for root in entries["roots"]:
+        owner = nullcontext() if root == cache_dir else _staging_directory_owner(root, wait=False)
         try:
-            bytes_freed += cache_file.stat().st_size
-            cache_file.unlink()
-            files_deleted += 1
+            with owner:
+                for cache_file in entries["files"]:
+                    if cache_file.parent != root:
+                        continue
+                    try:
+                        size = cache_file.stat().st_size
+                        cache_file.unlink()
+                        bytes_freed += size
+                        files_deleted += 1
+                    except OSError:
+                        pass  # Ignore deletion errors.
+                stages.extend(sweep_orphaned_staging_dirs(root))
+                if root != cache_dir:
+                    with _spill_base_lock(cache_dir):
+                        (root / _SPILL_LOCK_NAME).unlink(missing_ok=True)
+                        root.rmdir()
         except OSError:
-            pass  # Ignore deletion errors.
+            pass  # A live owner or inaccessible cache is left for a later run.
 
     removed = sweep_orphaned_spill_dirs(cache_dir)
-    stages = [path for root in entries["roots"] for path in sweep_orphaned_staging_dirs(root)]
-    for object_dir in entries["roots"][1:]:
-        try:
-            object_dir.rmdir()
-        except OSError:
-            pass  # A live stage or another writer still owns the directory.
 
     return {
         "files_deleted": files_deleted,

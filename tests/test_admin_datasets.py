@@ -1838,6 +1838,12 @@ class TestDownloadPerLevelCachesHousekeeping:
             dataset._download_per_level_caches(["country"])
             assert owned.exists() == (marker is not None)
             assert final.read_bytes() == b"published by sibling"
+            (owned / "live.parquet").write_bytes(b"owned object")
+            unowned.mkdir()
+            (unowned / "old.parquet").write_bytes(b"old object")
+            admin_datasets.clear_cache(confirm=True)
+            assert (owned / "live.parquet").exists() == (marker is not None)
+            assert not unowned.exists()
         finally:
             if marker is not None:
                 marker.close()
@@ -1850,7 +1856,7 @@ class TestDownloadPerLevelCachesHousekeeping:
 
         parts = tmp_path / f".{final.stem}-parts"
         parts.mkdir()
-        final.unlink()
+        final.unlink(missing_ok=True)
         marker = file_utils._spill_lock(str(parts))
         waiting = Event()
         sleep = file_utils.time.sleep
