@@ -274,7 +274,7 @@ def test_factory_shares_spatial_and_eager_reads_isolate_limits(
             out = tmp_path / f"chain_{index}.parquet"
             gpio.convert(str(one_point_geojson)).add_bbox().sort_hilbert().write(str(out))
             assert out.exists()
-            assert bounded.call_args.kwargs["per_thread"] == 8 * 1024**3
+            assert bounded.call_args.kwargs["per_thread"] == 16 * 1024**3
             assert _settings(observer) == before
             # Each bounded eager read owns a private database; its policy must
             # not alter the shared database used by the remaining API chain.

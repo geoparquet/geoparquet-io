@@ -198,7 +198,7 @@ _BYTES_PER_THREAD = 512 * BYTES_PER_MIB
 _MATERIALIZED_BYTES_PER_THREAD = 4 * 1024**3
 # Full ordered Arrow materialization retains more buffers than batched replay;
 # measured on 1M polygons and Connecticut, including DuckDB 2's larger read peak.
-_EAGER_BYTES_PER_THREAD = 8 * 1024**3
+_EAGER_BYTES_PER_THREAD = 16 * 1024**3
 
 
 def _thread_cap(limit_bytes: int, per_thread: int = _BYTES_PER_THREAD) -> int:
