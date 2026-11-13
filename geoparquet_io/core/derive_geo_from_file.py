@@ -389,7 +389,9 @@ def derive_v2_geo_metadata(
                 return None
             primary = primary_column or block["primary_column"]
             return written_geo_block(
-                output_path, kv, GeoBlockOptions(geometry_column=primary, version="2.0")
+                output_path,
+                kv,
+                GeoBlockOptions(geometry_column=primary, primary_column=primary, version="2.0"),
             )
         schema = pf.metadata.schema
         geo_cols: dict[int, tuple[str, str]] = {}

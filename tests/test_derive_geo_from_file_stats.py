@@ -150,3 +150,37 @@ def test_derive_v2_geo_metadata_describes_a_native_geography_column(tmp_path):
     column = refreshed["columns"]["geometry"]
     assert "bbox" not in column, "a planar scan cannot safely bound a spherical arc"
     assert column["geometry_types"] == ["LineString"]
+
+
+def test_refresh_explicit_primary_overrides_carried_primary(tmp_path):
+    import json
+
+    import geoarrow.pyarrow as ga
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.derive_geo_from_file import derive_v2_geo_metadata
+
+    carried = {
+        "version": "2.0.0",
+        "primary_column": "centroid",
+        "columns": {
+            name: {"encoding": "WKB", "geometry_types": ["Point"]}
+            for name in ("centroid", "geometry")
+        },
+    }
+    path = tmp_path / "different-primary.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "centroid": ga.as_wkb(["POINT (1 2)"]),
+                "geometry": ga.as_wkb(["POINT (3 4)"]),
+            }
+        ).replace_schema_metadata({b"geo": json.dumps(carried).encode()}),
+        path,
+    )
+    assert json.loads(pq.read_metadata(path).metadata[b"geo"])["primary_column"] == "centroid"
+    refreshed = derive_v2_geo_metadata(str(path), primary_column="geometry", refresh_stats=True)
+    assert refreshed["primary_column"] == "geometry"
+    assert refreshed["columns"]["centroid"]["bbox"] == [1, 2, 1, 2]
+    assert refreshed["columns"]["geometry"]["bbox"] == [3, 4, 3, 4]
