@@ -143,6 +143,7 @@ class TestAtomicWrite:
 
     def test_failed_write_cleanup(self):
         """Failed write cleans up temp file."""
+        import shutil
         from unittest.mock import patch
 
         import geoparquet_io.core.file_utils as fu
@@ -150,9 +151,18 @@ class TestAtomicWrite:
         # Ordinary writes must not require a readable parent or sweep its entries.
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "output.parquet"
-            with patch.object(fu, "_spill_base_lock", side_effect=PermissionError("0300")):
+            with (
+                patch.object(fu, "_spill_base_lock", side_effect=PermissionError("0300")) as lock,
+                patch.object(fu.os, "open", wraps=fu.os.open) as opened,
+                patch.object(fu.os, "scandir", wraps=fu.os.scandir) as scanned,
+                patch.object(Path, "glob", side_effect=AssertionError("parent sweep")),
+            ):
                 with atomic_write(str(output_path)) as staged:
                     Path(staged).write_bytes(b"complete")
+                # Main's only os.open is rmtree's fd-based cleanup, where supported.
+                assert opened.call_count == int(shutil.rmtree.avoids_symlink_attacks)
+                assert lock.call_count == 0
+                assert all(str(call.args[0]) != tmpdir for call in scanned.call_args_list)
                 with atomic_write(str(output_path), reclaim_staging=True) as staged:
                     assert not Path(staged).parent.name.split("-")[-2].isdigit()
                     Path(staged).write_bytes(b"complete")
