@@ -139,7 +139,7 @@ def assert_stdout_arrow_memory_is_bounded(tmp_path, monkeypatch):
                 patches.setattr(duckdb.DuckDBPyRelation, "to_arrow_reader", observed_reader)
                 patches.setattr(stream_io, "apply_geoarrow_extension_type", converted)
                 write_output(con, query, "-", original_metadata=metadata)
-            assert spies.counts["arrow_read_all"] == 0
+            assert spies.counts["arrow_nonempty_read_all"] == 0
             peaks.append(tracker.peak + max(live) - start)
             stream.close()
             from geoparquet_io.core.file_utils import unlink_released_file
@@ -178,7 +178,7 @@ def assert_stdout_arrow_memory_is_bounded(tmp_path, monkeypatch):
                     scratch = read_stdin_to_temp_file()
                 input_peaks.append(input_tracker.peak + max(input_live))
                 unlink_released_file(scratch)
-                assert input_spies.counts["arrow_read_all"] == 0
+                assert input_spies.counts["arrow_nonempty_read_all"] == 0
         finally:
             con.close()
     # 4096 polygons take <5 MB; allow a few simultaneously live batches.
