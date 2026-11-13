@@ -194,6 +194,33 @@ def test_a_gpio_error_arrives_sanitized():
                     assert "SECRET" not in clean(text)
                     assert "END" not in clean(text)
 
+    for _ in range(250):
+        secret = "PRIVATE" + "".join(rng.choices("abcdef0123456789", k=30))
+        for text in (
+            f'{{"api_key":"{secret}"}}',
+            f"{{'password': '{secret}'}}",
+            f"api_key={secret},source=https://host/x",
+        ):
+            for clean in (clean_error_text, redact_credentials):
+                assert secret not in clean(text)
+        for control in map(chr, (*range(32), *range(127, 160))):
+            for text in (
+                f"bad request{control}api_key={secret}",
+                f"api_key{control}={secret}",
+                f"api_key={control}{secret}",
+                f"api_key={secret}{control}next",
+            ):
+                assert secret not in clean_error_text(text)
+        assert secret not in clean_error_text(f"api_key\x1b[31m={secret}")
+
+    import time
+
+    for text in ("x" * (3 * 1024 * 1024), "https://" + "@=" * 10000 + "PRIVATE@host/x"):
+        start = time.perf_counter()
+        cleaned = clean_error_text(text)
+        assert time.perf_counter() - start < 0.8
+        assert "PRIVATE" not in cleaned
+
     # Builtin validator errors are not GeoParquetError: the automatic boundary
     # deliberately leaves them alone. Their API-facing cleaning remains needed.
     from geoparquet_io.cli.exception_handler import cli_error_for

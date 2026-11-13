@@ -37,10 +37,10 @@ def _url_without_credentials(url: str) -> str:
 
     parts = re.split(r"(\s+)", url)
     for i, token in enumerate(parts):
-        scheme, separator, _ = token.partition("://")
-        if not separator:
+        scheme = token.find("://")
+        if scheme == -1:
             continue
-        start = len(scheme) + len(separator)
+        start = scheme + 3
         last_at = token.rfind("@", start)
         if last_at != -1:
             # A query/fragment @ makes even the apparent hostname secret.
@@ -49,9 +49,10 @@ def _url_without_credentials(url: str) -> str:
                 token = token[:start] + "[redacted]"
             else:
                 token = token[:start] + "[redacted]@" + token[last_at + 1 :]
+        prefix, token = token[:start], token[start:]
         path, query, parameters = token.partition("?")
         # A question mark in a filename glob is not a parameter list.
-        parts[i] = (path if query and "=" in parameters else token).split("#", 1)[0]
+        parts[i] = prefix + (path if query and "=" in parameters else token).split("#", 1)[0]
     return "".join(parts)
 
 
@@ -87,30 +88,23 @@ def sanitize_url_for_logging(url: str) -> str:
 #: behind when the introducing ESC goes.
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 
-#: C0/C1 control characters, minus tab and newline, which error text legitimately
-#: uses. ``\r`` is not spared: on a terminal it rewinds the line and can hide
-#: what was printed before it.
+#: Keep boundaries when removing terminal controls; tabs/newlines already separate tokens.
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
-# URL tokens are handled first and excluded from free-text pair matching.
 _CREDENTIAL_PAIR = re.compile(
-    r"\S+://\S+|"
-    r"(?i:(?<![\w.-])((?:api[_-]?key|apikey|token|access_token|secret|password|"
+    r"(?i:(?<![\w.-])([\"']?(?:api[_-]?key|token|access_token|secret|password|"
     r"passwd|signature|credential|authorization|x-amz-signature|x-amz-credential|"
-    r"x-amz-security-token)\s*[=:]\s*)"
-    r"(?:(?:bearer|basic)\s+)?(?:\"[^\"]*\"|'[^']*'|[^\s&'\"<>,;]+))"
+    r"x-amz-security-token)[\"']?\s*[=:]\s*)"
+    r"(?:bearer\s+|basic\s+)?[\"']?[^\s\"',;&\]}>]+)"
 )
 
 
 def redact_credentials(text: str) -> str:
-    """Remove URL secrets and explicit free-text credential pairs, preserving paths."""
-    if not text:
-        return text
+    """Best-effort diagnostic redaction: normalize, strip URL secrets, then named values."""
+    text = _CONTROL_CHARS.sub(" ", _ANSI_ESCAPE.sub("", text))
     text = _url_without_credentials(text)
-    return _CREDENTIAL_PAIR.sub(
-        lambda match: f"{match.group(1)}***" if match.group(1) else match.group(), text
-    )
+    return _CREDENTIAL_PAIR.sub(lambda match: f"{match.group(1)}***", text)
 
 
 def clean_error_text(text: str) -> str:
@@ -127,12 +121,11 @@ def clean_error_text(text: str) -> str:
     * **Control characters.** DuckDB quotes the offending value back in a
       conversion or parse error, so a value a *file* chose reaches the terminal.
       ANSI escapes in it can rewrite the line, so an input could author a clean
-      ``Error:`` line of its own choosing. They are stripped; tab and newline stay.
+      ``Error:`` line of its own choosing. ANSI formatting is removed; other
+      controls become spaces to preserve boundaries. Tab and newline stay.
     """
     if not text:
         return text
-    text = _ANSI_ESCAPE.sub("", text)
-    text = _CONTROL_CHARS.sub("", text)
     return redact_credentials(text)
 
 
