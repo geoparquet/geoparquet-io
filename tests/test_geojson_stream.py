@@ -297,7 +297,10 @@ class TestPipelineIntegration:
         table_no_geom = pa.table({"id": [1, 2, 3], "name": ["a", "b", "c"]})
 
         # Mock read_arrow_stream at the source module
-        with patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table_no_geom):
+        with patch(
+            "geoparquet_io.core.streaming.read_arrow_stream",
+            side_effect=lambda: table_no_geom.to_reader(),
+        ):
             from geoparquet_io.core.geometry_detection import GeometryColumnNotFoundError
 
             with pytest.raises(GeometryColumnNotFoundError) as exc_info:
@@ -326,7 +329,10 @@ class TestPipelineIntegration:
 
         try:
             # Mock read_arrow_stream at the source module
-            with patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table):
+            with patch(
+                "geoparquet_io.core.streaming.read_arrow_stream",
+                side_effect=lambda: table.to_reader(),
+            ):
                 count = _convert_from_stream(output_path=str(output_path))
 
             assert count == 3
@@ -788,7 +794,7 @@ class TestFeatureMembersEmitValidJson:
             cli, ["convert", "geojson", places_test_file, str(out), *extra_args]
         )
         assert result.exit_code == 0, result.output
-        return json.loads(out.read_text())
+        return json.loads(out.read_text(encoding="utf-8"))
 
     def test_write_bbox_emits_parseable_features(self, tmp_path, places_test_file):
         data = self._convert(tmp_path, places_test_file, "--write-bbox")
@@ -891,9 +897,31 @@ class TestFeatureMembersEmitValidJson:
         assert "bbox" not in features[1]
 
 
-def test_feature_collection_bounded_decoding(tmp_path, monkeypatch):
+def test_feature_collection_bounded_decoding(tmp_path, monkeypatch, request):
     """Collection size must not determine the number of live decoded features."""
+    import pyarrow as pa
+
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
     from geoparquet_io.core.geojson_stream import _stream_feature_collection
+
+    settings = get_duckdb_connection(load_spatial=False, load_httpfs=False, threads=2)
+    request.addfinalizer(settings.close)
+
+    def arrow_connection(fetch):
+        def batches():
+            while (row := fetch()) is not None:
+                yield pa.record_batch([pa.array([row[0]])], names=["feature"])
+
+        def reader(batch_size):
+            assert batch_size == 4096
+            assert settings.execute("SELECT current_setting('threads')").fetchall() == [(1,)]
+            return pa.RecordBatchReader.from_batches(
+                pa.schema([("feature", pa.string())]), batches()
+            )
+
+        return SimpleNamespace(
+            execute=settings.execute, sql=lambda query: SimpleNamespace(to_arrow_reader=reader)
+        )
 
     loads = json.loads
     live = peak = 0
@@ -922,9 +950,7 @@ def test_feature_collection_bounded_decoding(tmp_path, monkeypatch):
     for pretty in (False, True):
         for size in (0, 1, 1000):
             rows = iter([(raw,)] * size + [None])
-            con = SimpleNamespace(
-                execute=lambda query, rows=rows: SimpleNamespace(fetchone=lambda: next(rows))
-            )
+            con = arrow_connection(lambda rows=rows: next(rows))
             destination = tmp_path / "collection.json"
             assert _stream_feature_collection(con, "query", "é\n", pretty, str(destination)) == size
             expected = (
@@ -940,9 +966,7 @@ def test_feature_collection_bounded_decoding(tmp_path, monkeypatch):
             )
             assert destination.read_bytes() == expected.encode()
             rows = iter([(raw,)] * size + [None])
-            con = SimpleNamespace(
-                execute=lambda query, rows=rows: SimpleNamespace(fetchone=lambda: next(rows))
-            )
+            con = arrow_connection(lambda rows=rows: next(rows))
             stdout = io.StringIO()
             monkeypatch.setattr(sys, "stdout", stdout)
             assert _stream_feature_collection(con, "query", "é\n", pretty) == size
@@ -955,9 +979,7 @@ def test_feature_collection_bounded_decoding(tmp_path, monkeypatch):
         stdout = io.StringIO()
         monkeypatch.setattr(sys, "stdout", stdout)
         rows = iter([(raw,), None])
-        con = SimpleNamespace(
-            execute=lambda query, rows=rows: SimpleNamespace(fetchone=lambda: next(rows))
-        )
+        con = arrow_connection(lambda rows=rows: next(rows))
         with pytest.raises(TypeError):
             _stream_feature_collection(
                 con, "query", output_path=str(destination) if to_file else None
@@ -976,9 +998,7 @@ def test_feature_collection_bounded_decoding(tmp_path, monkeypatch):
                     raise row
                 return row
 
-            con = SimpleNamespace(
-                execute=lambda query, fetch=fetch: SimpleNamespace(fetchone=fetch)
-            )
+            con = arrow_connection(fetch)
             destination.write_bytes(b"original")
             stdout = io.StringIO()
             monkeypatch.setattr(sys, "stdout", stdout)
@@ -988,3 +1008,4 @@ def test_feature_collection_bounded_decoding(tmp_path, monkeypatch):
                 )
             assert destination.read_bytes() == b"original"
             assert stdout.getvalue() == ""
+    assert settings.execute("SELECT current_setting('threads')").fetchall() == [(2,)]

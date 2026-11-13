@@ -360,7 +360,6 @@ _FACADE_CALLS = {"without_geometry_dictionary", "get_pyarrow_kwargs"}
 #: Keyed by (path under geoparquet_io/, enclosing function).
 _EXEMPT = {
     ("core/add/kdtree.py", "add_kdtree_table"): "scratch copy, read back by DuckDB",
-    ("core/streaming.py", "read_stdin_to_temp_file"): "scratch copy of stdin, read by DuckDB",
     ("core/arcgis.py", "_stream_features_to_parquet"): "scratch file, rewritten by a second pass",
     ("api/ops.py", "convert_to_geojson"): "scratch copy of the input table",
     ("api/ops.py", "_file_round_trip"): "scratch copy of the input table",

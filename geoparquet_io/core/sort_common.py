@@ -40,7 +40,8 @@ from geoparquet_io.core.remote import (
     validate_profile_for_urls,
 )
 from geoparquet_io.core.stream_io import open_input, write_output
-from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file, should_stream_output
+from geoparquet_io.core.streaming import is_stdin, should_stream_output
+from geoparquet_io.core.write_funnels import read_stdin_to_temp_file
 
 
 @uses_aws_profile

@@ -43,10 +43,10 @@ def test_file_export_refuses_before_truncating_output(tmp_path, carrier, repair,
     source = tmp_path / "cap.parquet"
     pq.write_table(_table(carrier=carrier), source)
     output = tmp_path / "out.geojson"
-    output.write_text("keep existing output")
+    output.write_text("keep existing output", encoding="utf-8")
     with pytest.raises(GeoParquetError, match="non-planar"):
         convert_to_geojson(str(source), str(output), repair_geometry=repair, keep_crs=keep_crs)
-    assert output.read_text() == "keep existing output"
+    assert output.read_text(encoding="utf-8") == "keep existing output"
 
 
 @pytest.mark.parametrize("carrier", ["geo", "native"])
@@ -56,7 +56,7 @@ def test_stream_export_refuses_before_emitting_output(
 ):
     """An IPC declaration has the same export contract as a Parquet declaration."""
     table = _table(carrier=carrier)
-    monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table)
+    monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table.to_reader())
     output = tmp_path / "out.geojson"
     with pytest.raises(GeoParquetError, match="non-planar"):
         convert_to_geojson(
@@ -141,7 +141,7 @@ def test_planar_and_unrecognized_declarations_keep_existing_behavior(tmp_path, e
     pq.write_table(_table("POINT(1.123456789 2)", edges=edges), source)
     output = tmp_path / "out.geojson"
     convert_to_geojson(str(source), str(output), precision=3)
-    geometry = json.loads(output.read_text())["features"][0]["geometry"]
+    geometry = json.loads(output.read_text(encoding="utf-8"))["features"][0]["geometry"]
     assert geometry == {"type": "Point", "coordinates": [1.123, 2.0]}
 
 
@@ -155,7 +155,9 @@ def test_unused_nonplanar_secondary_does_not_block_planar_export(
     table = table.append_column("secondary", secondary)
     output = tmp_path / "out.geojson"
     if source_mode == "stream":
-        monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table)
+        monkeypatch.setattr(
+            "geoparquet_io.core.streaming.read_arrow_stream", lambda: table.to_reader()
+        )
         source = "-"
     else:
         path = tmp_path / "mixed.parquet"
@@ -169,7 +171,10 @@ def test_unused_nonplanar_secondary_does_not_block_planar_export(
         run.assert_called_once()
     else:
         convert_to_geojson(source, str(output))
-        assert json.loads(output.read_text())["features"][0]["geometry"]["type"] == "Point"
+        assert (
+            json.loads(output.read_text(encoding="utf-8"))["features"][0]["geometry"]["type"]
+            == "Point"
+        )
 
 
 @pytest.mark.parametrize("source_mode", ["file", "stream"])
@@ -178,14 +183,18 @@ def test_explicit_planar_block_overrides_native_edge_type(tmp_path, monkeypatch,
     table = table.replace_schema_metadata(_table(edges="planar").schema.metadata)
     output = tmp_path / "out.geojson"
     if source_mode == "stream":
-        monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table)
+        monkeypatch.setattr(
+            "geoparquet_io.core.streaming.read_arrow_stream", lambda: table.to_reader()
+        )
         source = "-"
     else:
         path = tmp_path / "override.parquet"
         pq.write_table(table, path)
         source = str(path)
     convert_to_geojson(source, str(output))
-    assert json.loads(output.read_text())["features"][0]["geometry"]["type"] == "Point"
+    assert (
+        json.loads(output.read_text(encoding="utf-8"))["features"][0]["geometry"]["type"] == "Point"
+    )
 
 
 def test_metadata_only_geoarrow_field_is_refused(tmp_path, monkeypatch):
@@ -199,7 +208,7 @@ def test_metadata_only_geoarrow_field_is_refused(tmp_path, monkeypatch):
         },
     )
     table = table.cast(pa.schema([field]))
-    monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table)
+    monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table.to_reader())
     with pytest.raises(GeoParquetError, match="spherical"):
         convert_to_geojson("-", str(tmp_path / "out.geojson"))
 
@@ -269,10 +278,10 @@ def test_glob_checks_more_than_the_first_file(tmp_path, suffix):
     pq.write_table(_table("POINT(1 2)", edges="planar"), tmp_path / f"a{suffix}")
     pq.write_table(_table(), tmp_path / f"b{suffix}")
     output = tmp_path / "out.geojson"
-    output.write_text("keep existing output")
+    output.write_text("keep existing output", encoding="utf-8")
     with pytest.raises(GeoParquetError, match="non-planar"):
         convert_to_geojson(str(tmp_path / f"*{suffix}"), str(output), keep_crs=True)
-    assert output.read_text() == "keep existing output"
+    assert output.read_text(encoding="utf-8") == "keep existing output"
 
 
 def test_remote_glob_checks_each_matched_footer(monkeypatch):

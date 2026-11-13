@@ -26,3 +26,29 @@ The tool automatically transforms Overture's native region codes (e.g., "US-CA")
 - Performs spatial intersection to assign admin divisions based on geometry
 - Requires internet connection to access remote datasets
 - Uses spatial extent filtering and bbox columns for optimization
+
+### Overture cold reads and interrupted downloads
+
+`add admin-divisions` and `partition admin` prefer an existing complete level
+cache. On a cold cache, they inspect the Parquet row-group bbox statistics before
+reading geometry. They sum the compressed geometry bytes in row groups whose
+bbox statistics overlap the input extent to estimate remote read cost. If those
+bytes are at least as large as the bytes that could be skipped, they build the
+complete level cache: one complete remote scan is then estimated to cost no more
+than a bounded scan and its first repeat. Otherwise they read the bounded extent
+directly without creating a global cache. This compares
+actual row-group byte sizes, with no geographic area threshold. Unknown bounds
+count as overlapping; unknown sizes cannot prove savings. Only requested levels
+are built.
+
+A complete level is built one source object at a time. Each object's filtered,
+simplified rows publish atomically into a release- and level-specific parts
+directory. A retry skips completed objects, retries the interrupted object, and
+publishes the complete level only after all objects finish. Progress is reported
+per object. Bytes within an unfinished object are not retained; bounded inline
+reads also restart after an interruption.
+
+Admin cache cleanup removes abandoned staging directories after 24 hours while
+holding their ownership locks. A live writer remains protected regardless of its
+age. Older staging directories created without an ownership identity are left
+untouched. `--clear-cache` removes completed object parts as well as level caches.

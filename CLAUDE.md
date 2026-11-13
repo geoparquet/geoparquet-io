@@ -311,14 +311,14 @@ copies or compatibility wrappers. The guard set is in ADR-0008 and
 | CRS | `geoparquet_io/core/crs_utils.py` | `crs_of`, `is_geographic`, `is_projected`, `crs_equal`, `projjson_for_label`, `load_crs` |
 | Memory ceilings and byte sizes | `geoparquet_io/core/memory_limits.py`, `geoparquet_io/core/sizing.py` | `open_bounded_connection`, `scoped_write_memory_limit`, `parse_size_string`, `format_size`, `format_memory_limit`, `mb_to_bytes` |
 | SQL escaping and native type probes | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `sql_literal`, `sql_path`, `quote_identifier`, `native_geo_type`, `is_native_geo_column` |
-| Paths, remote access, overwrite and staging | `geoparquet_io/core/remote.py`, `geoparquet_io/core/file_utils.py` | `RemoteOptions`, `remote_options_from_keywords`, `is_remote_url`, `has_glob_pattern`, `is_partition_path`, `handle_output_overwrite`, `atomic_write`, `scratch_file`, `scratch_path`, `scratch_dir` |
+| Paths, remote access, overwrite and staging | `geoparquet_io/core/remote.py`, `geoparquet_io/core/file_utils.py` | `RemoteOptions`, `remote_options_from_keywords`, `is_remote_url`, `has_glob_pattern`, `is_partition_path`, `handle_output_overwrite`, `atomic_write`, `sweep_orphaned_dirs`, `sweep_orphaned_staging_dirs`, `scratch_file`, `scratch_path`, `scratch_dir` |
 | Column-name resolution | `geoparquet_io/core/column_selection.py` | `fold`, `find_column`, `matching_columns`, `unique_name`, `exclude_columns`, `resolve_columns_against_schema` |
 | Index add and partition workflows | `geoparquet_io/core/index_ops.py` | `IndexSpec`, `add_index_column`, `ensure_index_column`, `index_expression`, `index_point` |
 | HTTP retries | `geoparquet_io/core/http_retry.py` | `make_request_with_retry`, `run_with_retry`, `retry_wait`, `parse_retry_after` |
 | CLI options and report formatting | `geoparquet_io/cli/decorators.py`, `geoparquet_io/core/bbox_parse.py`, `geoparquet_io/core/json_output.py`, `geoparquet_io/cli/commands/check.py` | `overwrite_option`, `refuse_together`, `parse_bbox`, `BBox`, `dumps_json`, `MultiFileCheckRunner` |
 | What a check looks at and what its fix writes | `geoparquet_io/core/check_options.py` | `CheckOptions`, `check_options_from_keywords`, `FIXABLE_CHECKS` |
 | Spatial joins | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/admin_datasets.py` | `build_spatial_join_condition`, `build_spatial_join_query`, `build_admin_subquery`, `admin_match_order` |
-| Query schema and row-group statistics | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `query_schema`, `describe_query`, `get_row_group_bbox_stats`, `get_row_group_sizes` |
+| Query schema and row-group statistics | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `query_schema`, `describe_query`, `get_row_group_bbox_stats`, `get_per_row_group_bbox_stats`, `get_row_group_sizes` |
 | Error classification and CLI translation | `geoparquet_io/core/exceptions.py`, `geoparquet_io/cli/exception_handler.py` | `classify_failure`, `redact_credentials`, `status_message`, `error_boundary` |
 | GDAL format writes | `geoparquet_io/core/format_writers.py` | `write_gdal_format` |
 | DuckDB capabilities | `geoparquet_io/core/duckdb_utils.py` | `duckdb_capabilities`, `DuckDBCapabilities`, `complete_without_fetch`, `resolve_load_spatial` |

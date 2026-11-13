@@ -329,6 +329,7 @@ def create_overviews(
             verbose=verbose,
             show_sql=show_sql,
             input_parquet=input_parquet,
+            memory_limit=memory_limit,
         )
 
 
@@ -378,6 +379,7 @@ def _build_levels(
     verbose: bool,
     show_sql: bool,
     input_parquet: str | None = None,
+    memory_limit: str | None = None,
 ) -> list[tuple[int | str, str]]:
     """Roll the input up to each level and write it as a sibling file."""
     source_sql = f"SELECT * FROM {relation}"
@@ -394,7 +396,7 @@ def _build_levels(
         jobs.sort(key=lambda job: int(job[0]), reverse=True)
     try:
         for index, (level, out_path) in enumerate(jobs):
-            sql = build_level_sql(con, info, source_sql, level)
+            sql = build_level_sql(con, info, source_sql, level, memory_limit=memory_limit)
             if show_sql or verbose:
                 debug(sql)
             table = with_input_bbox(con.sql(sql).arrow().read_all(), bbox_field)
@@ -506,6 +508,7 @@ def create_overview_file(
             verbose=verbose,
             show_sql=show_sql,
             input_parquet=input_parquet,
+            memory_limit=memory_limit,
         )
         # Coarse first: the built ladder, then the base, which is the input
         # itself and always the finest (OVERVIEWS_SPEC 4.2).

@@ -171,12 +171,15 @@ class TestAddCommands:
         from geoparquet_io.core.geo_metadata import read_raw_geo
 
         source_table = pq.read_table(places_with_covering_file)
-        monkeypatch.setattr("geoparquet_io.core.stream_io.read_arrow_stream", lambda: source_table)
+        monkeypatch.setattr(
+            "geoparquet_io.core.streaming.read_arrow_stream", lambda: source_table.to_reader()
+        )
         for stdin in (False, True):
             for stdout in (False, True):
                 captured = []
                 monkeypatch.setattr(
-                    "geoparquet_io.core.stream_io.write_arrow_stream", captured.append
+                    "geoparquet_io.core.stream_io.write_arrow_stream",
+                    lambda reader, captured=captured: captured.append(reader.read_all()),
                 )
                 add_bbox_column(
                     "-" if stdin else places_with_covering_file,

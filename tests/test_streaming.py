@@ -149,7 +149,7 @@ class TestArrowStreamIO:
         monkeypatch.setattr(sys, "stdin", mock_stdin)
         result = read_arrow_stream()
 
-        assert result.equals(sample_table)
+        assert result.read_all().equals(sample_table)
 
     def test_write_arrow_stream_to_stdout(self, sample_table, monkeypatch):
         """Test writing Arrow IPC to mocked stdout."""
@@ -169,7 +169,7 @@ class TestArrowStreamIO:
 
         assert result.equals(sample_table)
 
-    def test_read_arrow_stream_raises_on_invalid_data(self, monkeypatch):
+    def test_read_arrow_stream_raises_on_invalid_data(self, monkeypatch, tmp_path, sample_table):
         """Test that invalid data raises StreamingError."""
         invalid_buffer = io.BytesIO(b"not arrow ipc data")
 
@@ -180,6 +180,21 @@ class TestArrowStreamIO:
         monkeypatch.setattr(sys, "stdin", mock_stdin)
         with pytest.raises(StreamingError, match="Invalid Arrow IPC stream"):
             read_arrow_stream()
+
+        # A valid schema followed by a truncated batch fails during draining.
+        data = io.BytesIO()
+        with ipc.new_stream(data, sample_table.schema) as writer:
+            writer.write_table(sample_table)
+        mock_stdin.buffer = io.BytesIO(data.getvalue()[:-16])
+        from geoparquet_io.core.write_funnels import read_stdin_to_temp_file
+
+        scratch = tmp_path / "broken.parquet"
+        monkeypatch.setattr(
+            "geoparquet_io.core.file_utils.scratch_path", lambda **kwargs: str(scratch)
+        )
+        with pytest.raises(StreamingError, match="Invalid Arrow IPC stream"):
+            read_stdin_to_temp_file()
+        assert not scratch.exists()
 
 
 class TestMetadataHandling:
@@ -350,6 +365,7 @@ class TestStreamIO:
         """Test open_input with a file path."""
         import pyarrow.parquet as pq
 
+        from geoparquet_io.core.memory_limits import open_bounded_connection
         from geoparquet_io.core.stream_io import open_input
 
         # Write test file
@@ -357,11 +373,23 @@ class TestStreamIO:
         table_with_meta = sample_geo_table.replace_schema_metadata(geo_metadata)
         pq.write_table(table_with_meta, str(test_file))
 
-        with open_input(str(test_file)) as (source, metadata, is_stream, con):
+        with (
+            mock.patch(
+                "geoparquet_io.core.memory_limits.open_bounded_connection",
+                wraps=open_bounded_connection,
+            ) as bounded,
+            open_input(str(test_file), stream_output=True) as (source, metadata, is_stream, con),
+        ):
             assert is_stream is False
             assert "read_parquet" in source
             assert metadata is not None
             assert con is not None
+            bounded.assert_called_once_with(
+                load_spatial=True, load_httpfs=False, preserve_insertion_order=True
+            )
+            assert con.execute("SELECT current_setting('preserve_insertion_order')").fetchall() == [
+                (True,)
+            ]
 
     def test_open_input_with_stdin(self, sample_geo_table, geo_metadata, monkeypatch):
         """Test open_input with stdin."""
@@ -385,8 +413,8 @@ class TestStreamIO:
         with open_input("-") as (source, metadata, is_stream, con):
             assert is_stream is True
             # Source should be a view name for stream input
-            assert "input_stream" in source
-            assert metadata is not None
+            assert con.sql(f"SELECT count(*) FROM {source}").fetchall() == [(2,)]
+            assert con.sql(f"SELECT ST_X(geometry) FROM {source}").fetchall() == [(1.0,), (1.0,)]
             assert con is not None
 
     def test_write_output_to_file(self, tmp_path, sample_geo_table, geo_metadata):
@@ -462,6 +490,9 @@ class TestStreamIO:
         assert read_table.num_rows == 2
 
         con.close()
+        from tests.stream_assertions import assert_stdout_arrow_memory_is_bounded
+
+        assert_stdout_arrow_memory_is_bounded(tmp_path, monkeypatch)
 
     def test_execute_transform_file_to_file(
         self, tmp_path, sample_geo_table, geo_metadata, monkeypatch
@@ -544,7 +575,10 @@ class TestStreamIO:
             dest = tmp_path / "output.parquet"
             execute_transform(str(source), str(dest), transform, custom_metadata=custom)
             captured = []
-            monkeypatch.setattr("geoparquet_io.core.stream_io.write_arrow_stream", captured.append)
+            monkeypatch.setattr(
+                "geoparquet_io.core.stream_io.write_arrow_stream",
+                lambda reader, captured=captured: captured.append(reader.read_all()),
+            )
             execute_transform(str(source), "-", transform, custom_metadata=custom)
             expected = read_raw_geo(pq.read_metadata(dest).metadata).value
             actual = read_raw_geo(captured[0].schema.metadata).value
@@ -623,8 +657,8 @@ class TestStreamIO:
             for explicit in (None, "footprint"):
                 stream_table = bare if explicit else bare.rename_columns(["id", "geometry", "bbox"])
                 monkeypatch.setattr(
-                    "geoparquet_io.core.stream_io.read_arrow_stream",
-                    lambda stream_table=stream_table: stream_table,
+                    "geoparquet_io.core.streaming.read_arrow_stream",
+                    lambda stream_table=stream_table: stream_table.to_reader(),
                 )
                 captured.clear()
                 kwargs = {"geometry_column": explicit, "add_bbox_flag": True}
@@ -651,7 +685,10 @@ class TestStreamIO:
         dest = tmp_path / "sorted.parquet"
         wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
         captured = []
-        monkeypatch.setattr("geoparquet_io.core.stream_io.write_arrow_stream", captured.append)
+        monkeypatch.setattr(
+            "geoparquet_io.core.stream_io.write_arrow_stream",
+            lambda reader, captured=captured: captured.append(reader.read_all()),
+        )
         versions = (None, "1.0", "1.1", "2.0", "parquet-geo-only", "1.1-geoarrow")
         for malformed, transform, stdin, stdout, version in product(
             (False, True), (hilbert_order, str_order), (False, True), (False, True), versions
@@ -660,7 +697,8 @@ class TestStreamIO:
             table = pa.table({"id": [1, 2, 3], "geometry": values})
             pq.write_table(table, source)
             monkeypatch.setattr(
-                "geoparquet_io.core.stream_io.read_arrow_stream", lambda table=table: table
+                "geoparquet_io.core.streaming.read_arrow_stream",
+                lambda table=table: table.to_reader(),
             )
             captured.clear()
             rejects_invalid = malformed and not stdout and version == "1.1-geoarrow"
@@ -727,10 +765,14 @@ class TestStreamIO:
             source = tmp_path / "source.parquet"
             pq.write_table(table, source)
             monkeypatch.setattr(
-                "geoparquet_io.core.stream_io.read_arrow_stream", lambda table=table: table
+                "geoparquet_io.core.streaming.read_arrow_stream",
+                lambda table=table: table.to_reader(),
             )
             captured = []
-            monkeypatch.setattr("geoparquet_io.core.stream_io.write_arrow_stream", captured.append)
+            monkeypatch.setattr(
+                "geoparquet_io.core.stream_io.write_arrow_stream",
+                lambda reader, captured=captured: captured.append(reader.read_all()),
+            )
             expected_geo = {}
             versions = (None, "2.0") if extra == {"crs": None} else (None,)
             for version, stdin, stdout in product(versions, (False, True), (False, True)):
@@ -1039,8 +1081,9 @@ class TestStreamIO:
         from geoparquet_io.core.sort_quadkey import sort_by_quadkey
 
         table = pq.read_table(source)
-        monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table)
-        monkeypatch.setattr("geoparquet_io.core.stream_io.read_arrow_stream", lambda: table)
+        monkeypatch.setattr(
+            "geoparquet_io.core.streaming.read_arrow_stream", lambda: table.to_reader()
+        )
         for sort, kwargs in (
             (sort_by_column, {"columns": "id"}),
             (sort_by_quadkey, {"quadkey_column_name": "grp"}),
@@ -1107,7 +1150,10 @@ class TestVersionExtraction:
         from geoparquet_io.core.stream_io import write_output
 
         captured = []
-        monkeypatch.setattr("geoparquet_io.core.stream_io.write_arrow_stream", captured.append)
+        monkeypatch.setattr(
+            "geoparquet_io.core.stream_io.write_arrow_stream",
+            lambda reader, captured=captured: captured.append(reader.read_all()),
+        )
         dest = tmp_path / "native.parquet"
         con = get_duckdb_connection(load_spatial=True)
         try:
@@ -1164,6 +1210,59 @@ def _wkb_polygon(npts: int) -> bytes:
     return hdr + bytes(coords)
 
 
+@pytest.mark.parametrize("carrier", ["text", "large_binary"])
+def test_stream_geometry_conversion_and_byte_budget(carrier, monkeypatch):
+    import geoarrow.pyarrow as ga
+
+    from geoparquet_io.core import stream_io, streaming
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+    output = []
+    monkeypatch.setattr(stream_io, "write_arrow_stream", lambda reader: output.extend(reader))
+    monkeypatch.setattr(streaming, "_MAX_WKB_CHUNK_BYTES", 42)
+    with get_duckdb_connection(load_spatial=True) as con:
+        if carrier == "text":
+            query = "SELECT 'POINT (1 2)' AS geometry"
+        else:
+            con.register(
+                "input_wkb",
+                pa.table(
+                    {
+                        "id": range(6),
+                        "geometry": pa.array(
+                            [ga.as_wkb(pa.array(["POINT (1 2)"])).storage[0].as_py()] * 6,
+                            type=pa.large_binary(),
+                        ),
+                    }
+                ),
+            )
+            query = "SELECT * FROM input_wkb"
+        from geoparquet_io.core.geojson_stream import _build_feature_query, _feature_rows
+        from geoparquet_io.core.geometry_detection import create_geometry_view
+
+        # GeoJSON serializes SQL GEOMETRY to JSON before Arrow sees the batch.
+        feature_source = (
+            f"(SELECT ST_GeomFromText(geometry) AS geometry FROM ({query}))"
+            if carrier == "text"
+            else f"({query})"
+        )
+        source = create_geometry_view(con, feature_source, "geometry", "feature_source")
+        features = list(_feature_rows(con, _build_feature_query(source, "geometry", [])))
+        assert [json.loads(value)["geometry"]["coordinates"] for value in features] == (
+            [[1.0, 2.0]] * (1 if carrier == "text" else 6)
+        )
+        stream_io.write_output(con, query, "-")
+    assert output
+    for batch in output:
+        geometry = batch.column("geometry")
+        assert geometry.type.extension_name == "geoarrow.wkb"
+        assert ga.as_wkt(geometry).storage.to_pylist() == ["POINT (1 2)"] * len(batch)
+        assert _wkb_chunk_data_nbytes(geometry.storage) <= 42
+    if carrier == "large_binary":
+        assert [row for batch in output for row in batch.column("id").to_pylist()] == list(range(6))
+        assert len(output) >= 3
+
+
 class TestWkbByteRebatching:
     """Tests for the 32-bit WKB offset-overflow guard (issue #511)."""
 
@@ -1173,8 +1272,6 @@ class TestWkbByteRebatching:
         arr = pa.array(blobs, type=pa.large_binary())
         assert _wkb_chunk_data_nbytes(arr) == 5
 
-    def test_data_nbytes_empty_array(self):
-        """An empty array has zero value bytes."""
         arr = pa.array([], type=pa.large_binary())
         assert _wkb_chunk_data_nbytes(arr) == 0
 
@@ -1192,8 +1289,7 @@ class TestWkbByteRebatching:
         rejoined = pa.concat_arrays(slices)
         assert rejoined.to_pylist() == arr.to_pylist()
 
-    def test_split_oversized_single_value(self):
-        """A single value above the budget is emitted alone (no empty slices)."""
+        # A single oversized value still occupies its own nonempty slice.
         arr = pa.array([b"y" * 100, b"z" * 5000, b"y" * 100], type=pa.large_binary())
 
         slices = _split_array_under_byte_limit(arr, max_bytes=1000)
@@ -1209,8 +1305,7 @@ class TestWkbByteRebatching:
         result = _rebatch_wkb_under_byte_limit(arr, max_bytes=1_000_000)
         assert result is arr
 
-    def test_rebatch_splits_oversized_chunk(self):
-        """Oversized chunks are split while preserving row order and values."""
+        # Oversized chunks split without changing values or row order.
         blobs = [b"q" * 1000 for _ in range(10)]
         arr = pa.chunked_array([pa.array(blobs, type=pa.large_binary())])
 
@@ -1273,13 +1368,14 @@ class TestApplyGeoArrowExtensionType:
         """
         table = self._zero_chunk_table()
 
-        result = apply_geoarrow_extension_type(table, "geometry")
+        for preserve_wkb in (False, True):
+            result = apply_geoarrow_extension_type(table, "geometry", preserve_wkb=preserve_wkb)
 
-        geom = result.column("geometry")
-        assert getattr(geom.type, "extension_name", "") == "geoarrow.wkb"
-        assert result.num_rows == 0
-        assert geom.num_chunks == 1
-        assert result.column_names == ["id", "geometry"]
+            geom = result.column("geometry")
+            assert getattr(geom.type, "extension_name", "") == "geoarrow.wkb"
+            assert result.num_rows == 0
+            assert geom.num_chunks == 1
+            assert result.column_names == ["id", "geometry"]
 
     def test_zero_chunk_column_keeps_crs(self):
         """The CRS branch also has to survive the zero-chunk case."""
@@ -1391,8 +1487,10 @@ class TestReadStdinToTempFile:
     def _run(self, monkeypatch, table):
         from geoparquet_io.core import streaming as streaming_mod
 
-        monkeypatch.setattr(streaming_mod, "read_arrow_stream", lambda table=table: table)
-        return streaming_mod.read_stdin_to_temp_file()
+        monkeypatch.setattr(streaming_mod, "read_arrow_stream", lambda: table.to_reader())
+        from geoparquet_io.core.write_funnels import read_stdin_to_temp_file
+
+        return read_stdin_to_temp_file()
 
     def test_missing_geometry_types_is_filled_in(self, monkeypatch):
         import os

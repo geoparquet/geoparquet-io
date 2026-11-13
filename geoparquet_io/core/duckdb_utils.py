@@ -45,6 +45,13 @@ from geoparquet_io.core.edges import (
     without_edges,
 )
 from geoparquet_io.core.exceptions import ExtensionUnavailableError, ValidationError
+from geoparquet_io.core.file_utils import (
+    _SPILL_LOCK_NAME,
+    _process_is_alive,
+    _spill_base_lock,
+    _spill_lock,
+    sweep_orphaned_dirs,
+)
 from geoparquet_io.core.logging_config import debug, warn
 from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.remote import is_s3_url, needs_httpfs
@@ -561,15 +568,19 @@ def _current_setting(con: duckdb.DuckDBPyConnection, key: str) -> object:
 
 
 def _set_setting(con: duckdb.DuckDBPyConnection, key: str, value: object) -> None:
-    if isinstance(value, str):
+    if value is None:
+        con.execute(f"RESET {key}")
+    elif isinstance(value, str):
         con.execute(f"SET {key} = {sql_literal(value)}")
     else:
         con.execute(f"SET {key} = {value}")
 
 
 @contextmanager
-def pin_duckdb_settings(con: duckdb.DuckDBPyConnection, settings: Mapping[str, int | bool]):
-    """Hold global settings for one operation, then restore them under the same lock."""
+def pin_duckdb_settings(
+    con: duckdb.DuckDBPyConnection, settings: Mapping[str, int | bool | str | None]
+):
+    """Hold settings for one operation; None selects the engine default, then restore."""
     from geoparquet_io.core.memory_limits import _settings_lock
 
     with _settings_lock:
@@ -579,9 +590,7 @@ def pin_duckdb_settings(con: duckdb.DuckDBPyConnection, settings: Mapping[str, i
         saved = {key: _current_setting(con, key) for key in settings}
         try:
             for key, value in settings.items():
-                _set_setting(
-                    con, key, str(value).lower() if isinstance(value, bool) else int(value)
-                )
+                _set_setting(con, key, str(value).lower() if isinstance(value, bool) else value)
             yield
         finally:
             restore_duckdb_settings(con, saved)
@@ -995,13 +1004,13 @@ def build_spatial_join_query(
     straddling a border goes to the smaller code, not to the region holding
     most of its area.
 
-    The dedup is spill-safe at the scale the admin commands target. Input rows
-    are numbered with ``row_number() OVER ()`` -- a streaming window, with no
-    ``PARTITION BY`` to buffer -- and the survivor is picked with ``DISTINCT
-    ON``, which DuckDB plans as a hash aggregate (it spills) followed by a sort
-    on the row number (it spills). The ``QUALIFY row_number() OVER (PARTITION
-    BY ...)`` form that #461 retired buffers every row in a window that does
-    not spill, and is not used.
+    The input row (including its unique row number) is a struct in the DISTINCT
+    ON key. DuckDB can spill grouping keys; putting large input geometries in
+    arg_min aggregate states instead makes the join OOM (#550). Only target
+    values remain in aggregate states. The struct expands back into the original
+    columns after dedup, and sorting by row number preserves input order. Each
+    input is read once, including volatile relations. The retired QUALIFY window
+    (#461) also failed the memory bound and is not used.
 
     Args:
         input_relation: The input side: a table name, ``read_parquet(...)``
@@ -1027,12 +1036,14 @@ def build_spatial_join_query(
     key_select = ", ".join(f"{expr} AS {key}" for expr, key in zip(match_order, keys, strict=True))
     key_order = ", ".join(f"{key} ASC NULLS LAST" for key in keys)
     return (
-        f"SELECT * EXCLUDE ({row}, {', '.join(keys)}) FROM (\n"
-        f"    SELECT DISTINCT ON ({row}) * FROM (\n"
-        f"        SELECT {input_alias}.*, {target_select}, {key_select}\n"
+        f"SELECT __gpio_input_values.* EXCLUDE ({row}), "
+        f"* EXCLUDE (__gpio_input_values, {row}, {', '.join(keys)}) FROM (\n"
+        f"    SELECT DISTINCT ON ({row}, __gpio_input_values) * FROM (\n"
+        f"        SELECT struct_pack(*COLUMNS({input_alias}.*)) AS __gpio_input_values, "
+        f"{input_alias}.{row}, "
+        f"{target_select}, {key_select}\n"
         f"        FROM (SELECT *, row_number() OVER () AS {row} FROM {input_relation}) {input_alias}\n"
-        f"        LEFT JOIN {target_relation} {target_alias}\n"
-        f"        ON {condition}\n"
+        f"        LEFT JOIN {target_relation} {target_alias} ON {condition}\n"
         "    )\n"
         f"    ORDER BY {row}, {key_order}\n"
         ")"
@@ -1158,43 +1169,8 @@ _SPILL_DIR_RE = re.compile(rf"^{re.escape(_SPILL_DIR_PREFIX)}(\d+)-[0-9a-f]{{12}
 
 # Keep the marker open for the owning process's lifetime. A lock is independent
 # of the pid namespace from which a sibling sweeps the shared volume.
-_SPILL_LOCK_NAME = ".gpio-owner.lock"
 _spill_locks: dict[str, BinaryIO] = {}
 _spill_locks_guard = threading.Lock()
-
-
-def _spill_lock(path: str) -> BinaryIO | None:
-    """Take a nonblocking ownership lock; None means Windows (no fcntl)."""
-    try:
-        import fcntl
-    except ImportError:
-        return None
-    marker = open(os.path.join(path, _SPILL_LOCK_NAME), "a+b")
-    try:
-        fcntl.flock(marker, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BaseException:
-        marker.close()
-        raise
-    return marker
-
-
-@contextmanager
-def _spill_base_lock(base: str | os.PathLike):
-    """Serialize publishing a marker and sweeping on a shared spill volume."""
-    try:
-        import fcntl
-    except ImportError:
-        yield
-        return
-    # Lock the base directory itself: a sidecar lock would outlive every spill
-    # and violate callers' scratch cleanup guarantees. This also works when
-    # the base is read-only (scanning it still must be best effort).
-    descriptor = os.open(base, os.O_RDONLY)
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        yield
-    finally:
-        os.close(descriptor)
 
 
 def _release_spill_lock(path: str) -> None:
@@ -1220,22 +1196,6 @@ def _release_spill_locks() -> None:
 atexit.register(_release_spill_locks)
 
 
-def _process_is_alive(pid: int) -> bool:
-    """Whether ``pid`` is still running. Answers True whenever it cannot tell.
-
-    Only ever used to decide *not* to delete something, so the unsure answer has
-    to be "alive": a false "dead" would take a running sibling's scratch space
-    away mid-query, while a false "alive" merely leaves one more directory for
-    the next run (or the OS tmp reaper) to collect.
-    """
-    try:
-        import psutil
-
-        return psutil.pid_exists(pid)
-    except Exception:  # psutil is optional on vendored hosts (#1330): unsure means alive
-        return True
-
-
 def orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
     """Spill directories under ``base_dir`` whose owning process has exited.
 
@@ -1243,6 +1203,15 @@ def orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
     Legacy leaves without a marker retain the conservative pid check. Windows
     has no fcntl and always uses that check.
     """
+    try:
+        with _spill_base_lock(base_dir):
+            return _orphaned_spill_dirs(base_dir)
+    except OSError:
+        return []
+
+
+def _orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
+    """Probe markers only with the base lock held, including read-only listings."""
     found: list[str] = []
     try:
         entries = list(os.scandir(base_dir))
@@ -1290,27 +1259,15 @@ def sweep_orphaned_spill_dirs(base_dir: str | os.PathLike) -> list[str]:
     Returns:
         The paths actually removed, for callers that report what they freed.
     """
-    removed: list[str] = []
-    try:
-        with _spill_base_lock(base_dir):
-            for path in orphaned_spill_dirs(base_dir):
-                marker = None
-                try:
-                    # Reacquire and hold through removal: listing is a snapshot.
-                    marker = _spill_lock(path)
-                    match = _SPILL_DIR_RE.match(os.path.basename(path))
-                    if marker is None and (match is None or _process_is_alive(int(match[1]))):
-                        continue
-                    shutil.rmtree(path)
-                except OSError:
-                    continue
-                finally:
-                    if marker is not None:
-                        marker.close()
-                removed.append(path)
-    except OSError:
-        pass  # Missing/read-only base: sweeping must never fail the caller.
-    return removed
+
+    def candidates() -> Iterator[tuple[str, int]]:
+        return (
+            (path, int(match[1]))
+            for path in _orphaned_spill_dirs(base_dir)
+            if (match := _SPILL_DIR_RE.match(os.path.basename(path)))
+        )
+
+    return sweep_orphaned_dirs(base_dir, candidates, 0)
 
 
 def spill_directory(base_dir: str | os.PathLike | None = None) -> str:
@@ -2524,7 +2481,6 @@ def variant_export_guard(
 
 
 def _zero_row_schema(con, sql: str, params=None) -> pa.Schema:
-    # read_all() drains the (empty) reader, so the connection is free afterwards.
     return con.sql(sql, params=params).arrow().read_all().schema
 
 

@@ -700,7 +700,7 @@ def resolve_geometry_read(
 
 
 def _query_with_native_geometry(con, query: str, columns, *, native_output: bool) -> str:
-    """Decode surviving WKB geometry declarations before native output is selected."""
+    """Decode surviving WKB/WKT declarations before native output or query statistics."""
     if not native_output:
         return query
     types = dict(describe_query(con, query))
@@ -709,6 +709,8 @@ def _query_with_native_geometry(con, query: str, columns, *, native_output: bool
         read = GeometryRead.for_type(name, types[name])
         if read.kind == "wkb":
             replacements.append(f"{read.expr} AS {read.quoted}")
+        elif read.duckdb_type == "VARCHAR":
+            replacements.append(f"ST_GeomFromText({read.quoted}) AS {read.quoted}")
     if not replacements:
         return query
     return f"SELECT * REPLACE ({', '.join(replacements)}) FROM ({query})"
