@@ -218,14 +218,14 @@ class TestOneMatchPerInput:
             assert counts == [100, 400]
             # Numbering and matching must read the same volatile input rows.
             volatile_query = du.build_spatial_join_query(
-                input_relation="(SELECT ST_Point(random() * 4, 1) geometry FROM range(100))",
+                input_relation="(SELECT 17 AS a, ST_Point(random() * 4, 1) geometry FROM range(100))",
                 target_relation="admins",
                 target_select="b.code",
                 condition=du.build_spatial_join_condition("geometry", "geometry"),
                 match_order=["b.code"],
             )
             assert con.execute(
-                "SELECT bool_and(code IS NOT DISTINCT FROM "
+                "SELECT bool_and(a = 17 AND code IS NOT DISTINCT FROM "
                 "CASE WHEN ST_X(geometry) <= 2 THEN 'AA' "
                 "WHEN ST_X(geometry) <= 3 THEN 'BB' END) "
                 f"FROM ({volatile_query})"
