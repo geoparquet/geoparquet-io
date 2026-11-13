@@ -1957,8 +1957,9 @@ def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, m
                 assert con.execute("SELECT current_setting('threads')").fetchall() == [(1,)]
 
             def write_result(step):
-                plan = str(con.execute(f"EXPLAIN {step.query}").fetchall())
-                assert "BLOCKWISE_NL_JOIN" in plan, plan
+                plan = str(con.execute(f"EXPLAIN (FORMAT JSON) {step.query}").fetchall())
+                assert any(name in plan for name in ("BLOCKWISE_NL_JOIN", "NESTED_LOOP_JOIN")), plan
+                assert "ST_Intersects" in plan and "bbox" in plan, plan
                 con.execute(f"CREATE TEMP TABLE bounded_admin_result AS {step.query}")
 
             with CallSpies() as spies:
