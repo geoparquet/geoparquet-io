@@ -552,7 +552,7 @@ class AdminDataset(ABC):
         """Publish only complete downloads, with the shared write memory and codec policy."""
         cache_codec = resolve_codec("ZSTD", 3, context="write")
         with (
-            atomic_write(str(cache_path)) as staged,
+            atomic_write(str(cache_path), reclaim_staging=True) as staged,
             scoped_write_memory_limit(con, self.memory_limit, self.verbose),
         ):
             con.execute(

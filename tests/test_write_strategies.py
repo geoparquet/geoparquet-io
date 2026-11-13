@@ -101,7 +101,7 @@ class TestAtomicWrite:
     import sys, time
     from pathlib import Path
     from geoparquet_io.core.file_utils import atomic_write
-    with atomic_write(sys.argv[1]) as staged:
+    with atomic_write(sys.argv[1], reclaim_staging=True) as staged:
         Path(staged).write_bytes(b'partial')
         print(staged, flush=True)
         time.sleep(60)
@@ -143,8 +143,21 @@ class TestAtomicWrite:
 
     def test_failed_write_cleanup(self):
         """Failed write cleans up temp file."""
+        from unittest.mock import patch
+
+        import geoparquet_io.core.file_utils as fu
+
+        # Ordinary writes must not require a readable parent or sweep its entries.
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "output.parquet"
+            with patch.object(fu, "_spill_base_lock", side_effect=PermissionError("0300")):
+                with atomic_write(str(output_path)) as staged:
+                    Path(staged).write_bytes(b"complete")
+                with atomic_write(str(output_path), reclaim_staging=True) as staged:
+                    assert not Path(staged).parent.name.split("-")[-2].isdigit()
+                    Path(staged).write_bytes(b"complete")
+            assert output_path.read_bytes() == b"complete"
+            output_path.unlink()
 
             with pytest.raises(RuntimeError):
                 with atomic_write(str(output_path)) as temp_path:

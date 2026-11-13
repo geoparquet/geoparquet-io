@@ -555,6 +555,7 @@ def atomic_write(
     *,
     sidecar_suffixes: Iterable[str] | None = None,
     mode_from: str | None = None,
+    reclaim_staging: bool = False,
 ) -> Iterator[str]:
     """The path a write goes to, moved over *destination* once the block succeeds.
 
@@ -584,6 +585,9 @@ def atomic_write(
     stale ``.cpg`` cannot outlive an overwrite. A multi-file publish is atomic
     per file, not as a set.
 
+    ``reclaim_staging`` opts cache writers into age-guarded orphan collection.
+    If the parent cannot be locked, the stage uses the legacy, uncollected name.
+
     A remote destination is yielded as given: there is no local file to rename
     over, and the writer stages and uploads it (``remote_write_context``).
     """
@@ -591,10 +595,21 @@ def atomic_write(
         yield str(destination)
         return
     final = Path(os.path.realpath(destination))
-    with _spill_base_lock(final.parent):
-        stage_dir = Path(tempfile.mkdtemp(prefix=f".gpio-stage-{os.getpid()}-", dir=final.parent))
+    # Only cache stages opt into reclamation; ordinary writes retain their old cost.
+    marker = None
+    with contextlib.ExitStack() as locks:
+        owned = False
+        if reclaim_staging:
+            try:
+                locks.enter_context(_spill_base_lock(final.parent))
+                owned = True
+            except OSError:
+                pass  # A writable/searchable directory need not be readable.
+        prefix = f".gpio-stage-{os.getpid()}-" if owned else ".gpio-stage-"
+        stage_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=final.parent))
         try:
-            marker = _spill_lock(str(stage_dir))
+            if owned:
+                marker = _spill_lock(str(stage_dir))
         except BaseException:
             shutil.rmtree(stage_dir, ignore_errors=True)
             raise
