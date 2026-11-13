@@ -125,7 +125,7 @@ class TestAtomicWrite:
                 pytest.fail("remote multi-file writes must fail before invoking the writer")
 
     def test_successful_write_and_orphan_cleanup(self, tmp_path, monkeypatch):
-        """A killed writer is collectable after aging; a live writer never is (#1149)."""
+        """An abruptly exited writer is collectable after aging; a live writer never is (#1149)."""
         import os
         import subprocess
         import time
@@ -134,63 +134,63 @@ class TestAtomicWrite:
         from geoparquet_io.core import admin_datasets, file_utils
 
         script = """
-    import sys, time
+    import os, sys
     from pathlib import Path
     from geoparquet_io.core.file_utils import atomic_write
     with atomic_write(sys.argv[1], reclaim_staging=True) as staged:
         Path(staged).write_bytes(b'partial')
         print(staged, flush=True)
-        time.sleep(60)
+        sys.stdin.read(1)
+        os._exit(0)
     """
         proc = subprocess.Popen(
             [sys.executable, "-c", dedent(script), str(tmp_path / "killed.parquet")],
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
         )
         try:
             stage = Path(proc.stdout.readline().strip()).parent
             assert stage.is_dir()
+            owner_pid = int(stage.name.split("-")[-2])
             old = time.time() - 2 * 24 * 60 * 60
             os.utime(stage, (old, old))
             assert file_utils.sweep_orphaned_staging_dirs(tmp_path) == []
-            proc.kill()
-            proc.wait(timeout=10)
-            # Reaping alone cannot prevent PID reuse on a host without locks.
-            real_check = file_utils._process_is_alive
-            monkeypatch.setattr(
-                file_utils, "_process_is_alive", lambda pid: pid != proc.pid and real_check(pid)
-            )
-            # A fresh abandoned stage waits for the age guard.
-            os.utime(stage, None)
-            assert file_utils.sweep_orphaned_staging_dirs(tmp_path) == []
-            os.utime(stage, (old, old))
-            monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
-            # Without locks or psutil, even a reaped writer must be kept.
-            with monkeypatch.context() as windows:
-                windows.setattr(file_utils, "_spill_lock", lambda path: None)
-                windows.setattr(file_utils, "_process_is_alive", lambda pid: True)
-                assert file_utils.sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == []
-                assert admin_datasets.clear_cache(confirm=True)["staging_dirs_deleted"] == 0
-                assert stage.exists()
-
-            assert file_utils.sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == [str(stage)]
-            assert stage.exists(), "pricing must not delete an abandoned stage"
-            # Exercise collection without fcntl on every platform as well.
-            monkeypatch.setattr(file_utils, "_spill_lock", lambda path: None)
-            result = admin_datasets.clear_cache(confirm=True)
-            assert result["staging_dirs_deleted"] == 1
-            assert result["staging_bytes_freed"] == len(b"partial")
-            assert not stage.exists()
-            assert not (tmp_path / "killed.parquet").exists()
-            with atomic_write(str(tmp_path / "killed.parquet")) as staged:
-                Path(staged).write_bytes(b"complete")
-            assert (tmp_path / "killed.parquet").read_bytes() == b"complete"
-            assert sorted(p.name for p in tmp_path.iterdir()) == ["killed.parquet"]
         finally:
-            if proc.poll() is None:
-                proc.kill()
-                proc.wait(timeout=10)
-            proc.stdout.close()
+            # A Windows venv launcher can have a different PID: let the writer exit itself.
+            proc.communicate(input="\n", timeout=10)
+        assert proc.returncode == 0
+        # Isolate PID reuse only after the actual writer exits, not after killing its launcher.
+        real_check = file_utils._process_is_alive
+        monkeypatch.setattr(
+            file_utils, "_process_is_alive", lambda pid: pid != owner_pid and real_check(pid)
+        )
+        # A fresh abandoned stage waits for the age guard.
+        os.utime(stage, None)
+        assert file_utils.sweep_orphaned_staging_dirs(tmp_path) == []
+        os.utime(stage, (old, old))
+        monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
+        # Without locks or psutil, even a reaped writer must be kept.
+        with monkeypatch.context() as windows:
+            windows.setattr(file_utils, "_spill_lock", lambda path: None)
+            windows.setattr(file_utils, "_process_is_alive", lambda pid: True)
+            assert file_utils.sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == []
+            assert admin_datasets.clear_cache(confirm=True)["staging_dirs_deleted"] == 0
+            assert stage.exists()
+
+        assert file_utils.sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == [str(stage)]
+        assert stage.exists(), "pricing must not delete an abandoned stage"
+        # Exercise collection without fcntl on every platform as well.
+        monkeypatch.setattr(file_utils, "_spill_lock", lambda path: None)
+        result = admin_datasets.clear_cache(confirm=True)
+        assert result["staging_dirs_deleted"] == 1
+        assert result["staging_bytes_freed"] == len(b"partial")
+        assert not stage.exists()
+        assert not (tmp_path / "killed.parquet").exists()
+        with atomic_write(str(tmp_path / "killed.parquet")) as staged:
+            Path(staged).write_bytes(b"complete")
+        assert (tmp_path / "killed.parquet").read_bytes() == b"complete"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["killed.parquet"]
 
     def test_failed_write_cleanup(self):
         """Failed write cleans up temp file."""
