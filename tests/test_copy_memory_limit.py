@@ -244,7 +244,6 @@ class TestEveryStrategyHonoursTheLimit:
         """An MB target samples the query before any strategy's scope was entered."""
         from geoparquet_io.core import parquet_writer
         from geoparquet_io.core.write_funnels import write_geoparquet_table
-        from geoparquet_io.core.write_strategies import duckdb_kv
 
         real = parquet_writer.resolve_row_group_rows_for_query
         sampled: list[str] = []
@@ -255,8 +254,6 @@ class TestEveryStrategyHonoursTheLimit:
             return real(con_, query, row_group_rows, *args, **kwargs)
 
         monkeypatch.setattr(parquet_writer, "resolve_row_group_rows_for_query", recording)
-        # A strategy holding its own reference to the sampler is spied too.
-        monkeypatch.setattr(duckdb_kv, "resolve_row_group_rows_for_query", recording, raising=False)
         query = _points_parquet(con, str(tmp_path / "src.parquet"))
         out = str(tmp_path / "out.parquet")
         if table:

@@ -210,9 +210,9 @@ def test_remote_witness_is_read_once_per_run(source_fixture, request, tmp_path, 
         return get_schema_info(str(source))
 
     monkeypatch.setattr(fsspec, "open", no_fsspec)
-    monkeypatch.setattr(staging, "get_first_parquet_file", resolve, raising=False)
-    monkeypatch.setattr(staging, "get_kv_metadata", read_kv, raising=False)
-    monkeypatch.setattr(staging, "get_schema_info", read_schema, raising=False)
+    monkeypatch.setattr(staging, "get_first_parquet_file", resolve)
+    monkeypatch.setattr(staging, "get_kv_metadata", read_kv)
+    monkeypatch.setattr(staging, "get_schema_info", read_schema)
     options = staging.PartitionWriteOptions(
         input_file=remote,
         geoparquet_version="1.1",

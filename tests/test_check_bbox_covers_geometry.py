@@ -1150,7 +1150,7 @@ class TestFooterReads:
             return real(*args, **kwargs)
 
         monkeypatch.setattr(check_parquet_structure, "check_bbox_structure", counting)
-        monkeypatch.setattr(check_bbox_values, "check_bbox_structure", counting, raising=False)
+        monkeypatch.setattr(check_bbox_values, "check_bbox_structure", counting)
         path = _write_geoparquet(tmp_path / "once.parquet", [SQUARE], [SQUARE_BBOX])
         result = check_bbox(path, return_results=True, quiet=True, verify_rows=100)
         assert result["bbox_values"]["checked"] is True

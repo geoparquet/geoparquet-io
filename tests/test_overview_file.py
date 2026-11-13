@@ -104,7 +104,6 @@ class TestOverviewFile:
     def test_footer_matches_the_column_across_multi_group_levels(self, tmp_path, monkeypatch):
         """4.1/4.2 with a level that spans several row groups, and a source
         file whose own row groups do not line up with the output's."""
-        monkeypatch.setattr(run_module, "resolve_row_group_rows", lambda *a: 4, raising=False)
         import geoparquet_io.core.process.overview.overview_file as of
 
         monkeypatch.setattr(of, "resolve_row_group_rows", lambda *a: 4)
