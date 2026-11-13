@@ -34,7 +34,7 @@ import pytest
 from click.testing import CliRunner
 
 from geoparquet_io.cli.main import cli
-from geoparquet_io.core import derive_geo_from_file, write_funnels
+from geoparquet_io.core import derive_geo_from_file
 from geoparquet_io.core.derive_geo_from_file import derive_secondary_geometry_info
 from geoparquet_io.core.duckdb_utils import fetch_one, get_duckdb_connection, sql_path
 from geoparquet_io.core.write_strategies import duckdb_kv
@@ -61,7 +61,7 @@ def _scans(monkeypatch) -> Counter:
     for name in ("geometry_stats_of", "geometry_types_of"):
         monkeypatch.setattr(duckdb_kv, name, counting(getattr(duckdb_kv, name)))
     monkeypatch.setattr(
-        write_funnels, "geometry_stats_of", counting(write_funnels.geometry_stats_of)
+        derive_geo_from_file, "geometry_stats_of", counting(derive_geo_from_file.geometry_stats_of)
     )
     return seen
 
