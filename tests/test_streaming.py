@@ -629,6 +629,45 @@ def _wkb_polygon(npts: int) -> bytes:
     return hdr + bytes(coords)
 
 
+@pytest.mark.parametrize("carrier", ["text", "large_binary"])
+def test_stream_geometry_conversion_and_byte_budget(carrier, monkeypatch):
+    import geoarrow.pyarrow as ga
+
+    from geoparquet_io.core import stream_io, streaming
+    from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+
+    output = []
+    monkeypatch.setattr(stream_io, "write_arrow_stream", lambda reader: output.extend(reader))
+    monkeypatch.setattr(streaming, "_MAX_WKB_CHUNK_BYTES", 42)
+    with get_duckdb_connection(load_spatial=True) as con:
+        if carrier == "text":
+            query = "SELECT 'POINT (1 2)' AS geometry"
+        else:
+            con.register(
+                "input_wkb",
+                pa.table(
+                    {
+                        "id": range(6),
+                        "geometry": pa.array(
+                            [ga.as_wkb(pa.array(["POINT (1 2)"])).storage[0].as_py()] * 6,
+                            type=pa.large_binary(),
+                        ),
+                    }
+                ),
+            )
+            query = "SELECT * FROM input_wkb"
+        stream_io.write_output(con, query, "-")
+    assert output
+    for batch in output:
+        geometry = batch.column("geometry")
+        assert geometry.type.extension_name == "geoarrow.wkb"
+        assert ga.as_wkt(geometry).storage.to_pylist() == ["POINT (1 2)"] * len(batch)
+        assert _wkb_chunk_data_nbytes(geometry.storage) <= 42
+    if carrier == "large_binary":
+        assert [row for batch in output for row in batch.column("id").to_pylist()] == list(range(6))
+        assert len(output) >= 3
+
+
 class TestWkbByteRebatching:
     """Tests for the 32-bit WKB offset-overflow guard (issue #511)."""
 
