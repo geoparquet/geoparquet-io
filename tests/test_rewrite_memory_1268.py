@@ -682,6 +682,7 @@ def test_eager_rewrite_peak_rss_and_bytes(tmp_path):
             def unbounded_read(**kwargs):
                 kwargs.pop('preserve_insertion_order', None)
                 kwargs.pop('verbose', None)
+                kwargs.pop('per_thread', None)
                 return get_duckdb_connection(**kwargs)
             memory_limits.open_bounded_connection = unbounded_read
         sys.argv = ['scripts/profile_command.py', '--child', '--command', 'api-convert',

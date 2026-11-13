@@ -87,7 +87,7 @@ from geoparquet_io.core.geometry_repair import (
     repair_query_geometry,
 )
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
-from geoparquet_io.core.memory_limits import open_bounded_connection
+from geoparquet_io.core.memory_limits import MATERIALIZED_BYTES_PER_THREAD, open_bounded_connection
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version, version_to_describe
 from geoparquet_io.core.partition.reader import require_single_file
 from geoparquet_io.core.remote import (
@@ -2447,6 +2447,7 @@ def read_spatial_to_arrow(
         load_spatial=True,
         load_httpfs=needs_httpfs(input_file),
         preserve_insertion_order=True,
+        per_thread=MATERIALIZED_BYTES_PER_THREAD,
         verbose=verbose,
     )
 
