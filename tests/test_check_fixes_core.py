@@ -701,33 +701,64 @@ def test_fresh_fix_outputs_inherit_private_input_mode(places_test_file, tmp_path
     source = tmp_path / "private.parquet"
     source.write_bytes(Path(places_test_file).read_bytes())
     source.chmod(0o600)
-    for name, fix in (
-        ("compression", lambda out: fix_compression(str(source), str(out))),
-        ("column", lambda out: fix_bbox_column(str(source), str(out))),
-        (
-            "chain",
-            lambda out: apply_all_fixes(
-                str(source),
-                str(out),
-                {
-                    "bbox": {"needs_bbox_column": True},
-                },
+    previous_umask = os.umask(0o022)
+    try:
+        for name, fix in (
+            ("compression", lambda out: fix_compression(str(source), str(out))),
+            ("column", lambda out: fix_bbox_column(str(source), str(out))),
+            (
+                "chain",
+                lambda out: apply_all_fixes(
+                    str(source),
+                    str(out),
+                    {
+                        "bbox": {"needs_bbox_column": True},
+                    },
+                ),
             ),
-        ),
-        (
-            "combined",
-            lambda out: apply_all_fixes(
-                str(source),
-                str(out),
-                {"bbox": {"needs_bbox_column": True}, "spatial": {"fix_available": True}},
+            (
+                "combined",
+                lambda out: apply_all_fixes(
+                    str(source),
+                    str(out),
+                    {"bbox": {"needs_bbox_column": True}, "spatial": {"fix_available": True}},
+                ),
             ),
-        ),
-        ("bbox", lambda out: fix_bbox_all(str(source), str(out), True, True)),
-        ("spatial", lambda out: fix_spatial_ordering(str(source), str(out))),
-    ):
-        output = tmp_path / f"{name}.parquet"
-        fix(output)
-        assert stat.S_IMODE(output.stat().st_mode) == 0o600, name
+            ("bbox", lambda out: fix_bbox_all(str(source), str(out), True, True)),
+            ("spatial", lambda out: fix_spatial_ordering(str(source), str(out))),
+        ):
+            output = tmp_path / f"{name}.parquet"
+            fix(output)
+            assert stat.S_IMODE(output.stat().st_mode) == 0o600, name
+
+        for checks in (
+            {},
+            {"bbox": {"needs_bbox_column": True}},
+            {"spatial": {"fix_available": True}},
+            {"compression": {"fix_available": True}},
+            {"row_groups": {"fix_available": True}},
+            {"bbox": {"needs_bbox_column": True}, "spatial": {"fix_available": True}},
+            {
+                "bbox": {"needs_bbox_column": True},
+                "spatial": {"fix_available": True},
+                "compression": {"fix_available": True},
+            },
+            {
+                "bbox": {"needs_bbox_column": True},
+                "spatial": {"fix_available": True},
+                "row_groups": {"fix_available": True},
+            },
+        ):
+            for inplace in (False, True):
+                source.write_bytes(Path(places_test_file).read_bytes())
+                source.chmod(0o600)
+                output = source if inplace else tmp_path / "chain-output.parquet"
+                if not inplace:
+                    output.unlink(missing_ok=True)
+                apply_all_fixes(str(source), str(output), checks)
+                assert stat.S_IMODE(output.stat().st_mode) == 0o600, (checks, inplace)
+    finally:
+        os.umask(previous_umask)
 
 
 def test_permission_copy_failure_never_publishes(places_test_file, tmp_path, monkeypatch):
