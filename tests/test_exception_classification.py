@@ -215,11 +215,27 @@ def test_a_gpio_error_arrives_sanitized():
 
     import time
 
-    for text in ("x" * (3 * 1024 * 1024), "https://" + "@=" * 10000 + "PRIVATE@host/x"):
-        start = time.perf_counter()
-        cleaned = clean_error_text(text)
-        assert time.perf_counter() - start < 0.8
-        assert "PRIVATE" not in cleaned
+    # CPU-time ratios measure growth without charging other processes' work.
+    # Eight times the input permits 20x cost; quadratic matching costs ~64x.
+    for make_text in (
+        lambda n: "x" * n,
+        lambda n: "https://" + "@=" * n + "PRIVATE@host/x",
+    ):
+        timings = []
+        for size in (4096, 8 * 4096):
+            text = make_text(size)
+            samples = []
+            for _ in range(3):
+                start = time.process_time()
+                cleaned = clean_error_text(text)
+                elapsed = time.process_time() - start
+                assert elapsed < 15, "redaction exceeded the hang guard"
+                samples.append(elapsed)
+                assert "PRIVATE" not in cleaned
+            timings.append(min(samples))
+        assert timings[1] < 20 * timings[0], f"nonlinear redaction: {timings}"
+
+    assert clean_error_text("x" * (3 * 1024 * 1024)) == "x" * (3 * 1024 * 1024)
 
     from geoparquet_io.core.wfs import _clip_to_area_of_use
 
