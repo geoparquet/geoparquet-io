@@ -34,7 +34,6 @@ import contextlib
 import copy
 import functools
 from collections.abc import Collection, Iterator, Mapping
-from dataclasses import replace
 from typing import Any
 
 import pyarrow as pa
@@ -59,6 +58,7 @@ from geoparquet_io.core.crs_utils import (
 from geoparquet_io.core.derive_geo_from_file import (
     derive_secondary_geometry_info,
     derive_v2_geo_metadata,
+    written_geo_block,
 )
 from geoparquet_io.core.duckdb_metadata import (
     get_kv_metadata,
@@ -101,7 +101,6 @@ from geoparquet_io.core.geo_metadata import (
     composes_a_covering,
     declared_write_metadata,
     geo_key_value,
-    geometry_stats_of,
     is_geoparquet_1x,
     may_hold_a_self_evident_bbox,
     prune_geo_metadata_to_columns,
@@ -1379,30 +1378,6 @@ def _unknown_secondary_needs_rewrite(
     )
 
 
-def _written_geo_block(path: str, metadata: dict | None, options: GeoBlockOptions) -> dict:
-    """Compose output facts from the written file, without re-running the user's query."""
-    schema = pq.read_schema(path)
-    primary = options.geometry_column
-    written = sanitized_carried_geo(schema.metadata)
-    names = {
-        primary,
-        *(written.get("columns") or {}),
-        *((options.geometry_info or {}).get("secondary") or []),
-    }
-    stats = {
-        name: {"bbox": measured.bbox, "geometry_types": measured.geometry_types}
-        for name in sorted(names)
-        if name in schema.names
-        for measured in [geometry_stats_of(path, name)]
-    }
-    options = replace(
-        options,
-        stats=stats,
-        encoding=(written.get("columns") or {}).get(primary, {}).get("encoding"),
-    )
-    return compose_geo_block(SchemaSource(schema, metadata), options)
-
-
 def _write_strategy_output(strategy, kwargs: dict) -> dict | None:
     """Run the query once; finalize measured facts from the completed output."""
     primary = kwargs["geometry_column"]
@@ -1421,7 +1396,7 @@ def _write_strategy_output(strategy, kwargs: dict) -> dict | None:
         written = sanitized_carried_geo(pq.read_schema(kwargs["output_path"]).metadata)
         if len(written.get("columns") or {}) < 2:
             return None
-    return _written_geo_block(
+    return written_geo_block(
         kwargs["output_path"],
         kwargs["original_metadata"],
         GeoBlockOptions(

@@ -439,8 +439,8 @@ def test_every_strategy_rebuilds_secondary_statistics(tmp_path):
             assert other["epoch"] == 2020.0
 
     # Native secondaries follow the same completed-output rule as WKB columns.
+    from geoparquet_io.core.derive_geo_from_file import written_geo_block
     from geoparquet_io.core.geo_metadata import GeoBlockOptions
-    from geoparquet_io.core.write_funnels import _written_geo_block
 
     native = table.set_column(
         table.schema.get_field_index("other"),
@@ -450,7 +450,7 @@ def test_every_strategy_rebuilds_secondary_statistics(tmp_path):
     block["columns"]["other"]["encoding"] = "point"
     block["columns"]["other"]["geometry_types"] = ["Point"]
     pq.write_table(native.replace_schema_metadata(with_geo_key(None, block)), source)
-    rebuilt = _written_geo_block(
+    rebuilt = written_geo_block(
         str(source),
         with_geo_key(None, block),
         GeoBlockOptions(geometry_column="geometry", version="1.1"),

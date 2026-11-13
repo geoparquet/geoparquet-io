@@ -14,6 +14,8 @@ imports is still importable from there. The type-code tables it reads are the
 single copies in ``geo_metadata``.
 """
 
+from dataclasses import replace
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -293,6 +295,30 @@ def _with_primary_column(
     )
 
 
+def written_geo_block(path: str, metadata: dict | None, options: GeoBlockOptions) -> dict:
+    """Compose output facts from the written file, without re-running the user's query."""
+    schema = pq.read_schema(path)
+    primary = options.geometry_column
+    written = sanitized_carried_geo(schema.metadata)
+    names = {
+        primary,
+        *(written.get("columns") or {}),
+        *((options.geometry_info or {}).get("secondary") or []),
+    }
+    stats = {
+        name: {"bbox": measured.bbox, "geometry_types": measured.geometry_types}
+        for name in sorted(names)
+        if name in schema.names
+        for measured in [geometry_stats_of(path, name)]
+    }
+    options = replace(
+        options,
+        stats=stats,
+        encoding=(written.get("columns") or {}).get(primary, {}).get("encoding"),
+    )
+    return compose_geo_block(SchemaSource(schema, metadata), options)
+
+
 def derive_v2_geo_metadata(
     output_path: str,
     primary_column: str | None = None,
@@ -338,15 +364,8 @@ def derive_v2_geo_metadata(
             if not block:
                 return None
             primary = primary_column or block["primary_column"]
-            stats = {
-                name: {"bbox": measured.bbox, "geometry_types": measured.geometry_types}
-                for name in block["columns"]
-                if name in pf.schema_arrow.names
-                for measured in [geometry_stats_of(output_path, name)]
-            }
-            return compose_geo_block(
-                SchemaSource(pf.schema_arrow, kv),
-                GeoBlockOptions(geometry_column=primary, version="2.0", stats=stats),
+            return written_geo_block(
+                output_path, kv, GeoBlockOptions(geometry_column=primary, version="2.0")
             )
         schema = pf.metadata.schema
         geo_cols: dict[int, tuple[str, str]] = {}
