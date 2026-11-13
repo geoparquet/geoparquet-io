@@ -6980,6 +6980,18 @@ def test_all_sort_commands_use_the_sort_owner():
             "validate_profile_for_urls",
         }, filename
 
+    for filename in ("sort_common.py", "write_strategies/duckdb_kv.py"):
+        tree = ast.parse((PACKAGE / "core" / filename).read_text())
+        assert not any(
+            isinstance(node, ast.If)
+            and isinstance(node.test, ast.Compare)
+            and any(
+                isinstance(value, ast.Constant) and value.value == "wkb"
+                for value in node.test.comparators
+            )
+            for node in ast.walk(tree)
+        ), filename
+
 
 def _extractor_raw_reports(source):
     """Logging helpers and gpio errors clean once; direct sinks must clean explicitly."""
