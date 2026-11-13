@@ -260,16 +260,31 @@ Checks if data is spatially ordered. Spatially ordered data improves:
 
 **Method Selection:**
 
-- **GeoParquet 2.0+ files** (with bbox column): Uses fast bbox-stats method by analyzing row group metadata (~10-100x faster)
-- **GeoParquet 1.x files** (no bbox column): Falls back to sampling method which analyzes actual geometry data
+- **Files with per-row-group bbox statistics** (a covering bbox column, or native GeoParquet 2.0 statistics): the footer-based pruning method, no data read
+- **Files with neither**: falls back to a sampling method which analyzes actual geometry data
 
 !!! tip "For faster spatial order checks"
-    Add a bbox column to your file with `gpio add bbox` to enable the fast bbox-stats method.
+    Add a bbox column to your file with `gpio add bbox` to enable the fast footer-based method.
 
 **How it works:**
 
-- **Bbox-stats method**: Checks if consecutive row groups have overlapping bounding boxes. Non-overlapping row groups indicate good spatial ordering. Passes if < 30% of row group pairs overlap.
-- **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5.
+- **Footer method**: computes the expected share of the file's bytes a spatial
+  query window skips, judged against an ideal tiling of the extent into the
+  same number of row groups. The window follows the data (its centre falls in
+  a row group with probability proportional to the group's rows, and spans 10%
+  of each dimension of that group's box), and each group weighs its compressed
+  bytes. The definition and its thresholds are the
+  [Portolan spec's](https://github.com/portolan-sdi/portolan-spec/pull/188)
+  footer check: pass at efficiency 0.65 or more, judged from eight row groups
+  up. Below eight row groups, the spec judges a file by its rows instead. gpio
+  does not run that row check, so it reports the statistics and says the
+  verdict is withheld, never a pass. A conformance validator such as
+  [rashid](https://github.com/portolan-sdi/rashid) gives that verdict. Nothing
+  on the CLI or API overrides the thresholds. A requested `--fix` still sorts a file
+  whose verdict was withheld — not judged is not known-ordered — and only a
+  judged pass skips the sort. `check all --fix` sorts only on a judged
+  failure, or on a withheld verdict whose measured efficiency is under 0.65.
+- **Sampling method**: Compares average distance between consecutive features vs random feature pairs. A lower ratio indicates better spatial clustering. This measures feature adjacency, not row-group pruning, so gpio reports the ratio as a statistic and withholds the verdict. The spec judges such a file by its rows, which a conformance validator such as rashid does.
 
 `--fix` Hilbert-sorts the file and keeps at least as many row groups as it
 had: it writes 49,152 rows per group when that already keeps the count, and

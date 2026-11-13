@@ -102,9 +102,14 @@
 # census reads, the kept signature, warning once per process, the canonical
 # name staying silent, and the alias handing core the call the canonical name
 # does, plus the root keeping both BigQuery spellings (11).
+# +126 (#774): the pruning-efficiency verdict's suite -- the shared spec
+# vectors with their verdicts, the closed-form cross-checks, the two-path
+# withheld semantics on every surface, partial-statistics coverage, and the
+# CLI/fix behavior pins, with #1458's two-path alignment tests.
 # +3 (#1149): isolate requested-level retry from housekeeping, pin failed
 # default COPY publication, and count HTTP bytes for cold bounded admin joins.
-max_collected = 14941
+# +2: the combined bbox and sort fix asks the batch rule (judged and withheld).
+max_collected = 15069
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

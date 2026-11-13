@@ -249,6 +249,10 @@ def test_multi_file_fix_stops_on_an_interrupted_fix_write(
         raise interrupt()
 
     monkeypatch.setattr(check_fixes, patched, interrupted_write)
+    # The shuffled files have no row-group statistics, so gpio withholds the
+    # verdict and the batch fix would not sort them (#774). This test is about
+    # the interrupt, so it lets the batch fix sort.
+    monkeypatch.setattr(check_fixes, "_batch_sort_wanted", lambda _result: True)
     result = CliRunner().invoke(
         cli, ["check", command, str(tmp_path / "*.parquet"), "--all-files", "--fix"]
     )

@@ -605,12 +605,14 @@ class TestHilbertDetectionAndWarnings:
             row_group_rows=100000,  # Standard Hilbert row group size
         )
 
-        # Check spatial ordering - should pass despite high overlap
+        # One large row group, under the footer check's eight: the verdict is
+        # withheld (spatial-order.md, Footer check), which is not a failure -- and not a judged
+        # pass either, so a requested fix still sorts.
         result = check_spatial_order(output_file, 100, 500, False, return_results=True, quiet=True)
 
-        # Should be marked as passed (Hilbert-ordered with large groups)
-        assert result["passed"] is True
-        assert result["fix_available"] is False
+        assert result["passed"] is True, "no failure found"
+        assert result["judged"] is False
+        assert result["fix_available"] is True
 
     def test_spatial_check_fails_for_non_hilbert_files(self, places_test_file, temp_output_dir):
         """Test that randomly shuffled data gets spatial warnings."""
@@ -630,7 +632,14 @@ class TestHilbertDetectionAndWarnings:
         table = table.take(indices)
         pq.write_table(table, output_file, compression="ZSTD", row_group_size=50)
 
-        result = check_spatial_order(output_file, 100, 500, False, return_results=True, quiet=True)
+        result = check_spatial_order(
+            output_file,
+            random_sample_size=50,
+            limit_rows=500,
+            verbose=False,
+            return_results=True,
+            quiet=True,
+        )
 
         assert result["passed"] is False
         assert result["fix_available"] is True

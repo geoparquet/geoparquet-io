@@ -613,6 +613,8 @@ def _apply_spatial_ordering_fix(
     spatial_result = check_results.get("spatial", {})
     if not spatial_result or not spatial_result.get("fix_available", False):
         return current_file, []
+    if not _batch_sort_wanted(spatial_result):
+        return current_file, []
 
     # A path, not a file: hilbert_order refuses an existing output (#278).
     temp_file = scratch.enter_context(scratch_file(directory=directory))
@@ -623,6 +625,24 @@ def _apply_spatial_ordering_fix(
 
     fix_spatial_ordering(current_file, temp_file, verbose, profile)
     return temp_file, ["Applied Hilbert spatial ordering"]
+
+
+def _batch_sort_wanted(spatial_result: dict) -> bool:
+    """Whether ``check all --fix`` should Hilbert-sort this file.
+
+    An explicit ``check spatial --fix`` sorts on any verdict short of a judged
+    pass, because the user asked for exactly that. The batch fix is quieter: a
+    withheld verdict whose efficiency is unknown, or already at the pass bar,
+    is no reason to rewrite an otherwise sound file -- only a judged failure,
+    or a withheld verdict whose measured efficiency sits under the bar, earns
+    the sort.
+    """
+    if spatial_result.get("judged", True):
+        return True
+    from geoparquet_io.core.check_spatial_order import SPATIAL_ORDER_MIN_EFFICIENCY
+
+    efficiency = spatial_result.get("skip_rate_efficiency")
+    return efficiency is not None and efficiency < SPATIAL_ORDER_MIN_EFFICIENCY
 
 
 @uses_aws_profile
@@ -737,10 +757,12 @@ def _run_fix_chain(
     )
     fixes_applied.extend(fixes)
 
+    spatial_result = check_results.get("spatial") or {}
     combined = (
         bbox_result.get("needs_bbox_column", False)
         and not bbox_result.get("needs_bbox_removal", False)
-        and (check_results.get("spatial") or {}).get("fix_available", False)
+        and spatial_result.get("fix_available", False)
+        and _batch_sort_wanted(spatial_result)
     )
     if combined:
         if verbose:

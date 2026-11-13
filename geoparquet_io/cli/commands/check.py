@@ -48,7 +48,10 @@ from geoparquet_io.cli.fix_helpers import NoBackupConfirmation, handle_fix_commo
 from geoparquet_io.core.check_bbox_values import DEFAULT_BBOX_SAMPLE_ROWS
 from geoparquet_io.core.check_options import DEFAULT_SPEC_SAMPLE_ROWS, CheckOptions
 from geoparquet_io.core.check_parquet_structure import check_all as check_structure_impl
-from geoparquet_io.core.check_spatial_order import SPATIAL_ORDER_CHECK
+from geoparquet_io.core.check_spatial_order import (
+    SPATIAL_ORDER_CHECK,
+    spatial_verdict_withheld,
+)
 from geoparquet_io.core.check_spatial_order import check_spatial_order as check_spatial_impl
 from geoparquet_io.core.check_verdict import (
     COULD_NOT_RUN_KEY,
@@ -188,6 +191,7 @@ class MultiFileCheckRunner:
         #: The run's one ``--no-backup`` prompt, shared by every file it fixes.
         self.confirmation = confirmation or NoBackupConfirmation(False)
         self.passed = 0
+        self.not_judged = 0
         self.warnings = 0
         self.failed = 0
         self.issues: list[tuple[str, str, str]] = []  # (file, level, message)
@@ -257,7 +261,12 @@ class MultiFileCheckRunner:
         if could_not:
             self.check_errors.append((file_path, "; ".join(could_not)))
         if verdict is Verdict.PASS:
-            self.passed += 1
+            # A withheld spatial verdict found no failure, but claiming a pass
+            # the check never gave misled every multi-file summary (#774).
+            if spatial_verdict_withheld(result):
+                self.not_judged += 1
+            else:
+                self.passed += 1
         else:
             if verdict is Verdict.FAILURE:
                 self.failed += 1
@@ -568,6 +577,8 @@ class MultiFileCheckRunner:
         summary_parts = []
         if self.passed:
             summary_parts.append(click.style(f"{self.passed} passed", fg="green"))
+        if self.not_judged:
+            summary_parts.append(click.style(f"{self.not_judged} not judged", fg="cyan"))
         if self.warnings:
             summary_parts.append(click.style(f"{self.warnings} warnings", fg="yellow"))
         if self.failed:
@@ -1037,19 +1048,55 @@ def _spatial_with_pushdown(file_path, random_sample_size, limit_rows, verbose, *
 
 
 def _echo_spatial_order(result: dict) -> None:
+    """One verdict line, led by the absolute cost where the footer judged.
+
+    A withheld verdict prints its reason and the statistics, never a check
+    mark. The sampling fallback never judges: it names its method and reports
+    the distance ratio as a statistic, because it measures consecutive-feature
+    distance, not row-group pruning.
+    """
     ratio = result.get("ratio")
-    if ratio is None:
+    if ratio is None and "judged" not in result:
         return
-    if result.get("passed", ratio < 0.5):
-        click.echo(click.style(f"{PASS_GLYPH} Data appears to be spatially ordered", fg="green"))
+    efficiency = result.get("skip_rate_efficiency")
+    efficiency_text = "undefined" if efficiency is None else f"{efficiency:.2f}"
+    read = result.get("estimated_skip_rate")
+    cost = "" if read is None else f"a typical query reads {1.0 - read:.0%} of the bytes, "
+    detail = f" ({cost}efficiency {efficiency_text})" if efficiency is not None else ""
+    if spatial_verdict_withheld(result):
+        _echo_withheld_spatial_order(result, cost, efficiency_text)
+    elif result.get("passed", True):
+        click.echo(
+            click.style(f"{PASS_GLYPH} Data appears to be spatially ordered{detail}", fg="green")
+        )
     else:
         click.echo(
             click.style(
-                f"{WARNING_GLYPH}  Data may not be optimally spatially ordered\n"
+                f"{WARNING_GLYPH}  Data may not be optimally spatially ordered{detail}\n"
                 "Consider running 'gpio sort hilbert' to improve spatial locality",
                 fg="yellow",
             )
         )
+
+
+def _echo_withheld_spatial_order(result: dict, cost: str, efficiency_text: str) -> None:
+    """The reason a spatial verdict was withheld, then the statistics it rests on.
+
+    Information, not a warning: the check found no failure, it only declines
+    to certify one way or the other.
+    """
+    for line in result.get("warnings") or ["Spatial ordering not judged"]:
+        click.echo(click.style(f"ℹ️  {line}", fg="cyan"))
+    if result.get("method") == "sampling" and result.get("ratio") is not None:
+        click.echo(
+            f"Consecutive / random feature distance: {result['ratio']:.2f} "
+            "(sampling method, a statistic, not a verdict)"
+        )
+    if result.get("num_row_groups"):
+        area_sum = result.get("bbox_area_sum")
+        area_text = "" if area_sum is None else f", area sum {area_sum:.2f}"
+        click.echo(f"Row groups: {result['num_row_groups']}")
+        click.echo(f"{cost.capitalize()}(efficiency {efficiency_text}{area_text})")
 
 
 def _echo_pushdown(pushdown: dict | None) -> None:
@@ -1150,6 +1197,8 @@ def check_spatial(
 
             if check.fix:
                 if not result.get("fix_available", False):
+                    # Only a judged pass gets here: a withheld verdict leaves
+                    # the ordering unknown, so its fix proceeds with the sort.
                     runner.no_fix(file_path, result, "already spatially ordered!", show=show_output)
                     continue
 

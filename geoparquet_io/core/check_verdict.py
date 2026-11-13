@@ -209,8 +209,16 @@ def spec_result(spec: object) -> dict:
 
 
 def all_checks_result(structure: Mapping, spatial: object, spec: object) -> dict:
-    """One file's ``check all`` outcome: structure, spatial order and spec, the worst wins."""
-    return combine_results([*structure.values(), spatial, spec_result(spec)])
+    """One file's ``check all`` outcome: structure, spatial order and spec, the worst wins.
+
+    A withheld spatial verdict keeps its ``judged: False`` on the combined
+    result, so a multi-file summary counts the file as not judged rather than
+    as a pass the spatial check never gave (#774).
+    """
+    combined = combine_results([*structure.values(), spatial, spec_result(spec)])
+    if isinstance(spatial, Mapping) and not spatial.get("judged", True):
+        combined["judged"] = False
+    return combined
 
 
 def not_geoparquet_result(file_path: str) -> dict | None:
