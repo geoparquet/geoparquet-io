@@ -192,6 +192,22 @@ def test_a_gpio_error_arrives_sanitized():
                     assert "SECRET" not in clean(text)
                     assert "END" not in clean(text)
 
+    # Builtin validator errors are not GeoParquetError: the automatic boundary
+    # deliberately leaves them alone. Their API-facing cleaning remains needed.
+    from geoparquet_io.cli.exception_handler import cli_error_for
+    from geoparquet_io.core import arcgis, extract_bigquery, wfs
+
+    url = "https://h/x?token=SECRET"
+    for validate, args in (
+        (extract_bigquery._validate_project_id, (url,)),
+        (arcgis._parse_crs_to_wkid, (url,)),
+        (wfs._clip_to_area_of_use, ((0, 0, 1, 1), url)),
+    ):
+        with pytest.raises(ValueError) as caught:
+            validate(*args)
+        assert "SECRET" not in str(caught.value)
+        assert cli_error_for(caught.value) is None
+
 
 @pytest.mark.parametrize(
     ("text", "kept"),
