@@ -88,7 +88,7 @@ class TestWriteStrategyFactory:
 class TestAtomicWrite:
     """Tests for atomic_write context manager."""
 
-    def test_successful_write(self):
+    def test_successful_write(self, monkeypatch):
         """Successful write atomically renames file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "output.parquet"
@@ -98,6 +98,26 @@ class TestAtomicWrite:
 
             assert output_path.exists()
             assert output_path.read_text() == "test content"
+
+        from geoparquet_io.core import remote
+        from geoparquet_io.core.exceptions import GeoParquetError
+
+        uploaded = []
+        monkeypatch.setattr(
+            remote,
+            "upload_if_remote",
+            lambda local, destination: uploaded.append(
+                (Path(local).suffix, Path(local).read_bytes(), destination)
+            ),
+        )
+        destination = "s3://bucket/map.pmtiles"
+        with atomic_write(destination, suffix=".pmtiles") as staged:
+            assert Path(staged).suffix == ".pmtiles"
+            Path(staged).write_bytes(b"tiles")
+        assert uploaded == [(".pmtiles", b"tiles", destination)]
+        with pytest.raises(GeoParquetError, match="sidecar"):
+            with atomic_write(destination, sidecar_suffixes=(".dbf",)):
+                pytest.fail("remote multi-file writes must fail before invoking the writer")
 
     def test_failed_write_cleanup(self):
         """Failed write cleans up temp file."""

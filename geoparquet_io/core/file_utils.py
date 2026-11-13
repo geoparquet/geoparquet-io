@@ -515,9 +515,11 @@ def atomic_write(
     its readers. The staging caller scopes credentials with ``uses_aws_profile``.
     """
     if is_remote_url(str(destination)):
-        from geoparquet_io.core.remote import remote_write_context, upload_if_remote
+        from geoparquet_io.core.remote import upload_if_remote
 
-        with remote_write_context(str(destination)) as (local, _):
+        if sidecar_suffixes is not None:
+            raise GeoParquetError("Remote writes do not support sidecar files.")
+        with scratch_file(suffix=suffix) as local:
             with _success_output_path(local, str(destination)):
                 yield local
             if Path(local).exists():
