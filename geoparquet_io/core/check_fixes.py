@@ -22,6 +22,7 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import (
     atomic_write,
+    copy_file,
     is_same_file_path,
     resolve_file_url,
     scratch_file,
@@ -685,7 +686,10 @@ def _place_result(result_file: str, output_file: str) -> None:
     if is_same_file_path(result_file, output_file):
         return
     with atomic_write(output_file) as destination:
-        shutil.copy2(result_file, destination)
+        if is_remote_url(result_file):
+            copy_file(result_file, destination)
+        else:
+            shutil.copy2(result_file, destination)
 
 
 def _apply_compression_fix(

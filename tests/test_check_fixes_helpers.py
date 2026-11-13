@@ -65,7 +65,7 @@ class TestApplySpatialOrderingFix:
 class TestApplyCompressionFix:
     """Tests for _apply_compression_fix function."""
 
-    def test_no_compression_fix_needed(self, tmp_path):
+    def test_no_compression_fix_needed(self, tmp_path, monkeypatch):
         """Test when no compression or row group fix is needed.
 
         Here the file to place *is* the user's input -- every earlier step
@@ -94,6 +94,39 @@ class TestApplyCompressionFix:
         assert output_file.exists()
         assert input_file.exists(), "the user's input was moved to the output path"
         assert input_file.read_text() == "test"
+
+        from obstore.store import LocalStore
+
+        from geoparquet_io.core.check_fixes import apply_all_fixes
+        from geoparquet_io.core.duckdb_utils import get_active_s3_config
+
+        bucket = tmp_path / "bucket"
+        bucket.mkdir()
+        payload = b"remote input bytes"
+        (bucket / "input.parquet").write_bytes(payload)
+        seen = []
+        outer = get_active_s3_config().copy()
+
+        def store(url, profile, *args):
+            assert profile == "prod"
+            seen.append(url)
+            return LocalStore(str(bucket)), {}
+
+        def source_store(url):
+            assert get_active_s3_config().get("profile") == "prod"
+            seen.append(url)
+            return LocalStore(str(bucket)), "input.parquet"
+
+        monkeypatch.setattr("geoparquet_io.core.file_utils.resolve_object_store", source_store)
+        monkeypatch.setattr("geoparquet_io.core.upload._setup_store_and_kwargs", store)
+        result = apply_all_fixes(
+            "s3://source/input.parquet", "s3://destination/output.parquet", {}, profile="prod"
+        )
+        assert result["fixes_applied"] == []
+        assert (bucket / "output.parquet").read_bytes() == payload
+        assert (bucket / "input.parquet").read_bytes() == payload
+        assert seen == ["s3://source/input.parquet", "s3://destination"]
+        assert get_active_s3_config() == outer
 
 
 class TestFixBboxAll:
