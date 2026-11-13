@@ -423,6 +423,13 @@ class TestRestoreSettings:
                 assert _setting(con, "disabled_optimizers") == "statistics_propagation"
                 raise RuntimeError("restore")
         assert _setting(con, "disabled_optimizers") == original
+        with memory_limits.pin_duckdb_settings(con, {"threads": 1}):
+            with pytest.raises(RuntimeError, match="reset"):
+                with memory_limits.pin_duckdb_settings(con, {"threads": None}):
+                    assert int(_setting(con, "threads")) >= 1
+                    raise RuntimeError("reset")
+            assert _setting(con, "threads") == 1
+        assert _setting(con, "threads") == before
 
 
 class TestDisplayedSizeMax:

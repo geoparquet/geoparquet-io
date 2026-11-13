@@ -561,15 +561,19 @@ def _current_setting(con: duckdb.DuckDBPyConnection, key: str) -> object:
 
 
 def _set_setting(con: duckdb.DuckDBPyConnection, key: str, value: object) -> None:
-    if isinstance(value, str):
+    if value is None:
+        con.execute(f"RESET {key}")
+    elif isinstance(value, str):
         con.execute(f"SET {key} = {sql_literal(value)}")
     else:
         con.execute(f"SET {key} = {value}")
 
 
 @contextmanager
-def pin_duckdb_settings(con: duckdb.DuckDBPyConnection, settings: Mapping[str, int | bool | str]):
-    """Hold global settings for one operation, then restore them under the same lock."""
+def pin_duckdb_settings(
+    con: duckdb.DuckDBPyConnection, settings: Mapping[str, int | bool | str | None]
+):
+    """Hold settings for one operation; None selects the engine default, then restore."""
     from geoparquet_io.core.memory_limits import _settings_lock
 
     with _settings_lock:

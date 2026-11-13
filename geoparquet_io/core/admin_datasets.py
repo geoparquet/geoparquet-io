@@ -30,7 +30,6 @@ from geoparquet_io.core.duckdb_utils import (
     orphaned_spill_dirs,
     pin_duckdb_settings,
     quote_identifier,
-    restore_duckdb_settings,
     s3_config_scope,
     spill_directory,
     sql_literal,
@@ -1863,16 +1862,12 @@ def run_admin_join(
             admin_table_ref = dataset.table_reference(source)
         if isinstance(source, _BoundedAdminSource) and not dry_run:
             # Read/simplify before the join's single-thread setting takes effect.
-            threads = fetch_one(con.execute("SELECT current_setting('threads')"))[0]
             bounded_table = f"_gpio_admin_boundaries_{i}"
-            try:
-                con.execute("RESET threads")
+            with pin_duckdb_settings(con, {"threads": None}):
                 with scoped_write_memory_limit(con, memory_limit, verbose):
                     con.execute(
                         f"CREATE TEMP TABLE {bounded_table} AS SELECT * FROM {admin_table_ref}"
                     )
-            finally:
-                restore_duckdb_settings(con, {"threads": threads})
             admin_table_ref = bounded_table
             intermediates.append(bounded_table)
         query = build_admin_join_query(
