@@ -215,8 +215,8 @@ def test_a_gpio_error_arrives_sanitized():
 
     import time
 
-    # Batches exceed two 15.6 ms clock ticks; minima reduce scheduling noise.
-    # Eight times the input permits 20x cost; quadratic matching costs ~64x.
+    # Calibrate to 50 ms; five batch minima reduce clock and scheduling noise.
+    # At 32x input, 180x separates linear (~32x) from quadratic (~1024x).
     for make_text in (
         lambda n: "x" * n,
         lambda n: "https://" + "@=" * n + "PRIVATE@host/x",
@@ -235,15 +235,15 @@ def test_a_gpio_error_arrives_sanitized():
         count = 1
         for _ in range(8):
             elapsed = batch(small, count)
-            if elapsed >= 0.032 or count == 4096:
+            if elapsed >= 0.05 or count == 4096:
                 break
-            count = min(4096, int(count * 0.032 / elapsed) + 1 if elapsed else 2 * count)
+            count = min(4096, int(count * 0.05 / elapsed) + 1 if elapsed else 2 * count)
         timings = [
-            min(batch(make_text(size), count) for _ in range(2)) / count
-            for size in (4096, 8 * 4096)
+            min(batch(make_text(size), calls) for _ in range(5)) / calls
+            for size, calls in ((4096, count), (32 * 4096, max(1, (count + 31) // 32)))
         ]
         assert timings[0] > 0, f"zero redaction baseline: {timings}"
-        assert timings[1] < 20 * timings[0], f"nonlinear redaction: {timings}"
+        assert timings[1] < 180 * timings[0], f"nonlinear redaction: {timings}"
 
     assert clean_error_text("x" * (3 * 1024 * 1024)) == "x" * (3 * 1024 * 1024)
 
