@@ -734,7 +734,10 @@ class TestStreamIO:
                 field = pq.ParquetFile(dest).schema.column(1)
                 assert "Geometry" in str(field.logical_type), (transform, stdin, version)
                 assert field.name == "geometry"
-                assert pq.ParquetFile(dest).metadata.row_group(0).column(1).statistics is not None
+                column = pq.ParquetFile(dest).metadata.row_group(0).column(1)
+                assert column.is_geo_stats_set
+                stats = column.geo_statistics
+                assert (stats.xmin, stats.ymin, stats.xmax, stats.ymax) == (1, 2, 1, 2)
             if stdout or version != "1.1-geoarrow":
                 expected = [wkb, None, None] if native and malformed else values
                 assert dict(
