@@ -242,6 +242,8 @@ def test_shapefile_zip_contains_every_sidecar(tmp_path):
 
 def _reader_snapshot(path):
     """Compare reader-visible declarations and ordered features, not SQLite pages."""
+    from pyproj import CRS
+
     from geoparquet_io.core.duckdb_utils import get_duckdb_connection, quote_identifier, sql_path
 
     with closing(get_duckdb_connection(load_spatial=True)) as con:
@@ -257,6 +259,13 @@ def _reader_snapshot(path):
         ]
         rows = con.sql(f"SELECT {', '.join(columns)} FROM {relation}").fetchall()
         layers = con.sql(f"SELECT layers FROM ST_Read_Meta({sql_path(path)})").fetchall()
+    for (file_layers,) in layers:
+        for layer in file_layers:
+            for field in layer["geometry_fields"]:
+                crs = field["crs"]
+                if crs["projjson"]:
+                    # GDAL's WKT1 expansion may use a datum or a datum ensemble.
+                    crs["projjson"] = CRS.from_json(crs["projjson"])
     sqlite = {}
     if path.suffix == ".gpkg":
         with closing(sqlite3.connect(path)) as db:
@@ -355,3 +364,43 @@ def test_staged_and_direct_exports_are_reader_equivalent(with_geo, tmp_path, mon
                         format_writers.write_gdal_format(str(with_geo), str(out), fmt, **kwargs)
                 outputs.append(out.read_bytes() if fmt == "csv" else _reader_snapshot(out))
             assert outputs[0] == outputs[1], (fmt, filtered)
+
+
+def test_reader_snapshot_compares_projjson_as_a_crs(with_geo, tmp_path, monkeypatch):
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    from pyproj import CRS
+
+    from geoparquet_io.core import duckdb_utils
+
+    out = tmp_path / "features.fgb"
+    assert _run("flatgeobuf", with_geo, out).exit_code == 0
+    expected = _reader_snapshot(out)
+    layers = deepcopy(expected[2])
+    crs = layers[0][0][0]["geometry_fields"][0]["crs"]
+    # GDAL can expand the same WKT1 WGS84 into a datum or a datum ensemble.
+    crs["projjson"] = CRS.from_wkt(crs["wkt"]).to_json()
+    factory = duckdb_utils.get_duckdb_connection
+
+    class MetadataConnection:
+        def __init__(self, con):
+            self.con = con
+
+        def __getattr__(self, name):
+            return getattr(self.con, name)
+
+        def sql(self, query):
+            if "SELECT layers FROM ST_Read_Meta" in query:
+                return SimpleNamespace(fetchall=lambda: deepcopy(layers))
+            return self.con.sql(query)
+
+    monkeypatch.setattr(
+        duckdb_utils,
+        "get_duckdb_connection",
+        lambda *a, **kw: MetadataConnection(factory(*a, **kw)),
+    )
+    assert _reader_snapshot(out) == expected
+    for different in ("EPSG:3857", "OGC:CRS84"):
+        crs["projjson"] = CRS(different).to_json()
+        assert _reader_snapshot(out) != expected, different
