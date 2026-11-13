@@ -319,6 +319,22 @@ def check_prepared_fixture_identity(tmp_path, monkeypatch):
     from unittest.mock import Mock
 
     assert profile_command.peak_rss_bytes() > 0
+    # Linux rusage can retain the parent's pre-exec high-water mark.
+    with monkeypatch.context() as context:
+        from pathlib import Path
+
+        context.setattr(sys, "platform", "linux")
+        context.setitem(
+            sys.modules,
+            "resource",
+            SimpleNamespace(RUSAGE_SELF=0, getrusage=lambda _: SimpleNamespace(ru_maxrss=500000)),
+        )
+        context.setattr(Path, "read_text", lambda *a, **kw: "Name: python\nVmHWM: 123456 kB\n")
+        assert profile_command.peak_rss_bytes() == 123456 * 1024
+        context.setattr(Path, "read_text", Mock(side_effect=OSError("no procfs")))
+        assert profile_command.peak_rss_bytes() == 500000 * 1024
+        context.setattr(sys, "platform", "darwin")
+        assert profile_command.peak_rss_bytes() == 500000
     monkeypatch.setitem(sys.modules, "resource", None)
     with monkeypatch.context() as context:
         context.setattr(sys, "platform", "win32")

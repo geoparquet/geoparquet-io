@@ -426,6 +426,15 @@ def peak_rss_bytes():
 
         return psutil.Process().memory_info().peak_wset
 
+    if sys.platform.startswith("linux"):
+        # rusage can retain a parent's pre-exec peak; procfs tracks this image.
+        try:
+            for line in Path("/proc/self/status").read_text().splitlines():
+                if line.startswith("VmHWM:"):
+                    return int(line.split()[1]) * 1024
+        except (OSError, ValueError, IndexError):
+            pass
+
     import resource
 
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (
