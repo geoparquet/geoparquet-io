@@ -862,8 +862,11 @@ class TestWithheldVerdictReachesEverySurface:
 
         from geoparquet_io.api.table import Table
 
+        # `options` is the shared CheckOptions object (#1436), not a metric
+        # knob: the spec's thresholds stay module constants nothing overrides.
         params = inspect.signature(Table.check_spatial).parameters
-        assert set(params) == {"self", "sample_size", "limit_rows"}
+        assert set(params) == {"self", "sample_size", "limit_rows", "options"}
+        assert not {"query_fraction", "min_efficiency", "efficiency_threshold"} & set(params)
 
 
 class TestBatchFixLeavesUnjudgedSoundFilesAlone:
