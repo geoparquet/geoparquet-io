@@ -318,6 +318,7 @@ def _get_row_count(
     sql = _build_carto_count_query(table_name, where=where, bbox=bbox)
 
     full_url = f"{url}?q={quote(sql)}"
+    debug(f"Request URL: {full_url}")
     if api_key:
         full_url += f"&api_key={quote(api_key)}"
 
@@ -384,6 +385,7 @@ def _carto_sql_json(
         CartoError: On request/parse failure or an API error payload.
     """
     full_url = f"{url}?q={quote(sql)}"
+    debug(f"Request URL: {full_url}")
     if api_key:
         full_url += f"&api_key={quote(api_key)}"
 
@@ -908,6 +910,7 @@ def _fetch_with_retry(
     # Construct full URL with the requested response format
     fmt_param = "GeoJSON" if fmt == "GeoJSON" else "csv"
     full_url = f"{url}?q={quote(sql)}&format={fmt_param}"
+    debug(f"Request URL: {full_url}")
     if api_key:
         full_url += f"&api_key={quote(api_key)}"
 
@@ -916,8 +919,6 @@ def _fetch_with_retry(
         read_expr = f"ST_Read({sql_path(full_url)})"
     else:
         read_expr = f"read_csv_auto({sql_path(full_url)})"
-
-    debug(f"Request URL: {full_url}")
 
     started = time.monotonic()
 
