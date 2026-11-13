@@ -259,6 +259,13 @@ class TestFormatExplainOutput:
         assert "PROJECTION" in output
         assert "PARQUET_SCAN" in output
         assert "Filter pushdown" in output
+        assert "Row groups:" not in output
+
+        parsed["operators"][1]["row_groups"] = (4, 102)
+        output = format_explain_output(parsed, output_format="table")
+        assert "      Row groups: 4/102" in output
+        parsed["operators"][1]["row_groups"] = (0, 0)
+        assert "      Row groups: 0/0" in format_explain_output(parsed, output_format="table")
 
     def test_format_json_output(self):
         """Test JSON formatting of explain results."""
@@ -406,7 +413,7 @@ class TestExplainCLI:
         assert result.exit_code == 0
         assert Path(output_path).exists()
 
-        with open(output_path) as f:
+        with open(output_path, encoding="utf-8") as f:
             data = json.load(f)
         assert "operators" in data
 

@@ -55,7 +55,8 @@ from geoparquet_io.core.partition.staging import (
     make_partition_aliases,
     run_partitioned_copy,
 )
-from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file
+from geoparquet_io.core.streaming import is_stdin
+from geoparquet_io.core.write_funnels import read_stdin_to_temp_file
 
 
 def _get_input_file_info(input_parquet, verbose):

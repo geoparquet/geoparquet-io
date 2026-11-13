@@ -7,14 +7,16 @@ import fnmatch
 import functools
 import glob as glob_module
 import os
+import re
 import shutil
 import tempfile
+import time
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path, PurePath
+from typing import BinaryIO
 from urllib.parse import urlsplit
 
-from geoparquet_io.core.duckdb_utils import get_active_s3_config
 from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     GeoParquetError,
@@ -472,12 +474,153 @@ def _publish_sidecars(stage_dir: Path, staged: Path, final: Path, suffixes: Iter
     """Move every file the writer left beside *staged*, and drop the old set's leftovers."""
     published = {part.name for part in stage_dir.iterdir()}
     for sidecar in sorted(stage_dir.iterdir()):
-        if sidecar != staged:
+        if sidecar != staged and sidecar.name != _SPILL_LOCK_NAME:
             os.replace(sidecar, final.parent / sidecar.name)
     for stale in suffixes:
         old = final.parent / f"{final.stem}{stale}"
         if old.name not in published and old != final:
             old.unlink(missing_ok=True)
+
+
+_SPILL_LOCK_NAME = ".gpio-owner.lock"
+
+
+def _spill_lock(path: str) -> BinaryIO | None:
+    """Take a nonblocking ownership lock; None means Windows (no fcntl)."""
+    try:
+        import fcntl
+    except ImportError:
+        return None
+    marker = open(os.path.join(path, _SPILL_LOCK_NAME), "a+b")
+    try:
+        fcntl.flock(marker, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BaseException:
+        marker.close()
+        raise
+    return marker
+
+
+@contextlib.contextmanager
+def _spill_base_lock(base: str | os.PathLike):
+    """Serialize publishing a marker and sweeping on a shared spill volume."""
+    try:
+        import fcntl
+    except ImportError:
+        yield
+        return
+    # Lock the base directory itself: a sidecar lock would outlive every spill
+    # and violate callers' scratch cleanup guarantees. This also works when
+    # the base is read-only (scanning it still must be best effort).
+    descriptor = os.open(base, os.O_RDONLY)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+@contextlib.contextmanager
+def _staging_directory_owner(path: Path, *, wait: bool = True):
+    """Wait for ownership, coordinating directory creation with collectors.
+
+    Never wait while holding the base lock: the current owner may need it to
+    publish a stage. Reopen after contention because that owner can delete the
+    directory (and its marker) before releasing ownership. No-op on Windows.
+    """
+    while True:
+        try:
+            with _spill_base_lock(path.parent):
+                path.mkdir(exist_ok=True)
+                marker = _spill_lock(str(path))
+            break
+        except BlockingIOError:
+            if not wait:
+                raise
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        if marker is not None:
+            marker.close()
+
+
+def _process_is_alive(pid: int) -> bool:
+    """Whether ``pid`` is still running. Answers True whenever it cannot tell.
+
+    Only ever used to decide *not* to delete something, so the unsure answer has
+    to be "alive": a false "dead" would take a running sibling's scratch space
+    away mid-query, while a false "alive" merely leaves one more directory for
+    the next run (or the OS tmp reaper) to collect.
+    """
+    try:
+        import psutil
+
+        return psutil.pid_exists(pid)
+    except Exception:  # psutil is optional on vendored hosts (#1330): unsure means alive
+        return True
+
+
+def sweep_orphaned_dirs(
+    base_dir: str | os.PathLike,
+    candidates: Callable[[], Iterable[tuple[str, int | None]]],
+    minimum_age: float,
+    *,
+    dry_run: bool = False,
+) -> list[str]:
+    """Shared collector: enumerate under the base lock, hold ownership through deletion.
+
+    A None PID means no process identity is available; on Windows these
+    directories have no concurrency protection.
+
+    Probing a marker before taking the base lock can steal it from a creator
+    between open() and flock(), leaving that live creator without protection.
+    """
+    removed = []
+    try:
+        with _spill_base_lock(base_dir):
+            for path, pid in candidates():
+                marker = None
+                try:
+                    directory = Path(path)
+                    if directory.is_symlink() or not directory.is_dir():
+                        continue
+                    if minimum_age and time.time() - directory.stat().st_mtime < minimum_age:
+                        continue
+                    if dry_run and not (directory / _SPILL_LOCK_NAME).is_file():
+                        if pid is None or not _process_is_alive(pid):
+                            removed.append(path)
+                        continue
+                    marker = _spill_lock(path)
+                    if marker is None and pid is not None and _process_is_alive(pid):
+                        continue
+                    if not dry_run:
+                        shutil.rmtree(path)
+                    removed.append(path)
+                except OSError:
+                    continue
+                finally:
+                    if marker is not None:
+                        marker.close()
+    except OSError:
+        pass  # Missing/read-only base: cleanup must not fail the caller.
+    return removed
+
+
+def sweep_orphaned_staging_dirs(base_dir: Path, *, dry_run: bool = False) -> list[str]:
+    """Collect stages older than a day, only while holding their ownership lock.
+
+    Reuse spill ownership across PID namespaces; age alone cannot protect a slow
+    live writer. Legacy stages without an owner identity are left untouched.
+    """
+
+    def candidates() -> Iterator[tuple[str, int]]:
+        return (
+            (str(stage), int(match[1]))
+            for stage in base_dir.glob(".gpio-stage-*")
+            if (match := re.fullmatch(r"\.gpio-stage-(\d+)-[a-z0-9_]{8}", stage.name))
+        )
+
+    return sweep_orphaned_dirs(base_dir, candidates, 24 * 60 * 60, dry_run=dry_run)
 
 
 @contextlib.contextmanager
@@ -487,6 +630,7 @@ def atomic_write(
     *,
     sidecar_suffixes: Iterable[str] | None = None,
     mode_from: str | None = None,
+    reclaim_staging: bool = False,
 ) -> Iterator[str]:
     """The path a write goes to, moved over *destination* once the block succeeds.
 
@@ -516,6 +660,9 @@ def atomic_write(
     stale ``.cpg`` cannot outlive an overwrite. A multi-file publish is atomic
     per file, not as a set.
 
+    ``reclaim_staging`` opts cache writers into age-guarded orphan collection.
+    If the parent cannot be locked, the stage uses the legacy, uncollected name.
+
     A remote destination is yielded as given: there is no local file to rename
     over, and the writer stages and uploads it (``remote_write_context``).
     """
@@ -523,7 +670,24 @@ def atomic_write(
         yield str(destination)
         return
     final = Path(os.path.realpath(destination))
-    stage_dir = Path(tempfile.mkdtemp(prefix=".gpio-stage-", dir=final.parent))
+    # Only cache stages opt into reclamation; ordinary writes retain their old cost.
+    marker = None
+    with contextlib.ExitStack() as locks:
+        owned = False
+        if reclaim_staging:
+            try:
+                locks.enter_context(_spill_base_lock(final.parent))
+                owned = True
+            except OSError:
+                pass  # A writable/searchable directory need not be readable.
+        prefix = f".gpio-stage-{os.getpid()}-" if owned else ".gpio-stage-"
+        stage_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=final.parent))
+        try:
+            if owned:
+                marker = _spill_lock(str(stage_dir))
+        except BaseException:
+            shutil.rmtree(stage_dir, ignore_errors=True)
+            raise
     staged = stage_dir / f"{final.stem}{suffix}"
     try:
         yield str(staged)
@@ -535,6 +699,8 @@ def atomic_write(
         os.replace(staged, final)
     finally:
         shutil.rmtree(stage_dir, ignore_errors=True)
+        if marker is not None:
+            marker.close()
 
 
 def scratch_path(suffix: str = ".parquet", *, prefix: str = "gpio_") -> str:
@@ -705,6 +871,8 @@ def resolve_object_store(url: str) -> tuple[object, str]:
     from geoparquet_io.core.upload import _setup_store_and_kwargs, parse_object_store_url
 
     bucket_url, key = parse_object_store_url(canonical)
+    from geoparquet_io.core.duckdb_utils import get_active_s3_config
+
     s3_config = get_active_s3_config()
     store, _kwargs = _setup_store_and_kwargs(
         bucket_url,

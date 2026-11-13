@@ -1305,7 +1305,7 @@ def strip_nonplanar_edges(
 
 def backfill_derived_stats(
     metadata: dict | None,
-    table: pa.Table,
+    table: pa.Table | QuerySource,
     verbose: bool = False,
 ) -> dict | None:
     """Return a copy of KV ``metadata`` with missing derived geo stats computed.
@@ -1330,9 +1330,24 @@ def backfill_derived_stats(
     The input is never mutated; unparsable ``geo`` values pass through untouched.
     """
 
+    import pyarrow as pa
+
+    from geoparquet_io.core.duckdb_utils import describe_query
+
     def _fill(geo_dict: dict) -> dict:
+        names = (
+            table.column_names
+            if isinstance(table, pa.Table)
+            else [name for name, _ in describe_query(table.con, table.query)]
+        )
         for name, col_meta in (geo_dict.get("columns") or {}).items():
-            if not isinstance(col_meta, dict) or name not in table.column_names:
+            if not isinstance(col_meta, dict) or name not in names:
+                continue
+            if not col_meta.get("geometry_types") and "bbox" not in col_meta:
+                stats = geometry_stats_of(table, name, verbose=verbose)
+                col_meta["geometry_types"] = stats.geometry_types
+                if stats.bbox:
+                    col_meta["bbox"] = stats.bbox
                 continue
             if not col_meta.get("geometry_types"):
                 col_meta["geometry_types"] = geometry_types_of(table, name, verbose=verbose)

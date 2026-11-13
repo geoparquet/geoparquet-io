@@ -72,7 +72,7 @@ CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 EXPECTED_COUNTS = {
     "G1.binary_mb": 0,
     "G1.raw_parquet_copy": 4,
-    "G1.tid251": 8,
+    "G1.tid251": 7,
     "G1.geo_parse": 0,
     "G1.set_memory_limit": 0,
     "G1.sql_escape": 0,
@@ -5438,7 +5438,9 @@ def test_g12_a_star_count_is_rejected(tmp_path):
 def test_g12_the_whitelist_stale_check_reads_the_ast_not_the_text(tmp_path):
     module = tmp_path / "geoparquet_io" / "m.py"
     module.parent.mkdir()
-    module.write_text("# old_helper was here\nNOTE = 'old_helper'\n\ndef kept():\n    pass\n")
+    module.write_text(
+        "# old_helper was here\nNOTE = 'old_helper'\n\ndef kept():\n    pass\n", encoding="utf-8"
+    )
     entries = [("old_helper", "geoparquet_io/m.py"), ("kept", "geoparquet_io/m.py")]
     assert stale_whitelist_entries(tmp_path, entries) == ["geoparquet_io/m.py: old_helper"]
 
@@ -6150,7 +6152,8 @@ def test_cap_owner_only_guard_sees_both_shapes(tmp_path):
         "import duckdb\n"
         "from geoparquet_io.core.duckdb_utils import duckdb_capabilities\n"
         "A = not duckdb_capabilities().core_geometry\n"
-        "B = hasattr(duckdb, 'HTTPException')\n"
+        "B = hasattr(duckdb, 'HTTPException')\n",
+        encoding="utf-8",
     )
     assert cap__owner_only_reads(module, root=tmp_path) == [
         "rogue.py:3 core_geometry",
@@ -6234,7 +6237,8 @@ def test_size_guard_catches_both_patterns(tmp_path):
         "def _parse_size(t):\n    return 1\n\n"
         "def f(con, v):\n    con.execute(f\"SET memory_limit = '{v}'\")\n"
         "import re\nR = re.compile(r'^(\\d+) ([KMG]iB)$')\n"
-        "def _displayed_size_max(t):\n    return t\n"
+        "def _displayed_size_max(t):\n    return t\n",
+        encoding="utf-8",
     )
     assert size__violations(tmp_path) == [
         "rogue.py:2 size parser/formatter",
@@ -6318,7 +6322,8 @@ def test_size_limit_setter_guard_sees_each_spelling(tmp_path):
         "def d(con):\n    con.execute('SET preserve_insertion_order = false')\n"
         'def e(con, key, v):\n    con.execute(f"SET {key} = {v}")\n'
         "def f(con, key, v):\n    _set_setting(con, key, v)\n"
-        "def g(con, v):\n    _set_setting(con, 'preserve_insertion_order', v)\n"
+        "def g(con, v):\n    _set_setting(con, 'preserve_insertion_order', v)\n",
+        encoding="utf-8",
     )
     assert size__all_limit_setters(tmp_path) == {
         "rogue.py:a",
@@ -6555,7 +6560,8 @@ def test_query_guards_catch_new_copies(tmp_path):
         "def col_type(con, src, c):\n"
         '    return con.execute(f"SELECT typeof({c}) FROM {src} LIMIT 1").fetchone()\n\n'
         "def is_geom(t):\n"
-        '    return t.upper() == "GEOMETRY" or t.startswith("GEOMETRY") or "GEOMETRY" in t\n'
+        '    return t.upper() == "GEOMETRY" or t.startswith("GEOMETRY") or "GEOMETRY" in t\n',
+        encoding="utf-8",
     )
     # Near-misses: comparing an owner's answer or a decided label is not a probe.
     (pkg / "clean.py").write_text(
@@ -6565,7 +6571,8 @@ def test_query_guards_catch_new_copies(tmp_path):
         '    a = parsed[0] == "GEOMETRY"\n'
         '    b = native_geo_type(lt) != "GEOMETRY"\n'
         '    c = info["logical_type"] == "Geography"\n'
-        '    return a, b, c, "geometry" in info\n'
+        '    return a, b, c, "geometry" in info\n',
+        encoding="utf-8",
     )
     # The owner's probe functions may spell the probe; any other function there may not.
     (pkg / "core" / "duckdb_utils.py").write_text(
@@ -6578,7 +6585,8 @@ def test_query_guards_catch_new_copies(tmp_path):
         "def duckdb_type_contains_geometry(t):\n"
         '    return "GEOMETRY" in t\n\n'
         "def _wkb(t):\n"
-        '    return t.startswith("GEOMETRY")\n'
+        '    return t.startswith("GEOMETRY")\n',
+        encoding="utf-8",
     )
     assert dict(query__probe_counts(pkg)) == {"pkg/rogue.py": 2, "pkg/core/duckdb_utils.py": 1}
     assert dict(query__native_counts(pkg)) == {

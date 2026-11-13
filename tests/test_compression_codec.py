@@ -813,8 +813,8 @@ _DOCSTRINGS: set[int] = set()
 #: gpio write among them still resolves its codec through the owner.
 JUSTIFIED_CALL_SITES = {
     ("geoparquet_io/core/admin_datasets.py", "codec-literal-arg"): (
-        2,
-        "admin-boundary download caches (default and per-level Overture): ZSTD 3",
+        1,
+        "shared admin-boundary download cache writer: ZSTD 3",
     ),
     ("geoparquet_io/core/partition/staging.py", "codec-literal-arg"): (
         1,

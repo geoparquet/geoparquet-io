@@ -451,6 +451,8 @@
     "scratch_dir",
     "scratch_file",
     "scratch_path",
+    "sweep_orphaned_dirs",
+    "sweep_orphaned_staging_dirs",
     "unlink_released_file",
     "validate_output_path",
     "validate_parquet_extension"
@@ -725,6 +727,7 @@
     "extract_preserved_kv_metadata",
     "open_parquet_writer",
     "read_preserved_kv_metadata",
+    "read_stdin_to_temp_file",
     "rewrite_file_through_funnel",
     "rewrite_footer_kv",
     "table_nonplanar_edges",

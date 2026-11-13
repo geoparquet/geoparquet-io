@@ -232,6 +232,7 @@ def open_bounded_connection(
     load_httpfs: bool | None = None,
     verbose: bool = False,
     preserve_insertion_order: bool = False,
+    temp_directory: str | None = None,
 ) -> duckdb.DuckDBPyConnection:
     """A DuckDB connection for one analysis query, opened inside a memory limit.
 
@@ -267,6 +268,7 @@ def open_bounded_connection(
         threads=threads,
         memory_limit=limit,
         isolated=True,
+        temp_directory=temp_directory,
     )
     try:
         con.execute(f"SET preserve_insertion_order = {str(preserve_insertion_order).lower()}")

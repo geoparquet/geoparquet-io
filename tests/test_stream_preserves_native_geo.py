@@ -4,11 +4,10 @@ Two sites on the pipe path are a plain-pyarrow read or write of a table that
 carries a Parquet ``GEOMETRY``/``GEOGRAPHY`` column:
 
 * ``cli/commands/convert.py`` -- ``gpio convert geoparquet in.parquet -`` writes
-  its result to a scratch file, reads it back with ``pq.read_table`` and puts
-  that table on stdout as an Arrow IPC stream.
-* ``core/streaming.read_stdin_to_temp_file`` -- the other end of the same pipe,
-  materialising an incoming IPC stream to a scratch Parquet file with
-  ``pq.write_table``.
+  its result to a scratch file, reads it back in batches and puts those
+  batches on stdout as an Arrow IPC stream.
+* ``core/write_funnels.read_stdin_to_temp_file`` -- the other end of the same pipe,
+  spooling incoming IPC batches to a scratch Parquet file.
 
 Whether either keeps the geometry column's type depends on nothing in the data
 and everything in the *process*: importing ``geoarrow.pyarrow`` registers the
@@ -146,8 +145,8 @@ def test_convert_to_stdout_closes_the_scratch_file_before_deleting_it(projected_
     The leaked reader is not observable from POSIX -- no descriptor stays open,
     the difference is in how Windows treats a reader the collector has not yet
     reached -- so what can be pinned on every OS is the discipline that keeps
-    the invariant: the scratch file is read through a ``ParquetFile`` that is
-    closed before the stream is written, and never through ``pq.read_table``,
+    the invariant: the scratch file is streamed through a ``ParquetFile`` that is
+    closed before its scratch context deletes it, and never through ``pq.read_table``,
     whose reader is closed whenever it is collected. In-process on purpose: it
     is about handle discipline, not the registration.
     """
@@ -155,7 +154,7 @@ def test_convert_to_stdout_closes_the_scratch_file_before_deleting_it(projected_
     from click.testing import CliRunner
 
     from geoparquet_io.cli.main import cli
-    from geoparquet_io.core import streaming
+    from geoparquet_io.core import file_utils, streaming
 
     events: list[tuple[str, str]] = []
     real_parquet_file = pq.ParquetFile
@@ -166,6 +165,13 @@ def test_convert_to_stdout_closes_the_scratch_file_before_deleting_it(projected_
         return real_read_table(source, *args, **kwargs)
 
     monkeypatch.setattr(pq, "read_table", recording_read_table)
+    real_unlink = file_utils.unlink_released_file
+
+    def recording_unlink(source):
+        events.append(("unlinked", str(source)))
+        return real_unlink(source)
+
+    monkeypatch.setattr(file_utils, "unlink_released_file", recording_unlink)
 
     class RecordingParquetFile(real_parquet_file):
         """Records which file each closed reader was on: the conversion itself
@@ -175,14 +181,23 @@ def test_convert_to_stdout_closes_the_scratch_file_before_deleting_it(projected_
             self._recorded_source = str(source)
             super().__init__(source, *args, **kwargs)
 
+        def read(self, *args, **kwargs):
+            if "gpio_convert_" in self._recorded_source:
+                raise AssertionError("stdout must not materialize the scratch file")
+            return super().read(*args, **kwargs)
+
         def close(self, *args, **kwargs):
             events.append(("closed", self._recorded_source))
             return super().close(*args, **kwargs)
 
     monkeypatch.setattr(pq, "ParquetFile", RecordingParquetFile)
-    monkeypatch.setattr(
-        streaming, "write_arrow_stream", lambda table: events.append(("streamed", ""))
-    )
+
+    def consume(reader):
+        assert isinstance(reader, pa.RecordBatchReader)
+        assert sum(batch.num_rows for batch in reader) > 0
+        events.append(("streamed", ""))
+
+    monkeypatch.setattr(streaming, "write_arrow_stream", consume)
 
     result = CliRunner().invoke(cli, ["convert", "geoparquet", str(projected_conus), "-"])
 
@@ -199,7 +214,13 @@ def test_convert_to_stdout_closes_the_scratch_file_before_deleting_it(projected_
         if kind == "closed" and "gpio_convert_" in source
     ]
     assert scratch_closed_at, f"the scratch file was never read through a closable reader: {events}"
-    assert scratch_closed_at[0] < streamed_at, events
+    scratch_unlinked_at = [
+        i
+        for i, (kind, source) in enumerate(events)
+        if kind == "unlinked" and "gpio_convert_" in source
+    ]
+    assert scratch_unlinked_at, events
+    assert streamed_at < scratch_closed_at[-1] < scratch_unlinked_at[-1], events
 
 
 def test_read_stdin_to_temp_file_keeps_the_native_logical_type(stream_of):
@@ -214,7 +235,7 @@ def test_read_stdin_to_temp_file_keeps_the_native_logical_type(stream_of):
     driver = (
         "import json;"
         "import pyarrow.parquet as pq;"
-        "from geoparquet_io.core.streaming import read_stdin_to_temp_file;"
+        "from geoparquet_io.core.write_funnels import read_stdin_to_temp_file;"
         "schema = pq.ParquetFile(read_stdin_to_temp_file()).schema;"
         "print(json.dumps({schema.column(i).name: "
         "json.loads(schema.column(i).logical_type.to_json()) for i in range(len(schema))}))"

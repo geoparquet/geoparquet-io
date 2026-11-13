@@ -17,20 +17,19 @@ Arrow IPC is used because:
 from __future__ import annotations
 
 import sys
+from contextlib import contextmanager
 
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.ipc as ipc
 
 from geoparquet_io.core.edges import EDGES, geoarrow_edge_type
-from geoparquet_io.core.geo_metadata import (
-    backfill_derived_stats,
-    prune_geo_metadata_to_columns,
-)
-from geoparquet_io.core.logging_config import debug
 
 # Marker for stdin/stdout in CLI arguments
 STREAM_MARKER = "-"
+
+# Shared cap for IPC export and its sequential consumers.
+STREAM_BATCH_ROWS = 4096
 
 # Arrow's plain ``binary`` type uses 32-bit offsets, so the cumulative value
 # bytes of a single array must stay below INT32_MAX (2,147,483,647). geoarrow's
@@ -109,21 +108,32 @@ def validate_output(output_path: str | None) -> None:
         warn("Writing binary Arrow IPC data to terminal...")
 
 
-def read_arrow_stream() -> pa.Table:
+def read_arrow_stream() -> pa.RecordBatchReader:
     """
     Read an Arrow IPC stream from stdin.
 
     Returns:
-        PyArrow Table with all data from the stream
+        Single-use PyArrow reader; the caller drains and closes it
 
     Raises:
         StreamingError: If stdin is a terminal or stream is invalid
     """
     validate_stdin()
+    with _arrow_stream_errors():
+        return ipc.RecordBatchStreamReader(sys.stdin.buffer)
+
+
+def _arrow_stream_batches(reader):
+    with _arrow_stream_errors():
+        yield from reader
+
+
+@contextmanager
+def _arrow_stream_errors():
+    """Give header and deferred batch failures the same stdin diagnostic."""
     try:
-        reader = ipc.RecordBatchStreamReader(sys.stdin.buffer)
-        return reader.read_all()
-    except pa.ArrowInvalid as e:
+        yield
+    except (pa.ArrowInvalid, OSError) as e:
         error_msg = str(e)
         if "null or length 0" in error_msg:
             raise StreamingError(
@@ -141,7 +151,7 @@ def read_arrow_stream() -> pa.Table:
         ) from e
 
 
-def write_arrow_stream(table: pa.Table) -> None:
+def write_arrow_stream(table: pa.Table | pa.RecordBatchReader) -> None:
     """
     Write a PyArrow Table as Arrow IPC stream to stdout.
 
@@ -149,8 +159,14 @@ def write_arrow_stream(table: pa.Table) -> None:
         table: PyArrow Table to write
     """
     writer = ipc.RecordBatchStreamWriter(sys.stdout.buffer, table.schema)
-    writer.write_table(table)
-    writer.close()
+    try:
+        if isinstance(table, pa.Table):
+            writer.write_table(table)
+        else:
+            for batch in table:
+                writer.write_batch(batch)
+    finally:
+        writer.close()
 
 
 def apply_metadata_to_table(table: pa.Table, metadata: dict | None) -> pa.Table:
@@ -167,60 +183,6 @@ def apply_metadata_to_table(table: pa.Table, metadata: dict | None) -> pa.Table:
     if not metadata:
         return table
     return table.replace_schema_metadata(metadata)
-
-
-def read_stdin_to_temp_file(verbose: bool = False) -> str:
-    """
-    Read Arrow IPC stream from stdin and write to a temporary parquet file.
-
-    This is a shared utility for commands that need file-based processing
-    but want to support stdin input. The caller is responsible for cleanup.
-
-    The stream's ``geo`` metadata is reconciled with the stream's own schema
-    before the temp file is written: entries naming a column the stream does not
-    carry are dropped, then any derived stat left out is computed from the rows.
-    gpio's own producers now carry ``geometry_types``, but a stream can come from
-    anywhere, and DuckDB refuses to open a Parquet file whose ``geo`` metadata
-    declares a geometry column without it — so closing both gaps here is what
-    keeps a pipe readable by the file-based command on the other end (#722).
-
-    Args:
-        verbose: Whether to print verbose output
-
-    Returns:
-        Path to the temporary parquet file. Caller must delete after use.
-    """
-    # Registers the GeoArrow extension types process-wide, so a geometry column
-    # arriving on the stream as `geoarrow.wkb` is written to the scratch file
-    # with its Parquet GEOMETRY/GEOGRAPHY logical type -- and the CRS inside it --
-    # rather than demoted to plain `binary`. That scratch file is the witness the
-    # write facade then reads the output's version and CRS from (#993), so it has
-    # to be lossless with respect to the stream. The registration is global, which
-    # is why it happens here rather than being relied on (#1006).
-    import geoarrow.pyarrow  # noqa: F401
-    import pyarrow.parquet as pq
-
-    from geoparquet_io.core.file_utils import scratch_path
-
-    if verbose:
-        debug("Reading Arrow IPC stream from stdin...")
-
-    table = read_arrow_stream()
-
-    metadata = dict(table.schema.metadata) if table.schema.metadata else None
-    if metadata:
-        metadata = prune_geo_metadata_to_columns(metadata, table.column_names)
-        table = table.replace_schema_metadata(backfill_derived_stats(metadata, table, verbose))
-
-    # The caller holds the spool and removes it (file_utils.unlink_released_file).
-    temp_path = scratch_path(prefix="gpio_stdin_")
-
-    pq.write_table(table, temp_path)
-
-    if verbose:
-        debug(f"Wrote {table.num_rows} rows to temporary file: {temp_path}")
-
-    return temp_path
 
 
 def _wkb_chunk_data_nbytes(arr: pa.Array) -> int:

@@ -88,25 +88,105 @@ class TestWriteStrategyFactory:
 class TestAtomicWrite:
     """Tests for atomic_write context manager."""
 
-    def test_successful_write(self):
-        """Successful write atomically renames file."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            output_path = Path(tmpdir) / "output.parquet"
+    def test_successful_write_and_orphan_cleanup(self, tmp_path, monkeypatch):
+        """A killed writer is collectable after aging; a live writer never is (#1149)."""
+        import os
+        import subprocess
+        import time
+        from textwrap import dedent
 
-            with atomic_write(str(output_path)) as temp_path:
-                Path(temp_path).write_text("test content")
+        from geoparquet_io.core import admin_datasets, file_utils
 
-            assert output_path.exists()
-            assert output_path.read_text() == "test content"
+        script = """
+    import sys, time
+    from pathlib import Path
+    from geoparquet_io.core.file_utils import atomic_write
+    with atomic_write(sys.argv[1], reclaim_staging=True) as staged:
+        Path(staged).write_bytes(b'partial')
+        print(staged, flush=True)
+        time.sleep(60)
+    """
+        proc = subprocess.Popen(
+            [sys.executable, "-c", dedent(script), str(tmp_path / "killed.parquet")],
+            stdout=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            stage = Path(proc.stdout.readline().strip()).parent
+            assert stage.is_dir()
+            old = time.time() - 2 * 24 * 60 * 60
+            os.utime(stage, (old, old))
+            assert file_utils.sweep_orphaned_staging_dirs(tmp_path) == []
+            proc.kill()
+            proc.wait(timeout=10)
+            # Reaping alone cannot prevent PID reuse on a host without locks.
+            real_check = file_utils._process_is_alive
+            monkeypatch.setattr(
+                file_utils, "_process_is_alive", lambda pid: pid != proc.pid and real_check(pid)
+            )
+            # A fresh abandoned stage waits for the age guard.
+            os.utime(stage, None)
+            assert file_utils.sweep_orphaned_staging_dirs(tmp_path) == []
+            os.utime(stage, (old, old))
+            monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
+            # Without locks or psutil, even a reaped writer must be kept.
+            with monkeypatch.context() as windows:
+                windows.setattr(file_utils, "_spill_lock", lambda path: None)
+                windows.setattr(file_utils, "_process_is_alive", lambda pid: True)
+                assert file_utils.sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == []
+                assert admin_datasets.clear_cache(confirm=True)["staging_dirs_deleted"] == 0
+                assert stage.exists()
+
+            assert file_utils.sweep_orphaned_staging_dirs(tmp_path, dry_run=True) == [str(stage)]
+            assert stage.exists(), "pricing must not delete an abandoned stage"
+            # Exercise collection without fcntl on every platform as well.
+            monkeypatch.setattr(file_utils, "_spill_lock", lambda path: None)
+            result = admin_datasets.clear_cache(confirm=True)
+            assert result["staging_dirs_deleted"] == 1
+            assert result["staging_bytes_freed"] == len(b"partial")
+            assert not stage.exists()
+            assert not (tmp_path / "killed.parquet").exists()
+            with atomic_write(str(tmp_path / "killed.parquet")) as staged:
+                Path(staged).write_bytes(b"complete")
+            assert (tmp_path / "killed.parquet").read_bytes() == b"complete"
+            assert sorted(p.name for p in tmp_path.iterdir()) == ["killed.parquet"]
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=10)
+            proc.stdout.close()
 
     def test_failed_write_cleanup(self):
         """Failed write cleans up temp file."""
+        import shutil
+        from unittest.mock import patch
+
+        import geoparquet_io.core.file_utils as fu
+
+        # Ordinary writes must not require a readable parent or sweep its entries.
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "output.parquet"
+            with (
+                patch.object(fu, "_spill_base_lock", side_effect=PermissionError("0300")) as lock,
+                patch.object(fu.os, "open", wraps=fu.os.open) as opened,
+                patch.object(fu.os, "scandir", wraps=fu.os.scandir) as scanned,
+                patch.object(Path, "glob", side_effect=AssertionError("parent sweep")),
+            ):
+                with atomic_write(str(output_path)) as staged:
+                    Path(staged).write_bytes(b"complete")
+                # Main's only os.open is rmtree's fd-based cleanup, where supported.
+                assert opened.call_count == int(shutil.rmtree.avoids_symlink_attacks)
+                assert lock.call_count == 0
+                assert all(str(call.args[0]) != tmpdir for call in scanned.call_args_list)
+                with atomic_write(str(output_path), reclaim_staging=True) as staged:
+                    assert not Path(staged).parent.name.split("-")[-2].isdigit()
+                    Path(staged).write_bytes(b"complete")
+            assert output_path.read_bytes() == b"complete"
+            output_path.unlink()
 
             with pytest.raises(RuntimeError):
                 with atomic_write(str(output_path)) as temp_path:
-                    Path(temp_path).write_text("partial")
+                    Path(temp_path).write_text("partial", encoding="utf-8")
                     raise RuntimeError("Simulated failure")
 
             assert not output_path.exists()

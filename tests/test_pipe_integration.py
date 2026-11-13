@@ -270,7 +270,7 @@ class TestStdinToNamedGeoJsonOutput:
 
         assert result.returncode == 0, f"Pipeline failed: {result.stderr}"
 
-        data = json.loads(output.read_text())
+        data = json.loads(output.read_text(encoding="utf-8"))
         assert data["type"] == "FeatureCollection"
         assert len(data["features"]) == 5
         assert all(f["geometry"] is not None for f in data["features"])
@@ -291,7 +291,7 @@ class TestStdinToNamedGeoJsonOutput:
         )
 
         assert result.returncode == 0, f"Pipeline failed: {result.stderr}"
-        assert json.loads(output.read_text())["type"] == "FeatureCollection"
+        assert json.loads(output.read_text(encoding="utf-8"))["type"] == "FeatureCollection"
 
     @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
     def test_stdin_to_named_file_with_bbox_and_id_field(self, tmp_path):
@@ -314,7 +314,7 @@ class TestStdinToNamedGeoJsonOutput:
 
         assert result.returncode == 0, f"Pipeline failed: {result.stderr}"
 
-        data = json.loads(output.read_text())
+        data = json.loads(output.read_text(encoding="utf-8"))
         assert data["type"] == "FeatureCollection"
         assert len(data["features"]) == 5
         for feature in data["features"]:
@@ -530,20 +530,136 @@ class TestStdinWithoutGeometryTypes:
         assert pq.read_table(output_file).num_rows > 0
 
     @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
-    def test_sort_quadkey_from_stdin(self, tmp_path, output_file):
+    @pytest.mark.parametrize("carry_geo", [True, False])
+    @pytest.mark.parametrize(
+        "command",
+        [
+            ["extract"],
+            ["add", "bbox", "--bbox-name", "new_bbox"],
+            ["add", "geometry-metrics"],
+            ["add", "quadkey"],
+            ["add", "h3"],
+            ["add", "s2"],
+            ["add", "a5"],
+            ["add", "kdtree"],
+            ["sort", "hilbert"],
+            ["sort", "str"],
+            ["sort", "quadkey"],
+            ["sort", "column"],
+            ["convert", "reproject", "--dst-crs", "EPSG:3857"],
+            ["convert", "geojson"],
+            ["partition", "string", "--column", "group", "--skip-analysis"],
+            ["partition", "kdtree", "--partitions", "2", "--skip-analysis"],
+            [
+                "partition",
+                "quadkey",
+                "--resolution",
+                "4",
+                "--skip-analysis",
+                "--force",
+                "--partition-resolution",
+                "2",
+            ],
+            ["partition", "h3", "--resolution", "2", "--skip-analysis", "--force"],
+            ["partition", "s2", "--level", "2", "--skip-analysis", "--force"],
+            ["partition", "a5", "--resolution", "2", "--skip-analysis", "--force"],
+            [
+                "partition",
+                "admin",
+                "--dataset",
+                "overture",
+                "--levels",
+                "country",
+                "--skip-analysis",
+                "--force",
+            ],
+        ],
+    )
+    def test_sort_quadkey_from_stdin(self, tmp_path, command, carry_geo, monkeypatch):
         stream = _stream_without_geometry_types(tmp_path / "nogt.arrows")
-        with open(stream, "rb") as fh:
-            result = subprocess.run(
-                ["gpio", "sort", "quadkey", "-", output_file],
-                stdin=fh,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
+        import pyarrow.ipc as ipc
 
+        with ipc.open_stream(stream.read_bytes()) as reader:
+            table = reader.read_all()
+        table = table.append_column("group", pa.array(["one"] * table.num_rows))
+        if not carry_geo:
+            table = pa.table(
+                {
+                    name: column.cast(pa.binary()) if name == "geometry" else column
+                    for name, column in zip(table.column_names, table.columns, strict=True)
+                }
+            )
+        with ipc.new_stream(stream, table.schema) as writer:
+            writer.write_table(table)
+        output_file = str(
+            tmp_path / ("output.geojson" if command == ["convert", "geojson"] else "output.parquet")
+        )
+        if command[:2] == ["partition", "admin"]:
+            from click.testing import CliRunner
+
+            from geoparquet_io.cli.main import cli
+            from geoparquet_io.core.admin_datasets import AdminDatasetFactory, OvertureAdminDataset
+            from geoparquet_io.core.duckdb_utils import get_duckdb_connection
+            from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+
+            admin = str(tmp_path / "admin.parquet")
+            with get_duckdb_connection(load_spatial=True, load_httpfs=False) as con:
+                write_parquet_with_metadata(
+                    con,
+                    "SELECT 'country' subtype, 'XX' country, NULL::VARCHAR region, "
+                    "ST_MakeEnvelope(-179, -89, 179, 89) geometry, "
+                    "{'xmin': -179.0, 'ymin': -89.0, 'xmax': 179.0, 'ymax': 89.0} bbox",
+                    admin,
+                )
+            monkeypatch.setattr(
+                AdminDatasetFactory,
+                "create",
+                staticmethod(lambda *a, **k: OvertureAdminDataset(source_path=admin)),
+            )
+            invoked = CliRunner().invoke(
+                cli, [*command, "-", output_file], input=stream.read_bytes()
+            )
+            result = subprocess.CompletedProcess(
+                command, invoked.exit_code, stderr=invoked.output + repr(invoked.exception)
+            )
+        else:
+            with open(stream, "rb") as fh:
+                result = subprocess.run(
+                    [
+                        "gpio",
+                        *command,
+                        "-",
+                        output_file,
+                        *(["name"] if command == ["sort", "column"] else []),
+                    ],
+                    stdin=fh,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+
+        # These file-based paths also reject untyped WKB on the reference build.
+        if not carry_geo and (
+            command[:2] == ["convert", "reproject"]
+            or command[:2]
+            in (
+                ["partition", "h3"],
+                ["partition", "s2"],
+                ["partition", "a5"],
+                ["partition", "admin"],
+            )
+        ):
+            assert result.returncode != 0
+            assert "BLOB" in result.stderr
+            return
         assert result.returncode == 0, result.stderr
         assert "Traceback (most recent call last)" not in result.stderr
-        assert pq.read_table(output_file).num_rows > 0
+        if command == ["convert", "geojson"]:
+            import json
+
+            assert len(json.loads(Path(output_file).read_text(encoding="utf-8"))["features"]) == 766
+        else:
+            assert pq.read_table(output_file).num_rows == 766
 
 
 class TestZeroRowStreams:

@@ -609,7 +609,7 @@ def partition_index(
         partition_by_column,
         raise_if_no_rows,
     )
-    from geoparquet_io.core.streaming import read_stdin_to_temp_file
+    from geoparquet_io.core.write_funnels import read_stdin_to_temp_file
 
     write = write or WriteOptions()
     validate_partition_arguments(spec, resolution, partition_resolution, auto)
