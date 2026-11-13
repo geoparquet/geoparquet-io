@@ -252,6 +252,18 @@ def test_non_url_text_is_preserved(text, kept):
     from geoparquet_io.core.exceptions import clean_error_text
 
     assert clean_error_text(text) == kept
+    for raw in (
+        'password="prefix,SUPERSECRETKEY123"',
+        'Authorization: "Bearer SECRET"',
+        'password="prefix SECRET with spaces"',
+        "password='prefix SECRET, with spaces'",
+        'password="prefix SECRET with no closing quote',
+        "password='prefix SECRET with no closing quote",
+        "Authorization: Bearer SECRET",
+        "Authorization: Basic SECRET",
+    ):
+        prefix = raw.split("=", 1)[0] + "=" if "=" in raw else "Authorization: "
+        assert clean_error_text(raw) == prefix + "***"
     for name in (
         "api_key",
         "api-key",
