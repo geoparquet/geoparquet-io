@@ -6980,6 +6980,11 @@ def test_all_sort_commands_use_the_sort_owner():
             "validate_profile_for_urls",
         }, filename
 
+    runner = ast.parse((PACKAGE / "core" / "sort_common.py").read_text())
+    assert not any(
+        isinstance(node, ast.Name) and node.id == "write_parquet_with_metadata"
+        for node in ast.walk(runner)
+    )
     for filename in ("sort_common.py", "write_strategies/duckdb_kv.py"):
         tree = ast.parse((PACKAGE / "core" / filename).read_text())
         assert not any(

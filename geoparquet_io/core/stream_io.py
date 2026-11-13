@@ -254,6 +254,8 @@ def write_output(
     memory_limit: str | None = None,
     *,
     preserve_wkb: bool = False,
+    input_file: str | None = None,
+    invalidate_derived_stats: bool = False,
 ) -> pa.Table | None:
     """
     Execute query and write result to file or stream.
@@ -332,6 +334,8 @@ def write_output(
             extra_kv_metadata,
             memory_limit,
             geometry_column=geometry_column,
+            input_file=input_file,
+            invalidate_derived_stats=invalidate_derived_stats,
         )
         return None
 
@@ -430,6 +434,8 @@ def _write_file_output(
     memory_limit: str | None = None,
     *,
     geometry_column: str | None = None,
+    input_file: str | None = None,
+    invalidate_derived_stats: bool = False,
 ) -> None:
     """Write output to Parquet file.
 
@@ -452,6 +458,8 @@ def _write_file_output(
         geoparquet_version=geoparquet_version,
         extra_kv_metadata=extra_kv_metadata,
         memory_limit=memory_limit,
+        input_file=input_file,
+        invalidate_derived_stats=invalidate_derived_stats,
     )
 
 

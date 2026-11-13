@@ -609,7 +609,7 @@ class TestSortPartitionSchemaMismatch:
         DuckDB calls invalid input must keep its original type and text."""
         parts_dir, _ = places_parts_dir
         boom = duckdb.InvalidInputException("something else entirely")
-        with mock.patch.object(sort_common, "write_parquet_with_metadata", side_effect=boom):
+        with mock.patch.object(sort_common, "write_output", side_effect=boom):
             with pytest.raises(duckdb.InvalidInputException, match="something else entirely"):
                 sort_by_column(str(parts_dir), temp_output_file, "name")
 
@@ -618,7 +618,7 @@ class TestSortPartitionSchemaMismatch:
     ):
         parts_dir, _ = places_parts_dir
         boom = duckdb.InvalidInputException("something else entirely")
-        with mock.patch.object(sort_common, "write_parquet_with_metadata", side_effect=boom):
+        with mock.patch.object(sort_common, "write_output", side_effect=boom):
             with pytest.raises(duckdb.InvalidInputException, match="something else entirely"):
                 sort_by_quadkey(str(parts_dir), temp_output_file)
 

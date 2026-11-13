@@ -41,7 +41,6 @@ from geoparquet_io.core.remote import (
 )
 from geoparquet_io.core.stream_io import open_input, write_output
 from geoparquet_io.core.streaming import is_stdin, read_stdin_to_temp_file, should_stream_output
-from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
 
 @uses_aws_profile
@@ -218,31 +217,19 @@ def run_sort(
                 )
             )
             query, reordered = build_query(con, source, key, verbose, working)
-            if streaming:
-                write_output(
-                    con,
-                    query,
-                    output_path,
-                    original_metadata=metadata,
-                    geometry_column=primary,
-                    preserve_wkb=True,
-                    verbose=verbose,
-                    custom_metadata=custom_metadata,
-                    **write.funnel_kwargs(),
-                )
-            else:
-                write_parquet_with_metadata(
-                    con,
-                    query,
-                    output_path,
-                    original_metadata=metadata,
-                    verbose=verbose,
-                    input_file=input_path,
-                    geometry_info={"primary": primary} if primary else None,
-                    custom_metadata=custom_metadata,
-                    invalidate_derived_stats=is_partition_path(input_path),
-                    **write.funnel_kwargs(),
-                )
+            write_output(
+                con,
+                query,
+                output_path,
+                original_metadata=metadata,
+                geometry_column=primary,
+                preserve_wkb=True,
+                verbose=verbose,
+                custom_metadata=custom_metadata,
+                input_file=input_path if not streaming else None,
+                invalidate_derived_stats=is_partition_path(input_path) if not streaming else False,
+                **write.funnel_kwargs(),
+            )
             if not stream_output:
                 if success_message is not None:
                     success(f"{success_message} to: {output_path}")
