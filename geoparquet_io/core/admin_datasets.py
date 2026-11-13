@@ -42,9 +42,12 @@ from geoparquet_io.core.exceptions import (
     InvalidParameterError,
 )
 from geoparquet_io.core.file_utils import (
+    _spill_base_lock,
+    _staging_directory_owner,
     atomic_write,
     glob_matches,
     has_glob_pattern,
+    sweep_orphaned_dirs,
     sweep_orphaned_staging_dirs,
 )
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
@@ -192,9 +195,15 @@ def _remove_stale_level_caches(cache_dir: Path, version: str, level: str, cache_
             pass  # A cache we cannot delete is not worth failing the run over.
 
     current_parts = cache_dir / f".{cache_path.stem}-parts"
-    for parts in cache_dir.glob(f".overture-*-{level}*-parts"):
-        if parts != current_parts or cache_path.exists():
-            shutil.rmtree(parts, ignore_errors=True)
+    sweep_orphaned_dirs(
+        cache_dir,
+        lambda: (
+            (str(parts), -1)
+            for parts in cache_dir.glob(f".overture-*-{level}*-parts")
+            if parts != current_parts or cache_path.exists()
+        ),
+        minimum_age=0,
+    )
 
 
 def _overture_level_predicate(level: str) -> str | None:
@@ -1288,24 +1297,27 @@ class OvertureAdminDataset(AdminDataset):
             try:
                 for level in self.get_available_levels() if levels is None else levels:
                     cache_path = self.get_cached_path_for_level(level)
-                    # Drop every superseded cache for this level/version so
-                    # renamed keys don't strand ~40MB files in the cache dir.
-                    _remove_stale_level_caches(cache_dir, version, level, cache_path)
+                    parts_dir = cache_path.parent / f".{cache_path.stem}-parts"
+                    with _staging_directory_owner(parts_dir):
+                        # Drop every superseded cache for this level/version so
+                        # renamed keys don't strand ~40MB files in the cache dir.
+                        _remove_stale_level_caches(cache_dir, version, level, cache_path)
 
-                    if cache_path.exists() and cache_path.stat().st_size > 0:
-                        continue
+                        if cache_path.exists() and cache_path.stat().st_size > 0:
+                            with _spill_base_lock(cache_dir):
+                                shutil.rmtree(parts_dir, ignore_errors=True)
+                            continue
 
-                    sweep_orphaned_staging_dirs(cache_dir)
-                    if objects is None:
-                        objects = glob_matches(source) if has_glob_pattern(source) else [source]
-                        if not objects:
-                            raise FileNotFoundGeoParquetError(source, "Overture source objects")
-                    query = self._cache_source_objects(con, level, objects, cache_path)
-                    self._copy_to_cache(con, query, cache_path)
-                    shutil.rmtree(
-                        cache_path.parent / f".{cache_path.stem}-parts", ignore_errors=True
-                    )
-                    info(f"Cached {level} dataset at: {cache_path}")
+                        sweep_orphaned_staging_dirs(cache_dir)
+                        if objects is None:
+                            objects = glob_matches(source) if has_glob_pattern(source) else [source]
+                            if not objects:
+                                raise FileNotFoundGeoParquetError(source, "Overture source objects")
+                        query = self._cache_source_objects(con, level, objects, cache_path)
+                        self._copy_to_cache(con, query, cache_path)
+                        with _spill_base_lock(cache_dir):
+                            shutil.rmtree(parts_dir, ignore_errors=True)
+                        info(f"Cached {level} dataset at: {cache_path}")
             finally:
                 con.close()
 

@@ -519,6 +519,29 @@ def _spill_base_lock(base: str | os.PathLike):
         os.close(descriptor)
 
 
+@contextlib.contextmanager
+def _staging_directory_owner(path: Path):
+    """Wait for ownership, coordinating directory creation with collectors.
+
+    Never wait while holding the base lock: the current owner may need it to
+    publish a stage. Reopen after contention because that owner can delete the
+    directory (and its marker) before releasing ownership. No-op on Windows.
+    """
+    while True:
+        try:
+            with _spill_base_lock(path.parent):
+                path.mkdir(exist_ok=True)
+                marker = _spill_lock(str(path))
+            break
+        except BlockingIOError:
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        if marker is not None:
+            marker.close()
+
+
 def _process_is_alive(pid: int) -> bool:
     """Whether ``pid`` is still running. Answers True whenever it cannot tell.
 

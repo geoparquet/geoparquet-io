@@ -656,6 +656,20 @@ def test_stream_geometry_conversion_and_byte_budget(carrier, monkeypatch):
                 ),
             )
             query = "SELECT * FROM input_wkb"
+        from geoparquet_io.core.geojson_stream import _build_feature_query, _feature_rows
+        from geoparquet_io.core.geometry_detection import create_geometry_view
+
+        # GeoJSON serializes SQL GEOMETRY to JSON before Arrow sees the batch.
+        feature_source = (
+            f"(SELECT ST_GeomFromText(geometry) AS geometry FROM ({query}))"
+            if carrier == "text"
+            else f"({query})"
+        )
+        source = create_geometry_view(con, feature_source, "geometry", "feature_source")
+        features = list(_feature_rows(con, _build_feature_query(source, "geometry", [])))
+        assert [json.loads(value)["geometry"]["coordinates"] for value in features] == (
+            [[1.0, 2.0]] * (1 if carrier == "text" else 6)
+        )
         stream_io.write_output(con, query, "-")
     assert output
     for batch in output:
@@ -677,8 +691,6 @@ class TestWkbByteRebatching:
         arr = pa.array(blobs, type=pa.large_binary())
         assert _wkb_chunk_data_nbytes(arr) == 5
 
-    def test_data_nbytes_empty_array(self):
-        """An empty array has zero value bytes."""
         arr = pa.array([], type=pa.large_binary())
         assert _wkb_chunk_data_nbytes(arr) == 0
 
@@ -696,8 +708,7 @@ class TestWkbByteRebatching:
         rejoined = pa.concat_arrays(slices)
         assert rejoined.to_pylist() == arr.to_pylist()
 
-    def test_split_oversized_single_value(self):
-        """A single value above the budget is emitted alone (no empty slices)."""
+        # A single oversized value still occupies its own nonempty slice.
         arr = pa.array([b"y" * 100, b"z" * 5000, b"y" * 100], type=pa.large_binary())
 
         slices = _split_array_under_byte_limit(arr, max_bytes=1000)
@@ -713,8 +724,7 @@ class TestWkbByteRebatching:
         result = _rebatch_wkb_under_byte_limit(arr, max_bytes=1_000_000)
         assert result is arr
 
-    def test_rebatch_splits_oversized_chunk(self):
-        """Oversized chunks are split while preserving row order and values."""
+        # Oversized chunks split without changing values or row order.
         blobs = [b"q" * 1000 for _ in range(10)]
         arr = pa.chunked_array([pa.array(blobs, type=pa.large_binary())])
 

@@ -1814,6 +1814,70 @@ class TestDownloadPerLevelCachesHousekeeping:
         mock_con.execute.assert_not_called()
         mock_con.close.assert_called_once()
 
+    def test_live_parts_survive_housekeeping_and_finishing_sibling(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+
+        from geoparquet_io.core import admin_datasets, file_utils
+
+        monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: tmp_path)
+        monkeypatch.setattr(admin_datasets, "open_bounded_connection", lambda **kw: MagicMock())
+        dataset = OvertureAdminDataset()
+        monkeypatch.setattr(dataset, "get_version", lambda: "fixture")
+        monkeypatch.setattr(dataset, "get_default_source", lambda: "unused")
+        final = dataset.get_cached_path_for_level("country")
+        final.write_bytes(b"published by sibling")
+        owned = tmp_path / ".overture-old-country-land-parts"
+        owned.mkdir()
+        unowned = tmp_path / ".overture-older-country-land-parts"
+        unowned.mkdir()
+        marker = file_utils._spill_lock(str(owned))
+        try:
+            admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
+            assert owned.exists() == (marker is not None)
+            assert not unowned.exists()
+            dataset._download_per_level_caches(["country"])
+            assert owned.exists() == (marker is not None)
+            assert final.read_bytes() == b"published by sibling"
+        finally:
+            if marker is not None:
+                marker.close()
+        admin_datasets._remove_stale_level_caches(tmp_path, "fixture", "country", final)
+        assert not owned.exists()
+
+        # A waiting builder must re-check the cache after its sibling publishes.
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Event
+
+        parts = tmp_path / f".{final.stem}-parts"
+        parts.mkdir()
+        final.unlink()
+        marker = file_utils._spill_lock(str(parts))
+        waiting = Event()
+        sleep = file_utils.time.sleep
+
+        def wait(seconds):
+            waiting.set()
+            sleep(seconds)
+
+        monkeypatch.setattr(file_utils.time, "sleep", wait)
+        monkeypatch.setattr(dataset, "_cache_source_objects", lambda *args: pytest.fail("rebuild"))
+        if marker is None:  # Windows has no ownership locking.
+            final.write_bytes(b"sibling result")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(dataset._download_per_level_caches, ["country"])
+            try:
+                if marker is not None:
+                    assert waiting.wait(5), "second builder did not wait for ownership"
+                    assert parts.exists()
+                    assert not future.done()
+                    final.write_bytes(b"sibling result")
+            finally:
+                if marker is not None:
+                    marker.close()
+            future.result(timeout=5)
+        assert final.read_bytes() == b"sibling result"
+        assert not parts.exists()
+
     def test_requested_level_retry_preserves_completed_cache_and_objects(
         self, tmp_path, monkeypatch
     ):
@@ -1852,6 +1916,20 @@ class TestDownloadPerLevelCachesHousekeeping:
                 reads.append(path)
                 return original(level, path, extent)
 
+            from geoparquet_io.core.file_utils import _spill_lock
+
+            copy = dataset._copy_to_cache
+
+            def owned_copy(connection, sql, destination):
+                level = "country" if "country" in str(destination) else "region"
+                path = dataset.get_cached_path_for_level(level)
+                parts = path.parent / f".{path.stem}-parts"
+                if os.name != "nt":
+                    with pytest.raises(BlockingIOError):
+                        _spill_lock(str(parts))
+                return copy(connection, sql, destination)
+
+            monkeypatch.setattr(dataset, "_copy_to_cache", owned_copy)
             monkeypatch.setattr(dataset, "_build_level_cache_query", query)
             with pytest.raises(duckdb.Error):
                 dataset.get_source_for_level("country")
