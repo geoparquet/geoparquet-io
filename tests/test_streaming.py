@@ -365,7 +365,10 @@ class TestStreamIO:
         """Test open_input with a file path."""
         import pyarrow.parquet as pq
 
-        from geoparquet_io.core.memory_limits import open_bounded_connection
+        from geoparquet_io.core.memory_limits import (
+            _MATERIALIZED_BYTES_PER_THREAD,
+            open_bounded_connection,
+        )
         from geoparquet_io.core.stream_io import open_input
 
         # Write test file
@@ -385,7 +388,10 @@ class TestStreamIO:
             assert metadata is not None
             assert con is not None
             bounded.assert_called_once_with(
-                load_spatial=True, load_httpfs=False, preserve_insertion_order=True
+                load_spatial=True,
+                load_httpfs=False,
+                preserve_insertion_order=True,
+                per_thread=_MATERIALIZED_BYTES_PER_THREAD,
             )
             assert con.execute("SELECT current_setting('preserve_insertion_order')").fetchall() == [
                 (True,)
@@ -410,7 +416,24 @@ class TestStreamIO:
 
         monkeypatch.setattr(sys, "stdin", mock_stdin)
 
-        with open_input("-") as (source, metadata, is_stream, con):
+        from geoparquet_io.core.memory_limits import (
+            _MATERIALIZED_BYTES_PER_THREAD,
+            open_bounded_connection,
+        )
+
+        with (
+            mock.patch(
+                "geoparquet_io.core.memory_limits.open_bounded_connection",
+                wraps=open_bounded_connection,
+            ) as bounded,
+            open_input("-") as (source, metadata, is_stream, con),
+        ):
+            bounded.assert_called_once_with(
+                load_spatial=True,
+                load_httpfs=False,
+                preserve_insertion_order=True,
+                per_thread=_MATERIALIZED_BYTES_PER_THREAD,
+            )
             assert is_stream is True
             # Source should be a view name for stream input
             assert con.sql(f"SELECT count(*) FROM {source}").fetchall() == [(2,)]
