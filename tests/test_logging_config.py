@@ -180,7 +180,7 @@ class TestSetupCliLogging:
         assert "SECRET" not in output
         assert "HIDDEN" not in output
         assert "ValueError" in output
-        assert "--- Logging error ---" in output
+        assert "logging error (TypeError)" in output
 
     def test_verbose_sets_debug_level(self):
         """verbose=True should set logger to DEBUG level."""
@@ -312,7 +312,7 @@ class TestDynamicStreamHandler:
         assert captured.err, "Expected output to stderr but got nothing"
         assert "Test emit" in captured.err
 
-    def test_emit_exception_handling(self):
+    def test_emit_exception_handling(self, monkeypatch):
         """Test emit handles exceptions (lines 142-143)."""
         handler = DynamicStreamHandler()
         handler.setFormatter(CLIFormatter(use_colors=False))
@@ -335,6 +335,32 @@ class TestDynamicStreamHandler:
 
         # handleError should have been called
         handler.handleError.assert_called_once()
+
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+
+        monkeypatch.setattr(logging, "raiseExceptions", True)
+        for msg, args, tty in (
+            ("GET %s %s", ("https://u:SECRET@h/x?token=HIDDEN",), False),
+            ("failed https://u:SECRET@h/café?token=HIDDEN", (), True),
+            ("failed https://u:SECRET@h/café?token=HIDDEN", (), False),
+        ):
+            stdout = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+            stderr = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+            stdout.isatty = lambda tty=tty: tty
+            handler = DynamicStreamHandler()
+            handler.setFormatter(CLIFormatter(use_colors=False))
+            record = logging.LogRecord("test", logging.WARNING, "", 1, msg, args, None)
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                handler.emit(record)
+            stdout.flush()
+            stderr.flush()
+            output = stdout.buffer.getvalue() + stderr.buffer.getvalue()
+            assert b"SECRET" not in output and b"HIDDEN" not in output
+            expected = b"TypeError" if args else b"UnicodeEncodeError"
+            assert stderr.buffer.getvalue() == b"logging error (" + expected + b")\n"
+            assert record.msg == msg and record.args == args
+            assert logging.raiseExceptions is True
 
 
 class TestCLIFormatterPlainMessage:

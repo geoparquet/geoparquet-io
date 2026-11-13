@@ -138,6 +138,14 @@ class DynamicStreamHandler(logging.StreamHandler):
         except Exception:
             self.handleError(record)
 
+    def handleError(self, record):
+        """Never let logging's failure diagnostics dump a raw shared record."""
+        if logging.raiseExceptions and sys.stderr:
+            try:
+                sys.stderr.write(f"logging error ({type(sys.exc_info()[1]).__name__})\n")
+            except Exception:
+                pass
+
 
 def setup_cli_logging(
     verbose: bool = False, show_timestamps: bool = False, use_colors: bool | None = None
