@@ -8,10 +8,13 @@ boundary datasets with hierarchical level support. Datasets can be local files
 or remote URLs, with automatic caching and error handling.
 """
 
+import hashlib
 import os
+import shutil
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,11 +23,14 @@ import duckdb
 from geoparquet_io.core import duckdb_utils
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import reproject_to_source_sql, transform_geom_sql
+from geoparquet_io.core.duckdb_metadata import get_per_row_group_bbox_stats
 from geoparquet_io.core.duckdb_utils import (
     build_spatial_join_condition,
     build_spatial_join_query,
+    fetch_one,
     get_duckdb_connection,
     orphaned_spill_dirs,
+    pin_duckdb_settings,
     quote_identifier,
     s3_config_scope,
     spill_directory,
@@ -36,6 +42,16 @@ from geoparquet_io.core.exceptions import (
     FileNotFoundGeoParquetError,
     InvalidParameterError,
 )
+from geoparquet_io.core.file_utils import (
+    _SPILL_LOCK_NAME,
+    _spill_base_lock,
+    _staging_directory_owner,
+    atomic_write,
+    glob_matches,
+    has_glob_pattern,
+    sweep_orphaned_dirs,
+    sweep_orphaned_staging_dirs,
+)
 from geoparquet_io.core.geo_metadata import QuerySource, bounds_of
 from geoparquet_io.core.logging_config import debug, info, warn
 from geoparquet_io.core.memory_limits import open_bounded_connection, scoped_write_memory_limit
@@ -45,6 +61,11 @@ from geoparquet_io.core.remote import is_remote_url
 # =============================================================================
 # Cache Configuration
 # =============================================================================
+
+
+class _BoundedAdminSource(str):
+    """SQL relation already filtered and simplified for one input extent."""
+
 
 # Cache age threshold in seconds (6 months)
 CACHE_AGE_THRESHOLD_SECONDS = 6 * 30 * 24 * 60 * 60  # ~180 days
@@ -175,6 +196,17 @@ def _remove_stale_level_caches(cache_dir: Path, version: str, level: str, cache_
         except OSError:
             pass  # A cache we cannot delete is not worth failing the run over.
 
+    current_parts = cache_dir / f".{cache_path.stem}-parts"
+    sweep_orphaned_dirs(
+        cache_dir,
+        lambda: (
+            (str(parts), None)
+            for parts in cache_dir.glob(f".overture-*-{level}*-parts")
+            if parts != current_parts or cache_path.exists()
+        ),
+        minimum_age=0,
+    )
+
 
 def _overture_level_predicate(level: str) -> str | None:
     """The full row predicate for one Overture admin level.
@@ -286,7 +318,7 @@ def spill_dir_bytes(paths: Iterable[Path]) -> int:
     return total
 
 
-def cache_spill_dirs() -> list[Path]:
+def cache_spill_dirs(cache_dir: Path | None = None) -> list[Path]:
     """Leftover spill directories in the admin cache, priced before deletion.
 
     ``gpio add admin-divisions`` and ``gpio partition admin`` spill onto the
@@ -296,20 +328,40 @@ def cache_spill_dirs() -> list[Path]:
     exited are listed; a concurrent run's scratch space is not ours to price or
     delete.
     """
-    return [Path(p) for p in orphaned_spill_dirs(get_cache_dir())]
+    return [
+        Path(p) for p in orphaned_spill_dirs(get_cache_dir() if cache_dir is None else cache_dir)
+    ]
+
+
+def _cache_inventory(cache_dir: Path) -> dict[str, list[Path]]:
+    """The cache entries confirmation prices and cleanup removes."""
+    roots = [cache_dir] + [
+        path
+        for path in cache_dir.glob(".overture-*-parts")
+        if path.is_dir() and not path.is_symlink()
+    ]
+    return {
+        "roots": roots,
+        "files": [path for root in roots for path in root.glob("*.parquet")],
+        "spill_dirs": cache_spill_dirs(cache_dir),
+        "staging_dirs": [
+            Path(path) for root in roots for path in sweep_orphaned_staging_dirs(root, dry_run=True)
+        ],
+    }
 
 
 def clear_cache(confirm: bool = False) -> dict | None:
     """
-    Clear all cached admin datasets, and any spill directories left in the cache.
+    Clear level caches, completed object parts, and abandoned cache scratch.
 
     Args:
         confirm: If True, actually delete files. If False, return without action.
 
     Returns:
         Dictionary with deletion stats: ``files_deleted``/``bytes_freed`` for the
-        cached datasets, ``spill_dirs_deleted``/``spill_bytes_freed`` for the
-        leftovers of interrupted runs. The two are counted apart because a spill
+        cached datasets and object parts, ``spill_dirs_deleted``/``spill_bytes_freed`` for the
+        leftovers of interrupted runs; staging_dirs_deleted/staging_bytes_freed
+        report eligible staging residue. The groups are counted apart because a spill
         directory is not a cached dataset: it is a bug's residue, and saying so
         is the point of reporting it at all.
         Returns None or {"cancelled": True} if confirm is False.
@@ -324,6 +376,8 @@ def clear_cache(confirm: bool = False) -> dict | None:
         "bytes_freed": 0,
         "spill_dirs_deleted": 0,
         "spill_bytes_freed": 0,
+        "staging_dirs_deleted": 0,
+        "staging_bytes_freed": 0,
     }
     if not cache_dir.exists():
         return empty
@@ -331,20 +385,33 @@ def clear_cache(confirm: bool = False) -> dict | None:
     files_deleted = 0
     bytes_freed = 0
 
-    # Only delete .parquet files
-    for cache_file in cache_dir.glob("*.parquet"):
+    entries = _cache_inventory(cache_dir)
+    sizes = {
+        path: spill_dir_bytes([path]) for path in entries["spill_dirs"] + entries["staging_dirs"]
+    }
+    stages = []
+    for root in entries["roots"]:
+        owner = nullcontext() if root == cache_dir else _staging_directory_owner(root, wait=False)
         try:
-            bytes_freed += cache_file.stat().st_size
-            cache_file.unlink()
-            files_deleted += 1
+            with owner:
+                for cache_file in entries["files"]:
+                    if cache_file.parent != root:
+                        continue
+                    try:
+                        size = cache_file.stat().st_size
+                        cache_file.unlink()
+                        bytes_freed += size
+                        files_deleted += 1
+                    except OSError:
+                        pass  # Ignore deletion errors.
+                stages.extend(sweep_orphaned_staging_dirs(root))
+                if root != cache_dir:
+                    with _spill_base_lock(cache_dir):
+                        (root / _SPILL_LOCK_NAME).unlink(missing_ok=True)
+                        root.rmdir()
         except OSError:
-            pass  # Ignore deletion errors
+            pass  # A live owner or inaccessible cache is left for a later run.
 
-    # ...and the spill directories an interrupted run left behind, which the
-    # ``*.parquet`` glob above reported as nothing and deleted nothing of. Price
-    # them first: after the sweep there is nothing left to measure, and only
-    # what the sweep actually removed is counted as freed.
-    sizes = {path: spill_dir_bytes([path]) for path in cache_spill_dirs()}
     removed = sweep_orphaned_spill_dirs(cache_dir)
 
     return {
@@ -352,6 +419,8 @@ def clear_cache(confirm: bool = False) -> dict | None:
         "bytes_freed": bytes_freed,
         "spill_dirs_deleted": len(removed),
         "spill_bytes_freed": sum(sizes.get(Path(path), 0) for path in removed),
+        "staging_dirs_deleted": len(stages),
+        "staging_bytes_freed": sum(sizes.get(Path(path), 0) for path in stages),
     }
 
 
@@ -495,30 +564,35 @@ class AdminDataset(ABC):
             # (todo 013). A private leaf under it, never the cache dir itself:
             # DuckDB's spill filenames carry no connection identity, so two runs
             # sharing this well-known directory overwrite each other's blocks.
-            con = get_duckdb_connection(
+            con = open_bounded_connection(
                 load_spatial=True,
                 load_httpfs=True,
+                memory_limit=self.memory_limit,
+                verbose=self.verbose,
+                preserve_insertion_order=True,
                 temp_directory=spill_directory(cache_path.parent),
             )
             try:
                 # Get read options
                 query = f"SELECT * FROM {self.table_reference(source)}"
 
-                # Write to cache, bounded like every other gpio write (#1156):
-                # the source is a multi-GB remote dataset and this COPY used to
-                # run at DuckDB's own 80%-of-RAM default.
-                # A download cache, not an output: DuckDB's fast ZSTD 3, named
-                # through the owner (#1335) rather than left to DuckDB's SNAPPY.
-                cache_codec = resolve_codec("ZSTD", 3, context="write")
-                with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
-                    con.execute(
-                        f"COPY ({query}) TO {sql_path(cache_path)} "
-                        f"(FORMAT PARQUET, {', '.join(cache_codec.duckdb_copy_options())})"
-                    )
+                self._copy_to_cache(con, query, cache_path)
             finally:
                 con.close()
 
         return cache_path
+
+    def _copy_to_cache(self, con: duckdb.DuckDBPyConnection, query: str, cache_path: Path) -> None:
+        """Publish only complete downloads, with the shared write memory and codec policy."""
+        cache_codec = resolve_codec("ZSTD", 3, context="write")
+        with (
+            atomic_write(str(cache_path), reclaim_staging=True) as staged,
+            scoped_write_memory_limit(con, self.memory_limit, self.verbose),
+        ):
+            con.execute(
+                f"COPY ({query}) TO {sql_path(staged)} "
+                f"(FORMAT PARQUET, {', '.join(cache_codec.duckdb_copy_options())})"
+            )
 
     @abstractmethod
     def get_dataset_name(self) -> str:
@@ -654,6 +728,16 @@ class AdminDataset(ABC):
         if not self.supports_per_level_sources():
             return None
         return self.get_source_for_level(level, no_cache=no_cache)
+
+    def _source_for_join(
+        self,
+        level: str,
+        no_cache: bool,
+        extent: tuple[float, float, float, float] | None,
+        con: duckdb.DuckDBPyConnection | None = None,
+    ) -> tuple[str | None, str]:
+        source = self.source_for_level(level, no_cache=no_cache)
+        return source, self.table_reference(source)
 
     def get_read_parquet_options(self) -> dict:
         """
@@ -971,7 +1055,7 @@ class OvertureAdminDataset(AdminDataset):
     def _is_prefiltered_source(self, source: str | None) -> bool:
         """Whether ``source`` already holds exactly the rows a level selects.
 
-        True for the per-level caches this class produces —
+        True for the bounded inline relations and per-level caches this class produces —
         :meth:`_build_level_cache_query` bakes every filter in, and the cache
         projects only ``bbox``/``country``/``subtype`` (no ``is_land``), so the
         full predicate could not even bind against it — and for a user-supplied
@@ -981,7 +1065,7 @@ class OvertureAdminDataset(AdminDataset):
             return True
         if source is None:
             return False
-        return Path(source).parent == get_cache_dir()
+        return isinstance(source, _BoundedAdminSource) or Path(source).parent == get_cache_dir()
 
     def get_subtype_filter(self, levels: list[str], source: str | None = None) -> str | None:
         """The row filter that selects the requested admin levels.
@@ -1065,7 +1149,9 @@ class OvertureAdminDataset(AdminDataset):
         suffix = f"-{'-'.join(extra)}" if extra else ""
         return cache_dir / f"overture-{version}-{level}{suffix}-land.parquet"
 
-    def _build_level_cache_query(self, level: str, source: str) -> str:
+    def _build_level_cache_query(
+        self, level: str, source: str, extent: tuple[float, float, float, float] | None = None
+    ) -> str:
         """Build the SELECT that produces a non-overlapping per-level cache.
 
         Only land polygons are kept. Overture stores a separate maritime (EEZ)
@@ -1095,12 +1181,14 @@ class OvertureAdminDataset(AdminDataset):
             _overture_country_code_sql() + " AS country" if col == "country" else col
             for col in config["cols"]
         )
-        where = _overture_level_predicate(level)
+        where = f"WHERE {_overture_level_predicate(level)}"
+        if extent is not None:
+            where += f" AND {_admin_bbox_predicate('bbox', extent)}"
         return (
             f"SELECT ST_SimplifyPreserveTopology(geometry, {tol}) as geometry, "
             f"{cols} "
             f"FROM read_parquet({sql_path(source)}, hive_partitioning=1) "
-            f"WHERE {where}"
+            f"{where}"
         )
 
     def get_source_for_level(self, level: str, no_cache: bool = False) -> str:
@@ -1119,11 +1207,73 @@ class OvertureAdminDataset(AdminDataset):
                 warn(age_warning)
             return str(cache_path)
 
-        self._download_per_level_caches()
+        self._download_per_level_caches([level])
         return str(cache_path)
 
-    def _download_per_level_caches(self) -> None:
-        """Download separate country and region cache files.
+    def _source_for_join(
+        self,
+        level: str,
+        no_cache: bool,
+        extent: tuple[float, float, float, float] | None,
+        con: duckdb.DuckDBPyConnection | None = None,
+    ) -> tuple[str | None, str]:
+        if extent is not None and not no_cache and self.source_path is None:
+            cache_path = self.get_cached_path_for_level(level)
+            if not (cache_path.exists() and cache_path.stat().st_size > 0):
+                # A global cache key must never hold only one command's extent.
+                # Read the bounded relation directly, retaining cache simplification.
+                source = self.get_default_source()
+                if self._extent_prunes_most_geometry(source, extent, con):
+                    relation = f"({self._build_level_cache_query(level, source, extent)})"
+                    return _BoundedAdminSource(relation), relation
+        return super()._source_for_join(level, no_cache, extent, con)
+
+    def _extent_prunes_most_geometry(
+        self,
+        source: str,
+        extent: tuple[float, float, float, float],
+        con: duckdb.DuckDBPyConnection | None = None,
+    ) -> bool:
+        """Read inline when two estimated remote scans cost less than one complete scan.
+
+        Compare geometry chunk bytes, not geographic area or row-group counts.
+        Unknown bounds count as fetched; unknown sizes cannot prove savings.
+        """
+        xmin, xmax, ymin, ymax = extent
+        fetched = pruned = 0
+        own_connection = con is None
+        with s3_config_scope(self.get_s3_config()):
+            if con is None:
+                con = get_duckdb_connection(load_spatial=False, load_httpfs=True)
+            try:
+                objects = glob_matches(source) if has_glob_pattern(source) else [source]
+                for obj in objects:
+                    for row in get_per_row_group_bbox_stats(
+                        obj, "bbox", con, geometry_column=self.get_geometry_column()
+                    ):
+                        size = row["geometry_bytes"]
+                        if size is None:
+                            return False
+                        known = all(
+                            row[key] is not None for key in ("xmin", "xmax", "ymin", "ymax")
+                        )
+                        outside = known and (
+                            row["xmin"] > xmax
+                            or row["xmax"] < xmin
+                            or row["ymin"] > ymax
+                            or row["ymax"] < ymin
+                        )
+                        if outside:
+                            pruned += size
+                        else:
+                            fetched += size
+                return pruned > fetched
+            finally:
+                if own_connection:
+                    con.close()
+
+    def _download_per_level_caches(self, levels: Iterable[str] | None = None) -> None:
+        """Download only the requested level caches (all levels for the base fallback).
 
         The full Overture divisions dataset is ~4.5GB with 1M+ rows. We split
         into per-level, land-only files (see :meth:`_build_level_cache_query`)
@@ -1145,35 +1295,61 @@ class OvertureAdminDataset(AdminDataset):
             # Spill onto the cache volume so the remote scan + simplification of
             # the ~4.5GB dataset bounds peak memory rather than OOM-ing (todo
             # 013), into a leaf of its own so concurrent runs cannot collide.
-            con = get_duckdb_connection(
-                load_spatial=True, load_httpfs=True, temp_directory=spill_directory(cache_dir)
+            con = open_bounded_connection(
+                load_spatial=True,
+                load_httpfs=True,
+                memory_limit=self.memory_limit,
+                verbose=self.verbose,
+                preserve_insertion_order=True,
+                temp_directory=spill_directory(cache_dir),
             )
             version = self.get_version()
+            objects = None
             try:
-                for level in self.get_available_levels():
+                for level in self.get_available_levels() if levels is None else levels:
                     cache_path = self.get_cached_path_for_level(level)
-                    # Drop every superseded cache for this level/version so
-                    # renamed keys don't strand ~40MB files in the cache dir.
-                    _remove_stale_level_caches(cache_dir, version, level, cache_path)
+                    parts_dir = cache_path.parent / f".{cache_path.stem}-parts"
+                    with _staging_directory_owner(parts_dir):
+                        # Drop every superseded cache for this level/version so
+                        # renamed keys don't strand ~40MB files in the cache dir.
+                        _remove_stale_level_caches(cache_dir, version, level, cache_path)
 
-                    if cache_path.exists() and cache_path.stat().st_size > 0:
-                        continue
+                        if cache_path.exists() and cache_path.stat().st_size > 0:
+                            with _spill_base_lock(cache_dir):
+                                shutil.rmtree(parts_dir, ignore_errors=True)
+                            continue
 
-                    query = self._build_level_cache_query(level, source)
-                    # Bounded like every other gpio write (#1156): the remote
-                    # scan + simplification of the ~4.5GB Overture dataset used
-                    # to run at DuckDB's own 80%-of-RAM default.
-                    with scoped_write_memory_limit(con, self.memory_limit, self.verbose):
-                        # A download cache, not an output: DuckDB's fast ZSTD 3,
-                        # named explicitly rather than left to DuckDB's default.
-                        cache_codec = resolve_codec("ZSTD", 3, context="write")
-                        con.execute(
-                            f"COPY ({query}) TO {sql_path(cache_path)} "
-                            f"(FORMAT PARQUET, {', '.join(cache_codec.duckdb_copy_options())})"
-                        )
-                    info(f"Cached {level} dataset at: {cache_path}")
+                        sweep_orphaned_staging_dirs(cache_dir)
+                        if objects is None:
+                            objects = glob_matches(source) if has_glob_pattern(source) else [source]
+                            if not objects:
+                                raise FileNotFoundGeoParquetError(source, "Overture source objects")
+                        query = self._cache_source_objects(con, level, objects, cache_path)
+                        self._copy_to_cache(con, query, cache_path)
+                        with _spill_base_lock(cache_dir):
+                            shutil.rmtree(parts_dir, ignore_errors=True)
+                        info(f"Cached {level} dataset at: {cache_path}")
             finally:
                 con.close()
+
+    def _cache_source_objects(
+        self, con: duckdb.DuckDBPyConnection, level: str, objects: list[str], cache_path: Path
+    ) -> str:
+        """Keep each completed object, then assemble the level in source order."""
+        if len(objects) == 1:
+            return self._build_level_cache_query(level, objects[0])
+        parts_dir = cache_path.parent / f".{cache_path.stem}-parts"
+        parts_dir.mkdir(exist_ok=True)
+        sweep_orphaned_staging_dirs(parts_dir)
+        parts = []
+        for index, obj in enumerate(objects):
+            # Immutable release object identity survives a changed listing order.
+            part = parts_dir / f"{hashlib.sha256(obj.encode()).hexdigest()}.parquet"
+            if not (part.exists() and part.stat().st_size > 0):
+                info(f"Caching {level} object {index + 1}/{len(objects)}...")
+                self._copy_to_cache(con, self._build_level_cache_query(level, obj), part)
+            parts.append(sql_path(part))
+        return f"SELECT * FROM read_parquet([{', '.join(parts)}])"
 
     def _download_to_cache(self, cache_path: Path) -> Path:
         """Download per-level caches (called by base class fallback)."""
@@ -1341,6 +1517,18 @@ def _admin_input_extent(
     return None if bbox is None else (bbox[0], bbox[2], bbox[1], bbox[3])
 
 
+def _admin_bbox_predicate(bbox_col: str, extent: tuple[float, float, float, float]) -> str:
+    """Overlap against a CRS84 extent, shared by remote reads and local joins."""
+    xmin, xmax, ymin, ymax = extent
+    q_bbox = quote_identifier(bbox_col)
+    return f"""
+        ({q_bbox}.xmin <= {xmax} AND
+         {q_bbox}.xmax >= {xmin} AND
+         {q_bbox}.ymin <= {ymax} AND
+         {q_bbox}.ymax >= {ymin})
+    """
+
+
 def _admin_where_clause(
     dataset: "AdminDataset",
     levels: list[str],
@@ -1367,13 +1555,7 @@ def _admin_where_clause(
             debug(f"Filtering admin boundaries: {subtype_filter}")
     if admin_bbox_col and extent:
         xmin, xmax, ymin, ymax = extent
-        q_bbox = quote_identifier(admin_bbox_col)
-        clauses.append(f"""
-            ({q_bbox}.xmin <= {xmax} AND
-             {q_bbox}.xmax >= {xmin} AND
-             {q_bbox}.ymin <= {ymax} AND
-             {q_bbox}.ymax >= {ymin})
-        """)
+        clauses.append(_admin_bbox_predicate(admin_bbox_col, extent))
         if verbose:
             debug(
                 "Filtering admin boundaries to input extent: "
@@ -1604,6 +1786,13 @@ class AdminJoinStep:
     target: str | None
     per_level: bool
 
+    @property
+    def source_description(self) -> str:
+        """A single line for status and executable dry-run comments."""
+        if isinstance(self.source, _BoundedAdminSource):
+            return "Overture boundaries within the input extent (uncached)"
+        return str(self.source).replace("\n", " ").replace("\r", " ")
+
 
 def _admin_join_steps(
     dataset: "AdminDataset", levels: list[str]
@@ -1662,6 +1851,9 @@ def run_admin_join(
 
     - reads the input -- ``input_path``, RAW, through :func:`sql_path` -- or,
       after the first step, the previous step's temp table, by its bare name;
+    - uses a warm Overture level cache, or reads a cold level directly with
+      extent pushdown and the cache's simplification, without publishing a
+      partial-coverage global cache;
     - filters the admin side to its levels and to the input's extent, which is
       read once for the whole chain and only when the admin side has a bbox to
       filter on (#480);
@@ -1691,8 +1883,23 @@ def run_admin_join(
     relation = sql_path(input_path)
     intermediates = []
     for i, (step_levels, step_columns) in enumerate(steps):
-        source = dataset.source_for_level(step_levels[0], no_cache=no_cache) or admin_source
-        admin_table_ref = dataset.table_reference(source)
+        if per_level:
+            source, admin_table_ref = dataset._source_for_join(
+                step_levels[0], no_cache, extent, con
+            )
+        else:
+            source = admin_source
+            admin_table_ref = dataset.table_reference(source)
+        if isinstance(source, _BoundedAdminSource) and not dry_run:
+            # Read/simplify before the join's single-thread setting takes effect.
+            bounded_table = f"_gpio_admin_boundaries_{i}"
+            with pin_duckdb_settings(con, {"threads": None}):
+                with scoped_write_memory_limit(con, memory_limit, verbose):
+                    con.execute(
+                        f"CREATE TEMP TABLE {bounded_table} AS SELECT * FROM {admin_table_ref}"
+                    )
+            admin_table_ref = bounded_table
+            intermediates.append(bounded_table)
         query = build_admin_join_query(
             input_relation=relation,
             admin_table_ref=admin_table_ref,
@@ -1719,7 +1926,17 @@ def run_admin_join(
             on_step(step)
         relation = target or relation
         if not dry_run:
-            _run_admin_join_step(con, step, final_step, memory_limit, verbose)
+            settings = {}
+            if isinstance(source, _BoundedAdminSource) and input_bbox_col:
+                # Temp-table stats otherwise erase bbox guards and change the join operator.
+                disabled = fetch_one(con.execute("SELECT current_setting('disabled_optimizers')"))[
+                    0
+                ]
+                settings["disabled_optimizers"] = ",".join(
+                    filter(None, (disabled, "statistics_propagation"))
+                )
+            with pin_duckdb_settings(con, settings):
+                _run_admin_join_step(con, step, final_step, memory_limit, verbose)
             if not last:
                 intermediates.append(relation)
     for table in intermediates:

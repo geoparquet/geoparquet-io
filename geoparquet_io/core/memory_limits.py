@@ -238,6 +238,7 @@ def open_bounded_connection(
     verbose: bool = False,
     preserve_insertion_order: bool = False,
     per_thread: int = _BYTES_PER_THREAD,
+    temp_directory: str | None = None,
 ) -> duckdb.DuckDBPyConnection:
     """A DuckDB connection for one analysis query, opened inside a memory limit.
 
@@ -273,6 +274,7 @@ def open_bounded_connection(
         threads=threads,
         memory_limit=limit,
         isolated=True,
+        temp_directory=temp_directory,
     )
     try:
         con.execute(f"SET preserve_insertion_order = {str(preserve_insertion_order).lower()}")

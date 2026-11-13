@@ -117,7 +117,7 @@ def _invoke(*args: str):
 def test_convert_geojson_file(variant, fixtures, tmp_path):
     out = tmp_path / "out.geojson"
     _invoke("convert", "geojson", str(fixtures[variant]), str(out))
-    _assert_tokyo(*_geojson_centre(out.read_text()))
+    _assert_tokyo(*_geojson_centre(out.read_text(encoding="utf-8")))
 
 
 @pytest.mark.parametrize("variant", VARIANTS)
@@ -127,9 +127,11 @@ def test_convert_geojson_stdin(variant, fixtures, tmp_path):
 
     table = gpio.read(str(fixtures[variant])).to_arrow()
     out = tmp_path / "out.geojson"
-    with patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table):
+    with patch(
+        "geoparquet_io.core.streaming.read_arrow_stream", side_effect=lambda: table.to_reader()
+    ):
         _convert_from_stream(output_path=str(out))
-    _assert_tokyo(*_geojson_centre(out.read_text()))
+    _assert_tokyo(*_geojson_centre(out.read_text(encoding="utf-8")))
 
 
 def _explicit_null_crs_table() -> pa.Table:
@@ -143,15 +145,25 @@ def test_convert_geojson_stdin_warns_once_on_an_explicit_null_crs(tmp_path, capl
     """An explicit ``crs: null`` on stdin is unknown, not lon/lat, so the user is told."""
     from geoparquet_io.core.geojson_stream import _convert_from_stream
 
-    table = _explicit_null_crs_table()
-    with (
-        patch("geoparquet_io.core.streaming.read_arrow_stream", return_value=table),
-        caplog.at_level("WARNING"),
-    ):
-        _convert_from_stream(output_path=str(tmp_path / "a.geojson"), keep_crs=True)
-        _convert_from_stream(output_path=str(tmp_path / "b.geojson"), keep_crs=True)
-    warned = [r for r in caplog.records if r.getMessage().startswith("Input has an explicit null")]
-    assert len(warned) == 1
+    table = _explicit_null_crs_table().set_column(
+        0, "geometry", pa.array([shapely.to_wkb(shapely.box(1, 2, 3, 4))])
+    )
+    for keep_crs in (True, False):
+        caplog.clear()
+        with (
+            patch(
+                "geoparquet_io.core.streaming.read_arrow_stream",
+                side_effect=lambda: table.to_reader(),
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            _convert_from_stream(output_path=str(tmp_path / "a.geojson"), keep_crs=keep_crs)
+            if keep_crs:
+                _convert_from_stream(output_path=str(tmp_path / "b.geojson"), keep_crs=keep_crs)
+        warned = [
+            r for r in caplog.records if r.getMessage().startswith("Input has an explicit null")
+        ]
+        assert len(warned) == 1
 
 
 def test_convert_geojson_keep_crs_does_not_resolve(fixtures, tmp_path):
@@ -160,7 +172,7 @@ def test_convert_geojson_keep_crs_does_not_resolve(fixtures, tmp_path):
     _write_geo_block(src, TM_SQUARE, {"type": "ProjectedCRS", "name": "not a real crs"})
     out = tmp_path / "out.geojson"
     _invoke("convert", "geojson", str(src), str(out), "--keep-crs")
-    x, _ = _geojson_centre(out.read_text())
+    x, _ = _geojson_centre(out.read_text(encoding="utf-8"))
     assert x == pytest.approx(6000.0)
 
 
@@ -354,7 +366,7 @@ def test_table_grid_keys(variant, fixtures):
 def test_table_to_geojson(variant, fixtures, tmp_path):
     out = tmp_path / "out.geojson"
     gpio.read(str(fixtures[variant])).to_geojson(str(out))
-    _assert_tokyo(*_geojson_centre(out.read_text()))
+    _assert_tokyo(*_geojson_centre(out.read_text(encoding="utf-8")))
 
 
 @pytest.mark.parametrize("variant", VARIANTS)

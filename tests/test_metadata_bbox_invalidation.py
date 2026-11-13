@@ -738,7 +738,7 @@ class TestStreamingPathsInvalidateStats:
         captured = {}
 
         def _capture(table):
-            captured["table"] = table
+            captured["table"] = table.read_all()
 
         monkeypatch.setattr(stream_io, "write_arrow_stream", _capture)
         self._stream_extract(src, None, **overrides)
@@ -762,6 +762,9 @@ class TestStreamingPathsInvalidateStats:
         col = geo["columns"][geo["primary_column"]]
         assert col["bbox"] == [1.0, 1.0, 2.0, 2.0], "stdout stream advertises a stale bbox"
         assert col["geometry_types"] == ["Point"]
+        from tests.stream_assertions import assert_stream_geo_matches_head_for_changed_selections
+
+        assert_stream_geo_matches_head_for_changed_selections(monkeypatch)
 
     def test_stdout_stream_prunes_dropped_geometry_column(self, tmp_path, monkeypatch):
         """A projection that drops a secondary geometry column must drop its entry.

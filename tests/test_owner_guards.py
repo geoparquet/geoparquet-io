@@ -72,7 +72,7 @@ CHECK_OWNER_DEFS = REPO / "scripts" / "check_owner_defs.py"
 EXPECTED_COUNTS = {
     "G1.binary_mb": 0,
     "G1.raw_parquet_copy": 4,
-    "G1.tid251": 8,
+    "G1.tid251": 7,
     "G1.geo_parse": 0,
     "G1.set_memory_limit": 0,
     "G1.sql_escape": 0,
