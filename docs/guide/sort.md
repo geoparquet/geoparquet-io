@@ -253,25 +253,6 @@ Column sorting:
 - Preserves all original columns and metadata
 - Useful for time-series data or alphabetical ordering
 
-Column and quadkey sorts also support `--add-bbox` for file and piped input/output.
-The Python sort methods accept `add_bbox=True` to compute the same column.
-
-=== "CLI"
-
-    ```bash
-    gpio sort column input.parquet output-bbox.parquet name --add-bbox
-    gpio sort quadkey input.parquet output-quadkey.parquet --add-bbox
-    ```
-
-=== "Python"
-
-    ```python
-    import geoparquet_io as gpio
-
-    gpio.read('input.parquet').sort_column('name', add_bbox=True).write('output-bbox.parquet')
-    gpio.read('input.parquet').sort_quadkey(add_bbox=True).write('output-quadkey.parquet')
-    ```
-
 ## Multi-File Input
 
 `sort column` and `sort quadkey` read a whole dataset — a directory of GeoParquet

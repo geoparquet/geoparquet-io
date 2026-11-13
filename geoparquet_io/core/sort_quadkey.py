@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from geoparquet_io.core.add.bbox import add_bbox_table
 from geoparquet_io.core.constants import DEFAULT_QUADKEY_COLUMN_NAME
 from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
@@ -26,7 +25,6 @@ def sort_by_quadkey_table(
     resolution: int = get_index_spec("quadkey").default_resolution,
     use_centroid: bool = False,
     remove_quadkey_column: bool = False,
-    add_bbox_flag: bool = False,
 ) -> pa.Table:
     """
     Sort an Arrow Table by quadkey column.
@@ -39,7 +37,6 @@ def sort_by_quadkey_table(
         resolution: Resolution for auto-adding quadkey column (0-23). Default: 13
         use_centroid: Use geometry centroid when auto-adding quadkey column
         remove_quadkey_column: Exclude quadkey column from output after sorting
-        add_bbox_flag: Compute a bbox column
 
     Returns:
         New table sorted by quadkey
@@ -67,7 +64,7 @@ def sort_by_quadkey_table(
 
         query = f"SELECT {select_clause} FROM __input_table ORDER BY {quote_identifier(quadkey_column_name)}"
         result = registered.read_back(con, query, table.schema.metadata)
-        return add_bbox_table(result) if add_bbox_flag else result
+        return result
     finally:
         con.close()
 
@@ -90,7 +87,6 @@ def sort_by_quadkey(
     overwrite: bool = False,
     memory_limit: str | None = None,
     allow_schema_diff: bool = False,
-    add_bbox_flag: bool = False,
 ) -> None:
     """
     Sort a GeoParquet file by quadkey column.
@@ -110,7 +106,6 @@ def sort_by_quadkey(
         resolution: Resolution for auto-adding quadkey column (0-23). Default: 13
         use_centroid: Use geometry centroid when auto-adding quadkey column
         remove_quadkey_column: Exclude quadkey column from output after sorting
-        add_bbox_flag: Add a bbox column when absent
         verbose: Print verbose output
         compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
         compression_level: Compression level (varies by format)
@@ -170,7 +165,7 @@ def sort_by_quadkey(
         build_key=key,
         build_query=query,
         geometry_column=None,
-        add_bbox_flag=add_bbox_flag,
+        add_bbox_flag=False,
         verbose=verbose,
         write=WriteOptions.pick(locals()),
         overwrite=overwrite,

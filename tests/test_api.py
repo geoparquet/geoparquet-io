@@ -603,26 +603,25 @@ FRONT_DOOR_CASES: list[FrontDoorCase] = [
         # The one knob the two doors spell differently: `ops.sort_column(column=)`
         # against `Table.sort_column(column_name=)`. Both must still land on
         # core's `columns`.
-        ops_call=lambda t: ops.sort_column(t, column="name", descending=True, add_bbox=True),
-        table_call=lambda t: t.sort_column(column_name="name", descending=True, add_bbox=True),
-        expected={"columns": "name", "descending": True, "add_bbox_flag": True},
+        ops_call=lambda t: ops.sort_column(t, column="name", descending=True),
+        table_call=lambda t: t.sort_column(column_name="name", descending=True),
+        expected={"columns": "name", "descending": True},
     ),
     FrontDoorCase(
         id="sort_quadkey",
         core_module=core_sort_quadkey,
         core_name="sort_by_quadkey_table",
         ops_call=lambda t: ops.sort_quadkey(
-            t, column_name="qk", resolution=10, use_centroid=True, remove_column=True, add_bbox=True
+            t, column_name="qk", resolution=10, use_centroid=True, remove_column=True
         ),
         table_call=lambda t: t.sort_quadkey(
-            column_name="qk", resolution=10, use_centroid=True, remove_column=True, add_bbox=True
+            column_name="qk", resolution=10, use_centroid=True, remove_column=True
         ),
         expected={
             "quadkey_column_name": "qk",
             "resolution": 10,
             "use_centroid": True,
             "remove_quadkey_column": True,
-            "add_bbox_flag": True,
         },
     ),
     FrontDoorCase(

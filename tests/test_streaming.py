@@ -571,8 +571,6 @@ class TestStreamIO:
             (sort_by_quadkey, {}),
             (hilbert_order, {"add_bbox_flag": True}),
             (str_order, {"add_bbox_flag": True}),
-            (sort_by_column, {"columns": "id", "add_bbox_flag": True}),
-            (sort_by_quadkey, {"add_bbox_flag": True}),
             (extract, {}),
             (extract, {"exclude_cols": "geometry"}),
             (extract, {"exclude_cols": "geometry,secondary"}),
@@ -591,7 +589,7 @@ class TestStreamIO:
 
         caplog.set_level("INFO", logger="geoparquet_io")
         pq.write_table(add_bbox_table(table, bbox_column_name="existing_bounds"), source)
-        for transform, options in transforms[:8]:
+        for transform, options in transforms[:6]:
             if not options.get("add_bbox_flag"):
                 continue
             captured.clear()
@@ -605,7 +603,7 @@ class TestStreamIO:
             ), (transform.__name__, "existing covering")
         collision = table.append_column("bbox", pa.array(["keep"]))
         pq.write_table(collision, source)
-        for transform, options in transforms[:8]:
+        for transform, options in transforms[:6]:
             if not options.get("add_bbox_flag"):
                 continue
             captured.clear()
@@ -638,54 +636,6 @@ class TestStreamIO:
                 assert actual == expected, (transform.__name__, explicit)
                 geom = explicit or "geometry"
                 assert actual["columns"][geom]["covering"]["bbox"]["xmin"] == ["bbox_1", "xmin"]
-
-        from geoparquet_io.api import ops
-        from geoparquet_io.api.table import Table
-
-        for sort in (
-            lambda: ops.sort_column(table, "id", add_bbox=True),
-            lambda: ops.sort_quadkey(table, add_bbox=True),
-            lambda: Table(table).sort_column("id", add_bbox=True).to_arrow(),
-            lambda: Table(table).sort_quadkey(add_bbox=True).to_arrow(),
-        ):
-            assert "bbox" in sort().column_names
-
-        import struct
-
-        unsorted = pa.table(
-            {
-                "geometry": [struct.pack("<BIdd", 1, 1, x, x) for x in (3, 1, 2)],
-            }
-        ).replace_schema_metadata(table.schema.metadata)
-        stale = add_bbox_table(unsorted)
-        stale = stale.set_column(1, "bbox", stale["bbox"].take([1, 2, 0]))
-        for input_table in (unsorted, stale):
-            for result in (
-                ops.sort_column(input_table, "bbox", add_bbox=True),
-                Table(input_table).sort_column("bbox", add_bbox=True).to_arrow(),
-            ):
-                values = result["bbox"].to_pylist()
-                assert values == sorted(values, key=lambda b: tuple(b.values()))
-
-        from click.testing import CliRunner
-
-        from geoparquet_io.cli.main import cli
-
-        for kind in ("column", "quadkey"):
-            args = ["sort", kind, str(source), str(dest)]
-            if kind == "column":
-                args.append("id")
-            result = CliRunner().invoke(cli, [*args, "--add-bbox", "--overwrite"])
-            assert result.exit_code == 0, result.output
-            assert "bbox" in pq.read_schema(dest).names
-
-        monkeypatch.setattr(
-            "geoparquet_io.core.stream_io.read_arrow_stream", lambda table=table: table
-        )
-        captured.clear()
-        sort_by_column("-", "-", columns="bbox", add_bbox_flag=True)
-        assert "bbox" in captured[0].column_names
-        assert captured[0].num_rows == table.num_rows
 
     def test_bare_wkb_sorts_preserve_bytes(self, tmp_path, monkeypatch):
         from contextlib import nullcontext

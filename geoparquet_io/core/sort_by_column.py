@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pyarrow as pa
 
-from geoparquet_io.core.add.bbox import add_bbox_table
 from geoparquet_io.core.column_selection import resolve_columns_against_schema
 from geoparquet_io.core.duckdb_utils import (
     describe_query,
@@ -23,7 +22,6 @@ def sort_by_column_table(
     table: pa.Table,
     columns: str | list[str],
     descending: bool = False,
-    add_bbox_flag: bool = False,
 ) -> pa.Table:
     """
     Sort an Arrow Table by specified column(s).
@@ -34,7 +32,6 @@ def sort_by_column_table(
         table: Input PyArrow Table
         columns: Column name or list of column names to sort by
         descending: Sort in descending order (default: ascending)
-        add_bbox_flag: Compute a bbox column
 
     Returns:
         New table with rows sorted by specified columns
@@ -47,9 +44,6 @@ def sort_by_column_table(
 
     if not column_list:
         raise ValueError("At least one column name must be specified")
-
-    if add_bbox_flag:
-        table = add_bbox_table(table)
 
     # Validate columns exist
     column_list = resolve_columns_against_schema(column_list, table.column_names, "columns")
@@ -92,7 +86,6 @@ def sort_by_column(
     overwrite: bool = False,
     memory_limit: str | None = None,
     allow_schema_diff: bool = False,
-    add_bbox_flag: bool = False,
 ) -> None:
     """
     Sort a GeoParquet file by specified column(s).
@@ -109,7 +102,6 @@ def sort_by_column(
         output_parquet: Path to output file, "-" for stdout, or None for auto-detect
         columns: Column name or comma-separated list of column names to sort by
         descending: Sort in descending order (default: ascending)
-        add_bbox_flag: Add a bbox column when absent
         verbose: Print verbose output
         compression: Compression type (ZSTD, GZIP, BROTLI, LZ4, SNAPPY, UNCOMPRESSED)
         compression_level: Compression level (varies by format)
@@ -158,7 +150,7 @@ def sort_by_column(
         build_key=key,
         build_query=query,
         geometry_column=None,
-        add_bbox_flag=add_bbox_flag,
+        add_bbox_flag=False,
         verbose=verbose,
         write=WriteOptions.pick(locals()),
         overwrite=overwrite,
