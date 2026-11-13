@@ -361,6 +361,8 @@ class TestCLIFormatterPlainMessage:
 
 def test_every_log_level_sanitizes_url_and_query_credentials(caplog):
     messages = [
+        "api_key\x1b[0m=SORTSECRET",
+        "api_key\x00=SORTSECRET",
         "https://example.test/x?api_key=SORTSECRET",
         "https://example.test/x?token=SORTSECRET",
         "https://user:SORTSECRET@example.test/x",

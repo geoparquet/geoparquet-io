@@ -131,9 +131,9 @@ def clean_error_text(text: str) -> str:
     """
     if not text:
         return text
-    text = redact_credentials(text)
     text = _ANSI_ESCAPE.sub("", text)
-    return _CONTROL_CHARS.sub("", text)
+    text = _CONTROL_CHARS.sub("", text)
+    return redact_credentials(text)
 
 
 class GeoParquetError(Exception):
