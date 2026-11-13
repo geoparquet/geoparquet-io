@@ -326,12 +326,6 @@ def fix_bbox_metadata(parquet_file, output_file, verbose=False, profile=None):
     if verbose:
         debug("Adding bbox covering metadata...")
 
-    if is_remote_url(output_file):
-        raise GeoParquetError(
-            "--fix-output must be a local path for a bbox covering metadata fix. "
-            "Write locally, then upload the result."
-        )
-
     # The input is only read: the rewrite goes straight to output_file in one
     # pass (staged beside it when it already exists), so the caller still has
     # its file afterwards and nothing is copied only to be rewritten.

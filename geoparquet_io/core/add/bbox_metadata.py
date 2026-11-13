@@ -302,7 +302,7 @@ def add_bbox_metadata(
         if is_remote_url(path):
             raise GeoParquetError(
                 f"Remote URLs are not supported for in-place metadata modification: {path}\n"
-                "Download the file locally, modify it, then upload."
+                "Use a local --fix-output path; download the input locally, modify it, then upload."
             )
 
     # Refuse a missing input by name before anything reads it. RAW path
