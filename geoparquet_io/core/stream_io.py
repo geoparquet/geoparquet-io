@@ -33,10 +33,9 @@ from geoparquet_io.core.duckdb_utils import (
     get_duckdb_connection,
     query_schema,
     quote_identifier,
-    sql_path,
 )
 from geoparquet_io.core.edges import declared_edges
-from geoparquet_io.core.file_utils import resolve_file_url
+from geoparquet_io.core.file_utils import get_first_parquet_file, is_partition_path
 from geoparquet_io.core.geo_metadata import (
     QuerySource,
     backfill_derived_stats,
@@ -56,6 +55,7 @@ from geoparquet_io.core.parquet_writer import (
     WriteOptions,
     resolve_output_geoparquet_version,
 )
+from geoparquet_io.core.partition.reader import build_read_parquet_expr
 from geoparquet_io.core.remote import needs_httpfs
 from geoparquet_io.core.streaming import (
     STREAM_BATCH_ROWS,
@@ -88,6 +88,7 @@ def open_input(
     *,
     stream_output: bool = False,
     preserve_wkb: bool = False,
+    allow_schema_diff: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """
     Open input source (file or stream) and prepare for DuckDB processing.
@@ -101,6 +102,7 @@ def open_input(
         verbose: Whether to print verbose output
         stream_output: Carry native field descriptions for an IPC producer
         preserve_wkb: Keep stream WKB as stored bytes for operations such as sorting
+        allow_schema_diff: Merge dataset columns by name
 
     Yields:
         Tuple of (source_reference, original_metadata, is_streaming, connection)
@@ -116,7 +118,9 @@ def open_input(
     if is_stdin(path):
         yield from _open_stdin_input(con, verbose, preserve_wkb=preserve_wkb)
     else:
-        yield from _open_file_input(path, con, verbose, stream_output=stream_output)
+        yield from _open_file_input(
+            path, con, verbose, stream_output=stream_output, allow_schema_diff=allow_schema_diff
+        )
 
 
 def _open_stdin_input(
@@ -150,11 +154,11 @@ def _open_file_input(
     verbose: bool,
     *,
     stream_output: bool = False,
+    allow_schema_diff: bool = False,
 ) -> Iterator[tuple[str, dict | None, bool, duckdb.DuckDBPyConnection]]:
     """Handle file-based input."""
     import geoarrow.pyarrow  # noqa: F401 - retain native geo field descriptions
 
-    raw_url = resolve_file_url(path, verbose=verbose)
     file_metadata, schema = get_parquet_metadata(path, verbose=verbose)
 
     created_connection = con is None
@@ -169,9 +173,12 @@ def _open_file_input(
             con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
 
     try:
-        source = f"read_parquet({sql_path(raw_url)})"
+        source = build_read_parquet_expr(path, allow_schema_diff=allow_schema_diff, verbose=verbose)
         if stream_output:
-            file_metadata = _file_stream_metadata(con, source, path, schema, file_metadata)
+            witness = get_first_parquet_file(path) if is_partition_path(path) else path
+            file_metadata = _file_stream_metadata(con, source, witness, schema, file_metadata)
+            if is_partition_path(path):
+                file_metadata = strip_derived_stats(file_metadata)
         yield source, file_metadata, False, con
     finally:
         if created_connection:

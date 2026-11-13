@@ -1080,6 +1080,17 @@ class TestStreamIO:
         from geoparquet_io.core.sort_by_column import sort_by_column
         from geoparquet_io.core.sort_quadkey import sort_by_quadkey
 
+        for sort, kwargs in (
+            (sort_by_column, {"columns": "id"}),
+            (sort_by_quadkey, {"quadkey_column_name": "grp"}),
+        ):
+            output.seek(0)
+            output.truncate()
+            sort(str(source), "-", **kwargs)
+            result = ipc.open_stream(output.getvalue()).read_all()
+            assert geoarrow_type_edges(result.schema.field("geometry").type) == "spherical"
+            assert "4269" in str(crs_of(result))
+
         table = pq.read_table(source)
         monkeypatch.setattr(
             "geoparquet_io.core.streaming.read_arrow_stream", lambda: table.to_reader()

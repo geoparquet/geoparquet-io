@@ -170,12 +170,14 @@ def run_sort(
                     stack.callback(unlink_released_file, working_input)
                 working_input, temp_file = prepare_input(working_input, verbose)
                 stack.callback(unlink_released_file, temp_file)
-            file_source = not streaming or (
-                not is_stdin(working_input) and allow_schema_diff is not None
-            )
+            file_source = not streaming
             context = (
                 open_input(
-                    working_input, verbose=verbose, stream_output=stream_output, preserve_wkb=True
+                    working_input,
+                    verbose=verbose,
+                    stream_output=stream_output,
+                    preserve_wkb=True,
+                    allow_schema_diff=bool(allow_schema_diff),
                 )
                 if not file_source
                 else _file_source(
@@ -191,8 +193,6 @@ def run_sort(
                 working = None
             else:
                 source, metadata, con, working = opened
-                if streaming:
-                    working = None
             described = describe_query(con, f"SELECT * FROM {source}")
             primary = (
                 primary_geometry_column(described, geo=sanitized_carried_geo(metadata))
