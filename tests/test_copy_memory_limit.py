@@ -415,6 +415,14 @@ class TestRestoreSettings:
             with memory_limits.pin_duckdb_settings(con, {"threads; DROP TABLE x": 1}):
                 pytest.fail("invalid setting entered the scope")
         assert _setting(con, "threads") == before
+        original = _setting(con, "disabled_optimizers")
+        with pytest.raises(RuntimeError, match="restore"):
+            with memory_limits.pin_duckdb_settings(
+                con, {"disabled_optimizers": "statistics_propagation"}
+            ):
+                assert _setting(con, "disabled_optimizers") == "statistics_propagation"
+                raise RuntimeError("restore")
+        assert _setting(con, "disabled_optimizers") == original
 
 
 class TestDisplayedSizeMax:

@@ -1588,36 +1588,101 @@ class TestPerLevelJoinKeepsEveryFeatureOnce:
     network access or real cache is involved.
     """
 
-    def test_row_count_preserved(self, tmp_path):
-        import duckdb
+    def test_row_count_preserved(self, tmp_path, monkeypatch):
+        """Bounded and full-level joins agree across levels, policies and CRS."""
+        from geoparquet_io.core import admin_datasets as ad
 
-        from geoparquet_io.core.add.admin_divisions import add_admin_divisions_multi
-
-        con = duckdb.connect()
-        con.execute("INSTALL spatial; LOAD spatial;")
-        admin_file = _write_country_admin_fixture(
-            con,
-            tmp_path,
-            [
-                ("POLYGON((0 0,0 1,1 1,1 0,0 0))", "AA"),
-                ("POLYGON((10 10,10 11,11 11,11 10,10 10))", "BB"),
-            ],
+        con = get_duckdb_connection(load_spatial=True)
+        cache = tmp_path / "cache"
+        cache.mkdir()
+        monkeypatch.setattr(ad, "get_cache_dir", lambda: cache)
+        source = tmp_path / "divisions.parquet"
+        rows = [
+            ("POLYGON((0 0,10 0,10 10,0 10,0 0))", "US", None, "country", True),
+            ("POLYGON((0 0,12 0,12 12,0 12,0 0))", "US", None, "country", False),
+            ("POLYGON((10 0,20 0,20 10,10 10,10 0))", "XS", None, "dependency", True),
+            ("POLYGON((20 0,30 0,30 10,20 10,20 0))", "XK", None, "country", True),
+            ("POLYGON((30 0,40 0,40 10,30 10,30 0))", "AQ", None, "country", True),
+            ("POLYGON((40 0,50 0,50 10,40 10,40 0))", "FR", None, "country", None),
+            ("POLYGON((0 0,5 0,5 10,0 10,0 0))", "US", "US-CA", "region", True),
+            ("POLYGON((5 0,10 0,10 10,5 10,5 0))", "US", "US-NV", "region", True),
+            ("POLYGON((-179 -80,179 -80,179 80,-179 80,-179 -80))", "ZZ", None, "locality", True),
+        ]
+        con.execute(
+            "CREATE TABLE raw(wkt VARCHAR, country VARCHAR, region VARCHAR, subtype VARCHAR, is_land BOOLEAN)"
         )
-        input_file = _write_points_fixture(con, tmp_path, [(0.5, 0.5), (10.5, 10.5)])
-        con.close()
-
-        out = str(tmp_path / "out.parquet")
-        add_admin_divisions_multi(
-            input_parquet=str(input_file),
-            output_parquet=out,
-            dataset_name="overture",
-            levels=["country"],
-            dataset_source=str(admin_file),
-            verbose=False,
+        con.executemany("INSERT INTO raw VALUES (?, ?, ?, ?, ?)", rows)
+        con.execute(
+            f"COPY (SELECT * EXCLUDE(wkt), ST_GeomFromText(wkt) geometry, "
+            "struct_pack(xmin:=ST_XMin(ST_GeomFromText(wkt)), "
+            "ymin:=ST_YMin(ST_GeomFromText(wkt)), xmax:=ST_XMax(ST_GeomFromText(wkt)), "
+            "ymax:=ST_YMax(ST_GeomFromText(wkt))) bbox FROM raw) "
+            f"TO {sql_path(source)} (FORMAT PARQUET)"
         )
-
-        con = duckdb.connect()
-        assert fetch_one(con.execute(f"SELECT COUNT(*) FROM '{out}'"))[0] == 2
+        try:
+            for crs in (None, "EPSG:3857"):
+                inp = tmp_path / f"input-{crs is None}.parquet"
+                geom = (
+                    "geometry"
+                    if crs is None
+                    else "ST_Transform(geometry, 'OGC:CRS84', 'EPSG:3857')"
+                )
+                con.execute(
+                    f"COPY (SELECT id, {geom} geometry FROM (VALUES "
+                    "(1,ST_Point(2,5)),(2,ST_Point(7,5)),(3,ST_Point(15,5)),"
+                    "(4,ST_Point(25,5)),(5,ST_Point(35,5)),(6,ST_Point(45,5)),"
+                    "(7,ST_Point(11,11)),(8,NULL),(9,ST_GeomFromText('POINT EMPTY')),"
+                    "(10,ST_Point(10,5))) t(id,geometry)) "
+                    f"TO {sql_path(inp)} (FORMAT PARQUET)"
+                )
+                for levels in (["country"], ["region"], ["country", "region"]):
+                    results = []
+                    for warm in (False, True):
+                        for file in cache.glob("*.parquet"):
+                            file.unlink()
+                        dataset = OvertureAdminDataset()
+                        monkeypatch.setattr(dataset, "get_version", lambda: "fixture")
+                        monkeypatch.setattr(dataset, "get_default_source", lambda: str(source))
+                        # Tiny fixtures have no prunable row groups; exercise the bounded branch.
+                        monkeypatch.setattr(
+                            dataset, "_extent_prunes_most_geometry", lambda *args: True
+                        )
+                        if warm:
+                            for level in levels:
+                                con.execute(
+                                    f"COPY ({dataset._build_level_cache_query(level, str(source))}) "
+                                    f"TO {sql_path(dataset.get_cached_path_for_level(level))} (FORMAT PARQUET)"
+                                )
+                        ad.run_admin_join(
+                            con,
+                            dataset,
+                            levels,
+                            input_path=str(inp),
+                            input_geom_col="geometry",
+                            input_bbox_col=None,
+                            admin_bbox_col="bbox",
+                            select_for=lambda lv, cols: ", ".join(f"b.{c} AS a_{c}" for c in cols),
+                            final_table="result",
+                            source_crs=crs,
+                        )
+                        results.append(con.execute("SELECT * FROM result ORDER BY id").fetchall())
+                    assert results[0] == results[1]
+                    assert len(results[0]) == 10
+                    if levels == ["country"]:
+                        assert [r[-1] for r in results[0]] == [
+                            "US",
+                            "US",
+                            "BQ",
+                            None,
+                            None,
+                            "FR",
+                            None,
+                            None,
+                            None,
+                            "BQ",
+                        ]
+        finally:
+            con.close()
 
     def test_overlapping_admin_polygons_keep_each_feature_once(self, tmp_path):
         """Two overlapping country polygons both cover one input point. The join
@@ -1841,7 +1906,11 @@ def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, m
         f"FROM range(32768) t(i)) TO {sql_path(source)} "
         "(FORMAT PARQUET, ROW_GROUP_SIZE 2048)"
     )
-    con.execute(f"COPY (SELECT ST_Point(0,0) geometry) TO {sql_path(inp)} (FORMAT PARQUET)")
+    con.execute(
+        f"COPY (SELECT ST_Point(0,0) geometry, "
+        "{'xmin':0.0,'ymin':0.0,'xmax':0.0,'ymax':0.0} bbox) "
+        f"TO {sql_path(inp)} (FORMAT PARQUET)"
+    )
     cache = tmp_path / "cache"
     cache.mkdir()
     monkeypatch.setattr(admin_datasets, "get_cache_dir", lambda: cache)
@@ -1881,6 +1950,17 @@ def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, m
             )
             assert dry.exit_code == 0, dry.output
             assert len(con.extract_statements(dry.output[dry.output.index("-- Step") :])) == 1
+            con.execute("SET threads=1")
+
+            def check_materialized(step):
+                assert "_gpio_admin_boundaries_0" in step.query
+                assert con.execute("SELECT current_setting('threads')").fetchall() == [(1,)]
+
+            def write_result(step):
+                plan = str(con.execute(f"EXPLAIN {step.query}").fetchall())
+                assert "BLOCKWISE_NL_JOIN" in plan, plan
+                con.execute(f"CREATE TEMP TABLE bounded_admin_result AS {step.query}")
+
             with CallSpies() as spies:
                 admin_datasets.run_admin_join(
                     con,
@@ -1888,10 +1968,11 @@ def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, m
                     ["country"],
                     input_path=str(inp),
                     input_geom_col="geometry",
-                    input_bbox_col=None,
+                    input_bbox_col="bbox",
                     admin_bbox_col="bbox",
                     select_for=lambda levels, cols: "b.country AS admin_country",
-                    final_table="bounded_admin_result",
+                    final_step=write_result,
+                    on_step=check_materialized,
                 )
             assert con.execute("SELECT admin_country FROM bounded_admin_result").fetchall() == [
                 ("US",)
@@ -1899,6 +1980,10 @@ def test_cold_overture_join_prunes_remote_bytes_without_global_cache(tmp_path, m
             assert counts["requests"] > 0
             assert counts["bytes"] < min(source.stat().st_size // 4, 1_000_000), counts
             assert spies.counts["parquet_writes"] == 0
+            assert spies.counts.get("connections", 0) == 0
+            assert con.execute("SELECT current_setting('disabled_optimizers')").fetchall() == [
+                ("",)
+            ]
             assert not list(cache.glob("*.parquet"))
             assert not list(cache.glob(".gpio-stage-*"))
             # Empty caches remain cold; bounded reads retain simplification.

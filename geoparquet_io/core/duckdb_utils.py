@@ -568,7 +568,7 @@ def _set_setting(con: duckdb.DuckDBPyConnection, key: str, value: object) -> Non
 
 
 @contextmanager
-def pin_duckdb_settings(con: duckdb.DuckDBPyConnection, settings: Mapping[str, int | bool]):
+def pin_duckdb_settings(con: duckdb.DuckDBPyConnection, settings: Mapping[str, int | bool | str]):
     """Hold global settings for one operation, then restore them under the same lock."""
     from geoparquet_io.core.memory_limits import _settings_lock
 
@@ -579,9 +579,7 @@ def pin_duckdb_settings(con: duckdb.DuckDBPyConnection, settings: Mapping[str, i
         saved = {key: _current_setting(con, key) for key in settings}
         try:
             for key, value in settings.items():
-                _set_setting(
-                    con, key, str(value).lower() if isinstance(value, bool) else int(value)
-                )
+                _set_setting(con, key, str(value).lower() if isinstance(value, bool) else value)
             yield
         finally:
             restore_duckdb_settings(con, saved)

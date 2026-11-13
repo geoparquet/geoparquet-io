@@ -25,8 +25,10 @@ from geoparquet_io.core.duckdb_metadata import _row_group_geometry_scan_stats
 from geoparquet_io.core.duckdb_utils import (
     build_spatial_join_condition,
     build_spatial_join_query,
+    fetch_one,
     get_duckdb_connection,
     orphaned_spill_dirs,
+    pin_duckdb_settings,
     quote_identifier,
     s3_config_scope,
     spill_directory,
@@ -701,7 +703,11 @@ class AdminDataset(ABC):
         return self.get_source_for_level(level, no_cache=no_cache)
 
     def _source_for_join(
-        self, level: str, no_cache: bool, extent: tuple[float, float, float, float] | None
+        self,
+        level: str,
+        no_cache: bool,
+        extent: tuple[float, float, float, float] | None,
+        con: duckdb.DuckDBPyConnection | None = None,
     ) -> tuple[str | None, str]:
         source = self.source_for_level(level, no_cache=no_cache)
         return source, self.table_reference(source)
@@ -1178,7 +1184,11 @@ class OvertureAdminDataset(AdminDataset):
         return str(cache_path)
 
     def _source_for_join(
-        self, level: str, no_cache: bool, extent: tuple[float, float, float, float] | None
+        self,
+        level: str,
+        no_cache: bool,
+        extent: tuple[float, float, float, float] | None,
+        con: duckdb.DuckDBPyConnection | None = None,
     ) -> tuple[str | None, str]:
         if extent is not None and not no_cache and self.source_path is None:
             cache_path = self.get_cached_path_for_level(level)
@@ -1186,13 +1196,16 @@ class OvertureAdminDataset(AdminDataset):
                 # A global cache key must never hold only one command's extent.
                 # Read the bounded relation directly, retaining cache simplification.
                 source = self.get_default_source()
-                if self._extent_prunes_most_geometry(source, extent):
+                if self._extent_prunes_most_geometry(source, extent, con):
                     relation = f"({self._build_level_cache_query(level, source, extent)})"
                     return _BoundedAdminSource(relation), relation
-        return super()._source_for_join(level, no_cache, extent)
+        return super()._source_for_join(level, no_cache, extent, con)
 
     def _extent_prunes_most_geometry(
-        self, source: str, extent: tuple[float, float, float, float]
+        self,
+        source: str,
+        extent: tuple[float, float, float, float],
+        con: duckdb.DuckDBPyConnection | None = None,
     ) -> bool:
         """Read inline when two estimated remote scans cost less than one complete scan.
 
@@ -1201,8 +1214,10 @@ class OvertureAdminDataset(AdminDataset):
         """
         xmin, xmax, ymin, ymax = extent
         fetched = pruned = 0
+        own_connection = con is None
         with s3_config_scope(self.get_s3_config()):
-            con = get_duckdb_connection(load_spatial=False, load_httpfs=True)
+            if con is None:
+                con = get_duckdb_connection(load_spatial=False, load_httpfs=True)
             try:
                 objects = glob_matches(source) if has_glob_pattern(source) else [source]
                 for obj in objects:
@@ -1227,7 +1242,8 @@ class OvertureAdminDataset(AdminDataset):
                             fetched += size
                 return pruned > fetched
             finally:
-                con.close()
+                if own_connection:
+                    con.close()
 
     def _download_per_level_caches(self, levels: Iterable[str] | None = None) -> None:
         """Download only the requested level caches (all levels for the base fallback).
@@ -1830,10 +1846,26 @@ def run_admin_join(
     intermediates = []
     for i, (step_levels, step_columns) in enumerate(steps):
         if per_level:
-            source, admin_table_ref = dataset._source_for_join(step_levels[0], no_cache, extent)
+            source, admin_table_ref = dataset._source_for_join(
+                step_levels[0], no_cache, extent, con
+            )
         else:
             source = admin_source
             admin_table_ref = dataset.table_reference(source)
+        if isinstance(source, _BoundedAdminSource) and not dry_run:
+            # Read/simplify before the join's single-thread setting takes effect.
+            threads = fetch_one(con.execute("SELECT current_setting('threads')"))[0]
+            bounded_table = f"_gpio_admin_boundaries_{i}"
+            try:
+                con.execute("RESET threads")
+                with scoped_write_memory_limit(con, memory_limit, verbose):
+                    con.execute(
+                        f"CREATE TEMP TABLE {bounded_table} AS SELECT * FROM {admin_table_ref}"
+                    )
+            finally:
+                con.execute(f"SET threads = {int(threads)}")
+            admin_table_ref = bounded_table
+            intermediates.append(bounded_table)
         query = build_admin_join_query(
             input_relation=relation,
             admin_table_ref=admin_table_ref,
@@ -1860,7 +1892,17 @@ def run_admin_join(
             on_step(step)
         relation = target or relation
         if not dry_run:
-            _run_admin_join_step(con, step, final_step, memory_limit, verbose)
+            settings = {}
+            if isinstance(source, _BoundedAdminSource) and input_bbox_col:
+                # Temp-table stats otherwise erase bbox guards and change the join operator.
+                disabled = fetch_one(con.execute("SELECT current_setting('disabled_optimizers')"))[
+                    0
+                ]
+                settings["disabled_optimizers"] = ",".join(
+                    filter(None, (disabled, "statistics_propagation"))
+                )
+            with pin_duckdb_settings(con, settings):
+                _run_admin_join_step(con, step, final_step, memory_limit, verbose)
             if not last:
                 intermediates.append(relation)
     for table in intermediates:
