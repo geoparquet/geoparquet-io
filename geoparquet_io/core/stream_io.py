@@ -302,7 +302,6 @@ def _write_stream_output(
         # This enables native geometry performance in downstream operations
         columns = carried.get("columns", {})
         geometry_columns = dict.fromkeys([*native_columns, *columns, geometry_column])
-        column_models = {}
         for name in geometry_columns:
             if name is None or name not in table.column_names:
                 continue
@@ -311,7 +310,6 @@ def _write_stream_output(
                 crs = "srid:0"
             entry = columns.get(name)
             edges = declared_edges(entry)
-            column_models[name] = (crs, edges)
             table = apply_geoarrow_extension_type(table, name, crs, edges=edges)
 
         # Apply metadata to output table, the way the file path does (#722):
@@ -341,10 +339,7 @@ def _write_stream_output(
 
             def batches():
                 for batch in reader:
-                    chunk = pa.Table.from_batches([batch])
-                    for name, (crs, edges) in column_models.items():
-                        chunk = apply_geoarrow_extension_type(chunk, name, crs, edges=edges)
-                    yield from chunk.cast(output_schema).to_batches()
+                    yield batch.cast(output_schema)
 
             write_arrow_stream(pa.RecordBatchReader.from_batches(output_schema, batches()))
         finally:
