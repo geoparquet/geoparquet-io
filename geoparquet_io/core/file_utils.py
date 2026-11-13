@@ -703,18 +703,18 @@ def atomic_write(
             os.chmod(staged, stat.S_IMODE(previous.st_mode))
         elif mode_from is not None and not is_remote_url(str(mode_from)):
             shutil.copymode(mode_from, staged)
+        if previous is not None:
+            staged_stat = staged.stat()
+            previous_second = previous.st_mtime_ns // 1_000_000_000
+            if staged_stat.st_mtime_ns // 1_000_000_000 <= previous_second:
+                # Windows has no file version tag; DuckDB trusts whole-second mtime.
+                os.utime(
+                    staged,
+                    ns=(staged_stat.st_atime_ns, (previous_second + 1) * 1_000_000_000),
+                )
         if sidecar_suffixes is not None:
             _publish_sidecars(stage_dir, staged, final, sidecar_suffixes)
         os.replace(staged, final)
-        if previous is not None:
-            published = final.stat()
-            previous_second = previous.st_mtime_ns // 1_000_000_000
-            if published.st_mtime_ns // 1_000_000_000 <= previous_second:
-                # Windows has no file version tag; DuckDB trusts whole-second mtime.
-                os.utime(
-                    final,
-                    ns=(published.st_atime_ns, (previous_second + 1) * 1_000_000_000),
-                )
     finally:
         shutil.rmtree(stage_dir, ignore_errors=True)
         if marker is not None:

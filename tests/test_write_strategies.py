@@ -13,6 +13,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -108,6 +109,20 @@ class TestAtomicWrite:
                     Path(temp_path).write_text("test content", encoding="utf-8")
                     os.utime(temp_path, ns=(pinned, pinned))
                 assert output_path.stat().st_mtime_ns // 1_000_000_000 > previous
+
+            from unittest.mock import patch
+
+            future = time.time_ns() + 60_000_000_000
+            os.utime(output_path, ns=(future, future))
+            for failure in (OSError, KeyboardInterrupt):
+                original = output_path.stat().st_mtime_ns
+                with pytest.raises(failure, match="timestamp update"):
+                    with patch("os.utime", side_effect=failure("timestamp update")):
+                        with atomic_write(str(output_path)) as temp_path:
+                            Path(temp_path).write_bytes(b"replacement")
+                assert output_path.read_bytes() == b"test content"
+                assert output_path.stat().st_mtime_ns == original
+                assert not list(Path(tmpdir).glob(".gpio-stage-*"))
 
         from geoparquet_io.core import remote
         from geoparquet_io.core.exceptions import GeoParquetError
