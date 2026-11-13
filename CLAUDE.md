@@ -110,6 +110,7 @@ geoparquet_io/
 | `convert.py` |  |
 | `crs_utils.py` | CRS (Coordinate Reference System) utilities for GeoParquet files. |
 | `curved_geometry.py` | Detection of curved/non-linear geometry types GeoParquet cannot hold. |
+| `deprecation.py` | Process-wide deprecation warnings, attributed to the caller of gpio. |
 | `derive_geo_from_file.py` | Deriving a ``geo`` block from a Parquet file that was written without one. |
 | `duckdb_metadata.py` | DuckDB-based Parquet metadata extraction. |
 | `duckdb_utils.py` | DuckDB connection management utilities. |
@@ -152,6 +153,7 @@ geoparquet_io/
 | `reproject.py` | Core reprojection logic for GeoParquet files. |
 | `sizing.py` | Byte sizes as humans write them: the one parser and the one formatter (#1367). |
 | `sort_by_column.py` |  |
+| `sort_common.py` | Shared dispatch, staging and writing for all four sorts. |
 | `sort_quadkey.py` |  |
 | `source_text.py` | Source text encoding for GDAL reads: decode what GDAL cannot, refuse what nobody named. |
 | `stac.py` | STAC Item and Collection generation for GeoParquet files. |
@@ -366,6 +368,8 @@ copies or compatibility wrappers. The guard set is in ADR-0008 and
 | Concept | Owner module | Public entry points |
 |---|---|---|
 | Final Parquet write policy | `geoparquet_io/core/parquet_writer.py`, `geoparquet_io/core/write_funnels.py`, `geoparquet_io/core/compression.py` | `WriteOptions`, `resolve_output_geoparquet_version`, `resolve_row_group_rows`, `resolve_codec`, `write_parquet_with_metadata`, `write_geoparquet_table`, `located_row_group_layout`, `ensure_located_row_groups` |
+| Process-wide keyword deprecation warnings | `geoparquet_io/core/deprecation.py` | `warn_deprecated` |
+| Spatial sort orchestration | `geoparquet_io/core/sort_common.py` | `run_sort`, `advised_output_version` |
 | Footer patch or rewrite | `geoparquet_io/core/parquet_footer.py` | `patch_or_rewrite` |
 | Geo block decoding | `geoparquet_io/core/geo_metadata.py` | `read_raw_geo`, `sanitized_carried_geo`, `declared_version` |
 | Geo block composition and covering | `geoparquet_io/core/geo_metadata.py`, `geoparquet_io/core/bbox_structure.py` | `compose_geo_block`, `GeoBlockOptions`, `build_bbox_covering`, `bbox_struct_child_names_match`, `covering_bbox_refs` |

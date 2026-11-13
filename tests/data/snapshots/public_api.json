@@ -258,6 +258,9 @@
     "warn_null_crs_once",
     "warn_srid0_crs_once"
   ],
+  "geoparquet_io.core.deprecation": [
+    "warn_deprecated"
+  ],
   "geoparquet_io.core.duckdb_metadata": [
     "aggregate_native_geo_stats",
     "count_kv_key",
@@ -718,6 +721,10 @@
     "normalize_size_string",
     "nudged_size",
     "parse_size_string"
+  ],
+  "geoparquet_io.core.sort_common": [
+    "advised_output_version",
+    "run_sort"
   ],
   "geoparquet_io.core.write_funnels": [
     "apply_nonplanar_edges",

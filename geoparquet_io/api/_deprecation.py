@@ -17,16 +17,14 @@ records every one with its reason.
 from __future__ import annotations
 
 import functools
-import warnings
 from collections.abc import Callable
 from typing import Any
+
+from geoparquet_io.core.deprecation import warn_deprecated
 
 #: The attribute an alias carries: the canonical name it forwards to. Read by
 #: the parity census, so a new alias needs no second list to stay accounted for.
 ALIAS_ATTRIBUTE = "__gpio_deprecated_alias__"
-
-#: One warning per alias per process, keyed by the deprecated name.
-_warned_aliases: set[str] = set()
 
 
 def deprecated_alias(canonical: Callable[..., Any], *, old: str, new: str) -> Callable[..., Any]:
@@ -54,14 +52,7 @@ def deprecated_alias(canonical: Callable[..., Any], *, old: str, new: str) -> Ca
 
     @functools.wraps(canonical)
     def alias(*args: Any, **kwargs: Any) -> Any:
-        if old not in _warned_aliases:
-            _warned_aliases.add(old)
-            warnings.warn(
-                f"{old}() is deprecated and will be removed in the next minor "
-                f"release; call {new}() instead",
-                DeprecationWarning,
-                stacklevel=2,
-            )
+        warn_deprecated({old: (f"{old}()", f"call {new}() instead")})
         return canonical(*args, **kwargs)
 
     alias.__name__ = old.rsplit(".", 1)[-1]

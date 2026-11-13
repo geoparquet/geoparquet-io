@@ -884,6 +884,9 @@ class TestCartoCli:
         runner = CliRunner()
         result = runner.invoke(cli, ["extract", "carto", "--help"])
         assert result.exit_code == 0
+        help_text = " ".join(result.output.split())
+        assert "GeoJSON GDAL read is not bounded by this timeout" in help_text
+        assert f"capped at {carto_module.STATUS_PROBE_TIMEOUT:g} seconds" in help_text
         assert "--where" in result.output
         assert "--bbox" in result.output
         assert "--limit" in result.output
@@ -1331,7 +1334,9 @@ class TestFailureClassificationUsesTheHttpStatus:
         def _slow(*args, **kwargs):
             raise httpx.ConnectTimeout("took too long")
 
-        monkeypatch.setattr(httpx, "stream", _slow)
+        monkeypatch.setattr(
+            carto_module.http_retry, "get_shared_http_client", lambda: mock.Mock(stream=_slow)
+        )
         warnings: list[str] = []
         monkeypatch.setattr(carto_module, "warn", warnings.append)
 
@@ -1527,7 +1532,9 @@ class TestFailureClassificationUsesTheHttpStatus:
         def _boom(*args, **kwargs):
             raise httpx.InvalidURL("not a URL httpx will accept")
 
-        monkeypatch.setattr(httpx, "stream", _boom)
+        monkeypatch.setattr(
+            carto_module.http_retry, "get_shared_http_client", lambda: mock.Mock(stream=_boom)
+        )
         assert carto_module._probe_request_status("http://x/", 1.0) == carto_module._CartoStatus(
             None, False
         )
@@ -1539,7 +1546,9 @@ class TestFailureClassificationUsesTheHttpStatus:
         def _slow(*args, **kwargs):
             raise httpx.ConnectTimeout("took too long")
 
-        monkeypatch.setattr(httpx, "stream", _slow)
+        monkeypatch.setattr(
+            carto_module.http_retry, "get_shared_http_client", lambda: mock.Mock(stream=_slow)
+        )
         assert carto_module._probe_request_status("http://x/", 1.0) == carto_module._CartoStatus(
             None, False
         )
@@ -1554,7 +1563,9 @@ class TestFailureClassificationUsesTheHttpStatus:
             seen["timeout"] = kwargs["timeout"]
             raise httpx.ConnectError("refused")
 
-        monkeypatch.setattr(httpx, "stream", _record)
+        monkeypatch.setattr(
+            carto_module.http_retry, "get_shared_http_client", lambda: mock.Mock(stream=_record)
+        )
         carto_module._probe_request_status("http://x/", 120.0)
         assert seen["timeout"] == carto_module.STATUS_PROBE_TIMEOUT
 
@@ -1782,3 +1793,49 @@ class TestCartoRetriesThroughTheSharedOwner:
         assert table.num_rows == 2
         assert seen, "the fetch did not go through http_retry.run_with_retry"
         assert slept == [1.0]  # http_retry.DEFAULT_RETRY_DELAY, one step
+
+
+def test_carto_request_and_probe_never_log_credentials(monkeypatch, caplog):
+    import logging
+
+    import httpx
+
+    from geoparquet_io.core.logging_config import CLIFormatter
+    from tests.http_transport import FakeTransport, json_reply
+
+    http = FakeTransport.install(monkeypatch)
+    secret = "SORTSECRET"
+    from geoparquet_io.core.exceptions import InvalidParameterError
+    from geoparquet_io.core.remote import show_remote_read_message, validate_profile_for_urls
+
+    with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+        for url in [f"https://user:{secret}@/file.parquet", "https://host:bad/file.parquet"]:
+            show_remote_read_message(url, verbose=True)
+            with pytest.raises(InvalidParameterError):
+                validate_profile_for_urls("profile", url)
+    assert all(
+        secret not in CLIFormatter(use_colors=False).format(record) for record in caplog.records
+    )
+    http.respond(
+        "/sql",
+        json_reply({"error": [f"bad request api_key={secret}"]}, status=400),
+        httpx.ConnectError(f"failed https://h/x?api_key={secret}"),
+    )
+    logged = []
+    monkeypatch.setattr(carto_module, "debug", logged.append)
+    conn = _AttemptCountingConnection(RuntimeError("IO Error: Could not open GDAL dataset"))
+    monkeypatch.setattr(carto_module, "get_duckdb_connection", lambda *a, **k: conn)
+    with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+        with pytest.raises(CartoError) as caught:
+            _fetch_with_retry(f"https://user:{secret}@x/sql", "tbl", "SELECT 1", api_key=secret)
+        status = carto_module._probe_request_status(f"https://x/sql?api_key={secret}", 2)
+    request_urls = [message for message in logged if message.startswith("Request URL:")]
+    assert request_urls
+    assert all("api_key=" not in message for message in request_urls)
+    assert status.code is None
+    assert len(http.requests) == 2
+    assert http.requests[0].params["api_key"] == secret
+    assert secret not in str(caught.value)
+    assert all(
+        secret not in CLIFormatter(use_colors=False).format(record) for record in caplog.records
+    )

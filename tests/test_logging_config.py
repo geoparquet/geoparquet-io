@@ -145,12 +145,42 @@ class TestCLIFormatter:
 class TestSetupCliLogging:
     """Tests for the setup_cli_logging function."""
 
-    def test_setup_creates_handler(self):
+    def test_setup_creates_handler(self, capsys):
         """setup_cli_logging should configure the logger with a handler."""
         setup_cli_logging(verbose=False, show_timestamps=False)
         logger = get_logger()
         assert len(logger.handlers) == 1
         assert isinstance(logger.handlers[0].formatter, CLIFormatter)
+
+        handler = DynamicStreamHandler()
+        handler.setFormatter(CLIFormatter(use_colors=False))
+        record = logging.LogRecord(
+            "httpx", logging.WARNING, "", 0, "GET %s", ("https://u:pa'ss@h/x",), None
+        )
+        handler.handle(record)
+        # Pytest's capture handler intentionally re-raises formatting errors.
+        root = logging.getLogger()
+        with patch.object(
+            root, "handlers", [h for h in root.handlers if isinstance(h, DynamicStreamHandler)]
+        ):
+            logging.getLogger("third_party").warning("a %s %s", 1)
+        assert record.msg == "GET %s"
+        assert record.args == ("https://u:pa'ss@h/x",)
+        try:
+            raise ValueError("https://u:SECRET/other@h/x?token=HIDDEN")
+        except ValueError:
+            import sys
+
+            record = logging.LogRecord(
+                "httpcore", logging.ERROR, "", 0, "failed", (), sys.exc_info()
+            )
+            handler.handle(record)
+        output = capsys.readouterr().err
+        assert "pa'ss" not in output
+        assert "SECRET" not in output
+        assert "HIDDEN" not in output
+        assert "ValueError" in output
+        assert "logging error (TypeError)" in output
 
     def test_verbose_sets_debug_level(self):
         """verbose=True should set logger to DEBUG level."""
@@ -193,31 +223,20 @@ class TestHelperFunctions:
         logger.propagate = original_propagate
         logger.setLevel(original_level)
 
-    def test_success_logs_info_with_marker(self, caplog):
-        """success() should log at INFO level with SUCCESS marker."""
-        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            success("Operation completed")
-        assert "Operation completed" in caplog.text
-        assert "[SUCCESS]" in caplog.text
-
-    def test_warn_logs_warning(self, caplog):
-        """warn() should log at WARNING level."""
-        with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-            warn("Something to note")
-        assert "Something to note" in caplog.text
-
-    def test_error_logs_error(self, caplog):
-        """error() should log at ERROR level."""
-        with caplog.at_level(logging.ERROR, logger="geoparquet_io"):
-            error("Something went wrong")
-        assert "Something went wrong" in caplog.text
-
-    def test_info_logs_info_with_marker(self, caplog):
-        """info() should log at INFO level with INFO marker."""
-        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
-            info("Informational message")
-        assert "Informational message" in caplog.text
-        assert "[INFO]" in caplog.text
+    def test_styled_helpers_preserve_level_message_and_marker(self, caplog):
+        cases = (
+            (success, logging.INFO, "Operation completed", "[SUCCESS]"),
+            (warn, logging.WARNING, "Something to note", ""),
+            (error, logging.ERROR, "Something went wrong", ""),
+            (info, logging.INFO, "Informational message", "[INFO]"),
+        )
+        for emit, level, message, marker in cases:
+            caplog.clear()
+            with caplog.at_level(level, logger="geoparquet_io"):
+                emit(message)
+            assert message in caplog.text
+            assert marker in caplog.text
+            assert [record.levelno for record in caplog.records] == [level]
 
     def test_debug_logs_at_debug_level(self, caplog):
         """debug() should log at DEBUG level."""
@@ -293,7 +312,7 @@ class TestDynamicStreamHandler:
         assert captured.err, "Expected output to stderr but got nothing"
         assert "Test emit" in captured.err
 
-    def test_emit_exception_handling(self):
+    def test_emit_exception_handling(self, monkeypatch):
         """Test emit handles exceptions (lines 142-143)."""
         handler = DynamicStreamHandler()
         handler.setFormatter(CLIFormatter(use_colors=False))
@@ -317,6 +336,37 @@ class TestDynamicStreamHandler:
         # handleError should have been called
         handler.handleError.assert_called_once()
 
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from itertools import product
+
+        monkeypatch.setattr(logging, "raiseExceptions", True)
+        for (msg, args, tty), newline in product(
+            (
+                ("GET %s %s", ("https://u:SECRET@h/x?token=HIDDEN",), False),
+                ("failed https://u:SECRET@h/café?token=HIDDEN", (), True),
+                ("failed https://u:SECRET@h/café?token=HIDDEN", (), False),
+            ),
+            ("\n", "\r\n"),
+        ):
+            stdout = io.TextIOWrapper(io.BytesIO(), encoding="ascii", newline=newline)
+            stderr = io.TextIOWrapper(io.BytesIO(), encoding="ascii", newline=newline)
+            stdout.isatty = lambda tty=tty: tty
+            handler = DynamicStreamHandler()
+            handler.setFormatter(CLIFormatter(use_colors=False))
+            record = logging.LogRecord("test", logging.WARNING, "", 1, msg, args, None)
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                handler.emit(record)
+            stdout.flush()
+            stderr.flush()
+            output = stdout.buffer.getvalue() + stderr.buffer.getvalue()
+            assert b"SECRET" not in output and b"HIDDEN" not in output
+            expected = "TypeError" if args else "UnicodeEncodeError"
+            stderr.seek(0)
+            assert stderr.read().splitlines() == [f"logging error ({expected})"]
+            assert record.msg == msg and record.args == args
+            assert logging.raiseExceptions is True
+
 
 class TestCLIFormatterPlainMessage:
     """Additional tests for CLIFormatter plain message path (line 103)."""
@@ -338,3 +388,42 @@ class TestCLIFormatterPlainMessage:
         assert result == "Plain message with no markers"
         # Should NOT have any ANSI color codes since no markers matched
         assert "\033[" not in result
+
+
+def test_every_log_level_sanitizes_url_and_query_credentials(caplog, tmp_path):
+    messages = [
+        "api_key\x1b[0m=SORTSECRET",
+        "api_key\x00=SORTSECRET",
+        "https://example.test/x?api_key=SORTSECRET",
+        "https://example.test/x?token=SORTSECRET",
+        "https://user:SORTSECRET@example.test/x",
+        "https://SORTSECRET@example.test/x",
+        "https://[invalid/x?token=SORTSECRET",
+        "https://SORTSECRET:SORTSECRET@example.test/x",
+        "https://example.test/x?X-Amz-Credential=SORTSECRET&X-Amz-Signature=SORTSECRET",
+        "SELECT * FROM 'https://example.test/x?token=SORTSECRET' WHERE id=1",
+    ]
+    with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
+        for emit in (debug, info, progress, success, warn, error):
+            for message in messages:
+                emit(message)
+    assert len(caplog.records) == len(messages) * 6
+    formatter = CLIFormatter(use_colors=False)
+    assert all("SORTSECRET" not in formatter.format(record) for record in caplog.records)
+    # caplog is a host handler: no CLI formatter protects these library records.
+    assert all("SORTSECRET" not in record.getMessage() for record in caplog.records)
+
+    for path in (
+        ".../key=7/part-?.parquet",
+        str(tmp_path / "year=2024" / "part-?.parquet"),
+        "s3://bucket/out/key=7/part-?.parquet",
+        "Sorting by key=value",
+    ):
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+            progress(path)
+        assert formatter.format(caplog.records[-1]) == path
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="geoparquet_io"):
+        progress("https://host/out/api_key=7/part-?.parquet")
+    assert formatter.format(caplog.records[-1]) == "https://host/out/api_key=***"

@@ -411,7 +411,17 @@ class TestHilbertOrderEdgeCases:
         assert sorted(result.column("id").to_pylist()) == [0, 1, 2]
 
     def test_view_typed_columns(self, con):
+        from geoparquet_io.core.arrow_types import view_offset_type
         from geoparquet_io.core.hilbert_order import hilbert_order_table
+
+        for view, offset in [
+            (pa.binary_view(), pa.large_binary()),
+            (pa.string_view(), pa.large_string()),
+        ]:
+            assert view_offset_type(view) == offset
+            values = pa.array([None, "value"], type=view)
+            assert values.cast(offset).cast(view).equals(values)
+        assert view_offset_type(pa.binary()) is None
 
         wkbs = [_wkb(con, f"POINT({x} {x})") for x in (30, 5, 20, 10)]
         table = pa.table(

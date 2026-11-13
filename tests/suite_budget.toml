@@ -104,7 +104,7 @@
 # does, plus the root keeping both BigQuery spellings (11).
 # +3 (#1149): isolate requested-level retry from housekeeping, pin failed
 # default COPY publication, and count HTTP bytes for cold bounded admin joins.
-max_collected = 14942
+max_collected = 14941
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

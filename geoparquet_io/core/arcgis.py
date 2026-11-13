@@ -45,6 +45,7 @@ from geoparquet_io.core.exceptions import (
     GeoParquetError,
     InvalidParameterError,
     RemoteAccessError,
+    clean_error_text,
 )
 from geoparquet_io.core.file_utils import (
     handle_output_overwrite,
@@ -959,12 +960,20 @@ def _parse_crs_to_wkid(value: str) -> int:
         return int(cleaned)
     identifier = _extract_crs_identifier(cleaned)
     if identifier is None:
-        raise ValueError(f"Cannot parse CRS '{value}'. Use 'EPSG:<code>' or a numeric code.")
+        raise ValueError(
+            clean_error_text(f"Cannot parse CRS '{value}'. Use 'EPSG:<code>' or a numeric code.")
+        )
     authority, code = identifier
     if authority != "EPSG":
-        raise ValueError(f"Unsupported CRS authority '{authority}' in '{value}'. Use EPSG codes.")
+        raise ValueError(
+            clean_error_text(
+                f"Unsupported CRS authority '{authority}' in '{value}'. Use EPSG codes."
+            )
+        )
     if not isinstance(code, int):
-        raise ValueError(f"Cannot parse CRS '{value}'. Use 'EPSG:<code>' or a numeric code.")
+        raise ValueError(
+            clean_error_text(f"Cannot parse CRS '{value}'. Use 'EPSG:<code>' or a numeric code.")
+        )
     return code
 
 

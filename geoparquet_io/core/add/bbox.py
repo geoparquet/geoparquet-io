@@ -25,6 +25,7 @@ from geoparquet_io.core.geo_metadata import (
     ArrowTableSource,
     GeoBlockOptions,
     _bbox_claimed_by_another_column,
+    bbox_column_to_declare,
     bbox_struct_array,
     bbox_struct_sql,
     bbox_struct_type,
@@ -243,25 +244,6 @@ def _version_a_copy_would_miss(input_parquet: str) -> str | None:
     return target
 
 
-def _make_add_bbox_query(
-    source: str,
-    geometry_column: str,
-    bbox_column_name: str,
-    replace_existing: bool = False,
-) -> str:
-    """Build query to add bbox column to a source."""
-    quoted_geom_col = quote_identifier(geometry_column)
-    quoted_bbox_col = quote_identifier(bbox_column_name)
-    bbox_expr = bbox_struct_sql(quoted_geom_col, geometry_column)
-
-    if replace_existing:
-        return (
-            f"SELECT * EXCLUDE ({quoted_bbox_col}), {bbox_expr} AS {quoted_bbox_col} FROM {source}"
-        )
-    else:
-        return f"SELECT *, {bbox_expr} AS {quoted_bbox_col} FROM {source}"
-
-
 def add_bbox_column(
     input_parquet: str,
     output_parquet: str | None = None,
@@ -378,7 +360,7 @@ def _add_bbox_streaming(
     # rather than through execute_transform, which fixes both before the query is
     # built. (add_bbox's query builder takes no source CRS, so nothing is lost.)
     with open_input(input_path, verbose=verbose) as (source, metadata, _is_stream, con):
-        query, passed_through, bbox_column_name = _make_streaming_bbox_query(
+        query, passed_through, bbox_column_name, custom_metadata = prepare_streaming_bbox(
             source,
             con,
             bbox_column_name,
@@ -387,18 +369,20 @@ def _add_bbox_streaming(
             metadata=metadata,
         )
 
+        if passed_through:
+            progress(
+                f"Input already has bbox column '{bbox_column_name}'; "
+                "passed it through unchanged - the existing bbox column was not recomputed."
+            )
+            progress("Use --force to recompute and replace the existing bbox column.")
+
         write_output(
             con,
             query,
             output_path,
             original_metadata=metadata,
             verbose=verbose,
-            # A covering gpio did not compute must not be declared. The version
-            # is the facade's, pass-through or not: a 1.0 stream writes 1.1 like
-            # every other command (approved change 7).
-            custom_metadata=None
-            if passed_through
-            else {"covering": {"bbox": build_bbox_covering(bbox_column_name)}},
+            custom_metadata=custom_metadata,
             **write.funnel_kwargs(),
         )
 
@@ -414,41 +398,47 @@ def _add_bbox_streaming(
         success(f"Successfully added bbox column '{bbox_column_name}' to: {output_path}")
 
 
-def _make_streaming_bbox_query(
+def prepare_streaming_bbox(
     source: str,
     con,
     bbox_column_name: str,
     force: bool,
     geoparquet_version: str | None = None,
     metadata: dict | None = None,
-) -> tuple[str, bool, str]:
+    geometry_column: str | None = None,
+    *,
+    reuse_existing: bool = False,
+) -> tuple[str, bool, str, dict | None]:
     """Build the add-bbox query for a streaming source.
 
-    Returns ``(query, passed_through, bbox_column_name)``. ``passed_through``
-    means the source already carries a usable bbox struct, so the query is a
+    Returns ``(query, passed_through, bbox_column_name, custom_metadata)``. ``passed_through``
+    means the requested column already carries a usable bbox struct, so the query is a
     plain copy and the caller must not claim anything about a column gpio did not
-    compute. The name comes back because a source column of the requested name
+    compute. Sort callers set ``reuse_existing`` to accept any existing covering.
+    The name comes back because a source column of the requested name
     that is *not* a bbox struct moves the computed one aside (#1176), and the
     caller declares the covering over the name actually written.
     """
+    if reuse_existing and not force:
+        declared = bbox_column_to_declare(
+            query_schema(con, f"SELECT * FROM {source}"), sanitized_carried_geo(metadata)
+        )
+        if declared:
+            bbox_column_name = declared
+
     # Same guard as the file-based path (#728): a source that already carries a
     # bbox struct is passed through untouched rather than silently gaining a
     # second column named 'bbox_1'.
     has_bbox_struct = _has_bbox_struct_column(con, source, bbox_column_name)
     if not force and has_bbox_struct:
-        progress(
-            f"Input already has bbox column '{bbox_column_name}'; "
-            "passed it through unchanged - the existing bbox column was not recomputed."
-        )
-        progress("Use --force to recompute and replace the existing bbox column.")
-        return f"SELECT * FROM {source}", True, bbox_column_name
+        return f"SELECT * FROM {source}", True, bbox_column_name, None
 
     # Get column names from query result (works with both table names and read_parquet)
     described = describe_query(con, f"SELECT * FROM {source}")
     col_names = [name for name, _ in described]
     # The owner over the typed columns and the stream's carried block (#1367).
     geom_col = require_geometry_column(
-        primary_geometry_column(described, geo=sanitized_carried_geo(metadata)),
+        geometry_column or primary_geometry_column(described, geo=sanitized_carried_geo(metadata)),
         "the input stream",
     )
 
@@ -458,10 +448,16 @@ def _make_streaming_bbox_query(
         bbox_column_name = resolve_bbox_name(
             col_names, geoparquet_version, requested=bbox_column_name
         )
+    read = resolve_geometry_read(con, source, geom_col, relation=True)
+    bbox_expr = bbox_struct_sql(read.shape_expr, geom_col, read)
+    quoted_bbox = quote_identifier(bbox_column_name)
+    select = f"* EXCLUDE ({quoted_bbox})" if has_bbox_struct else "*"
+    query = f"SELECT {select}, {bbox_expr} AS {quoted_bbox} FROM {source}"
     return (
-        _make_add_bbox_query(source, geom_col, bbox_column_name, replace_existing=has_bbox_struct),
+        query,
         False,
         bbox_column_name,
+        {"covering": {"bbox": build_bbox_covering(bbox_column_name)}},
     )
 
 
@@ -602,9 +598,6 @@ def _handle_existing_bbox(
 
     existing_bbox_col = bbox_info.get("bbox_column_name")
 
-    if force:
-        return False, _handle_existing_bbox_force(bbox_column_name, existing_bbox_col)
-
     if bbox_column_name != existing_bbox_col:
         # Not a conflict: the requested column does not exist yet, so compute it
         # and leave the existing one alone. Copying the input would not satisfy
@@ -614,6 +607,10 @@ def _handle_existing_bbox(
             f"'{existing_bbox_col}'. File will have 2 bbox columns."
         )
         return False, None
+
+    if force:
+        progress(f"Replacing existing bbox column '{existing_bbox_col}'...")
+        return False, existing_bbox_col
 
     if write_options_requested:
         # A verbatim copy reproduces the input's compression, row groups and
@@ -706,19 +703,6 @@ def _copy_instead_of_recomputing(
         f'Copied "{input_parquet}" to "{output_parquet}" unchanged - '
         "the existing bbox column was not recomputed."
     )
-
-
-def _handle_existing_bbox_force(bbox_column_name: str, existing_bbox_col: str) -> str | None:
-    """Handle force mode when bbox column exists. Returns column to replace or None."""
-    if bbox_column_name == existing_bbox_col:
-        progress(f"Replacing existing bbox column '{existing_bbox_col}'...")
-        return existing_bbox_col
-    else:
-        warn(
-            f"Warning: Adding '{bbox_column_name}' alongside existing "
-            f"'{existing_bbox_col}'. File will have 2 bbox columns."
-        )
-        return None
 
 
 if __name__ == "__main__":

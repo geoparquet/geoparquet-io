@@ -1179,7 +1179,12 @@ def _rewrite_geo_metadata(metadata: dict | None, rewrite) -> dict | None:
 
 
 def compose_carried_geo(
-    metadata: dict | None, schema: pa.Schema, version: str, verbose: bool = False
+    metadata: dict | None,
+    schema: pa.Schema,
+    version: str,
+    verbose: bool = False,
+    *,
+    custom_metadata: dict | None = None,
 ) -> dict | None:
     """A Parquet KV ``metadata`` dict with its carried block composed for ``schema``.
 
@@ -1203,7 +1208,12 @@ def compose_carried_geo(
             return geo
         return compose_geo_block(
             SchemaSource(schema, with_geo_key(None, geo)),
-            GeoBlockOptions(geometry_column=primary, version=version, verbose=verbose),
+            GeoBlockOptions(
+                geometry_column=primary,
+                version=version,
+                verbose=verbose,
+                custom_metadata=custom_metadata,
+            ),
         )
 
     return _rewrite_geo_metadata(metadata, _compose)
@@ -2797,7 +2807,7 @@ def _file_footer_stats(
 
 
 def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
-    from geoparquet_io.core.duckdb_utils import sql_path
+    from geoparquet_io.core.duckdb_utils import disable_geoparquet_conversion, sql_path
     from geoparquet_io.core.file_utils import resolve_file_url
     from geoparquet_io.core.geometry_detection import primary_geometry_column
     from geoparquet_io.core.memory_limits import open_bounded_connection
@@ -2819,6 +2829,8 @@ def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
     # analysis budget also caps parallel decompression buffers on large hosts.
     con = open_bounded_connection(memory_limit="256MB", load_httpfs=needs_httpfs(path))
     try:
+        # Inspect stored WKB through the guarded geometry reader, including malformed values.
+        disable_geoparquet_conversion(con)
         query = f"SELECT * FROM read_parquet({sql_path(resolve_file_url(path, verbose=False))})"
         return _stats(QuerySource(con, query), geometry_column, **kwargs)
     finally:

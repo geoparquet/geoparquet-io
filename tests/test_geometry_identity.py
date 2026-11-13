@@ -169,6 +169,13 @@ def test_never_the_literal_fallback(tmp_path):
     assert primary_geometry_column(str(path)) is None
     assert primary_geometry_column(pa.table({"id": [1]})) is None
     assert primary_geometry_column([]) is None
+    # A stored input identity is a preference, never a missing output column.
+    assert primary_geometry_column(["id"], preferred="geometry") is None
+    described = [("geometry", "BLOB"), ("footprint", "BLOB")]
+    assert primary_geometry_column(described, preferred="footprint") == "footprint"
+    geo = {"primary_column": "geometry", "columns": {"geometry": {}, "footprint": {}}}
+    assert primary_geometry_column(["footprint"], geo=geo, preferred="geometry") == "footprint"
+    assert primary_geometry_column(described, geo=geo, preferred="dropped") == "geometry"
 
 
 def test_native_typed_column_without_a_standard_name():

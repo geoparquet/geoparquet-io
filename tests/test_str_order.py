@@ -417,26 +417,6 @@ def test_str_order_rejects_zero_row_group_size_by_the_name_the_user_typed(tmp_pa
     assert "tile_size" not in str(excinfo.value)
 
 
-def test_str_order_streaming_warns_that_add_bbox_is_ignored(tmp_path, monkeypatch, caplog):
-    """Streaming has no bbox step (same gap as `sort hilbert`), so say so."""
-    table = _point_table([(index, index % 4, index // 4) for index in range(16)])
-    stream = io.BytesIO()
-    with ipc.RecordBatchStreamWriter(stream, table.schema) as writer:
-        writer.write_table(table)
-    stream.seek(0)
-    mock_stdin = mock.MagicMock()
-    mock_stdin.isatty.return_value = False
-    mock_stdin.buffer = stream
-    monkeypatch.setattr(sys, "stdin", mock_stdin)
-    output = tmp_path / "stream-bbox.parquet"
-
-    with caplog.at_level(logging.WARNING, logger="geoparquet_io"):
-        str_order("-", str(output), add_bbox_flag=True, geoparquet_version="1.1")
-
-    assert any("--add-bbox is ignored in streaming mode" in r.message for r in caplog.records)
-    assert "bbox" not in pq.read_table(output).column_names
-
-
 def test_str_order_streaming_uses_the_streams_own_primary_column(tmp_path, monkeypatch):
     """A non-standard primary column works in stream mode, as it does in file mode."""
     metadata = {
@@ -474,7 +454,7 @@ def test_str_order_streaming_uses_the_streams_own_primary_column(tmp_path, monke
     assert result.column_names == ["id", "footprint"]
 
 
-def test_str_order_file_write_preserves_the_in_memory_ordering(tmp_path):
+def test_str_order_file_write_preserves_the_in_memory_ordering(tmp_path, monkeypatch):
     """The written row order is str_order_table's order - the write does not reshuffle.
 
     The tile size the file path uses is ``--row-group-size`` as the write facade
@@ -487,6 +467,12 @@ def test_str_order_file_write_preserves_the_in_memory_ordering(tmp_path):
     20 is one -- is passed through rather than rounded: pyarrow honours it
     exactly, so rounding could only change the output on the writer that obeyed.
     """
+    from geoparquet_io.core import sort_common
+
+    single_file = mock.Mock(wraps=sort_common.require_single_file)
+    stream_output = mock.Mock(wraps=sort_common.should_stream_output)
+    monkeypatch.setattr(sort_common, "require_single_file", single_file)
+    monkeypatch.setattr(sort_common, "should_stream_output", stream_output)
     source = tmp_path / "order-source.parquet"
     output = tmp_path / "order-str.parquet"
     table = _point_table(_SPREAD_POINTS)
@@ -494,6 +480,8 @@ def test_str_order_file_write_preserves_the_in_memory_ordering(tmp_path):
 
     str_order(str(source), str(output), row_group_rows=20, geoparquet_version="1.1")
 
+    single_file.assert_called_once()
+    stream_output.assert_called_once()
     written = pq.read_table(output)
     expected = str_order_table(table, tile_size=resolve_row_group_rows(20, None))
     assert written["id"].to_pylist() == expected["id"].to_pylist()
@@ -524,3 +512,27 @@ def _assert_str_materialized_scan_bounds():
         visit(profile)
         assert sum(node["operator_cardinality"] for node in scans) <= 4096
         assert sum(node["result_set_size"] for node in scans) <= 4096 * 48
+
+
+@pytest.mark.parametrize("kind", ["str", "hilbert", "column", "quadkey"])
+def test_sort_stdin_refuses_existing_output_before_reading(tmp_path, monkeypatch, kind):
+    from geoparquet_io.core.exceptions import GeoParquetError
+    from geoparquet_io.core.hilbert_order import hilbert_order
+
+    output = tmp_path / "existing.parquet"
+    output.write_bytes(b"keep me")
+    stdin = mock.MagicMock()
+    stdin.buffer.read.side_effect = AssertionError("input must not be consumed")
+    monkeypatch.setattr(sys, "stdin", stdin)
+    from geoparquet_io.core.sort_by_column import sort_by_column
+    from geoparquet_io.core.sort_quadkey import sort_by_quadkey
+
+    sorts = {
+        "str": str_order,
+        "hilbert": hilbert_order,
+        "column": lambda *args: sort_by_column(*args, columns="id"),
+        "quadkey": sort_by_quadkey,
+    }
+    with pytest.raises(GeoParquetError, match="already exists"):
+        sorts[kind]("-", str(output))
+    assert output.read_bytes() == b"keep me"

@@ -384,38 +384,23 @@ def test_bootstrap_installs_a_real_handler_when_nothing_configured_logging():
 
     _bootstrap_default_handler(verbose=False)
 
+    stream = io.StringIO()
+    logging.basicConfig(stream=stream, format="HOST:%(message)s", level=logging.INFO)
+    logging.getLogger("host_application").warning("configured after gpio")
+    assert stream.getvalue() == "HOST:configured after gpio\n"
+
     assert gpio_logger.handlers, "gpio installed no handler; output would be dropped"
     assert not all(isinstance(h, logging.NullHandler) for h in gpio_logger.handlers), (
         "gpio installed only a NullHandler with no host handlers to propagate to"
     )
 
 
-def test_bootstrap_restores_a_level_the_caller_chose_explicitly():
-    """setup_cli_logging() sets a level; an explicit caller choice must win.
-
-    Covers the `chosen_level != NOTSET` restore -- without it, a script that
-    silences gpio before its first call would have that choice overwritten by
-    the bootstrap.
-    """
+def test_bootstrap_preserves_explicit_level_and_defaults_only_when_notset():
+    """Bare scripts get a default level; an explicit host choice still wins."""
     root = logging.getLogger()
     root.handlers[:] = []
-    gpio_logger.handlers[:] = []
-    gpio_logger.setLevel(logging.WARNING)
-
-    _bootstrap_default_handler(verbose=False)
-
-    assert gpio_logger.level == logging.WARNING, (
-        "bootstrap overwrote a level the caller set before the first gpio call"
-    )
-
-
-def test_bootstrap_leaves_notset_level_to_setup_cli_logging():
-    """A caller who chose nothing gets the CLI default, not a forced NOTSET."""
-    root = logging.getLogger()
-    root.handlers[:] = []
-    gpio_logger.handlers[:] = []
-    gpio_logger.setLevel(logging.NOTSET)
-
-    _bootstrap_default_handler(verbose=False)
-
-    assert gpio_logger.level != logging.NOTSET
+    for chosen, expected in ((logging.WARNING, logging.WARNING), (logging.NOTSET, logging.INFO)):
+        gpio_logger.handlers[:] = []
+        gpio_logger.setLevel(chosen)
+        _bootstrap_default_handler(verbose=False)
+        assert gpio_logger.level == expected
