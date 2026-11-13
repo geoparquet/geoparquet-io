@@ -30,6 +30,7 @@ from geoparquet_io.core.duckdb_utils import (
     orphaned_spill_dirs,
     pin_duckdb_settings,
     quote_identifier,
+    restore_duckdb_settings,
     s3_config_scope,
     spill_directory,
     sql_literal,
@@ -1871,7 +1872,7 @@ def run_admin_join(
                         f"CREATE TEMP TABLE {bounded_table} AS SELECT * FROM {admin_table_ref}"
                     )
             finally:
-                con.execute(f"SET threads = {int(threads)}")
+                restore_duckdb_settings(con, {"threads": threads})
             admin_table_ref = bounded_table
             intermediates.append(bounded_table)
         query = build_admin_join_query(
