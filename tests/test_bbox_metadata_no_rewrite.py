@@ -117,10 +117,22 @@ def test_row_groups_and_bloom_filters_are_untouched(zstd15_file):
     assert _column_stats(zstd15_file) == before
 
 
-def test_the_covering_is_there(zstd15_file):
+def test_the_covering_is_there(zstd15_file, monkeypatch):
     """The command's own job, unchanged by how it is now written."""
+    from geoparquet_io.core import duckdb_metadata, geo_metadata
+
+    monkeypatch.setattr(duckdb_metadata, "get_row_group_bbox_stats", lambda *a, **kw: ([], None))
+    scans = []
+    original = geo_metadata._query_stats
+
+    def count(*args, **kwargs):
+        scans.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(geo_metadata, "_query_stats", count)
     add_bbox_metadata(str(zstd15_file))
 
+    assert len(scans) == 1, "an unusable covering footer must measure bounds and types together"
     geo = json.loads(pq.read_metadata(str(zstd15_file)).metadata[b"geo"])
     assert geo["columns"]["geometry"]["covering"] == {
         "bbox": {

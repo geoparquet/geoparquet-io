@@ -28,6 +28,7 @@ from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
     SchemaSource,
     _bbox_claimed_by_another_column,
+    _footer_stats,
     arrow_bbox_covering_problem,
     compose_geo_block,
     covering_supported,
@@ -371,6 +372,13 @@ def add_bbox_metadata(
         primary_geometry_column(parquet_file, verbose=verbose), parquet_file
     )
 
+    measured = _footer_stats(parquet_file, primary_col, target_column, need_bbox=True)
+    if measured is None:
+        measured = geometry_stats_of(parquet_file, primary_col, verbose=verbose)
+        geometry_types = measured.geometry_types
+    else:
+        geometry_types = geometry_types_of(parquet_file, primary_col, verbose=verbose)
+
     # The block is re-composed with the covering declared on the primary: the
     # composer creates a missing or non-object ``columns`` entry and runs every
     # covering gate, so the one key this command writes is the owner's answer.
@@ -382,10 +390,8 @@ def add_bbox_metadata(
             geometry_column=primary_col,
             stats={
                 primary_col: {
-                    "bbox": geometry_stats_of(
-                        parquet_file, primary_col, bbox_column=target_column, verbose=verbose
-                    ).bbox,
-                    "geometry_types": geometry_types_of(parquet_file, primary_col, verbose=verbose),
+                    "bbox": measured.bbox,
+                    "geometry_types": geometry_types,
                 }
             },
             covering=target_column,
