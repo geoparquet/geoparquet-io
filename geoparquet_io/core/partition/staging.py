@@ -36,9 +36,10 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
 )
 from geoparquet_io.core.duckdb_utils import sql_path
-from geoparquet_io.core.edges import geoarrow_edge_type, logical_type_edges
+from geoparquet_io.core.edges import logical_type_edges
 from geoparquet_io.core.exceptions import PartitionError
 from geoparquet_io.core.file_utils import get_first_parquet_file, output_is_kept, scratch_file
+from geoparquet_io.core.geoarrow_encoding import native_wkb_type
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_schema import root_schema_columns
@@ -111,19 +112,8 @@ class PartitionWriteOptions:
     write: WriteOptions = field(default_factory=WriteOptions)
     extra_kv_metadata: dict[str, str] | None = None
 
-    def as_write_kwargs(self) -> dict:
-        """Return the kwargs accepted by ``write_parquet_with_metadata``."""
-        return {
-            **self.write.funnel_kwargs(),
-            "geoparquet_version": self.geoparquet_version,
-            "input_file": self.input_file,
-            "extra_kv_metadata": self.extra_kv_metadata,
-        }
-
     @cached_property
     def _remote_schema(self) -> pa.Schema:
-        import geoarrow.pyarrow as ga
-
         assert self.input_file is not None
         source = get_first_parquet_file(self.input_file)
         if source is None:
@@ -137,16 +127,20 @@ class PartitionWriteOptions:
             native = parse_geometry_logical_type(column.get("logical_type") or "")
             field_type = pa.binary()
             if native is not None:
-                field_type = ga.wkb().with_crs(native.get("crs"))
                 edges = logical_type_edges(native) if native["geo_type"] == "Geography" else None
-                field_type = field_type.with_edge_type(geoarrow_edge_type(edges))
+                field_type = native_wkb_type(native.get("crs"), edges)
             fields.append(pa.field(column["name"], field_type))
         return pa.schema(fields, metadata=metadata)
 
     @contextmanager
     def write_kwargs(self):
         """Keep the cached remote declarations local for the duration of a write."""
-        kwargs = self.as_write_kwargs()
+        kwargs = {
+            **self.write.funnel_kwargs(),
+            "geoparquet_version": self.geoparquet_version,
+            "input_file": self.input_file,
+            "extra_kv_metadata": self.extra_kv_metadata,
+        }
         if not is_remote_url(self.input_file):
             yield kwargs
             return

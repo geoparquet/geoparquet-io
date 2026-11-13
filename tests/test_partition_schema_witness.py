@@ -170,7 +170,7 @@ def test_every_partition_write_options_names_its_witness():
     from geoparquet_io.core.partition.staging import PartitionWriteOptions
 
     kwargs_tree = ast.parse(
-        textwrap.dedent(inspect.getsource(PartitionWriteOptions.as_write_kwargs))
+        textwrap.dedent(inspect.getsource(PartitionWriteOptions.write_kwargs.__wrapped__))
     )
     assert not any(isinstance(node, ast.IfExp) for node in ast.walk(kwargs_tree))
     assert len(sites) >= 3, sites
@@ -245,5 +245,7 @@ def test_a_local_witness_is_forwarded(projected_conus):
     from geoparquet_io.core.partition.staging import PartitionWriteOptions
 
     options = PartitionWriteOptions(input_file=str(projected_conus))
-    assert options.as_write_kwargs()["input_file"] == str(projected_conus)
-    assert PartitionWriteOptions().as_write_kwargs()["input_file"] is None
+    with options.write_kwargs() as kwargs:
+        assert kwargs["input_file"] == str(projected_conus)
+    with PartitionWriteOptions().write_kwargs() as kwargs:
+        assert kwargs["input_file"] is None
