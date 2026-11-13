@@ -572,7 +572,9 @@ class TestFastPathPlumbing:
         out = tmp_path / "out.geojson"
 
         def _fake_maybe(*args, **kwargs):
-            Path(kwargs["output_path"]).write_text('{"type":"FeatureCollection","features":[]}')
+            Path(kwargs["output_path"]).write_text(
+                '{"type":"FeatureCollection","features":[]}', encoding="utf-8"
+            )
             return 42
 
         monkeypatch.setattr(geojson_stream, "_maybe_native_feature_collection", _fake_maybe)
@@ -591,7 +593,9 @@ class TestFastPathPlumbing:
         )
 
         def _fake_maybe(*args, **kwargs):
-            Path(kwargs["output_path"]).write_text('{"type":"FeatureCollection","features":[]}')
+            Path(kwargs["output_path"]).write_text(
+                '{"type":"FeatureCollection","features":[]}', encoding="utf-8"
+            )
             return 42
 
         monkeypatch.setattr(geojson_stream, "_maybe_native_feature_collection", _fake_maybe)

@@ -171,7 +171,7 @@ class TestAtomicWrite:
 
             with pytest.raises(RuntimeError):
                 with atomic_write(str(output_path)) as temp_path:
-                    Path(temp_path).write_text("partial")
+                    Path(temp_path).write_text("partial", encoding="utf-8")
                     raise RuntimeError("Simulated failure")
 
             assert not output_path.exists()

@@ -270,7 +270,7 @@ class TestStdinToNamedGeoJsonOutput:
 
         assert result.returncode == 0, f"Pipeline failed: {result.stderr}"
 
-        data = json.loads(output.read_text())
+        data = json.loads(output.read_text(encoding="utf-8"))
         assert data["type"] == "FeatureCollection"
         assert len(data["features"]) == 5
         assert all(f["geometry"] is not None for f in data["features"])
@@ -291,7 +291,7 @@ class TestStdinToNamedGeoJsonOutput:
         )
 
         assert result.returncode == 0, f"Pipeline failed: {result.stderr}"
-        assert json.loads(output.read_text())["type"] == "FeatureCollection"
+        assert json.loads(output.read_text(encoding="utf-8"))["type"] == "FeatureCollection"
 
     @pytest.mark.skipif(not PLACES_PARQUET.exists(), reason="Test data not available")
     def test_stdin_to_named_file_with_bbox_and_id_field(self, tmp_path):
@@ -314,7 +314,7 @@ class TestStdinToNamedGeoJsonOutput:
 
         assert result.returncode == 0, f"Pipeline failed: {result.stderr}"
 
-        data = json.loads(output.read_text())
+        data = json.loads(output.read_text(encoding="utf-8"))
         assert data["type"] == "FeatureCollection"
         assert len(data["features"]) == 5
         for feature in data["features"]:
@@ -657,7 +657,7 @@ class TestStdinWithoutGeometryTypes:
         if command == ["convert", "geojson"]:
             import json
 
-            assert len(json.loads(Path(output_file).read_text())["features"]) == 766
+            assert len(json.loads(Path(output_file).read_text(encoding="utf-8"))["features"]) == 766
         else:
             assert pq.read_table(output_file).num_rows == 766
 

@@ -195,7 +195,9 @@ def assert_stream_geo_matches_head_for_changed_selections(monkeypatch):
 
     import geoparquet_io.core.stream_io as stream_io
 
-    cases = json.loads((Path(__file__).parent / "data" / "stream_geo_head.json").read_text())
+    cases = json.loads(
+        (Path(__file__).parent / "data" / "stream_geo_head.json").read_text(encoding="utf-8")
+    )
     con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
     try:
         for name, case in cases.items():

@@ -794,7 +794,7 @@ class TestFeatureMembersEmitValidJson:
             cli, ["convert", "geojson", places_test_file, str(out), *extra_args]
         )
         assert result.exit_code == 0, result.output
-        return json.loads(out.read_text())
+        return json.loads(out.read_text(encoding="utf-8"))
 
     def test_write_bbox_emits_parseable_features(self, tmp_path, places_test_file):
         data = self._convert(tmp_path, places_test_file, "--write-bbox")

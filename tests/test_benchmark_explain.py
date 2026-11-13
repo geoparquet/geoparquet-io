@@ -413,7 +413,7 @@ class TestExplainCLI:
         assert result.exit_code == 0
         assert Path(output_path).exists()
 
-        with open(output_path) as f:
+        with open(output_path, encoding="utf-8") as f:
             data = json.load(f)
         assert "operators" in data
 

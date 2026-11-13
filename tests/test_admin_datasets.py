@@ -1155,8 +1155,8 @@ class TestClearCache:
         with tempfile.TemporaryDirectory() as tmpdir:
             cache_dir = Path(tmpdir)
             (cache_dir / "gaul-2024.parquet").write_bytes(b"parquet")
-            (cache_dir / "readme.txt").write_text("do not delete")
-            (cache_dir / ".gitkeep").write_text("")
+            (cache_dir / "readme.txt").write_text("do not delete", encoding="utf-8")
+            (cache_dir / ".gitkeep").write_text("", encoding="utf-8")
 
             with patch("geoparquet_io.core.admin_datasets.get_cache_dir") as mock_get_cache:
                 mock_get_cache.return_value = cache_dir
@@ -1938,7 +1938,7 @@ class TestDownloadPerLevelCachesHousekeeping:
             original = dataset._build_level_cache_query
 
             def query(level, path, extent=None):
-                reads.append(path)
+                reads.append(Path(path))
                 return original(level, path, extent)
 
             from geoparquet_io.core.file_utils import _spill_lock
@@ -1966,8 +1966,8 @@ class TestDownloadPerLevelCachesHousekeeping:
             write_part("part-b.parquet", "CA")
             final = dataset.get_source_for_level("country")
             assert not completed[0].parent.exists()
-            assert reads.count(str(source / "part-a.parquet")) == 1
-            assert reads.count(str(source / "part-b.parquet")) == 2
+            assert reads.count(source / "part-a.parquet") == 1
+            assert reads.count(source / "part-b.parquet") == 2
             assert con.execute(
                 f"SELECT country FROM {sql_path(final)} ORDER BY country"
             ).fetchall() == [("CA",), ("US",)]
