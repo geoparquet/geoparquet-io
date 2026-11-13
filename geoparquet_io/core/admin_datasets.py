@@ -22,7 +22,7 @@ import duckdb
 from geoparquet_io.core import duckdb_utils
 from geoparquet_io.core.compression import resolve_codec
 from geoparquet_io.core.crs_utils import reproject_to_source_sql, transform_geom_sql
-from geoparquet_io.core.duckdb_metadata import _row_group_geometry_scan_stats
+from geoparquet_io.core.duckdb_metadata import get_per_row_group_bbox_stats
 from geoparquet_io.core.duckdb_utils import (
     build_spatial_join_condition,
     build_spatial_join_query,
@@ -1228,8 +1228,8 @@ class OvertureAdminDataset(AdminDataset):
             try:
                 objects = glob_matches(source) if has_glob_pattern(source) else [source]
                 for obj in objects:
-                    for row in _row_group_geometry_scan_stats(
-                        obj, self.get_geometry_column(), "bbox", con
+                    for row in get_per_row_group_bbox_stats(
+                        obj, "bbox", con, geometry_column=self.get_geometry_column()
                     ):
                         size = row["geometry_bytes"]
                         if size is None:

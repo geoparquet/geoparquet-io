@@ -316,7 +316,7 @@ copies or compatibility wrappers. The guard set is in ADR-0008 and
 | CLI options and report formatting | `geoparquet_io/cli/decorators.py`, `geoparquet_io/core/bbox_parse.py`, `geoparquet_io/core/json_output.py`, `geoparquet_io/cli/commands/check.py` | `overwrite_option`, `refuse_together`, `parse_bbox`, `BBox`, `dumps_json`, `MultiFileCheckRunner` |
 | What a check looks at and what its fix writes | `geoparquet_io/core/check_options.py` | `CheckOptions`, `check_options_from_keywords`, `FIXABLE_CHECKS` |
 | Spatial joins | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/admin_datasets.py` | `build_spatial_join_condition`, `build_spatial_join_query`, `build_admin_subquery`, `admin_match_order` |
-| Query schema and row-group statistics | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `query_schema`, `describe_query`, `get_row_group_bbox_stats`, `get_row_group_sizes` |
+| Query schema and row-group statistics | `geoparquet_io/core/duckdb_utils.py`, `geoparquet_io/core/duckdb_metadata.py` | `query_schema`, `describe_query`, `get_row_group_bbox_stats`, `get_per_row_group_bbox_stats`, `get_row_group_sizes` |
 | Error classification and CLI translation | `geoparquet_io/core/exceptions.py`, `geoparquet_io/cli/exception_handler.py` | `classify_failure`, `redact_credentials`, `status_message`, `error_boundary` |
 | GDAL format writes | `geoparquet_io/core/format_writers.py` | `write_gdal_format` |
 | DuckDB capabilities | `geoparquet_io/core/duckdb_utils.py` | `duckdb_capabilities`, `DuckDBCapabilities`, `complete_without_fetch`, `resolve_load_spatial` |
