@@ -3202,9 +3202,11 @@ class Table:
         Portolan spec defines it. Below eight row groups the verdict is
         withheld: ``to_dict()["judged"]`` is False, ``passed()`` stays True (no
         failure was found), the numbers are still in ``to_dict()`` and
-        ``warnings()`` says why. Files without such statistics fall back to
-        comparing the distance between consecutive features against random
-        pairs, which does not measure pruning.
+        ``warnings()`` says why. The spec judges such files by their rows,
+        which a conformance validator such as rashid does. Files without such
+        statistics fall back to comparing the distance between consecutive
+        features against random pairs. That ratio does not measure pruning, so
+        it is reported as a statistic and the verdict is withheld.
 
         Spatial order alone: ``gpio check spatial`` also judges pushdown
         readiness, so for its answer run ``gpio.check_spatial(path)`` on the file.

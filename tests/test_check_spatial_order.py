@@ -88,11 +88,8 @@ class TestCheckSpatialOrder:
 
         assert pq.ParquetFile(unsorted_test_file).metadata.num_row_groups >= 3
 
-    def test_poorly_ordered_file(self, unsorted_test_file, monkeypatch):
+    def test_poorly_ordered_file(self, unsorted_test_file):
         """The unsorted fixture must actually fail the spatial-order check."""
-        import geoparquet_io.core.check_spatial_order as mod
-
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
         result = check_spatial_order(
             unsorted_test_file,
             random_sample_size=50,
@@ -226,11 +223,8 @@ class TestCheckSpatialOrderBboxStats:
         assert result["issues"] == []
         assert result["fix_available"] is True, "unjudged is not known-ordered"
 
-    def test_issues_and_recommendations_when_failed(self, unsorted_test_file, monkeypatch):
+    def test_issues_and_recommendations_when_failed(self, unsorted_test_file):
         """Test that failing check includes proper issues and recommendations."""
-        import geoparquet_io.core.check_spatial_order as mod
-
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
         result = check_spatial_order(
             unsorted_test_file,
             random_sample_size=50,
@@ -481,8 +475,12 @@ class TestSpatialLocalitySecondaryCheck:
             {"row_group_id": 2, "xmin": 2.0, "ymin": 2.0, "xmax": 98.0, "ymax": 98.0},
             {"row_group_id": 3, "xmin": 1.0, "ymin": 1.0, "xmax": 99.0, "ymax": 99.0},
             {"row_group_id": 4, "xmin": 3.0, "ymin": 3.0, "xmax": 97.0, "ymax": 97.0},
+            {"row_group_id": 5, "xmin": 4.0, "ymin": 1.0, "xmax": 96.0, "ymax": 99.0},
+            {"row_group_id": 6, "xmin": 1.0, "ymin": 4.0, "xmax": 99.0, "ymax": 96.0},
+            {"row_group_id": 7, "xmin": 2.0, "ymin": 3.0, "xmax": 98.0, "ymax": 97.0},
         ]
 
+        # Eight groups: the footer check judges from eight up (PORTO-FMT-050).
         result = _check_spatial_order_from_row_group_bboxes(
             row_group_bboxes,
             parquet_file="test_unsorted.parquet",

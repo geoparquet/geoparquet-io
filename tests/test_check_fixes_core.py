@@ -605,8 +605,8 @@ class TestHilbertDetectionAndWarnings:
             row_group_rows=100000,  # Standard Hilbert row group size
         )
 
-        # One large row group under the 5 MB floor: the verdict is withheld
-        # (PORTO-FMT-058/044), which is not a failure -- and not a judged
+        # One large row group, under the footer check's eight: the verdict is
+        # withheld (PORTO-FMT-044), which is not a failure -- and not a judged
         # pass either, so a requested fix still sorts.
         result = check_spatial_order(output_file, 100, 500, False, return_results=True, quiet=True)
 
@@ -614,15 +614,9 @@ class TestHilbertDetectionAndWarnings:
         assert result["judged"] is False
         assert result["fix_available"] is True
 
-    def test_spatial_check_fails_for_non_hilbert_files(
-        self, places_test_file, temp_output_dir, monkeypatch
-    ):
+    def test_spatial_check_fails_for_non_hilbert_files(self, places_test_file, temp_output_dir):
         """Test that randomly shuffled data gets spatial warnings."""
         import random
-
-        import geoparquet_io.core.check_spatial_order as mod
-
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
 
         import pyarrow.parquet as pq
 

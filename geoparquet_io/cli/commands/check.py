@@ -1017,52 +1017,26 @@ def _spatial_with_pushdown(file_path, random_sample_size, limit_rows, verbose, *
 def _echo_spatial_order(result: dict) -> None:
     """One verdict line, led by the absolute cost where the footer judged.
 
-    A withheld verdict prints its reason and the numbers, never a check mark;
-    the sampling fallback names its method, because it measures a different
-    thing (consecutive-feature distance, not row-group pruning).
+    A withheld verdict prints its reason and the statistics, never a check
+    mark. The sampling fallback never judges: it names its method and reports
+    the distance ratio as a statistic, because it measures consecutive-feature
+    distance, not row-group pruning.
     """
     ratio = result.get("ratio")
     if ratio is None and "judged" not in result:
         return
-    sampling = result.get("method") == "sampling"
     efficiency = result.get("skip_rate_efficiency")
     efficiency_text = "undefined" if efficiency is None else f"{efficiency:.2f}"
     read = result.get("estimated_skip_rate")
     cost = "" if read is None else f"a typical query reads {1.0 - read:.0%} of the bytes, "
+    detail = f" ({cost}efficiency {efficiency_text})" if efficiency is not None else ""
     if spatial_verdict_withheld(result):
-        # Information, not a warning: the check found no failure, it only
-        # declines to certify one way or the other.
-        for line in result.get("warnings") or ["Spatial ordering not judged"]:
-            click.echo(click.style(f"ℹ️  {line}", fg="cyan"))
-        if result.get("num_row_groups"):
-            click.echo(f"Row groups: {result['num_row_groups']}")
-            click.echo(f"{cost.capitalize()}(efficiency {efficiency_text})")
-        return
-    if result.get("passed", (ratio or 0) < 0.5):
-        if sampling:
-            click.echo(
-                click.style(
-                    f"{PASS_GLYPH} Consecutive features are spatially close (sampling method)",
-                    fg="green",
-                )
-            )
-        else:
-            detail = f" ({cost}efficiency {efficiency_text})" if efficiency is not None else ""
-            click.echo(
-                click.style(
-                    f"{PASS_GLYPH} Data appears to be spatially ordered{detail}", fg="green"
-                )
-            )
-    elif sampling:
+        _echo_withheld_spatial_order(result, cost, efficiency_text)
+    elif result.get("passed", True):
         click.echo(
-            click.style(
-                f"{WARNING_GLYPH}  Consecutive features are not spatially close (sampling method)\n"
-                "Consider running 'gpio sort hilbert' to improve spatial locality",
-                fg="yellow",
-            )
+            click.style(f"{PASS_GLYPH} Data appears to be spatially ordered{detail}", fg="green")
         )
     else:
-        detail = f" ({cost}efficiency {efficiency_text})" if efficiency is not None else ""
         click.echo(
             click.style(
                 f"{WARNING_GLYPH}  Data may not be optimally spatially ordered{detail}\n"
@@ -1070,6 +1044,26 @@ def _echo_spatial_order(result: dict) -> None:
                 fg="yellow",
             )
         )
+
+
+def _echo_withheld_spatial_order(result: dict, cost: str, efficiency_text: str) -> None:
+    """The reason a spatial verdict was withheld, then the statistics it rests on.
+
+    Information, not a warning: the check found no failure, it only declines
+    to certify one way or the other.
+    """
+    for line in result.get("warnings") or ["Spatial ordering not judged"]:
+        click.echo(click.style(f"ℹ️  {line}", fg="cyan"))
+    if result.get("method") == "sampling" and result.get("ratio") is not None:
+        click.echo(
+            f"Consecutive / random feature distance: {result['ratio']:.2f} "
+            "(sampling method, a statistic, not a verdict)"
+        )
+    if result.get("num_row_groups"):
+        area_sum = result.get("bbox_area_sum")
+        area_text = "" if area_sum is None else f", area sum {area_sum:.2f}"
+        click.echo(f"Row groups: {result['num_row_groups']}")
+        click.echo(f"{cost.capitalize()}(efficiency {efficiency_text}{area_text})")
 
 
 def _echo_pushdown(pushdown: dict | None) -> None:

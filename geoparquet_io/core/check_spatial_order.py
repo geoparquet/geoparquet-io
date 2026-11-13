@@ -40,7 +40,7 @@ from geoparquet_io.core.geometry_detection import (
 from geoparquet_io.core.logging_config import debug, progress, warn
 from geoparquet_io.core.remote import needs_httpfs
 
-# The Portolan spec's thresholds (portolan-sdi/portolan-spec#188). All four are
+# The Portolan spec's thresholds (portolan-sdi/portolan-spec#188). Both are
 # named constants and nothing on the CLI or API overrides them: the spec fixes
 # them, so two validators cannot disagree.
 # 0.65 comes from the 2026-11 registry survey and its Hilbert-sort control:
@@ -48,16 +48,11 @@ from geoparquet_io.core.remote import needs_httpfs
 # 0.70 bar rejected an already-sorted file while 0.65 accepts every tested
 # sorted copy and still fails the shuffled band (PORTO-FMT-050).
 SPATIAL_ORDER_MIN_EFFICIENCY = 0.65
-#: A footer pass needs at least this many row groups (PORTO-FMT-044/050).
+#: The spec's footer check needs at least this many row groups
+#: (PORTO-FMT-044/050). Below it the spec applies its row check, which a
+#: conformance validator such as rashid runs. gpio only runs the footer check,
+#: so it withholds its verdict there and reports the statistics.
 SPATIAL_ORDER_MIN_ROW_GROUPS = 8
-#: Below the pass floor, efficiency under this still fails -- from three row
-#: groups up (PORTO-FMT-059): sorted two-group copies measured as low as 0.18,
-#: and no tested sorted copy with three or more groups fell below 0.34.
-SPATIAL_ORDER_OBVIOUS_FAIL_EFFICIENCY = 0.25
-#: Under this many compressed row-group bytes nothing about order is judged:
-#: skipping parts of so small a file saves a reader almost nothing
-#: (PORTO-FMT-058). Footer-only, so remote files measure the same.
-SPATIAL_ORDER_MIN_FILE_BYTES = 5_000_000
 
 _SKIP_RATE_THRESHOLD = 0.5
 _DEFAULT_QUERY_FRACTION = 0.1
@@ -159,23 +154,25 @@ def _errored_results(reason: str) -> dict:
 
 
 def _build_results_dict(ratio, consecutive_avg, random_avg):
-    """Build structured results dictionary for sampling method."""
-    passed = ratio is not None and ratio < 0.5
-    issues = []
-    recommendations = []
-    if ratio is not None and ratio >= 0.5:
-        issues.append(f"Poor spatial ordering (ratio: {ratio:.2f})")
-        recommendations.append("Apply Hilbert spatial ordering for better query performance")
+    """Build structured results dictionary for sampling method.
+
+    The distances are statistics, not a verdict: the spec judges a file
+    without row-group statistics by its rows (its row check), which gpio does
+    not run. ``passed`` means no failure was found and ``judged`` is False.
+    ``fix_available`` stays True, as for any withheld verdict, so an explicit
+    ``check spatial --fix`` still sorts.
+    """
     return {
-        "passed": passed,
+        "passed": True,
         "ratio": ratio,
         "consecutive_avg": consecutive_avg,
         "random_avg": random_avg,
         "method": "sampling",
-        "issues": issues,
-        "recommendations": recommendations,
-        "judged": ratio is not None,
-        "fix_available": not passed,
+        "issues": [],
+        "recommendations": [],
+        "warnings": [_NO_STATISTICS_WARNING],
+        "judged": False,
+        "fix_available": True,
     }
 
 
@@ -198,11 +195,7 @@ def _print_standalone_results(ratio, consecutive_avg, random_avg):
     debug(f"Average distance between consecutive features: {consecutive_avg}")
     debug(f"Average distance between random features: {random_avg}")
     progress(f"Ratio (consecutive / random): {ratio}")
-
-    if ratio is not None and ratio < 0.5:
-        progress("=> Data seems strongly spatially clustered.")
-    elif ratio is not None:
-        progress("=> Data might not be strongly clustered (or is partially clustered).")
+    progress(f"=> {_NO_STATISTICS_WARNING}.")
 
 
 def _print_bbox_stats_results(ratio, overlap_count, total_pairs, passed, judged, metrics):
@@ -256,57 +249,67 @@ def spatial_verdict_withheld(result: dict) -> bool:
     return not result.get("judged", True)
 
 
-def _spatial_order_verdict(
-    num_row_groups: int, efficiency: float | None, file_bytes: float | None
-) -> tuple[bool, bool, list[str]]:
-    """The verdict: ``(passed, judged, warnings)``, per the spec's floors.
+#: Why gpio withholds where the spec's row check applies.
+_ROW_CHECK_NOTE = (
+    "gpio checks spatial order from row-group statistics only from "
+    f"{SPATIAL_ORDER_MIN_ROW_GROUPS} row groups; a conformance validator such as "
+    "rashid judges smaller files by their rows"
+)
 
-    Under the 5 MB size floor nothing is judged (PORTO-FMT-058). At eight or
-    more row groups the 0.65 bar decides (PORTO-FMT-050). At three to seven
-    groups, a file under the 0.25 obvious-fail bar still fails (PORTO-FMT-059)
-    -- two groups are exempt, since sorted two-group copies measured as low as
-    0.18; otherwise the pass is withheld (PORTO-FMT-044) and ``warnings`` says
-    why there is no verdict.
+#: The withheld verdict for a file without row-group statistics.
+_NO_STATISTICS_WARNING = (
+    "Spatial ordering not judged: no row-group statistics. gpio checks spatial "
+    "order from row-group statistics only; a conformance validator such as "
+    "rashid judges this file by its rows"
+)
+
+
+def _row_group_hint(total_rows: float | None) -> str:
+    """The lever that makes a file judgeable here, when the file has the rows for it."""
+    from geoparquet_io.core.parquet_writer import WRITER_VECTOR_ROWS
+
+    if total_rows is None or total_rows < SPATIAL_ORDER_MIN_ROW_GROUPS * WRITER_VECTOR_ROWS:
+        return ""
+    return (
+        f". Smaller row groups (--row-group-size, {WRITER_VECTOR_ROWS:,} minimum) "
+        "would let gpio judge it"
+    )
+
+
+def _spatial_order_verdict(
+    num_row_groups: int, efficiency: float | None, total_rows: float | None = None
+) -> tuple[bool, bool, list[str]]:
+    """The spec's footer check: ``(passed, judged, warnings)``.
+
+    At eight or more row groups with a defined efficiency the 0.65 bar decides
+    (PORTO-FMT-050). Fewer row groups must not be judged by their boxes
+    (PORTO-FMT-044), and the spec sends them, a file without row-group
+    statistics, and an undefined efficiency to its row check. gpio has no row
+    check, so it withholds the verdict there and ``warnings`` says why.
     """
-    if file_bytes is not None and file_bytes < SPATIAL_ORDER_MIN_FILE_BYTES:
+    if num_row_groups == 0:
+        return True, False, [_NO_STATISTICS_WARNING]
+    if num_row_groups < SPATIAL_ORDER_MIN_ROW_GROUPS:
         return (
             True,
             False,
             [
-                f"Spatial ordering not judged: the row groups hold "
-                f"{file_bytes / 1_000_000:.1f} MB, under the "
-                f"{SPATIAL_ORDER_MIN_FILE_BYTES / 1_000_000:.0f} MB floor at which "
-                "ordering matters for reads"
+                f"Spatial ordering not judged: this file has {num_row_groups} row "
+                f"group{'s' if num_row_groups != 1 else ''}. "
+                f"{_ROW_CHECK_NOTE}{_row_group_hint(total_rows)}"
             ],
         )
-    if num_row_groups == 0:
-        return True, False, ["Spatial ordering not judged: no row-group statistics"]
-    if num_row_groups >= SPATIAL_ORDER_MIN_ROW_GROUPS:
-        if efficiency is None:
-            return (
-                True,
-                False,
-                [
-                    "Spatial ordering not judged: the efficiency is undefined "
-                    "for an extent no query can miss"
-                ],
-            )
-        return efficiency >= SPATIAL_ORDER_MIN_EFFICIENCY, True, []
-    if (
-        num_row_groups >= 3
-        and efficiency is not None
-        and efficiency < SPATIAL_ORDER_OBVIOUS_FAIL_EFFICIENCY
-    ):
-        return False, True, []
-    return (
-        True,
-        False,
-        [
-            f"Spatial ordering not judged below {SPATIAL_ORDER_MIN_ROW_GROUPS} row groups "
-            f"({num_row_groups} in this file); smaller row groups "
-            "(--row-group-size, 2,048 minimum) would make it judgeable"
-        ],
-    )
+    if efficiency is None:
+        return (
+            True,
+            False,
+            [
+                "Spatial ordering not judged: the efficiency is undefined "
+                "for an extent no query can miss, so the spec applies its row check, "
+                "which a conformance validator such as rashid runs"
+            ],
+        )
+    return efficiency >= SPATIAL_ORDER_MIN_EFFICIENCY, True, []
 
 
 def _check_spatial_order_from_row_group_bboxes(
@@ -378,7 +381,7 @@ def _check_spatial_order_from_row_group_bboxes(
     efficiency: float | None = metrics.get("skip_rate_efficiency")
 
     passed, judged, warnings = _spatial_order_verdict(
-        len(finite_bboxes) if metrics else 0, efficiency, weights["file_bytes"]
+        len(finite_bboxes) if metrics else 0, efficiency, weights["total_rows"]
     )
     if covered and not complete:
         warnings = [
@@ -422,7 +425,6 @@ def _check_spatial_order_from_row_group_bboxes(
             "warnings": warnings,
             "judged": judged,
             "num_row_groups": len(finite_bboxes),
-            "file_bytes": weights["file_bytes"],
             # Only a judged pass says the file is already ordered; a withheld
             # verdict leaves the ordering unknown, so a requested fix sorts.
             "fix_available": not (judged and passed),
@@ -455,9 +457,8 @@ def _finite_bboxes(row_group_bboxes: list[dict]) -> list[dict]:
 def _row_group_weights(parquet_file: str, bboxes: list[dict]) -> dict:
     """Rows and compressed bytes aligned with ``bboxes``, plus the file total.
 
-    ``file_bytes`` sums every row group, not only the boxed ones, because the
-    spec's size floor is about the file. A footer that cannot be read leaves
-    uniform weights and no size, which judges the layout but never the floor.
+    ``file_bytes`` and ``total_rows`` sum every row group, not only the boxed
+    ones. A footer that cannot be read leaves uniform weights and no totals.
     """
     try:
         groups = get_row_group_sizes(parquet_file)
@@ -552,7 +553,8 @@ def check_spatial_order(
         warn(
             "No bbox column or native geo_bbox stats found - using slower sampling method, "
             "which compares consecutive-feature distances and does not measure row-group "
-            "pruning. Add a bbox column with 'gpio add bbox' so the footer-based check can run."
+            "pruning, so it gives no verdict. Add a bbox column with 'gpio add bbox' so the "
+            "footer-based check can run."
         )
 
     geometry_column = primary_geometry_column(parquet_file, verbose=verbose)

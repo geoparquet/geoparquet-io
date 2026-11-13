@@ -31,7 +31,6 @@ import geoparquet_io.core.check_spatial_order as mod
 from geoparquet_io.core.check_spatial_order import (
     SPATIAL_ORDER_MIN_EFFICIENCY,
     SPATIAL_ORDER_MIN_ROW_GROUPS,
-    SPATIAL_ORDER_OBVIOUS_FAIL_EFFICIENCY,
     _bboxes_overlap,
     _compute_data_extent,
     _full_tiling_bboxes,
@@ -46,13 +45,6 @@ from geoparquet_io.core.check_spatial_order import (
 
 UNIT = {"xmin": 0.0, "ymin": 0.0, "xmax": 1.0, "ymax": 1.0}
 FLOOR = SPATIAL_ORDER_MIN_ROW_GROUPS
-
-
-@pytest.fixture(autouse=True)
-def _no_size_floor(monkeypatch):
-    """The fixtures here are kilobytes; the spec's 5 MB floor would mute every
-    verdict. ``TestSizeFloor`` sets it back explicitly."""
-    monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
 
 
 def tiling(n, extent=None):
@@ -80,8 +72,8 @@ def unsorted(n):
 def strips(n):
     """Vertical strips, overlapping their neighbours: middling order.
 
-    Scores between the obvious-fail bar and the pass bar at small n, which is
-    exactly the band where the verdict is withheld below the floor.
+    Scores well above zero at small n, so a withheld verdict below the floor
+    is not mistaken for a shuffled one.
     """
     width = 1.0 / (0.5 + 0.5 * n)
     out = []
@@ -248,8 +240,12 @@ class TestSharedVectors:
     """The vectors the Portolan spec, rashid and gpio all pin (PORTO-FMT-054).
 
     Vendored byte-for-byte from ``specs/portolan/abstract-tests/spatial-metric-vectors.json``
-    in portolan-spec. Only the ``layouts`` apply here: the ``rows`` section is
-    the spec's row rule, which gpio does not implement.
+    in portolan-spec (#188). Only the ``layouts`` apply here. Their ``verdict``
+    is the spec's footer check, which gpio runs: ``row-check`` means the footer
+    check gives no verdict, so gpio withholds. The ``rows`` section and its
+    verdicts belong to the spec's row check, which a conformance validator such
+    as rashid runs. gpio is a writer's tool without a row check, so it does not
+    reproduce them.
     """
 
     @pytest.mark.parametrize("name", list(VECTORS["layouts"]))
@@ -282,58 +278,46 @@ class TestSharedVectors:
             assert (m["skip_rate_efficiency"] < SPATIAL_ORDER_MIN_EFFICIENCY) is expected[
                 "below_bar"
             ]
+        # The footer check's verdict; ``row-check`` is gpio's withheld verdict.
+        passed, judged, _ = _spatial_order_verdict(len(boxes), m["skip_rate_efficiency"])
+        assert (("pass" if passed else "fail") if judged else "row-check") == expected["verdict"]
 
 
 class TestVerdictFunction:
-    """``_spatial_order_verdict``: the one thing a reader wants to check."""
+    """``_spatial_order_verdict``: the spec's footer check, and nothing else."""
 
     def test_at_or_above_the_floor_the_bar_decides(self):
-        assert _spatial_order_verdict(FLOOR, 0.65, None) == (True, True, [])
-        assert _spatial_order_verdict(FLOOR, 0.64, None)[:2] == (False, True)
+        assert _spatial_order_verdict(FLOOR, 0.65) == (True, True, [])
+        assert _spatial_order_verdict(FLOOR, 0.64)[:2] == (False, True)
 
-    def test_below_the_floor_a_clear_failure_is_judged(self):
-        """PORTO-FMT-059: efficiency under 0.25 fails from three groups up.
+    def test_below_the_floor_even_a_shuffled_file_is_not_judged(self):
+        """The retired clear-fail band (PORTO-FMT-059): the row check owns these files."""
+        for n in (1, 2, 3, FLOOR - 1):
+            passed, judged, warnings = _spatial_order_verdict(n, 0.0)
 
-        Two groups are exempt -- the spec's sort control measured sorted
-        two-group copies as low as 0.18, so a clear-fail there would reject
-        files a re-sort cannot improve.
-        """
-        assert _spatial_order_verdict(3, 0.0, None)[:2] == (False, True)
-        assert _spatial_order_verdict(FLOOR - 1, 0.24, None)[:2] == (False, True)
-        assert _spatial_order_verdict(2, 0.0, None)[1] is False, "two groups are withheld"
+            assert (passed, judged) == (True, False), f"n={n}"
+            assert f"only from {FLOOR} row groups" in warnings[0]
+            assert "rashid judges smaller files by their rows" in warnings[0]
+        assert "this file has 7 row groups" in _spatial_order_verdict(FLOOR - 1, 0.5)[2][0]
 
-    def test_below_the_floor_a_middling_file_is_not_judged_and_names_the_lever(self):
-        passed, judged, warnings = _spatial_order_verdict(FLOOR - 1, 0.5, None)
-
-        assert (passed, judged) == (True, False)
-        assert "not judged below 8 row groups (7 in this file)" in warnings[0]
-        assert "--row-group-size" in warnings[0]
-
-    def test_under_the_size_floor_nothing_is_judged(self, monkeypatch):
-        """The spec's PORTO-FMT-058: under 5 MB even a shuffled file is only reported."""
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 5_000_000)
-        passed, judged, warnings = _spatial_order_verdict(20, 0.0, 4_999_999)
-
-        assert (passed, judged) == (True, False)
-        assert "5 MB floor" in warnings[0]
-
-    def test_at_the_size_floor_the_bar_decides_again(self, monkeypatch):
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 5_000_000)
-        assert _spatial_order_verdict(20, 0.0, 5_000_000)[:2] == (False, True)
+    def test_the_row_group_lever_is_named_only_when_the_rows_allow_it(self):
+        """Eight groups of the 2,048-row minimum need 16,384 rows."""
+        assert "--row-group-size" in _spatial_order_verdict(3, 0.5, 16_384)[2][0]
+        assert "--row-group-size" not in _spatial_order_verdict(3, 0.5, 16_383)[2][0]
+        assert "--row-group-size" not in _spatial_order_verdict(3, 0.5)[2][0]
 
     def test_undefined_efficiency_and_no_statistics_are_not_judged(self):
-        assert _spatial_order_verdict(FLOOR, None, None)[:2] == (True, False)
-        assert "no row-group statistics" in _spatial_order_verdict(0, None, None)[2][0]
+        assert _spatial_order_verdict(FLOOR, None)[:2] == (True, False)
+        assert "row check" in _spatial_order_verdict(FLOOR, None)[2][0]
+        assert "no row-group statistics" in _spatial_order_verdict(0, None)[2][0]
 
     def test_the_predicate_reads_judged_and_defaults_to_judged(self):
         assert spatial_verdict_withheld({"passed": True, "judged": False}) is True
         assert spatial_verdict_withheld({"passed": False}) is False
 
-    def test_the_bars_and_floors_are_the_spec_constants(self):
+    def test_the_bar_and_floor_are_the_spec_constants(self):
         assert SPATIAL_ORDER_MIN_EFFICIENCY == 0.65
-        assert SPATIAL_ORDER_OBVIOUS_FAIL_EFFICIENCY == 0.25
         assert FLOOR == 8
-        assert mod.SPATIAL_ORDER_MIN_FILE_BYTES == 0, "patched for these tests"
 
 
 class TestClosedForm:
@@ -524,13 +508,15 @@ class TestBadlyOrderedFilesStillFail:
 
         assert result(boxes)["passed"] is False
 
-    @pytest.mark.parametrize("n", [3, 5, FLOOR - 1])
-    def test_unsorted_data_below_the_floor_is_a_clear_failure(self, n):
-        """PORTO-FMT-059: efficiency 0.00 is plain at any count of two or more."""
+    @pytest.mark.parametrize("n", [1, 3, FLOOR - 1])
+    def test_unsorted_data_below_the_floor_is_withheld_with_its_numbers(self, n):
+        """The clear-fail band is retired: the spec's row check judges these files."""
         r = result(unsorted(n))
 
-        assert r["judged"] is True and r["passed"] is False
+        assert r["judged"] is False and r["passed"] is True
         assert r["fix_available"] is True
+        if n > 1:
+            assert r["skip_rate_efficiency"] == 0.0, "the statistic is still reported"
 
 
 class TestVerdictIsWithheldBelowTheFloor:
@@ -546,7 +532,7 @@ class TestVerdictIsWithheldBelowTheFloor:
         r = result(strips(n))
 
         eff = r["skip_rate_efficiency"]
-        assert SPATIAL_ORDER_OBVIOUS_FAIL_EFFICIENCY < eff, "fixture must sit between the bars"
+        assert eff > 0.0, "fixture must be partly ordered, not shuffled"
         assert r["judged"] is False, f"n={n} is below the floor and must not be judged"
         assert r["passed"] is True, "no failure found"
         assert r["fix_available"] is True, "unjudged is not known-ordered; a requested fix sorts"
@@ -565,7 +551,8 @@ class TestVerdictIsWithheldBelowTheFloor:
     def test_the_withheld_verdict_says_so_in_the_payload(self):
         r = result(strips(3))
 
-        assert any("not judged below 8 row groups" in w for w in r["warnings"])
+        assert any("this file has 3 row groups" in w for w in r["warnings"])
+        assert any("rashid" in w for w in r["warnings"])
 
     def test_one_row_group_either_side_of_the_floor(self):
         """Same middling data: withheld at FLOOR-1, judged at FLOOR."""
@@ -705,46 +692,17 @@ def _run(args):
     return CliRunner().invoke(check, args)
 
 
-class TestSizeFloor:
-    """The spec's 5 MB floor (PORTO-FMT-058), on real files."""
+class TestNoSizeFloor:
+    """The retired 5 MB floor (PORTO-FMT-058): a small file is judged like any other."""
 
-    def test_a_small_shuffled_file_is_not_judged(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 5_000_000)
+    def test_a_kilobyte_shuffled_file_with_enough_groups_fails(self, tmp_path):
         path = _write_bbox_file(tmp_path / "small.parquet", 4000, 40, shuffle_seed=0)
 
         r = mod.check_spatial_order(path, 10, 100, verbose=False, return_results=True, quiet=True)
 
-        assert r["judged"] is False and r["passed"] is True
-        assert any("5 MB floor" in w for w in r["warnings"])
-        assert r["fix_available"] is True, "unjudged is not known-ordered; a requested fix sorts"
-
-    def test_the_floor_reads_the_footer_compressed_bytes(self, tmp_path, monkeypatch):
-        path = _write_bbox_file(tmp_path / "boundary.parquet", 4000, 40, shuffle_seed=0)
-        r = mod.check_spatial_order(path, 10, 100, verbose=False, return_results=True, quiet=True)
-        footer_bytes = r["file_bytes"]
-        assert footer_bytes and footer_bytes > 0
-
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", footer_bytes + 1)
-        below = mod.check_spatial_order(
-            path, 10, 100, verbose=False, return_results=True, quiet=True
-        )
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", footer_bytes)
-        at_floor = mod.check_spatial_order(
-            path, 10, 100, verbose=False, return_results=True, quiet=True
-        )
-
-        assert below["judged"] is False
-        assert at_floor["judged"] is True and at_floor["passed"] is False
-
-    def test_cli_says_the_file_is_too_small(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 5_000_000)
-        path = _write_bbox_file(tmp_path / "small.parquet", 4000, 40, shuffle_seed=0)
-
-        r = _run(["spatial", path])
-
-        assert r.exit_code == 0, r.output
-        assert "5 MB floor" in r.output
-        assert "spatially ordered" not in r.output
+        assert r["judged"] is True and r["passed"] is False
+        assert "file_bytes" not in r
+        assert not any("MB" in w for w in r["warnings"])
 
 
 class TestCliVerdicts:
@@ -794,38 +752,28 @@ class TestCliWithheldVerdict:
         r = _run(["spatial", small_file])
 
         assert r.exit_code == 0, r.output
-        assert "not judged below 8 row groups" in r.output
+        assert "this file has 1 row group." in r.output
+        assert "rashid" in r.output
         assert "✓" not in r.output.split("Pushdown")[0]
         assert "spatially ordered" not in r.output.split("Pushdown")[0]
         assert "Row groups:" in r.output
 
-    def test_three_shuffled_row_groups_are_a_clear_failure(self, tmp_path):
-        """PORTO-FMT-059 end to end: the case that used to print a green pass.
-
-        Three groups, not two: the recalibrated spec exempts two-group files,
-        whose sorted copies measured as low as 0.18.
-        """
-        path = _write_bbox_file(tmp_path / "three.parquet", 600, 3, shuffle_seed=1)
-
-        r = _run(["spatial", path])
-
-        assert "Data may not be optimally spatially ordered" in r.output
-        assert "efficiency 0.0" in r.output
-
-    def test_two_shuffled_row_groups_are_withheld(self, tmp_path):
-        """At two groups the clear-fail rule stands down and the pass is withheld."""
-        path = _write_bbox_file(tmp_path / "two.parquet", 400, 2, shuffle_seed=1)
+    @pytest.mark.parametrize("n_groups", [2, 3])
+    def test_shuffled_row_groups_below_the_floor_are_withheld(self, tmp_path, n_groups):
+        """The retired clear-fail band: no failure line, the statistics still shown."""
+        path = _write_bbox_file(tmp_path / "few.parquet", 200 * n_groups, n_groups, shuffle_seed=1)
 
         r = _run(["spatial", path])
 
         assert "Spatial ordering not judged" in r.output
         assert "Data may not be optimally spatially ordered" not in r.output
+        assert "efficiency 0.0" in r.output
 
     def test_check_all_prints_no_check_mark_either(self, small_file):
         r = _run(["all", small_file])
 
         assert r.exit_code == 0, r.output
-        assert "not judged below 8 row groups" in r.output
+        assert "this file has 1 row group." in r.output
 
     def test_a_withheld_verdict_is_not_a_failure_in_a_multi_file_run(self, tmp_path):
         d = tmp_path / "part"
@@ -984,19 +932,22 @@ class TestSamplingFallbackSaysWhatItMeasures:
         r = _run(["spatial", buildings_test_file])
 
         assert r.exit_code == 0, r.output
-        assert "Consecutive features are spatially close (sampling method)" in r.output
+        assert "Spatial ordering not judged: no row-group statistics" in r.output
+        assert "(sampling method, a statistic, not a verdict)" in r.output
         assert r.output.count("does not measure row-group pruning") == 1
         assert "gpio add bbox" in r.output
         assert "Data appears to be spatially ordered" not in r.output
+        assert "spatially close" not in r.output
 
-    def test_failing_sampling_result_names_the_method_too(self, capsys):
+    def test_a_high_sampling_ratio_prints_no_warning(self, capsys):
         from geoparquet_io.cli.commands.check import _echo_spatial_order
 
-        _echo_spatial_order({"ratio": 0.9, "passed": False, "method": "sampling"})
+        _echo_spatial_order(mod._build_results_dict(0.9, 1.0, 2.0))
 
         out = capsys.readouterr().out
-        assert "Consecutive features are not spatially close (sampling method)" in out
-        assert "gpio sort hilbert" in out
+        assert "Consecutive / random feature distance: 0.90" in out
+        assert "not optimally" not in out
+        assert "⚠" not in out
 
 
 class TestFooterCheckOwnsTheVerdict:
@@ -1015,7 +966,6 @@ class TestFooterCheckOwnsTheVerdict:
         def _must_not_run(*args, **kwargs):
             raise AssertionError("the sampling fallback ran on a file with footer statistics")
 
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
         monkeypatch.setattr(mod, "_calculate_consecutive_avg", _must_not_run)
         monkeypatch.setattr(mod, "_calculate_random_avg", _must_not_run)
 
@@ -1032,7 +982,6 @@ class TestFooterCheckOwnsTheVerdict:
             # The one row-group stats reader: native first (main's #1367 flow).
             return native(), "native"
 
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
         monkeypatch.setattr(mod, "get_row_group_bbox_stats", _native_first)
         monkeypatch.setattr(mod, "get_per_row_group_native_geo_stats", lambda *a, **k: tiling(9))
         monkeypatch.setattr(mod, "primary_geometry_column", lambda *a, **k: "geometry")
@@ -1062,7 +1011,6 @@ class TestPartialStatisticsAreNotJudged:
     def test_a_group_without_statistics_withholds_the_verdict(self, tmp_path, monkeypatch):
         n = FLOOR + 2
         path = _write_bbox_file(tmp_path / "f.parquet", 400, n, shuffle_seed=3, null_stats_group=0)
-        monkeypatch.setattr(mod, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
 
         r = mod.check_spatial_order(path, 10, 100, verbose=False, return_results=True, quiet=True)
 
@@ -1185,12 +1133,13 @@ class TestUntouchedConsumersSeeNoFailure:
 
         assert checks["spatial_sorting"]["passed"] is True
 
-    def test_check_optimization_fails_a_clearly_shuffled_small_file(self, tmp_path):
-        """Three shuffled groups are a clear failure (PORTO-FMT-059); two are exempt."""
+    def test_check_optimization_withholds_on_a_shuffled_small_file(self, tmp_path):
+        """Three shuffled groups: the clear-fail band is retired, so no verdict either way."""
         from geoparquet_io.core.check_optimization import check_optimization
 
         path = _write_bbox_file(tmp_path / "three.parquet", 600, 3, shuffle_seed=1)
 
         checks = check_optimization(path, return_results=True, quiet=True)["checks"]
 
-        assert checks["spatial_sorting"]["passed"] is False
+        assert checks["spatial_sorting"]["passed"] is True
+        assert "not judged" in checks["spatial_sorting"]["detail"]

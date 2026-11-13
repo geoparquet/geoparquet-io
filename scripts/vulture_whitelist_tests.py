@@ -105,5 +105,3 @@ offline_wfs_probes  # unused function (tests/test_wfs.py:46) -- dynamic: pytest 
 is_v2  # unused attribute (tests/test_duckdb_capabilities.py:146) -- dynamic: assigned to prove the dataclass is frozen
 native_writer_on  # unused function (tests/test_geojson_native_writer.py:104) -- dynamic: pytest fixture used via usefixtures
 _.do_PUT  # unused method (tests/_fake_s3.py:65) -- dynamic: http.server dispatches do_<COMMAND> by name (HANDOFFS row 43 test)
-_no_size_floor  # unused function (tests/test_spatial_order_pruning_first.py:51) -- dynamic: pytest fixture, autouse
-_no_ordering_size_floor  # unused function (tests/test_check_cli_guards.py:53) -- dynamic: pytest fixture, autouse

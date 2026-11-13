@@ -1587,12 +1587,12 @@ row_group_result = table.check_row_groups()
 details = result.to_dict()
 ```
 
-`check_spatial()` can withhold its verdict: the Portolan spec does not judge a
-file whose row groups hold under 5 MB of compressed bytes, nor pass one with
-fewer than eight row groups. `passed()` stays `True` there (no failure was
-found), `judged()` is `False`, the numbers are still in `to_dict()` and
-`warnings()` says why. A clearly shuffled file (efficiency under 0.25) still
-fails from three row groups up.
+`check_spatial()` can withhold its verdict. gpio runs the Portolan spec's
+footer check, which judges files with eight or more row groups. A file with
+fewer row groups, or without row-group statistics, takes the spec's row
+check, which a conformance validator such as rashid runs. `passed()` stays
+`True` there (no failure was found), `judged()` is `False`, the numbers are
+still in `to_dict()` and `warnings()` says why.
 
 ```python
 spatial_result = table.check_spatial()

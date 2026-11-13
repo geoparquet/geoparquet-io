@@ -119,11 +119,6 @@ def unsorted_misdeclared(tmp_path, unsorted_test_file):
 
 
 def test_check_all_runs_what_gpio_check_all_runs(monkeypatch, unsorted_misdeclared):
-    # The fixture is kilobytes: zero the spec's 5 MB floor so the spatial
-    # verdict is judged rather than withheld (PORTO-FMT-058).
-    from geoparquet_io.core import check_spatial_order
-
-    monkeypatch.setattr(check_spatial_order, "SPATIAL_ORDER_MIN_FILE_BYTES", 0)
     categories = []
     real = cli_check.all_checks_result
 

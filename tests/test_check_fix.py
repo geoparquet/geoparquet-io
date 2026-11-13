@@ -216,8 +216,8 @@ class TestCheckFixSpatial:
         )
 
         assert result.exit_code == 0
-        # The places fixture sits under the 5 MB floor, so the verdict is
-        # withheld — which is not "already ordered", so the requested fix
+        # The places fixture has one row group, under the footer check's
+        # eight, so the verdict is withheld — which is not "already ordered", so the requested fix
         # still sorts into the named output (#755, #1098).
         assert "Spatial ordering not judged" in result.output
         assert "No fix needed" not in result.output, "a withheld verdict is not a pass"

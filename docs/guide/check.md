@@ -231,17 +231,17 @@ Checks if data is spatially ordered. Spatially ordered data improves:
   a row group with probability proportional to the group's rows, and spans 10%
   of each dimension of that group's box), and each group weighs its compressed
   bytes. The definition and its thresholds are the
-  [Portolan spec's](https://github.com/portolan-sdi/portolan-spec/pull/188):
-  pass at efficiency 0.65 or more, judged from eight row groups up; below
-  eight, only a clear failure (efficiency under 0.25, at three or more row
-  groups) is reported as one. A
-  file whose row groups hold under 5 MB of compressed bytes is not judged at
-  all — at that size, skipping parts of the file saves a reader almost
-  nothing — and the check says so instead of printing a pass. Nothing on the
-  CLI or API overrides the thresholds. A requested `--fix` still sorts a file
+  [Portolan spec's](https://github.com/portolan-sdi/portolan-spec/pull/188)
+  footer check: pass at efficiency 0.65 or more, judged from eight row groups
+  up. Below eight row groups, the spec judges a file by its rows instead. gpio
+  does not run that row check, so it reports the statistics and says the
+  verdict is withheld, never a pass. A conformance validator such as
+  [rashid](https://github.com/portolan-sdi/rashid) gives that verdict. Nothing
+  on the CLI or API overrides the thresholds. A requested `--fix` still sorts a file
   whose verdict was withheld — not judged is not known-ordered — and only a
-  judged pass skips the sort.
-- **Sampling method**: Compares average distance between consecutive features vs random feature pairs. Lower ratio indicates better spatial clustering. Passes if ratio < 0.5. This measures feature adjacency, not row-group pruning, and the output names the method.
+  judged pass skips the sort. `check all --fix` sorts only on a judged
+  failure, or on a withheld verdict whose measured efficiency is under 0.65.
+- **Sampling method**: Compares average distance between consecutive features vs random feature pairs. A lower ratio indicates better spatial clustering. This measures feature adjacency, not row-group pruning, so gpio reports the ratio as a statistic and withholds the verdict. The spec judges such a file by its rows, which a conformance validator such as rashid does.
 
 `--fix` Hilbert-sorts the file and keeps at least as many row groups as it
 had: it writes 49,152 rows per group when that already keeps the count, and
