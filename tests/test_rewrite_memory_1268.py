@@ -699,6 +699,6 @@ def test_eager_rewrite_peak_rss_and_bytes(tmp_path):
             text=True,
         )
         assert completed.returncode == 0, completed.stderr
-        results[mode] = json.loads(report.read_text())
+        results[mode] = json.loads(report.read_text(encoding="utf-8"))
     assert results["bounded"]["peak_rss_bytes"] < 600_000_000, results
     assert results["bounded"]["raw_output_sha256"] == results["reference"]["raw_output_sha256"]

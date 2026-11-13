@@ -591,14 +591,20 @@ def test_decorator_profile_counts_as_explicit_inside_an_exported_profile_scope(m
         assert probe("s3://b/k.parquet", profile="inner") == "inner"
 
 
-def test_staging_callers_keep_profile_scope_through_publication():
+def test_staging_callers_keep_profile_scope_through_publication(monkeypatch):
     """Every profile-bearing staging owner keeps credentials until final upload."""
     import ast
     from pathlib import Path
 
+    read_text = Path.read_text
+
+    def windows_read_text(path, encoding=None, **kwargs):
+        return read_text(path, encoding=encoding or "cp1252", **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", windows_read_text)
     missing = []
     for path in (Path(__file__).parents[1] / "geoparquet_io").rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text())):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.FunctionDef):
                 continue
             if not {"profile", "write", "remote"} & {
