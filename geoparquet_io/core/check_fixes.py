@@ -29,7 +29,6 @@ from geoparquet_io.core.file_utils import (
 )
 from geoparquet_io.core.geo_metadata import (
     GeoBlockOptions,
-    QuerySource,
     SchemaSource,
     bbox_struct_sql,
     bboxless_covering_columns,
@@ -637,9 +636,8 @@ def _fix_bbox_and_spatial_ordering(parquet_file, output_file, verbose, profile, 
     metadata, _ = get_parquet_metadata(parquet_file, verbose)
     raw_url = resolve_file_url(parquet_file, verbose)
     primary = require_geometry_column(primary_geometry_column(parquet_file), parquet_file)
-    # Match the final writer: parallel bounds scans retain extra geometry buffers.
     with contextlib.closing(
-        get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(raw_url), threads=1)
+        get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(raw_url))
     ) as con:
         read = resolve_geometry_read(con, raw_url, primary)
         version = resolve_output_geoparquet_version(None, input_file=parquet_file)
@@ -650,7 +648,7 @@ def _fix_bbox_and_spatial_ordering(parquet_file, output_file, verbose, profile, 
         ordered = hilbert_order_query(
             source,
             read.expr,
-            bounds_of(QuerySource(con, f"SELECT * FROM {source}", metadata), primary),
+            bounds_of(parquet_file, primary),
         )
         query = computed_column_query(
             f"({ordered})", bbox_name, bbox_struct_sql(read.shape_expr, primary, read)
