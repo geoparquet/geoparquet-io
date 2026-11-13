@@ -356,10 +356,7 @@ def _write_stream_output(
     - CRS preservation through the pipeline
     - Automatic native Parquet geometry when written to file
     """
-    # Auto-detect geometry column if not provided
     carried = sanitized_carried_geo(original_metadata)
-    if geometry_column is None:
-        geometry_column = primary_geometry_column(describe_query(con, query), geo=carried)
 
     # Convert geometry to WKB (DuckDB's Arrow export uses native format)
     native_columns = native_geometry_types_from_query(con, query)
@@ -385,12 +382,10 @@ def _write_stream_output(
         )
 
     # Apply metadata to output table, the way the file path does (#722):
-    # first drop entries for columns a projection removed -- a dropped secondary
-    # geometry column would otherwise leave an orphan `geo.columns` entry -- then
     # recompute the derived stats a filtering caller stripped, from the rows
-    # actually being written. Without the backfill the stream omits
-    # `geometry_types`, which GeoParquet 1.1 requires and which DuckDB refuses to
-    # read a file without; without the prune the orphan entry has none either.
+    # actually being written. write_output already pruned removed columns.
+    # Without the backfill the stream omits `geometry_types`, which
+    # GeoParquet 1.1 requires and which DuckDB refuses to read a file without.
     # ... and then compose the block as every file write does. A stream is
     # read and persisted exactly like a file gpio wrote, so a covering the
     # pruning has just emptied of its bbox member -- or one declared over a
@@ -402,9 +397,6 @@ def _write_stream_output(
             version=resolve_output_geoparquet_version(None, original_metadata=original_metadata),
         )
     if original_metadata:
-        original_metadata = prune_geo_metadata_to_columns(
-            original_metadata, table.column_names, repoint_primary=True
-        )
         original_metadata = backfill_derived_stats(original_metadata, table)
         # A stream takes no version option: auto mode, the facade's answer.
         version = resolve_output_geoparquet_version(None, original_metadata=original_metadata)
