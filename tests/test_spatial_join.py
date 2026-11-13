@@ -217,19 +217,27 @@ class TestOneMatchPerInput:
                 assert all(row[2] == "AA" for row in rows)
             assert counts == [100, 400]
             # Numbering and matching must read the same volatile input rows.
-            volatile_query = du.build_spatial_join_query(
-                input_relation="(SELECT 17 AS a, ST_Point(random() * 4, 1) geometry FROM range(100))",
-                target_relation="admins",
-                target_select="b.code",
-                condition=du.build_spatial_join_condition("geometry", "geometry"),
-                match_order=["b.code"],
-            )
-            assert con.execute(
-                "SELECT bool_and(a = 17 AND code IS NOT DISTINCT FROM "
-                "CASE WHEN ST_X(geometry) <= 2 THEN 'AA' "
-                "WHEN ST_X(geometry) <= 3 THEN 'BB' END) "
-                f"FROM ({volatile_query})"
-            ).fetchall() == [(True,)]
+            for alias in ("a", "s"):
+                volatile_query = du.build_spatial_join_query(
+                    input_relation=(
+                        "(SELECT 17 AS a, 18 AS s, 19 AS b, "
+                        "ST_Point(random() * 4, 1) geometry FROM range(100))"
+                    ),
+                    target_relation="admins",
+                    target_select="b.code",
+                    condition=du.build_spatial_join_condition(
+                        "geometry", "geometry", input_alias=alias
+                    ),
+                    input_alias=alias,
+                    match_order=["b.code"],
+                )
+                assert con.execute(
+                    "SELECT bool_and(a = 17 AND s = 18 AND b = 19 "
+                    "AND code IS NOT DISTINCT FROM "
+                    "CASE WHEN ST_X(geometry) <= 2 THEN 'AA' "
+                    "WHEN ST_X(geometry) <= 3 THEN 'BB' END) "
+                    f"FROM ({volatile_query})"
+                ).fetchall() == [(True,)]
             # Large geometry must not live in every DISTINCT ON aggregate state.
             source = tmp_path / "large-polygons.parquet"
             con.execute(
