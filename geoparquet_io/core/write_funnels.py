@@ -2473,6 +2473,7 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
             chunks = (
                 prepare(pa.Table.from_batches([batch])) for batch in _arrow_stream_batches(reader)
             )
+            # Transport scratch uses 4,096-row groups and pyarrow's default codec.
             for group in regroup(chunks, STREAM_BATCH_ROWS):
                 writer.write_table(group)
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
