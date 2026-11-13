@@ -43,10 +43,12 @@ from geoparquet_io.core.edges import (
 from geoparquet_io.core.geo_metadata import (
     KEEP_CRS,
     GeoBlockOptions,
+    GeometryStats,
     SchemaSource,
     _file_footer_stats,
     compose_geo_block,
     geometry_stats_of,
+    geometry_types_of,
     read_raw_geo,
     row_group_geometry_stats,
     sanitized_carried_geo,
@@ -326,7 +328,12 @@ def written_geo_block(path: str, metadata: dict | None, options: GeoBlockOptions
             else None
         )
         if measured is None:
-            measured = geometry_stats_of(path, name, antimeridian=geographic)
+            if geographic:
+                # Vertex envelopes cannot bound geodesic edges. Keep types,
+                # but omit the optional bbox without complete spherical stats.
+                measured = GeometryStats(None, geometry_types_of(path, name))
+            else:
+                measured = geometry_stats_of(path, name)
         stats[name] = {"bbox": measured.bbox, "geometry_types": measured.geometry_types}
     options = replace(
         options,

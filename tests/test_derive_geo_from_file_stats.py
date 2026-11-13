@@ -126,3 +126,27 @@ def test_derive_v2_geo_metadata_describes_a_native_geography_column(tmp_path):
         patch_or_rewrite(str(path), {"geo": json.dumps(block)}, rewrite=rewrite_footer_kv)
         refreshed = derive_v2_geo_metadata(str(path), refresh_stats=True)
         assert refreshed["columns"]["geometry"]["bbox"] == block["columns"]["geometry"]["bbox"]
+
+    # Incomplete spherical statistics cannot be replaced with vertex envelopes:
+    # this great-circle arc reaches 63.4349 degrees, above its vertices at 60.
+    incomplete = tmp_path / "incomplete-geography.parquet"
+    geometry = ga.as_wkb(["LINESTRING (-30 60, 30 60)", None])
+    carried = {
+        "version": "2.0.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["LineString"]}},
+    }
+    pq.write_table(
+        pa.table({"geometry": geometry}).replace_schema_metadata(
+            {b"geo": json.dumps(carried).encode()}
+        ),
+        incomplete,
+        row_group_size=1,
+    )
+    patch_or_rewrite(
+        str(incomplete), {}, rewrite=rewrite_footer_kv, geography={"geometry": "spherical"}
+    )
+    refreshed = derive_v2_geo_metadata(str(incomplete), refresh_stats=True)
+    column = refreshed["columns"]["geometry"]
+    assert "bbox" not in column, "a planar scan cannot safely bound a spherical arc"
+    assert column["geometry_types"] == ["LineString"]
