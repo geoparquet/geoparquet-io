@@ -221,6 +221,14 @@ def test_a_gpio_error_arrives_sanitized():
         assert time.perf_counter() - start < 0.8
         assert "PRIVATE" not in cleaned
 
+    from geoparquet_io.core.wfs import _clip_to_area_of_use
+
+    # The complete userinfo must be removed before a diagnostic length cap.
+    crs = "x" * 180 + " https://user:PRIVATEVALUE@host/x"
+    with pytest.raises(ValueError) as caught:
+        _clip_to_area_of_use((0, 0, 1, 1), crs)
+    assert "PRIVAT" not in str(caught.value)
+
     # Builtin validator errors are not GeoParquetError: the automatic boundary
     # deliberately leaves them alone. Their API-facing cleaning remains needed.
     from geoparquet_io.cli.exception_handler import cli_error_for

@@ -3099,7 +3099,9 @@ def _clip_to_area_of_use(
     """
     target = load_crs(crs)
     if target is None:
-        raise ValueError(clean_error_text(f"pyproj cannot read the CRS {crs[:200]!r}"))
+        raise ValueError(
+            clean_error_text(f"pyproj cannot read the CRS {clean_error_text(crs)[:200]!r}")
+        )
     area = target.area_of_use
     xmin, ymin, xmax, ymax = lon_lat
     if area is None:
