@@ -205,10 +205,10 @@ def test_overwrite_removes_a_stale_shapefile_sidecar(with_geo, tmp_path):
     stale = tmp_path / "out.sbn"
     stale.write_bytes(b"old index")
     unrelated = tmp_path / "out.txt"
-    unrelated.write_text("keep")
+    unrelated.write_text("keep", encoding="utf-8")
     assert _run("shapefile", with_geo, out, "--overwrite").exit_code == 0
     assert not stale.exists()
-    assert unrelated.read_text() == "keep"
+    assert unrelated.read_text(encoding="utf-8") == "keep"
     assert out.exists()
 
 

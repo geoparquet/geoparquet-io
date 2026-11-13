@@ -332,7 +332,9 @@ class TestParseGeometryInput:
         # Use unique filename to avoid Windows file locking issues
         tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
         try:
-            tmp_path.write_text(json.dumps({"type": "Point", "coordinates": [0, 0]}))
+            tmp_path.write_text(
+                json.dumps({"type": "Point", "coordinates": [0, 0]}), encoding="utf-8"
+            )
             result = parse_geometry_input(f"@{tmp_path}")
             assert "POINT" in result.upper()
         finally:
@@ -343,7 +345,7 @@ class TestParseGeometryInput:
         # Use unique filename to avoid Windows file locking issues
         tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.wkt"
         try:
-            tmp_path.write_text("POINT(0 0)")
+            tmp_path.write_text("POINT(0 0)", encoding="utf-8")
             result = parse_geometry_input(f"@{tmp_path}")
             assert "POINT" in result.upper()
         finally:
@@ -354,7 +356,9 @@ class TestParseGeometryInput:
         # Use unique filename to avoid Windows file locking issues
         tmp_path = Path(tempfile.gettempdir()) / f"test_{uuid.uuid4()}.geojson"
         try:
-            tmp_path.write_text(json.dumps({"type": "Point", "coordinates": [0, 0]}))
+            tmp_path.write_text(
+                json.dumps({"type": "Point", "coordinates": [0, 0]}), encoding="utf-8"
+            )
             result = parse_geometry_input(str(tmp_path))
             assert "POINT" in result.upper()
         finally:

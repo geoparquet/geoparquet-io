@@ -286,17 +286,18 @@ class TestUpdateMode:
             assert f"<!-- END GENERATED: {name} -->" in updated
 
     def test_core_modules_follow_source(self, tmp_path):
-        (tmp_path / "__init__.py").write_text("# ignored\n")
-        (tmp_path / "small.py").write_text('"""Small module."""\n')
+        (tmp_path / "__init__.py").write_text("# ignored\n", encoding="utf-8")
+        (tmp_path / "small.py").write_text('"""Small module."""\n', encoding="utf-8")
         large = tmp_path / "large.py"
-        large.write_text('"""Large module.\n\nMore details.\n"""\n\nx = 1\n')
+        large.write_text('"""Large module.\n\nMore details.\n"""\n\nx = 1\n', encoding="utf-8")
         section = self.mod.generate_core_modules_section(tmp_path)
         assert "| `large.py` | Large module. |" in section
         assert "| `small.py` | Small module. |" in section
         assert "Lines" not in section
         assert "More details" not in section
         (tmp_path / "small.py").write_text(
-            (tmp_path / "small.py").read_text(encoding="utf-8") + "# source line\n" * 100
+            (tmp_path / "small.py").read_text(encoding="utf-8") + "# source line\n" * 100,
+            encoding="utf-8",
         )
         assert self.mod.generate_core_modules_section(tmp_path) == section
         assert section.index("large.py") < section.index("small.py")

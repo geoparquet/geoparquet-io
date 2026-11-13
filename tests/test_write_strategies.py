@@ -94,10 +94,10 @@ class TestAtomicWrite:
             output_path = Path(tmpdir) / "output.parquet"
 
             with atomic_write(str(output_path)) as temp_path:
-                Path(temp_path).write_text("test content")
+                Path(temp_path).write_text("test content", encoding="utf-8")
 
             assert output_path.exists()
-            assert output_path.read_text() == "test content"
+            assert output_path.read_text(encoding="utf-8") == "test content"
 
         from geoparquet_io.core import remote
         from geoparquet_io.core.exceptions import GeoParquetError
@@ -131,7 +131,7 @@ class TestAtomicWrite:
 
             with pytest.raises(RuntimeError):
                 with atomic_write(str(output_path)) as temp_path:
-                    Path(temp_path).write_text("partial")
+                    Path(temp_path).write_text("partial", encoding="utf-8")
                     raise RuntimeError("Simulated failure")
 
             assert not output_path.exists()

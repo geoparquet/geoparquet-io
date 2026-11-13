@@ -433,12 +433,12 @@ class TestDisplayedSizeMax:
 
 def _fake_cgroups(tmp_path, proc_lines: list[str], files: dict[str, str]):
     proc = tmp_path / "proc_self_cgroup"
-    proc.write_text("\n".join(proc_lines) + "\n")
+    proc.write_text("\n".join(proc_lines) + "\n", encoding="utf-8")
     root = tmp_path / "cgroup"
     for rel, value in files.items():
         f = root / rel
         f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_text(value + "\n")
+        f.write_text(value + "\n", encoding="utf-8")
     return str(proc), str(root)
 
 

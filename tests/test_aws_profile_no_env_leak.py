@@ -227,10 +227,11 @@ needs_runtime_env_in_aws_sdk = pytest.mark.skipif(
 def fake_aws_files(tmp_path, monkeypatch):
     """Point the AWS SDK at temp files holding one fake static profile."""
     config = tmp_path / "config"
-    config.write_text("[profile fakep]\nregion = eu-west-3\n")
+    config.write_text("[profile fakep]\nregion = eu-west-3\n", encoding="utf-8")
     credentials = tmp_path / "credentials"
     credentials.write_text(
-        f"[fakep]\naws_access_key_id = {_FAKE_STATIC_KEY}\naws_secret_access_key = fakesecret\n"
+        f"[fakep]\naws_access_key_id = {_FAKE_STATIC_KEY}\naws_secret_access_key = fakesecret\n",
+        encoding="utf-8",
     )
     for name in (
         "AWS_PROFILE",

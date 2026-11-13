@@ -248,7 +248,8 @@ def one_point_geojson(tmp_path):
                     }
                 ],
             }
-        )
+        ),
+        encoding="utf-8",
     )
     return path
 

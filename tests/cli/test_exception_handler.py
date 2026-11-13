@@ -407,7 +407,7 @@ def test_a_file_that_is_not_parquet_gets_one_answer_from_every_path(tmp_path):
     from geoparquet_io.core.geo_metadata import raw_geo_of_file
 
     bad = tmp_path / "data.parquet"
-    bad.write_text("id,name\n1,x\n")
+    bad.write_text("id,name\n1,x\n", encoding="utf-8")
     expected = not_parquet_file_error(str(bad)).message
 
     for argv in (

@@ -1,6 +1,9 @@
 """Additional tests for check_fixes helper functions."""
 
 import contextlib
+import sys
+
+import pytest
 
 from geoparquet_io.core.check_fixes import (
     _apply_bbox_column_fix,
@@ -84,7 +87,7 @@ class TestApplyCompressionFix:
         # Create temp files
         input_file = tmp_path / "input.parquet"
         output_file = tmp_path / "output.parquet"
-        input_file.write_text("test")
+        input_file.write_text("test", encoding="utf-8")
 
         fixes = _apply_compression_fix(
             check_results, str(input_file), str(output_file), None, False, None
@@ -93,7 +96,7 @@ class TestApplyCompressionFix:
         assert fixes == []
         assert output_file.exists()
         assert input_file.exists(), "the user's input was moved to the output path"
-        assert input_file.read_text() == "test"
+        assert input_file.read_text(encoding="utf-8") == "test"
 
         from obstore.store import LocalStore
 
@@ -225,6 +228,9 @@ class TestFixBboxAll:
         assert_buildings_output_is_sound(output_file)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Symlinks require admin/Developer Mode on Windows"
+)
 def test_fix_intermediates_stay_on_output_volume(tmp_path, monkeypatch):
     from pathlib import Path
 

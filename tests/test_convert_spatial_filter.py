@@ -410,7 +410,7 @@ class TestCLI:
 
     def test_geometry_from_file(self, runner, tmp_path):
         boundary = tmp_path / "boundary.wkt"
-        boundary.write_text(BBOX_AS_WKT)
+        boundary.write_text(BBOX_AS_WKT, encoding="utf-8")
         out = tmp_path / "out.gpkg"
         result = runner.invoke(
             cli, ["convert", "geopackage", PLACES, str(out), "--geometry", f"@{boundary}"]

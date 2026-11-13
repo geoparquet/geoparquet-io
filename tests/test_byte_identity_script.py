@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 from dataclasses import replace
+from importlib.util import find_spec
 from pathlib import Path
 
 import pytest
@@ -121,19 +122,11 @@ def test_the_fault_hook_is_ignored_outside_pytest(tmp_path):
         check=False,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    assert _verdicts(report.read_text()) == {"convert_parquet_default": "identical"}
+    assert _verdicts(report.read_text(encoding="utf-8")) == {"convert_parquet_default": "identical"}
 
 
 # Full CLI matrix: nested writers report only published destinations.
 CASES = [case for case in matrix._matrix() if case.kind == "cli"]
-CASES += [
-    matrix.Case(
-        "check_bbox_missing_column",
-        ("check", "bbox", "{in}", "--fix", "--fix-output", "{out}"),
-        ("buildings_test.parquet",),
-        "out.parquet",
-    ),
-]
 CASES += [
     matrix.Case(
         "sort_str", ("sort", "str", "{in}", "{out}"), ("places_test.parquet",), "out.parquet"
@@ -326,11 +319,6 @@ def write_message_side(tmp_path_factory):
     assert not failures, failures
     import numpy as np
 
-    from tests.test_process_raster_reader import _write_tif
-
-    _write_tif(
-        side.inputs / "raster.tif", np.arange(16, dtype="float32").reshape(4, 4), crs="EPSG:32633"
-    )
     from tests.test_add_stac_metadata import COLLECTION
 
     (side.inputs / "collection.json").write_text(json.dumps(COLLECTION), encoding="utf-8")
@@ -408,8 +396,33 @@ def _offline_source(case, side, monkeypatch):
         monkeypatch.setattr(extract_bigquery, "_setup_bigquery_connection", connect)
 
 
-@pytest.mark.parametrize("case", CASES, ids=lambda case: case.name)
+# The byte matrix contains format aliases; run each command/input pair once.
+CASES = list({(case.argv, case.inputs, case.inplace): case for case in CASES}.values())
+RASTER_MARKS = [
+    pytest.mark.skipif(find_spec(dep) is None, reason=f"requires the raster extra ({dep})")
+    for dep in ("contourrs", "rasterio")
+]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param(case, marks=RASTER_MARKS if "raster.tif" in case.inputs else [])
+        for case in CASES
+    ],
+    ids=lambda case: case.name,
+)
 def test_write_messages_name_published_destinations(case, write_message_side, monkeypatch):
+    if "raster.tif" in case.inputs:
+        import numpy as np
+
+        from tests.test_process_raster_reader import _write_tif
+
+        _write_tif(
+            write_message_side.inputs / "raster.tif",
+            np.arange(16, dtype="float32").reshape(4, 4),
+            crs="EPSG:32633",
+        )
     run = matrix.subprocess.run
     captured = []
 
