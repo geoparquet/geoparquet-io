@@ -473,23 +473,7 @@ def _hilbert_order_streaming(
             debug(f"Dataset bounds: ({xmin:.6f}, {ymin:.6f}, {xmax:.6f}, {ymax:.6f})")
             debug("Reordering data using Hilbert curve...")
 
-        # Build Hilbert ordering query with empty geometry handling
-        # Non-empty geometries are ordered by Hilbert curve, empty/null appended at end
-        query = f"""
-            WITH non_empty AS (
-                SELECT * FROM {source}
-                WHERE {key_expr} IS NOT NULL AND NOT ST_IsEmpty({key_expr})
-                ORDER BY ST_Hilbert({key_expr},
-                    ST_Extent(ST_MakeEnvelope({xmin}, {ymin}, {xmax}, {ymax})))
-            ),
-            empty_or_null AS (
-                SELECT * FROM {source}
-                WHERE {key_expr} IS NULL OR ST_IsEmpty({key_expr})
-            )
-            SELECT * FROM non_empty
-            UNION ALL
-            SELECT * FROM empty_or_null
-        """
+        query = hilbert_order_query(source, key_expr, bounds_result)
 
         if verbose:
             debug(f"Streaming hilbert query: {query}")
