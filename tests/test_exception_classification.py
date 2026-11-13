@@ -215,24 +215,34 @@ def test_a_gpio_error_arrives_sanitized():
 
     import time
 
-    # CPU-time ratios measure growth without charging other processes' work.
+    # Batches exceed two 15.6 ms clock ticks; minima reduce scheduling noise.
     # Eight times the input permits 20x cost; quadratic matching costs ~64x.
     for make_text in (
         lambda n: "x" * n,
         lambda n: "https://" + "@=" * n + "PRIVATE@host/x",
     ):
-        timings = []
-        for size in (4096, 8 * 4096):
-            text = make_text(size)
-            samples = []
-            for _ in range(3):
-                start = time.process_time()
+
+        def batch(text, count):
+            start = time.perf_counter()
+            for _ in range(count):
                 cleaned = clean_error_text(text)
-                elapsed = time.process_time() - start
-                assert elapsed < 15, "redaction exceeded the hang guard"
-                samples.append(elapsed)
-                assert "PRIVATE" not in cleaned
-            timings.append(min(samples))
+            elapsed = time.perf_counter() - start
+            assert elapsed < 15, "redaction exceeded the hang guard"
+            assert "PRIVATE" not in cleaned
+            return elapsed
+
+        small = make_text(4096)
+        count = 1
+        for _ in range(8):
+            elapsed = batch(small, count)
+            if elapsed >= 0.032 or count == 4096:
+                break
+            count = min(4096, int(count * 0.032 / elapsed) + 1 if elapsed else 2 * count)
+        timings = [
+            min(batch(make_text(size), count) for _ in range(2)) / count
+            for size in (4096, 8 * 4096)
+        ]
+        assert timings[0] > 0, f"zero redaction baseline: {timings}"
         assert timings[1] < 20 * timings[0], f"nonlinear redaction: {timings}"
 
     assert clean_error_text("x" * (3 * 1024 * 1024)) == "x" * (3 * 1024 * 1024)
