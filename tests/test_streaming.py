@@ -1033,6 +1033,34 @@ class TestStreamIO:
         assert geoarrow_type_edges(result.schema.field("geometry").type) == "spherical"
         assert "4269" in str(crs_of(result))
 
+        import pyarrow.parquet as pq
+
+        from geoparquet_io.core.sort_by_column import sort_by_column
+        from geoparquet_io.core.sort_quadkey import sort_by_quadkey
+
+        table = pq.read_table(source)
+        monkeypatch.setattr("geoparquet_io.core.streaming.read_arrow_stream", lambda: table)
+        monkeypatch.setattr("geoparquet_io.core.stream_io.read_arrow_stream", lambda: table)
+        for sort, kwargs in (
+            (sort_by_column, {"columns": "id"}),
+            (sort_by_quadkey, {"quadkey_column_name": "grp"}),
+        ):
+            outputs = []
+            for stdin in (False, True):
+                dest = tmp_path / f"{sort.__name__}-{stdin}.parquet"
+                sort("-" if stdin else str(source), str(dest), **kwargs)
+                outputs.append(pq.read_table(dest))
+            assert outputs[0].equals(outputs[1])
+            blocks = [json.loads(output.schema.metadata[b"geo"]) for output in outputs]
+            from geoparquet_io.core.crs_utils import crs_equal
+
+            assert crs_equal(crs_of(outputs[0]), crs_of(outputs[1]))
+            for block in blocks:
+                block["columns"]["geometry"].pop("crs")
+            assert blocks[0] == blocks[1]
+            assert geoarrow_type_edges(outputs[1].schema.field("geometry").type) == "spherical"
+            assert "4269" in str(crs_of(outputs[1]))
+
 
 class TestVersionExtraction:
     """The stream path's version witnesses, asked of the owner (#1367 concept 1)."""

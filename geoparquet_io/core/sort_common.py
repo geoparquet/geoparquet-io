@@ -227,7 +227,7 @@ def run_sort(
                 preserve_wkb=True,
                 verbose=verbose,
                 custom_metadata=custom_metadata,
-                input_file=input_path if not streaming else None,
+                input_file=working_input if not is_stdin(working_input) else None,
                 invalidate_derived_stats=is_partition_path(input_path) if not streaming else False,
                 **write.funnel_kwargs(),
             )
