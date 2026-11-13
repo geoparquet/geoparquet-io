@@ -158,6 +158,14 @@ class TestSetupCliLogging:
             "httpx", logging.WARNING, "", 0, "GET %s", ("https://u:pa'ss@h/x",), None
         )
         handler.handle(record)
+        # Pytest's capture handler intentionally re-raises formatting errors.
+        root = logging.getLogger()
+        with patch.object(
+            root, "handlers", [h for h in root.handlers if isinstance(h, DynamicStreamHandler)]
+        ):
+            logging.getLogger("third_party").warning("a %s %s", 1)
+        assert record.msg == "GET %s"
+        assert record.args == ("https://u:pa'ss@h/x",)
         try:
             raise ValueError("https://u:SECRET/other@h/x?token=HIDDEN")
         except ValueError:
@@ -172,6 +180,7 @@ class TestSetupCliLogging:
         assert "SECRET" not in output
         assert "HIDDEN" not in output
         assert "ValueError" in output
+        assert "--- Logging error ---" in output
 
     def test_verbose_sets_debug_level(self):
         """verbose=True should set logger to DEBUG level."""

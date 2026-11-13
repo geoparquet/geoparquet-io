@@ -78,7 +78,7 @@ class CLIFormatter(logging.Formatter):
 
     def format(self, record: logging.LogRecord) -> str:
         """Format log record with optional colors."""
-        message = super().format(record)
+        message = clean_error_text(super().format(record))
 
         if self.use_colors:
             message = self._apply_colors(message, record)
@@ -110,19 +110,6 @@ class CLIFormatter(logging.Formatter):
         return message
 
 
-class _CredentialFilter(logging.Filter):
-    """Sanitize fully interpolated records, including exception chains."""
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = clean_error_text(record.getMessage())
-        record.args = ()
-        if record.exc_info:
-            record.exc_text = logging.Formatter().formatException(record.exc_info)
-        if record.exc_text:
-            record.exc_text = clean_error_text(record.exc_text)
-        return True
-
-
 class DynamicStreamHandler(logging.StreamHandler):
     """
     A StreamHandler that works correctly with Click's CliRunner and piping.
@@ -137,7 +124,6 @@ class DynamicStreamHandler(logging.StreamHandler):
     def __init__(self):
         # Initialize with None stream - we'll handle output dynamically
         super().__init__(stream=None)
-        self.addFilter(_CredentialFilter())
 
     def emit(self, record):
         try:
