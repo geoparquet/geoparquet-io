@@ -475,8 +475,7 @@ def _feature_rows(con, query):
         con.sql(query).to_arrow_reader(batch_size=STREAM_BATCH_ROWS) as reader,
     ):
         for batch in reader:
-            for value in batch.column(0):
-                yield value.as_py()
+            yield from batch.column(0).to_pylist()
 
 
 def _stream_to_stdout(
