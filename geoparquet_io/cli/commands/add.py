@@ -244,7 +244,10 @@ def add_admin_divisions(
     - GAUL: Downloads and caches the full dataset on first use; later runs reuse it
     - Overture: Reuses existing level caches. Cold levels read the input extent
       when footer statistics predict most geometry bytes can be skipped; otherwise
-      they build complete level caches, resuming at completed source objects
+      they build complete level caches, resuming at completed source objects.
+      Without a finite extent (empty or all-NULL geometry), they build the full level.
+      Uncached bounded reads need network on each run. To populate caches first,
+      use process aggregate admin or process overview; completed level caches work offline.
     - Warning shown if cache is older than 6 months
     - Use --no-cache to skip cache or --clear-cache to delete cached data
 

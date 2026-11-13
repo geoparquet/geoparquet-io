@@ -66,6 +66,9 @@ class TestAddAdminDivisionsClearCache:
         unrelated.write_text("not a cached dataset", encoding="utf-8")
 
         runner = CliRunner()
+        help_result = runner.invoke(add, ["admin-divisions", "--help"])
+        assert "Without a finite extent" in help_result.output
+        assert "network on each run" in help_result.output
         with patch.object(admin_divisions, "add_admin_divisions_multi"):
             result = runner.invoke(
                 add,

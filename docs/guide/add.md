@@ -838,7 +838,7 @@ The `--vecorel` flag:
 Caching depends on the dataset:
 
 - **GAUL**: Downloads and caches the full dataset on first use; subsequent runs use the cache.
-- **Overture**: Reuses complete per-level caches. Cold joins compare overlapping and skipped geometry bytes from row-group footers: read inline when more bytes can be skipped than fetched; otherwise build the complete cache. Completed source objects survive interrupted builds. `process aggregate` and `overview` also populate these caches.
+- **Overture**: Reuses complete per-level caches. Cold joins compare overlapping and skipped geometry bytes from row-group footers: read inline when more bytes can be skipped than fetched; otherwise build the complete cache. Completed source objects survive interrupted builds and are reused when that level's cache build resumes. Without a finite extent (including empty or all-NULL geometry), the command builds the complete requested levels. A small uncached extent needs the network on every run; bounded reads do not assemble a cache from object parts. To populate complete caches before repeated or offline use, run `process aggregate admin` or `process overview` for the needed levels. Completed level caches are then reused locally.
 - **Cache location**: `~/.geoparquet-io/cache/admin/`
 - **Warning**: Shown if cache is older than 6 months
 
