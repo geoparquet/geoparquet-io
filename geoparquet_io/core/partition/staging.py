@@ -20,16 +20,29 @@ from __future__ import annotations
 
 import os
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import cached_property
 from urllib.parse import unquote
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from geoparquet_io.core.column_selection import unique_name
 from geoparquet_io.core.compression import resolve_codec
+from geoparquet_io.core.duckdb_metadata import (
+    get_kv_metadata,
+    get_schema_info,
+    parse_geometry_logical_type,
+)
 from geoparquet_io.core.duckdb_utils import sql_path
+from geoparquet_io.core.edges import logical_type_edges
 from geoparquet_io.core.exceptions import PartitionError
-from geoparquet_io.core.file_utils import output_is_kept
+from geoparquet_io.core.file_utils import get_first_parquet_file, output_is_kept, scratch_file
+from geoparquet_io.core.geoarrow_encoding import native_wkb_type
 from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
+from geoparquet_io.core.parquet_schema import root_schema_columns
 from geoparquet_io.core.parquet_writer import WriteOptions
 from geoparquet_io.core.remote import is_remote_url
 from geoparquet_io.core.write_funnels import write_parquet_with_metadata
@@ -86,13 +99,9 @@ class PartitionWriteOptions:
     (#1005). ``test_partition_schema_witness.py`` checks every construction site
     names it.
 
-    Only a *local* witness reaches the writes, though. Every partition write
-    reads it again, and a local footer is a pyarrow read of about half a
-    millisecond; a remote one is several fetches on a new connection each
-    (#1013), which took 100 partitions of an HTTP input from 5 s to over five
-    minutes. A remote input therefore keeps the ``geo``-block-only answer it had
-    before: a native-geo-only remote input still loses its CRS at 1.x and its
-    GEOGRAPHY edges, until the witness can be read once per run.
+    Remote witnesses read KV and native geometry declarations through DuckDB
+    once per run. Each finalization uses a local metadata-only witness; its
+    non-geometry fields are placeholders, never used to read data.
     """
 
     #: The resolved output version; it replaces ``write.geoparquet_version``
@@ -103,14 +112,42 @@ class PartitionWriteOptions:
     write: WriteOptions = field(default_factory=WriteOptions)
     extra_kv_metadata: dict[str, str] | None = None
 
-    def as_write_kwargs(self) -> dict:
-        """Return the kwargs accepted by ``write_parquet_with_metadata``."""
-        return {
+    @cached_property
+    def _remote_schema(self) -> pa.Schema:
+        assert self.input_file is not None
+        source = get_first_parquet_file(self.input_file)
+        if source is None:
+            raise PartitionError(f"No Parquet file found for witness: {self.input_file}")
+        metadata = get_kv_metadata(source)
+        # The witness needs declarations, not data types for reading rows.
+        # Keep CRS reference keys, but let Arrow regenerate its schema carrier.
+        metadata.pop(b"ARROW:schema", None)
+        fields = []
+        for column in root_schema_columns(get_schema_info(source)):
+            native = parse_geometry_logical_type(column.get("logical_type") or "")
+            field_type = pa.binary()
+            if native is not None:
+                edges = logical_type_edges(native) if native["geo_type"] == "Geography" else None
+                field_type = native_wkb_type(native.get("crs"), edges)
+            fields.append(pa.field(column["name"], field_type))
+        return pa.schema(fields, metadata=metadata)
+
+    @contextmanager
+    def write_kwargs(self):
+        """Keep the cached remote declarations local for the duration of a write."""
+        kwargs = {
             **self.write.funnel_kwargs(),
             "geoparquet_version": self.geoparquet_version,
-            "input_file": None if is_remote_url(self.input_file) else self.input_file,
+            "input_file": self.input_file,
             "extra_kv_metadata": self.extra_kv_metadata,
         }
+        if not is_remote_url(self.input_file):
+            yield kwargs
+            return
+        with scratch_file() as witness:
+            pq.write_metadata(self._remote_schema, witness)
+            kwargs["input_file"] = witness
+            yield kwargs
 
 
 def make_partition_aliases(count: int, existing_columns) -> list[str]:
@@ -189,7 +226,6 @@ def run_partitioned_copy(con, select_sql, partition_cols, staging_dir, verbose, 
     with scoped_write_memory_limit(con, memory_limit, verbose, pinned=pinned):
         if verbose:
             debug("Single-pass partition COPY (one scan of input):")
-            debug(copy_sql)
         con.execute(copy_sql)
 
 
@@ -257,15 +293,16 @@ def finalize_partition_file(
     # output file.
     staging_glob = os.path.join(partition_dir, "*.parquet")
     query = f"SELECT * FROM read_parquet({sql_path(staging_glob)}, hive_partitioning=false)"
-    write_parquet_with_metadata(
-        con,
-        query,
-        output_filename,
-        original_metadata=metadata,
-        invalidate_derived_stats=True,
-        verbose=False,
-        **options.as_write_kwargs(),
-    )
+    with options.write_kwargs() as write_kwargs:
+        write_parquet_with_metadata(
+            con,
+            query,
+            output_filename,
+            original_metadata=metadata,
+            invalidate_derived_stats=True,
+            verbose=False,
+            **write_kwargs,
+        )
     if verbose:
         debug(f"Wrote {output_filename}")
     return True

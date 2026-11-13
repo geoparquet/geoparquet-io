@@ -638,5 +638,4 @@ def remote_write_context(output_path, is_directory=False, verbose=False):
     with context as temp_path:
         if verbose:
             debug(f"Remote output detected: {output_path}")
-            debug(f"Writing to temporary path: {temp_path}")
         yield temp_path, True

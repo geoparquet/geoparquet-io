@@ -296,19 +296,8 @@ ignore_missing_imports = true
 # installed package to prove the promise holds. Typing the core modules behind
 # it is #1012.
 #
-# `arrow_geo_metadata`, `derive_geo_from_file` and `write_funnels` were carved out
-# of `geoparquet_io.core.common`, which is on this list: their errors were always
-# suppressed, by their old address. Listing them relocates that suppression
-# rather than granting a new one, so the split stays a pure move. Typing them out
-# is tracked separately -- the errors are real (a `compression_level: int | None`
-# reaching a field typed `int`, an `effective_version: str | None` used as a dict
-# key, a `row_group_size_mb: float | None` reaching a parameter typed
-# `int | None`), not annotation noise.
 [[tool.mypy.overrides]]
 module = [
-    "geoparquet_io.core.arrow_geo_metadata",
-    "geoparquet_io.core.derive_geo_from_file",
-    "geoparquet_io.core.write_funnels",
     "geoparquet_io.benchmarks.profile_report",
     "geoparquet_io.cli.decorators",
     "geoparquet_io.core.add.a5",

@@ -340,7 +340,7 @@ def _process_geometry_column_for_version(
     table,
     geometry_column: str,
     geoparquet_version: str | None,
-    input_crs: dict | None,
+    input_crs: dict | str | None,
     verbose: bool,
     *,
     crs_resolved: bool = False,
@@ -575,10 +575,10 @@ def _canonicalize_wkb_columns(table, geometry_columns, verbose: bool = False, na
 
 def _apply_geoparquet_metadata(
     table,
-    geometry_column: str,
+    geometry_column: str | None,
     geoparquet_version: str | None,
     original_metadata: dict | None = None,
-    input_crs: dict | None = None,
+    input_crs: dict | str | None = None,
     custom_metadata: dict | None = None,
     verbose: bool = False,
     edges: str | None = None,
@@ -638,7 +638,7 @@ def _apply_geoparquet_metadata(
         debug(f"Applying GeoParquet metadata for version: {effective_version}")
 
     # Check if geometry column exists in table
-    if geometry_column not in table.column_names:
+    if geometry_column is None or geometry_column not in table.column_names:
         # An explicit parquet-geo-only request still has to drop a carried geo
         # key, even with nothing to convert: the key names a primary_column the
         # file does not contain (issue #701). Restricted to the explicit request
@@ -810,6 +810,7 @@ def _apply_geoparquet_metadata(
         measure_missing=lambda block: missing_geometry_types(table, block),
     )
 
+    assert metadata_version is not None
     return _assemble_and_apply_geo_metadata(table, geo_meta, metadata_version, verbose)
 
 
@@ -817,7 +818,7 @@ def _build_geo_block(
     table,
     geometry_column: str,
     original_metadata: dict | None,
-    input_crs: dict | None,
+    input_crs: dict | str | None,
     custom_metadata: dict | None,
     effective_version: str,
     edges: str | None,

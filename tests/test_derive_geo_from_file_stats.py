@@ -88,10 +88,21 @@ def test_derive_v2_geo_metadata_describes_a_native_geography_column(tmp_path):
 
     from geoparquet_io.core.derive_geo_from_file import derive_v2_geo_metadata
 
-    wkb = ga.as_wkb(["POINT (1 2)", "POINT (3 4)"]).storage
-    geography = ga.wkb().with_edge_type(ga.EdgeType.SPHERICAL).wrap_array(wkb)
+    wkb = ga.as_wkb(["LINESTRING (170 0, -170 0)", "POINT (175 2)"]).storage
+    from geoparquet_io.core.parquet_footer import patch_or_rewrite
+    from geoparquet_io.core.write_funnels import rewrite_footer_kv
+
+    geography = ga.wkb().wrap_array(wkb)
     path = tmp_path / "geography.parquet"
-    pq.write_table(pa.table({"id": [1, 2], "geometry": geography}), str(path))
+    pq.write_table(pa.table({"id": [1, 2], "geometry": geography}), str(path), row_group_size=1)
+    # PyArrow omits spherical statistics; supply the geodesic extents when retyping.
+    patch_or_rewrite(
+        str(path),
+        {},
+        rewrite=rewrite_footer_kv,
+        geography={"geometry": "spherical"},
+        geography_bbox={"geometry": [(170, 0, -170, 0), (175, 2, 175, 2)]},
+    )
     logical = str(pq.ParquetFile(str(path)).metadata.schema.column(1).logical_type)
     assert logical == "Geography(crs=, algorithm=spherical)"
 
@@ -104,3 +115,72 @@ def test_derive_v2_geo_metadata_describes_a_native_geography_column(tmp_path):
     # implies no orientation (#1367 T3e audit 2, finding A -- a regression the
     # `edges=` spelling introduced, undone).
     assert "orientation" not in block["columns"]["geometry"]
+
+    # A native GEOGRAPHY must fold longitude the same way on rebuild and refresh.
+    import json
+
+    assert block["columns"]["geometry"]["bbox"] == [170, 0, -170, 2]
+    for declared_edges in (True, False):
+        if not declared_edges:
+            block["columns"]["geometry"].pop("edges")
+        patch_or_rewrite(str(path), {"geo": json.dumps(block)}, rewrite=rewrite_footer_kv)
+        refreshed = derive_v2_geo_metadata(str(path), refresh_stats=True)
+        assert refreshed["columns"]["geometry"]["bbox"] == block["columns"]["geometry"]["bbox"]
+
+    # Incomplete spherical statistics cannot be replaced with vertex envelopes:
+    # this great-circle arc reaches 63.4349 degrees, above its vertices at 60.
+    incomplete = tmp_path / "incomplete-geography.parquet"
+    geometry = ga.as_wkb(["LINESTRING (-30 60, 30 60)", None])
+    carried = {
+        "version": "2.0.0",
+        "primary_column": "geometry",
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["LineString"]}},
+    }
+    pq.write_table(
+        pa.table({"geometry": geometry}).replace_schema_metadata(
+            {b"geo": json.dumps(carried).encode()}
+        ),
+        incomplete,
+        row_group_size=1,
+    )
+    patch_or_rewrite(
+        str(incomplete), {}, rewrite=rewrite_footer_kv, geography={"geometry": "spherical"}
+    )
+    refreshed = derive_v2_geo_metadata(str(incomplete), refresh_stats=True)
+    column = refreshed["columns"]["geometry"]
+    assert "bbox" not in column, "a planar scan cannot safely bound a spherical arc"
+    assert column["geometry_types"] == ["LineString"]
+
+
+def test_refresh_explicit_primary_overrides_carried_primary(tmp_path):
+    import json
+
+    import geoarrow.pyarrow as ga
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from geoparquet_io.core.derive_geo_from_file import derive_v2_geo_metadata
+
+    carried = {
+        "version": "2.0.0",
+        "primary_column": "centroid",
+        "columns": {
+            name: {"encoding": "WKB", "geometry_types": ["Point"]}
+            for name in ("centroid", "geometry")
+        },
+    }
+    path = tmp_path / "different-primary.parquet"
+    pq.write_table(
+        pa.table(
+            {
+                "centroid": ga.as_wkb(["POINT (1 2)"]),
+                "geometry": ga.as_wkb(["POINT (3 4)"]),
+            }
+        ).replace_schema_metadata({b"geo": json.dumps(carried).encode()}),
+        path,
+    )
+    assert json.loads(pq.read_metadata(path).metadata[b"geo"])["primary_column"] == "centroid"
+    refreshed = derive_v2_geo_metadata(str(path), primary_column="geometry", refresh_stats=True)
+    assert refreshed["primary_column"] == "geometry"
+    assert refreshed["columns"]["centroid"]["bbox"] == [1, 2, 1, 2]
+    assert refreshed["columns"]["geometry"]["bbox"] == [3, 4, 3, 4]

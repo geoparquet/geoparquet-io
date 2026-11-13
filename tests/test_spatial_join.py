@@ -626,7 +626,7 @@ def test_aggregate_admin_opens_the_admin_join_connection(tmp_path, local_admin, 
         calls.append(kwargs)
         return real(**kwargs)
 
-    monkeypatch.setattr(by_admin, "open_admin_join_connection", spy, raising=False)
+    monkeypatch.setattr(by_admin, "open_admin_join_connection", spy)
     src = _write_points(tmp_path / "pts.parquet")
     _aggregate_admin(tmp_path, src)
     assert calls == [
@@ -877,9 +877,7 @@ def test_partition_reports_the_join_strategy_its_sql_runs(
     local_admin()
     if input_rewritten:
         for module in (admin_datasets, admin_hierarchical):
-            monkeypatch.setattr(
-                module, "admin_input_reprojected", lambda crs, bbox: True, raising=False
-            )
+            monkeypatch.setattr(module, "admin_input_reprojected", lambda crs, bbox: True)
     queries = _spy_admin_join_queries(monkeypatch)
     src = _write_points(tmp_path / "pts.parquet", bbox_name="bbox")
     result = _invoke(

@@ -58,6 +58,7 @@ from geoparquet_io.core.crs_utils import (
 from geoparquet_io.core.derive_geo_from_file import (
     derive_secondary_geometry_info,
     derive_v2_geo_metadata,
+    written_geo_block,
 )
 from geoparquet_io.core.duckdb_metadata import (
     get_kv_metadata,
@@ -69,6 +70,7 @@ from geoparquet_io.core.duckdb_utils import (
     _get_query_columns,
     get_duckdb_connection,
     sql_path,
+    uses_aws_profile,
 )
 from geoparquet_io.core.edges import (
     PLANAR,
@@ -80,8 +82,13 @@ from geoparquet_io.core.edges import (
     logical_type_edges,
     requests_planar,
 )
-from geoparquet_io.core.exceptions import RemoteAccessError
-from geoparquet_io.core.file_utils import atomic_write, get_all_parquet_files, is_partition_path
+from geoparquet_io.core.exceptions import GeoParquetError, RemoteAccessError
+from geoparquet_io.core.file_utils import (
+    atomic_write,
+    get_all_parquet_files,
+    is_partition_path,
+    is_same_file_path,
+)
 from geoparquet_io.core.geo_metadata import (
     DETECT_BBOX_COLUMN,
     GENERATED_COLUMN_FIELDS,
@@ -122,7 +129,6 @@ from geoparquet_io.core.logging_config import (
     debug,
     info,
     progress,
-    success,
     warn,
 )
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
@@ -502,7 +508,11 @@ def _composed_edges(block: dict | None, edges_by_col: dict[str, str]) -> dict[st
         return {}
     stated = block_edges(block)
     columns = block.get("columns") or {}
-    return {name: stated.get(name, PLANAR) for name in edges_by_col if name in columns}
+    return {
+        name: edge if isinstance(edge := stated.get(name, PLANAR), str) else PLANAR
+        for name in edges_by_col
+        if name in columns
+    }
 
 
 def _geo_block_updates(
@@ -531,7 +541,7 @@ def _geo_block_updates(
         if isinstance(columns.get(name), dict):
             stats[name] = {"bbox": None}
     composed = _restored_geo_block(written_schema, geo_meta, edges_by_col, stats=stats)
-    if composed == geo_meta and not force:
+    if composed is None or (composed == geo_meta and not force):
         return {}
     return {"geo": geo_key_value(composed)}
 
@@ -544,6 +554,7 @@ def _ensure_v2_geo_metadata(
     verbose: bool = False,
     primary_column: str | None = None,
     defer: bool = False,
+    refresh_stats: bool = False,
 ) -> dict | None:
     """Attach GeoParquet 2.0 geo metadata if the writer omitted it (#589).
 
@@ -572,7 +583,9 @@ def _ensure_v2_geo_metadata(
     one ``patch_or_rewrite`` call halves the post-write I/O (#1270). Returns the
     pending block then, ``None`` otherwise.
     """
-    geo_meta = derive_v2_geo_metadata(output_path, primary_column=primary_column)
+    geo_meta = derive_v2_geo_metadata(
+        output_path, primary_column=primary_column, refresh_stats=refresh_stats
+    )
     if geo_meta is None:
         return None
     if defer:
@@ -725,16 +738,9 @@ def _plain_copy_to(
             verbose=verbose,
             primary_column=geometry_column,
             defer=defer_v2_geo_repair,
+            refresh_stats=carry_geo_metadata is not None,
         )
 
-    if verbose:
-        import pyarrow.parquet as pq
-
-        # Closed before the caller moves or uploads this file: `--verbose` must
-        # not be the difference between a fix that lands and one that dies on
-        # `Could not move file: Access is denied` (#1023, #1032).
-        with pq.ParquetFile(output_path) as pf:
-            success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
     return pending_v2_geo
 
 
@@ -1004,6 +1010,7 @@ def open_parquet_writer(
     return pq.ParquetWriter(destination, schema, **kwargs, **options)
 
 
+@uses_aws_profile
 def rewrite_file_through_funnel(
     source: str,
     destination: str,
@@ -1025,7 +1032,7 @@ def rewrite_file_through_funnel(
     """
     import duckdb  # deferred: the embeddable import surface defers duckdb (#1307)
 
-    with atomic_write(destination) as staged:
+    with atomic_write(destination, mode_from=source) as staged:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(source))
         try:
             write_parquet_with_metadata(
@@ -1106,6 +1113,7 @@ def rewrite_footer_kv(
     _rewrite_parquet(source, destination, updates, write=write, verbose=verbose)
 
 
+@uses_aws_profile
 def _rewrite_parquet(
     source: str,
     destination: str,
@@ -1128,36 +1136,34 @@ def _rewrite_parquet(
     write_kwargs = resolve_codec(
         write.compression, write.compression_level, context="write"
     ).pyarrow_kwargs()
-    with remote_write_context(destination, verbose=verbose) as (local, _):
-        with atomic_write(local) as staged:
-            # Every handle on *source* closes before the swap: Windows refuses
-            # to replace a file that is still open.
-            with contextlib.ExitStack() as stack:
-                handle = stack.enter_context(open_url(source)) if is_remote_url(source) else source
-                # pre_buffer off: pyarrow's pre-buffer cache keeps every column
-                # chunk `iter_batches` has read until the file closes, which grew
-                # to roughly the whole compressed file instead of one row group.
-                pf = stack.enter_context(pq.ParquetFile(handle, pre_buffer=False))
-                metadata = output_schema_metadata(
-                    _carried_with_updates(_footer_keys(pf), updates), None
+    with atomic_write(destination) as staged:
+        # Every handle on *source* closes before the swap: Windows refuses
+        # to replace a file that is still open.
+        with contextlib.ExitStack() as stack:
+            handle = stack.enter_context(open_url(source)) if is_remote_url(source) else source
+            # pre_buffer off: pyarrow's pre-buffer cache keeps every column
+            # chunk `iter_batches` has read until the file closes, which grew
+            # to roughly the whole compressed file instead of one row group.
+            pf = stack.enter_context(pq.ParquetFile(handle, pre_buffer=False))
+            metadata = output_schema_metadata(
+                _carried_with_updates(_footer_keys(pf), updates), None
+            )
+            schema = pf.schema_arrow.with_metadata(metadata)
+            if verbose:
+                debug(f"Rewriting with footer keys: {[key.decode() for key in metadata]}")
+            with open_parquet_writer(staged, schema, write_kwargs) as writer:
+                # Read at the row count when there is one, so each batch
+                # is one group; a byte target is sized by the facade on
+                # the leading batches (sized_stream).
+                count = resolve_row_group_rows(write.row_group_rows, write.row_group_size_mb)
+                batches = pf.iter_batches(batch_size=count) if count else pf.iter_batches()
+                chunks, rows = sized_stream(
+                    batches, write.row_group_rows, write.row_group_size_mb, pf.schema_arrow
                 )
-                schema = pf.schema_arrow.with_metadata(metadata)
-                if verbose:
-                    debug(f"Rewriting with footer keys: {[key.decode() for key in metadata]}")
-                with open_parquet_writer(staged, schema, write_kwargs) as writer:
-                    # Read at the row count when there is one, so each batch
-                    # is one group; a byte target is sized by the facade on
-                    # the leading batches (sized_stream).
-                    count = resolve_row_group_rows(write.row_group_rows, write.row_group_size_mb)
-                    batches = pf.iter_batches(batch_size=count) if count else pf.iter_batches()
-                    chunks, rows = sized_stream(
-                        batches, write.row_group_rows, write.row_group_size_mb, pf.schema_arrow
+                for group in regroup(chunks, _layout or rows):
+                    writer.write_table(
+                        pa.Table.from_batches([group]), row_group_size=group.num_rows
                     )
-                    for group in regroup(chunks, _layout or rows):
-                        writer.write_table(
-                            pa.Table.from_batches([group]), row_group_size=group.num_rows
-                        )
-        upload_if_remote(local, destination, profile=write.remote.profile, verbose=verbose)
 
 
 def _carries_more_than_duckdb_generates(geo_dict: dict) -> bool:
@@ -1351,6 +1357,37 @@ def _unknown_secondary_needs_rewrite(
     )
 
 
+def _write_strategy_output(strategy, kwargs: dict) -> dict | None:
+    """Run the query once; finalize measured facts from the completed output."""
+    primary = kwargs["geometry_column"]
+    version = kwargs["geoparquet_version"]
+    defer_stats = (
+        primary is not None
+        and version not in ("parquet-geo-only", "1.1-geoarrow")
+        and strategy.name in ("duckdb-kv", "streaming")
+    )
+    if defer_stats:
+        kwargs["defer_stats"] = True
+    strategy.write_from_query(**kwargs)
+    if version == "parquet-geo-only":
+        return None
+    if not defer_stats:
+        written = sanitized_carried_geo(pq.read_schema(kwargs["output_path"]).metadata)
+        if len(written.get("columns") or {}) < 2:
+            return None
+    return written_geo_block(
+        kwargs["output_path"],
+        kwargs["original_metadata"],
+        GeoBlockOptions(
+            geometry_column=primary,
+            version=version,
+            custom_metadata=kwargs["custom_metadata"],
+            crs=kwargs["input_crs"],
+            geometry_info=kwargs["geometry_info"],
+        ),
+    )
+
+
 def write_parquet_with_metadata(
     con,
     query,
@@ -1468,6 +1505,10 @@ def write_parquet_with_metadata(
         None
     """
 
+    if input_file and is_same_file_path(input_file, output_file):
+        raise GeoParquetError(
+            "The write facade refuses in-place output; stage via file_utils.atomic_write."
+        )
     configure_verbose(verbose)
 
     # A conversion rebuilds the input's measured facts. Transforming an
@@ -1721,9 +1762,8 @@ def write_parquet_with_metadata(
     ):
         if not rewrite_needed:
             # Fast path: plain DuckDB COPY TO without geo metadata manipulation
-            if verbose:
-                debug(f"Writing GeoParquet version: {effective_version}")
-                debug(f"No metadata rewrite needed for {effective_version} - using plain COPY TO")
+            debug(f"Writing GeoParquet version: {effective_version}")
+            debug(f"No metadata rewrite needed for {effective_version} - using plain COPY TO")
 
             # Nothing but a bare DuckDB COPY writes this file, so a sub-vector
             # request lands at 2,048 whatever was asked for. Say so here, where
@@ -1771,8 +1811,7 @@ def write_parquet_with_metadata(
                     else bool(geoarrow_encoding)
                 )
                 if not already_native and write_strategy != "streaming":
-                    if verbose:
-                        debug("Routing 1.1-geoarrow WKB input through arrow-streaming")
+                    debug("Routing 1.1-geoarrow WKB input through arrow-streaming")
                     write_strategy = "streaming"
 
             # "auto" (WriteOptions' default) is this funnel's duckdb-kv (#761).
@@ -1781,9 +1820,18 @@ def write_parquet_with_metadata(
             )
             strategy = WriteStrategyFactory.get_strategy(strategy_enum)
 
-            if verbose:
-                debug(f"Writing GeoParquet version: {effective_version}")
-                debug(f"Using write strategy: {strategy.name}")
+            debug(f"Writing GeoParquet version: {effective_version}")
+            debug(f"Using write strategy: {strategy.name}")
+
+            # The primary's measured facts belong to the output rows, even when the
+            # caller only sorts or adds a column: the input block may already be stale.
+            # Keep declarations and secondary-column invalidation policy unchanged.
+            if geometry_column:
+                original_metadata = strip_derived_stats(
+                    original_metadata,
+                    columns={geometry_column},
+                    recomputed_columns={geometry_column},
+                )
 
             write_kwargs = {
                 "con": con,
@@ -1816,7 +1864,7 @@ def write_parquet_with_metadata(
             if strategy_enum == WriteStrategy.DUCKDB_KV:
                 note_duckdb_copy_rounding(row_group_rows)
 
-            strategy.write_from_query(**write_kwargs)
+            pending_v2_geo = _write_strategy_output(strategy, write_kwargs)
 
         # Non-planar edges must survive every rewrite path (#588): DuckDB
         # regenerates geo metadata without `edges`, silently demoting geography
@@ -2362,7 +2410,10 @@ def _stream_input_metadata(table: pa.Table, *, version: str | None = None) -> di
         compose_geo_block,
         with_geo_block,
     )
-    from geoparquet_io.core.geometry_detection import primary_geometry_column
+    from geoparquet_io.core.geometry_detection import (
+        primary_geometry_column,
+        require_geometry_column,
+    )
     from geoparquet_io.core.parquet_writer import version_to_describe
 
     metadata = dict(table.schema.metadata or {})
@@ -2375,7 +2426,7 @@ def _stream_input_metadata(table: pa.Table, *, version: str | None = None) -> di
     # non-geometry column that merely has a standard name cannot win, and every
     # inferred column is declared by the block or GeoArrow-typed, so one answers.
     geometry_fields = pa.schema([table.schema.field(name) for name in inferred_columns])
-    primary = primary_geometry_column(geometry_fields, geo=geo)
+    primary = require_geometry_column(primary_geometry_column(geometry_fields, geo=geo))
     # What each column's field says (its CRS, the "not known" geometry types),
     # the primary's included, is ``geometry_info``; the data's edges, resolved
     # block-over-type, are ``column_edges``. The composer lets whatever the
@@ -2447,8 +2498,9 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
 
     reader = read_arrow_stream()
     schema = reader.schema
-    metadata = prune_geo_metadata_to_columns(
-        _stream_input_metadata(schema.empty_table()), schema.names
+    metadata = (
+        prune_geo_metadata_to_columns(_stream_input_metadata(schema.empty_table()), schema.names)
+        or {}
     )
     # The carried block can be incomplete; DuckDB must be able to open the
     # scratch file to fill it. Restore the exact block after deriving its gaps.
@@ -2473,10 +2525,13 @@ def read_stdin_to_temp_file(verbose: bool = False) -> str:
                 writer.write_table(group)
         con = get_duckdb_connection(load_spatial=True, load_httpfs=False)
         try:
-            metadata = backfill_derived_stats(
-                metadata,
-                QuerySource(con, f"SELECT * FROM read_parquet({sql_path(temp_path)})"),
-                verbose,
+            metadata = (
+                backfill_derived_stats(
+                    metadata,
+                    QuerySource(con, f"SELECT * FROM read_parquet({sql_path(temp_path)})"),
+                    verbose,
+                )
+                or {}
             )
         finally:
             con.close()

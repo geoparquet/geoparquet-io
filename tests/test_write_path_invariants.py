@@ -155,7 +155,29 @@ def _run_cli(name: str, src: Path, out_dir: Path) -> Path:
         )
     elif name == "partition_h3":
         part = out_dir / "partition_h3"
-        _invoke("partition", "h3", src, part, "--resolution", "1", "--skip-analysis")
+        previous_versions = []
+        from geoparquet_io.core import parquet_footer
+
+        atomic_write = parquet_footer.atomic_write
+
+        @contextlib.contextmanager
+        def record_publication(destination, **kwargs):
+            with atomic_write(destination, **kwargs) as staged:
+                yield staged
+                destination = Path(destination)
+                if destination.is_relative_to(part) and destination.exists():
+                    previous = destination.stat().st_mtime_ns // 1_000_000_000
+                    # Pin before publication prepares the timestamp.
+                    pinned = previous * 1_000_000_000
+                    os.utime(staged, ns=(pinned, pinned))
+                    previous_versions.append((destination, previous))
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(parquet_footer, "atomic_write", record_publication)
+            _invoke("partition", "h3", src, part, "--resolution", "1", "--skip-analysis")
+        assert previous_versions, "H3 must publish its spherical-edge footer over COPY output"
+        for destination, previous in previous_versions:
+            assert destination.stat().st_mtime_ns // 1_000_000_000 > previous
         out = sorted(part.rglob("*.parquet"))[0]
     return out
 

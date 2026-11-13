@@ -48,7 +48,7 @@ def _geo(path) -> dict:
 
 
 def _scans(monkeypatch) -> Counter:
-    """Count duckdb-kv's stats scans per column."""
+    """Count strategy and completed-output measurements per column."""
     seen: Counter = Counter()
 
     def counting(real):
@@ -60,6 +60,9 @@ def _scans(monkeypatch) -> Counter:
 
     for name in ("geometry_stats_of", "geometry_types_of"):
         monkeypatch.setattr(duckdb_kv, name, counting(getattr(duckdb_kv, name)))
+    monkeypatch.setattr(
+        derive_geo_from_file, "geometry_stats_of", counting(derive_geo_from_file.geometry_stats_of)
+    )
     return seen
 
 
@@ -171,12 +174,8 @@ class TestEmptiedGeometryTypesAreRecomputed:
         # The only legitimate one is convert's "nothing to measure" Hilbert note.
         assert all("Hilbert" in message for message in warnings), warnings
 
-    def test_known_values_are_left_alone(self, tmp_path, monkeypatch):
-        """This fills gaps, it does not audit: a known list is not rescanned at all.
-
-        Not even for the optional ``bbox`` it lacks: a secondary is scanned only
-        when its spec-required ``geometry_types`` is missing or ``[]``.
-        """
+    def test_known_values_are_remeasured_from_output(self, tmp_path, monkeypatch):
+        """A rewrite audits carried type claims against the completed output."""
         input_file = tmp_path / "in.parquet"
         output_file = tmp_path / "out.parquet"
         _write_two_geometry_file(input_file)
@@ -186,7 +185,7 @@ class TestEmptiedGeometryTypesAreRecomputed:
 
         columns = _geo(output_file)["columns"]
         assert columns["boundary"]["geometry_types"] == ["Polygon"]
-        assert "boundary" not in scans
+        assert scans == {"geometry": 1, "boundary": 1}
 
     def test_an_emptied_primary_is_recomputed_too(self, tmp_path):
         """The same gate covers the primary: `[]` is a gap on a single-geometry file."""
@@ -440,11 +439,8 @@ class TestOddInputs:
 
         assert info["secondary"] == ["centroid"]
 
-    def test_a_plain_binary_secondary_in_the_query_is_left_alone(self, tmp_path):
-        """A secondary the query carries as BLOB (a non-gpio Arrow stream) cannot be measured.
-
-        Binding ST_* to it aborted the whole write; it keeps its carried metadata.
-        """
+    def test_a_plain_binary_secondary_is_measured_from_the_output(self, tmp_path):
+        """The file stats owner decodes declared WKB without binding ST_* to a BLOB."""
         from geoparquet_io.core.write_funnels import write_parquet_with_metadata
 
         source = tmp_path / "in.parquet"
@@ -467,7 +463,8 @@ class TestOddInputs:
 
         columns = _geo(output)["columns"]
         assert columns["geometry"]["geometry_types"] == ["Point"]
-        assert columns["boundary"]["geometry_types"] == []
+        assert columns["boundary"]["geometry_types"] == ["Polygon"]
+        assert columns["boundary"]["bbox"] == [-0.5, -0.5, 2.5, 2.5]
 
 
 class TestThePrimaryCrsIsThePrimarysOwn:

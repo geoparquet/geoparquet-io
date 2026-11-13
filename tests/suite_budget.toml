@@ -225,6 +225,7 @@ slow_mark_sites = [
   "test_process_overview.py::test_level_not_coarser_than_base_errors",
   "test_process_overview.py::test_mixed_resolution_input_errors",
   "test_process_overview.py::test_table_overview_api",
+  "test_rewrite_memory_1268.py::test_eager_rewrite_peak_rss_and_bytes",
   "test_rewrite_memory_1268.py::test_hilbert_past_2_gib_attribute_column",
   "test_streaming.py::TestApplyGeoArrowExtensionType.test_real_overflow_succeeds",
   "test_streaming.py::TestStreamIO",

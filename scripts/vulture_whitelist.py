@@ -165,3 +165,6 @@ a5_from_query_farm  # unused variable (geoparquet_io/core/duckdb_utils.py:415) -
 
 _.format_commands  # unused method (geoparquet_io/cli/main.py:65) -- dynamic: Click invokes the LazyGroup help-rendering override
 alias_target  # unused function (geoparquet_io/api/_deprecation.py:77) -- dynamic: read by the parity census in tests/parity_registry.py
+
+duckdb_param  # unused variable (geoparquet_io/core/geo_metadata.py:66) -- dynamic: TypedDict registry key read by string lookup in write_funnels and version consumers
+rewrite_metadata  # unused variable (geoparquet_io/core/geo_metadata.py:68) -- dynamic: TypedDict registry key read by string lookup in write_strategies.base

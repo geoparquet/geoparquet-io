@@ -248,13 +248,14 @@ def one_point_geojson(tmp_path):
                     }
                 ],
             }
-        )
+        ),
+        encoding="utf-8",
     )
     return path
 
 
-def test_factory_and_api_chains_load_spatial_once(
-    production_factory, spatial_loads, one_point_geojson, tmp_path
+def test_factory_shares_spatial_and_eager_reads_isolate_limits(
+    production_factory, spatial_loads, one_point_geojson, tmp_path, monkeypatch
 ):
     for _ in range(4):
         with production_factory() as con:
@@ -263,12 +264,21 @@ def test_factory_and_api_chains_load_spatial_once(
     assert spatial_loads == ["spatial"]
 
     import geoparquet_io as gpio
+    from geoparquet_io.core import convert
 
-    for index in range(2):
-        out = tmp_path / f"chain_{index}.parquet"
-        gpio.convert(str(one_point_geojson)).add_bbox().sort_hilbert().write(str(out))
-        assert out.exists()
-    assert spatial_loads == ["spatial"]
+    bounded = Mock(wraps=convert.open_bounded_connection)
+    monkeypatch.setattr(convert, "open_bounded_connection", bounded)
+    with production_factory() as observer:
+        before = _settings(observer)
+        for index in range(2):
+            out = tmp_path / f"chain_{index}.parquet"
+            gpio.convert(str(one_point_geojson)).add_bbox().sort_hilbert().write(str(out))
+            assert out.exists()
+            assert bounded.call_args.kwargs["per_thread"] == 16 * 1024**3
+            assert _settings(observer) == before
+            # Each bounded eager read owns a private database; its policy must
+            # not alter the shared database used by the remaining API chain.
+            assert spatial_loads == ["spatial"] * (index + 2)
 
 
 def test_gc_only_after_isolated_gdal_read(
@@ -289,9 +299,11 @@ def test_gc_only_after_isolated_gdal_read(
                         case_patch.setenv("GPIO_DUCKDB_PROFILE", str(tmp_path / "profiles"))
                     case_patch.setattr(
                         convert,
-                        "get_duckdb_connection",
+                        "open_bounded_connection",
                         lambda isolated=isolated, **kwargs: production_factory(
-                            isolated=isolated, **kwargs
+                            isolated=isolated,
+                            load_spatial=kwargs["load_spatial"],
+                            load_httpfs=kwargs["load_httpfs"],
                         ),
                     )
                     collect = Mock()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from itertools import pairwise
 
 import pyarrow as pa
@@ -220,6 +221,8 @@ def hilbert_order(
     geoparquet_version: str | None = None,
     overwrite: bool = False,
     memory_limit: str | None = None,
+    *,
+    report: bool = True,
 ) -> None:
     """
     Reorder a GeoParquet file using Hilbert curve ordering.
@@ -272,6 +275,7 @@ def hilbert_order(
         verbose=verbose,
         write=WriteOptions.pick(locals()),
         overwrite=overwrite,
+        report=report,
     )
 
 
@@ -295,8 +299,15 @@ def _hilbert_query(con, source, geom_col, verbose, working, *, advise=True):
     if bounds is None:
         warn("All geometries are empty or null. Writing file without Hilbert ordering.")
         return f"SELECT * FROM {source}", False
+    return hilbert_order_query(source, key_expr, bounds), True
+
+
+def hilbert_order_query(source: str, key_expr: str, bounds: Sequence[float] | None) -> str:
+    """Build the file sort's SQL over a caller's SQL source, keeping nulls last."""
+    if not bounds:
+        return f"SELECT * FROM {source}"
     xmin, ymin, xmax, ymax = bounds
-    query = f"""
+    return f"""
         WITH non_empty AS (
             SELECT * FROM {source}
             WHERE {key_expr} IS NOT NULL AND NOT ST_IsEmpty({key_expr})
@@ -311,5 +322,3 @@ def _hilbert_query(con, source, geom_col, verbose, working, *, advise=True):
         UNION ALL
         SELECT * FROM empty_or_null
     """
-
-    return query, True

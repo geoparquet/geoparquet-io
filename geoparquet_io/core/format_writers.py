@@ -447,7 +447,7 @@ def write_gdal_format(
     # (#1289).
     require_planar_export_file(input_path, target=str(config["description"]), profile=profile)
 
-    handle_output_overwrite(output_path, overwrite, remove=False)
+    handle_output_overwrite(output_path, overwrite)
 
     validate_output_path(output_path, verbose)
     progress(f"Converting to {config['description']}: {output_path}")
@@ -536,12 +536,6 @@ def write_gdal_format(
         if where_filter:
             source_query += f" WHERE {where_filter}"
 
-        staging = None
-        # Filtered GeoPackage COPY changes SQLite header counters without staging.
-        if where_filter and format_name == "geopackage":
-            staging = f"CREATE OR REPLACE TEMP TABLE {_STAGED_TABLE} AS {source_query}"
-            source_query = f"SELECT * FROM {_STAGED_TABLE}"
-
         def copy_query(target: str) -> str:
             return f"""
             COPY ({source_query})
@@ -552,17 +546,14 @@ def write_gdal_format(
         # No `--write-memory` on the export commands, so this is the
         # ceiling-based default; the export used to run at DuckDB's own
         # 80%-of-host default, blind to a container or job cgroup (#1174).
+        debug(f"Export query: {copy_query(output_path)}")
         with scoped_write_memory_limit(con, None, verbose):
-            if staging:
-                debug(f"Executing: {staging}")
-                con.execute(staging)
             with atomic_write(
                 output_path,
                 suffix=str(config["extension"]),
                 sidecar_suffixes=cast("tuple[str, ...] | None", config["sidecar_suffixes"]),
             ) as target:
                 query = copy_query(target)
-                debug(f"Executing: {query}")
                 con.execute(query)
                 if format_name == "geopackage" and not has_geometry:
                     _drop_gpkg_geometry_column(target)
@@ -644,7 +635,7 @@ def write_csv(
     if include_wkt:
         require_planar_export_file(input_path, target="CSV", profile=profile)
 
-    handle_output_overwrite(output_path, overwrite, remove=False)
+    handle_output_overwrite(output_path, overwrite)
 
     validate_output_path(output_path, verbose)
 
@@ -766,7 +757,7 @@ def write_geojson(
             "output_path", "GeoJSON output path must be local. Use upload() for cloud destinations."
         )
 
-    handle_output_overwrite(output_path, overwrite, remove=False)
+    handle_output_overwrite(output_path, overwrite)
 
     validate_profile_for_urls(profile, input_path)
 

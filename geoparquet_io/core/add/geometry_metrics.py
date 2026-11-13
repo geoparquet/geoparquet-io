@@ -25,7 +25,7 @@ from geoparquet_io.core.crs_utils import (
     crs_of,
     transform_geom_sql,
 )
-from geoparquet_io.core.duckdb_utils import describe_query, quote_identifier
+from geoparquet_io.core.duckdb_utils import describe_query, quote_identifier, uses_aws_profile
 from geoparquet_io.core.file_utils import atomic_write, handle_output_overwrite, scratch_file
 from geoparquet_io.core.geo_metadata import sanitized_carried_geo
 from geoparquet_io.core.geometry_detection import (
@@ -172,6 +172,7 @@ def _add_metrics_streaming(
         success(f"Added geometry metrics to: {output_path}")
 
 
+@uses_aws_profile
 def _add_metrics_file_based(
     input_parquet,
     output_parquet,
@@ -184,7 +185,7 @@ def _add_metrics_file_based(
 ) -> None:
     """Handle file-based geometry metrics addition — two passes via add_computed_column."""
     # remove=False: the output is staged and replaced only on success.
-    handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
+    handle_output_overwrite(output_parquet, overwrite, input_parquet)
     require_single_file(input_parquet, "add geometry-metrics")
 
     geom_col = require_geometry_column(

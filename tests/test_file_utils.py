@@ -8,6 +8,7 @@ SQL escaping, and cache key generation.
 import functools
 import http.server
 import os
+import shutil
 import threading
 
 import pytest
@@ -468,14 +469,14 @@ class TestHandleOutputOverwrite:
         with pytest.raises(GeoParquetError, match="already exists"):
             handle_output_overwrite(str(existing), overwrite=False)
 
-    def test_existing_file_with_overwrite_deletes(self, tmp_path):
-        """Existing file with overwrite flag is deleted."""
+    def test_existing_file_with_overwrite_preserves_until_replaced(self, tmp_path):
+        """Overwrite permission must not delete the last good output."""
         existing = tmp_path / "existing.parquet"
         existing.write_bytes(b"test")
 
         handle_output_overwrite(str(existing), overwrite=True)
 
-        assert not existing.exists()
+        assert existing.read_bytes() == b"test"
 
     def test_same_input_output_raises(self, tmp_path):
         """Same input and output file raises."""
@@ -642,7 +643,7 @@ def recording_http_server(tmp_path):
 class TestCopyFile:
     """Test byte-for-byte copying, local and remote (#798 diff-cover gap)."""
 
-    def test_local_copy_verbose_logs_debug_message(self, tmp_path, caplog):
+    def test_local_copy_verbose_logs_debug_message(self, tmp_path, caplog, monkeypatch):
         """verbose=True logs the 'Copying ... to ...' debug line before copying."""
         import logging
 
@@ -657,6 +658,20 @@ class TestCopyFile:
 
         assert dest.read_bytes() == b"geoparquet-bytes"
         assert f"Copying {source} to {dest}" in caplog.text
+
+        from geoparquet_io.core import file_utils
+
+        pinned = 1_700_000_000_000_000_000
+        copy = shutil.copyfile
+
+        def pinned_copy(source, destination):
+            copy(source, destination)
+            os.utime(destination, ns=(pinned, pinned))
+
+        monkeypatch.setattr(shutil, "copyfile", pinned_copy)
+        os.utime(dest, ns=(pinned, pinned))
+        file_utils.copy_file(str(source), str(dest))
+        assert dest.stat().st_mtime_ns // 1_000_000_000 > pinned // 1_000_000_000
 
     def test_s3_copy_builds_the_store_from_gpio_s_configured_endpoint(self):
         """The ambient S3 config (--s3-endpoint/--s3-region/--aws-profile) reaches the store.
@@ -887,6 +902,12 @@ class TestCopyFile:
         file_utils.copy_file("s3://bucket/in.parquet", str(dest))
 
         assert dest.read_bytes() == payload
+
+        previous = dest.stat().st_mtime_ns // 1_000_000_000 + 60
+        pinned = previous * 1_000_000_000
+        os.utime(dest, ns=(pinned, pinned))
+        file_utils.copy_file("s3://bucket/in.parquet", str(dest))
+        assert dest.stat().st_mtime_ns // 1_000_000_000 > previous
 
     def test_local_source_remote_dest_puts_the_object(self, monkeypatch, tmp_path):
         """A local file uploaded to a remote destination lands under the resolved key."""

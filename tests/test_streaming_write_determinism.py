@@ -167,6 +167,7 @@ class TestCanonicalStreamingSchema:
     def _geometry_field_for(self, geometry_field: pa.Field) -> pa.Field:
         schema = pa.schema([pa.field("id", pa.int64()), geometry_field])
         built = ArrowStreamingStrategy()._build_streaming_schema(
+            geoparquet_version="1.1",
             schema=schema,
             geometry_column="geometry",
             geo_meta=json.loads(json.dumps(GEO_1_1)),

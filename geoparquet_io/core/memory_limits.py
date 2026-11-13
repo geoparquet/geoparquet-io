@@ -193,14 +193,22 @@ def default_memory_limit() -> str | None:
 #: Measured on a 4M-polygon Hilbert COPY: ~250MB per thread spilled reliably,
 #: under ~170MB raised OutOfMemoryException with a temp_directory set.
 _BYTES_PER_THREAD = 512 * BYTES_PER_MIB
+# Ordered snapshots and replay retain buffers; use DuckDB’s upper tuning budget.
+# https://duckdb.org/docs/stable/guides/performance/how_to_tune_workloads.html
+_MATERIALIZED_BYTES_PER_THREAD = 4 * 1024**3
+# Full ordered Arrow materialization retains more buffers than batched replay;
+# measured on 1M polygons and Connecticut, including DuckDB 2's larger read peak.
+_EAGER_BYTES_PER_THREAD = 16 * 1024**3
 
 
-def _thread_cap(limit_bytes: int) -> int:
-    """The most threads a memory limit supports, each keeping ``_BYTES_PER_THREAD``."""
-    return max(1, limit_bytes // _BYTES_PER_THREAD)
+def _thread_cap(limit_bytes: int, per_thread: int = _BYTES_PER_THREAD) -> int:
+    """The most threads a memory limit supports, each keeping ``per_thread``."""
+    return max(1, limit_bytes // per_thread)
 
 
-def _connection_limit(memory_limit: str | None) -> tuple[str | None, int | None]:
+def _connection_limit(
+    memory_limit: str | None, per_thread: int = _BYTES_PER_THREAD
+) -> tuple[str | None, int | None]:
     """The ``memory_limit`` and thread cap a freshly opened connection should carry.
 
     ``_resolve_limit``'s rule, minus the part that reads the session: a new
@@ -221,7 +229,7 @@ def _connection_limit(memory_limit: str | None) -> tuple[str | None, int | None]
     limit_bytes = parse_size_string(limit)
     if not limit_bytes:  # pragma: no cover - validate_memory_limit accepts only sizes
         return limit, None
-    threads = _thread_cap(limit_bytes)
+    threads = _thread_cap(limit_bytes, per_thread)
     return limit, threads if threads < (os.cpu_count() or 1) else None
 
 
@@ -232,6 +240,7 @@ def open_bounded_connection(
     load_httpfs: bool | None = None,
     verbose: bool = False,
     preserve_insertion_order: bool = False,
+    per_thread: int = _BYTES_PER_THREAD,
     temp_directory: str | None = None,
 ) -> duckdb.DuckDBPyConnection:
     """A DuckDB connection for one analysis query, opened inside a memory limit.
@@ -253,15 +262,15 @@ def open_bounded_connection(
     share of the ceiling is half rather than DuckDB's 80% (the share's own
     rationale is on :data:`DEFAULT_MEMORY_FRACTION`).
 
-    ``preserve_insertion_order`` defaults off: every caller today takes its
-    output order from a GROUP BY, so buffering the scan to keep the input's
-    order buys nothing and costs the whole scan's width in memory. It is a
-    parameter rather than a constant because the setting is about ordering, not
-    memory, and a future caller that does need the input's order would
-    otherwise be silently reordered by a function whose name promises only a
-    memory bound.
+    ``per_thread`` opts measured buffered reads into a larger concurrency budget;
+    ordinary analysis queries retain the spilling budget. This is not an RSS
+    bound: the result itself and native allocations can exceed it.
+
+    ``preserve_insertion_order`` defaults off for aggregate/overview queries,
+    whose order comes from GROUP BY. Eager file reads pass True to retain the
+    input order and byte-identical rewrites; disabling it can reorder rows.
     """
-    limit, threads = _connection_limit(memory_limit)
+    limit, threads = _connection_limit(memory_limit, per_thread)
     con: duckdb.DuckDBPyConnection = get_duckdb_connection(
         load_spatial=load_spatial,
         load_httpfs=load_httpfs,

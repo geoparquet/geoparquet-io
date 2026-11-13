@@ -29,7 +29,7 @@ import reprlib
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from functools import cache, lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from geoparquet_io.core.column_selection import fold
 from geoparquet_io.core.duckdb_utils import (
@@ -61,7 +61,14 @@ if TYPE_CHECKING:
 # GeoParquet Version Configuration
 # =============================================================================
 
-GEOPARQUET_VERSIONS = {
+
+class _GeoParquetVersion(TypedDict):
+    duckdb_param: str
+    metadata_version: str | None
+    rewrite_metadata: bool
+
+
+GEOPARQUET_VERSIONS: dict[str, _GeoParquetVersion] = {
     "1.0": {"duckdb_param": "V1", "metadata_version": "1.0.0", "rewrite_metadata": True},
     "1.1": {"duckdb_param": "V1", "metadata_version": "1.1.0", "rewrite_metadata": True},
     "1.1-geoarrow": {"duckdb_param": "V1", "metadata_version": "1.1.0", "rewrite_metadata": True},
@@ -1953,7 +1960,8 @@ def compose_geo_block(source: GeoBlockSource, options: GeoBlockOptions) -> dict:
             geo_meta["columns"][column].setdefault(key, value)
     _apply_stats(geo_meta, secondaries.stats)
     _apply_stats(geo_meta, options.stats)
-    _name_geoarrow_geometry_types(col_meta, view, primary)
+    for name, entry in geo_meta["columns"].items():
+        _name_geoarrow_geometry_types(entry, view, name)
     if options.measure_missing is not None:
         _apply_stats(geo_meta, options.measure_missing(geo_meta))
     provenance = geo_meta if carried else sanitized_carried_geo(options.covering_provenance)
@@ -2333,6 +2341,11 @@ def _query_stats(
     measured = _geometry_rows_sql(con, query, geometry_column, bbox_column)
     if measured is None:
         return _NO_STATS, None
+    if not need_bbox:
+        # Project only types so DuckDB prunes the unused envelope expressions.
+        rows = con.execute(f"SELECT DISTINCT __t FROM ({measured})").fetchall()
+        names = {geometry_type_name(row[0]) for row in rows}
+        return GeometryStats(None, sorted(name for name in names if name)), None
     located = f"SELECT * FROM ({measured}) WHERE {_located_sql('__x0', '__y0', '__x1', '__y1')}"
     # Keep unlocated rows for their types; aggregate filters avoid pushing the
     # envelope predicate through the source and re-evaluating its geometry.
@@ -2738,17 +2751,86 @@ def _stats(
     )
 
 
+def _footer_stats(
+    path: str, geometry_column: str, bbox_column: str | None, *, need_bbox: bool
+) -> GeometryStats | None:
+    """Complete physical footer facts; never fold a subset of the row groups."""
+    from geoparquet_io.core.file_utils import get_all_parquet_files, is_partition_path
+
+    if is_partition_path(path):
+        parts = [
+            _file_footer_stats(file, geometry_column, bbox_column, need_bbox=need_bbox)
+            for file in get_all_parquet_files(path)
+        ]
+        if not parts or any(part is None for part in parts):
+            return None
+        return merged_geometry_stats(parts, geographic=False)
+
+    return _file_footer_stats(path, geometry_column, bbox_column, need_bbox=need_bbox)
+
+
+def _file_footer_stats(
+    path: str,
+    geometry_column: str,
+    bbox_column: str | None,
+    *,
+    need_bbox: bool,
+    geographic: bool = False,
+) -> GeometryStats | None:
+    """Read one listed file's footer without classifying its path again."""
+    from geoparquet_io.core.duckdb_metadata import (
+        get_file_metadata,
+        get_native_geo_stats_by_row_group,
+        get_row_group_bbox_stats,
+    )
+
+    groups = get_file_metadata(path)["num_row_groups"]
+    if bbox_column is not None:
+        chunks, _ = get_row_group_bbox_stats(
+            path, bbox_column=lambda: bbox_column, native=lambda: []
+        )
+    else:
+        chunks = get_native_geo_stats_by_row_group(path, geometry_column) or []
+    if len(chunks) != groups:
+        return None
+    if need_bbox and any(
+        any(c.get(k) is None or not math.isfinite(c[k]) for k in ("xmin", "ymin", "xmax", "ymax"))
+        for c in chunks
+    ):
+        return None
+    # A wrapped spherical range cannot supply Cartesian min/max to this API.
+    if need_bbox and not geographic and any(c["xmin"] > c["xmax"] for c in chunks):
+        return None
+    if bbox_column is None and any(not c.get("geometry_types") for c in chunks):
+        return None
+    return row_group_geometry_stats(chunks, geographic=geographic)
+
+
 def _file_stats(path, geometry_column: str | None, **kwargs) -> GeometryStats:
-    from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+    from geoparquet_io.core.duckdb_utils import disable_geoparquet_conversion, sql_path
     from geoparquet_io.core.file_utils import resolve_file_url
     from geoparquet_io.core.geometry_detection import primary_geometry_column
+    from geoparquet_io.core.memory_limits import open_bounded_connection
     from geoparquet_io.core.remote import needs_httpfs
 
     path = str(path)
     if geometry_column is None:
         geometry_column = primary_geometry_column(path)
-    con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))
+    if not kwargs["antimeridian"]:
+        footer = _footer_stats(
+            path, geometry_column, kwargs["bbox_column"], need_bbox=kwargs["need_bbox"]
+        )
+        if footer is not None:
+            return footer
+        # An incomplete or wrapped covering cannot establish Cartesian bounds.
+        # Measure the geometry rather than filtering inverted covering rows out.
+        kwargs["bbox_column"] = None
+    # This aggregate retains only distinct types and four bounds. A small
+    # analysis budget also caps parallel decompression buffers on large hosts.
+    con = open_bounded_connection(memory_limit="256MB", load_httpfs=needs_httpfs(path))
     try:
+        # Inspect stored WKB through the guarded geometry reader, including malformed values.
+        disable_geoparquet_conversion(con)
         query = f"SELECT * FROM read_parquet({sql_path(resolve_file_url(path, verbose=False))})"
         return _stats(QuerySource(con, query), geometry_column, **kwargs)
     finally:
@@ -2775,7 +2857,9 @@ def geometry_stats_of(
 
     ``bbox_column`` measures a bbox covering's struct (its ``xmin``..``ymax``
     fields) instead of the geometry: the fast path for a file that has one.
-    It yields no types. ``antimeridian=True`` returns a lon/lat extent astride
+    It yields no types. File sources use complete physical row-group statistics
+    first (bbox struct min/max, or native GEOMETRY bounds/types); missing facts
+    fall back to a projected scan. ``antimeridian=True`` returns a lon/lat extent astride
     the antimeridian with ``xmin > xmax``.
 
     A trailing ``ORDER BY`` on a query is dropped first: an aggregate cannot
@@ -2804,13 +2888,14 @@ def bounds_of(
 
     :func:`geometry_stats_of`'s bbox; the same sources and the same policy.
     """
-    return geometry_stats_of(
+    bbox = geometry_stats_of(
         source,
         geometry_column,
         antimeridian=antimeridian,
         bbox_column=bbox_column,
         verbose=verbose,
     ).bbox
+    return list(bbox_xy(bbox)) if bbox is not None else None
 
 
 def geometry_types_of(source, geometry_column: str | None, *, verbose: bool = False) -> list[str]:
@@ -2836,10 +2921,11 @@ def missing_geometry_types(source, block: dict) -> dict[str, dict]:
     entry without it is invalid (#1433). Only the absent key is a gap here: the
     ``[]`` "not known" sentinel stays as the caller left it (#934); duckdb-kv,
     which fills that too, has its own gap rule (#952). ``source`` is anything
-    :func:`geometry_types_of` measures.
+    :func:`geometry_types_of` measures. A None source supplies the required
+    unknown-type sentinel while a writer defers measurement to its completed file.
     """
     return {
-        name: {"geometry_types": geometry_types_of(source, name)}
+        name: {"geometry_types": geometry_types_of(source, name) if source is not None else []}
         for name, meta in block["columns"].items()
         if isinstance(meta, dict) and "geometry_types" not in meta
     }

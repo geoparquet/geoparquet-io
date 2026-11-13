@@ -60,7 +60,7 @@ def validate_remote_file_modification(parquet_file, fix_output, overwrite):
     Returns whether *parquet_file* is remote.
     """
     if fix_output and not is_same_file_path(fix_output, parquet_file):
-        handle_output_overwrite(fix_output, overwrite, parquet_file, remove=False)
+        handle_output_overwrite(fix_output, overwrite, parquet_file)
     is_remote = is_remote_url(parquet_file)
     if not is_remote or fix_output:
         return is_remote
@@ -71,7 +71,7 @@ def validate_remote_file_modification(parquet_file, fix_output, overwrite):
             fg="yellow",
         )
     )
-    handle_output_overwrite(parquet_file, overwrite, parquet_file, remove=False)
+    handle_output_overwrite(parquet_file, overwrite, parquet_file)
 
     click.echo("Proceeding with remote file overwrite (no backup will be created)...")
     return is_remote

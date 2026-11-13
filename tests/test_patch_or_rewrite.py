@@ -164,6 +164,25 @@ def test_a_patchable_footer_keeps_every_sidecar_key_and_the_input_pages(name, tm
     assert _sidecars(out) == SIDECARS, sorted(footer_kv(out))
     assert _layout(out) == _layout(src), "a footer patch re-encoded the data"
 
+    pinned = 1_700_000_000_000_000_000
+    os.utime(out, ns=(pinned, pinned))
+    atomic_write = parquet_footer.atomic_write
+
+    @contextlib.contextmanager
+    def pinned_stage(*args, **kwargs):
+        with atomic_write(*args, **kwargs) as staged:
+            yield staged
+            os.utime(staged, ns=(pinned, pinned))
+
+    for value in ("first", "second"):
+        previous = out.stat().st_mtime_ns // 1_000_000_000
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(parquet_footer, "atomic_write", pinned_stage)
+            parquet_footer.patch_or_rewrite(
+                str(out), {"test:mtime": value}, rewrite=_recording_rewrite([])
+            )
+        assert out.stat().st_mtime_ns // 1_000_000_000 > previous
+
 
 @pytest.mark.parametrize("name", PATHS)
 def test_an_unpatchable_footer_rewrites_through_the_funnel_keeping_the_same_keys(

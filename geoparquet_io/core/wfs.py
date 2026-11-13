@@ -3489,7 +3489,7 @@ def convert_wfs_to_geoparquet(
     """
     configure_verbose(verbose)
 
-    handle_output_overwrite(output_file, overwrite, remove=False)
+    handle_output_overwrite(output_file, overwrite)
 
     # Fetch data
     table = wfs_to_table(
@@ -3662,7 +3662,7 @@ def convert_wfs_layers_to_directory(
     # Every layer's output is checked before the first layer is fetched
     for typename in typenames:
         safe_name = typename.replace(":", "_").replace("/", "_")
-        handle_output_overwrite(str(output_path / f"{safe_name}.parquet"), overwrite, remove=False)
+        handle_output_overwrite(str(output_path / f"{safe_name}.parquet"), overwrite)
 
     progress(
         f"Extracting {len(typenames)} layers to {output_dir} "

@@ -72,11 +72,12 @@ def test_api_read_partition_keeps_aws_profile_env(previous_profile, monkeypatch)
     """The Python API's aws_profile= reaches DuckDB without touching the environment."""
     import geoparquet_io as gpio
 
+    read_partition = gpio.read_partition  # resolve lazy imports before patching their dependency
     seen: list = []
     monkeypatch.setattr(duckdb_utils, "get_duckdb_connection", _recorder(seen))
 
     with pytest.raises(_Stop):
-        gpio.read_partition("s3://bucket/data.parquet", aws_profile="prod")
+        read_partition("s3://bucket/data.parquet", aws_profile="prod")
 
     assert seen == [{"env": previous_profile, "profile": "prod"}]
     assert os.environ.get("AWS_PROFILE") == previous_profile
@@ -226,10 +227,11 @@ needs_runtime_env_in_aws_sdk = pytest.mark.skipif(
 def fake_aws_files(tmp_path, monkeypatch):
     """Point the AWS SDK at temp files holding one fake static profile."""
     config = tmp_path / "config"
-    config.write_text("[profile fakep]\nregion = eu-west-3\n")
+    config.write_text("[profile fakep]\nregion = eu-west-3\n", encoding="utf-8")
     credentials = tmp_path / "credentials"
     credentials.write_text(
-        f"[fakep]\naws_access_key_id = {_FAKE_STATIC_KEY}\naws_secret_access_key = fakesecret\n"
+        f"[fakep]\naws_access_key_id = {_FAKE_STATIC_KEY}\naws_secret_access_key = fakesecret\n",
+        encoding="utf-8",
     )
     for name in (
         "AWS_PROFILE",
@@ -588,3 +590,47 @@ def test_decorator_profile_counts_as_explicit_inside_an_exported_profile_scope(m
     with s3_config_scope(resolve_s3_config()):
         assert duckdb_utils._resolve_s3_settings(None, None, None)["profile"] is None
         assert probe("s3://b/k.parquet", profile="inner") == "inner"
+
+
+def test_staging_callers_keep_profile_scope_through_publication(monkeypatch):
+    """Every profile-bearing staging owner keeps credentials until final upload."""
+    import ast
+    from pathlib import Path
+
+    read_text = Path.read_text
+
+    def windows_read_text(path, encoding=None, **kwargs):
+        return read_text(path, encoding=encoding or "cp1252", **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", windows_read_text)
+    missing = []
+    for path in (Path(__file__).parents[1] / "geoparquet_io").rglob("*.py"):
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if not {"profile", "write", "remote"} & {
+                arg.arg for arg in node.args.args + node.args.kwonlyargs
+            }:
+                continue
+            staged = any(
+                isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+                and call.func.id == "atomic_write"
+                for call in ast.walk(node)
+            )
+            scoped = any(
+                isinstance(d, ast.Name) and d.id == "uses_aws_profile" for d in node.decorator_list
+            )
+            if staged and not scoped:
+                missing.append(f"{path.name}:{node.name}")
+            if path.name == "write_funnels.py" and node.name in (
+                "rewrite_file_through_funnel",
+                "_rewrite_parquet",
+            ):
+                assert not any(
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == "upload_if_remote"
+                    for call in ast.walk(node)
+                ), f"{node.name}: repair staging must own final upload"
+    assert not missing, missing

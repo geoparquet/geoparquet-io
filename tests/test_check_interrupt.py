@@ -226,7 +226,7 @@ def test_fix_summary_is_printed_once_on_interrupt(tmp_path, monkeypatch):
 )
 @pytest.mark.parametrize(
     ("command", "patched"),
-    [("all", "_apply_bbox_column_fix"), ("spatial", "fix_spatial_ordering")],
+    [("all", "_fix_bbox_and_spatial_ordering"), ("spatial", "fix_spatial_ordering")],
 )
 def test_multi_file_fix_stops_on_an_interrupted_fix_write(
     tmp_path, monkeypatch, interrupt, command, patched

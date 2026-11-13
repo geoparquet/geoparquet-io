@@ -105,7 +105,7 @@ EXPECTED_COUNTS = {
     "G3.pylint": 13,
     "G13.options": 11,
     "G13.bbox_parsers": 0,
-    "G4.whitelist": 149,
+    "G4.whitelist": 151,
     "G4.tests_whitelist": 90,
 }
 

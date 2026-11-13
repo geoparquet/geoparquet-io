@@ -1263,7 +1263,7 @@ def extract_bigquery(
 
     # Check if output file exists and handle overwrite (fixes issue #278)
     if output_parquet and not dry_run:
-        handle_output_overwrite(output_parquet, overwrite, remove=False)
+        handle_output_overwrite(output_parquet, overwrite)
 
     # Handle dry_run without connecting to BigQuery
     if dry_run:

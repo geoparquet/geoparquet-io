@@ -602,6 +602,8 @@ def reproject_impl(
                         invalidate_derived_stats_columns={geom_col},
                         drop_nonplanar_edges_columns=drop_edges_columns,
                     )
+                    # Publication must wait for the reader, including on Windows.
+                    con.close()
 
                 if is_remote:
                     upload_if_remote(

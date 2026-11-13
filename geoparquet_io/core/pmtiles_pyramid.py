@@ -379,7 +379,7 @@ def create_pmtiles_pyramid(
         _validate_path(features_source)
     # Fail fast before any tiling work: tile-join would only reject an
     # existing output after every per-band tippecanoe run had completed.
-    handle_output_overwrite(output_path, force, flag="--force", remove=False)
+    handle_output_overwrite(output_path, force, flag="--force")
     base_max, feat_min = _resolve_feature_zooms(max_zoom, features_min_zoom, include_features)
     if not _check_tippecanoe():
         raise TippecanoeNotFoundError()

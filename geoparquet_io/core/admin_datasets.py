@@ -1726,7 +1726,7 @@ def open_admin_join_connection(
     statement exists for ``scoped_write_memory_limit`` to wrap: the connection
     itself carries ``memory_limit`` (else the default), through
     :func:`~geoparquet_io.core.memory_limits.open_bounded_connection`. It keeps
-    that function's thread cap -- each thread keeps a spillable share of the
+    the default spill-budget thread cap -- each thread keeps a spillable share of the
     limit -- instead of ``threads=1``: aggregate's join point is a POINT per
     row with a GROUP BY right after it, and nothing has measured the
     single-threaded shape on it, so it is not imposed here. It cannot combine

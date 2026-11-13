@@ -9,6 +9,7 @@ import glob as glob_module
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -32,6 +33,8 @@ from geoparquet_io.core.remote import (
     needs_httpfs,
     protocol_label,
 )
+
+_STAGE_PREFIX = ".gpio-stage-"
 
 
 def _has_glob_characters(text: str) -> bool:
@@ -385,7 +388,6 @@ def handle_output_overwrite(
     input_path: str | None = None,
     *,
     flag: str = "--overwrite",
-    remove: bool = True,
 ) -> None:
     """The one overwrite policy: what a command does about an output that exists.
 
@@ -404,10 +406,8 @@ def handle_output_overwrite(
         flag: How the caller spells the switch, for the refusal's hint
             (``--force`` for the tile and overview commands, ``overwrite=True``
             for the Python API)
-        remove: Unlink an existing output when *overwrite* is set. False for a
-            writer that replaces the file itself (an atomic rename, an in-place
-            patch, tippecanoe's own ``--force``), so the old output survives a
-            run that fails before it is replaced.
+
+    Existing outputs remain in place until the writer replaces them on success.
 
     Raises:
         GeoParquetError: When the output may not be written.
@@ -434,9 +434,6 @@ def handle_output_overwrite(
     if not overwrite:
         raise output_exists_error(output_path, flag)
 
-    if remove:
-        output_file.unlink()
-
 
 #: Seconds to wait before each further attempt at an unlink Windows refused.
 _UNLINK_WAITS = (0.1, 0.2, 0.3)
@@ -460,14 +457,6 @@ def unlink_released_file(path: str | os.PathLike | None) -> None:
             return
         except OSError:
             time.sleep(wait)
-
-
-def _take_mode(staged: Path, source: Path | str | None) -> None:
-    """Give *staged* the permission bits of *source*; a missing source changes nothing."""
-    if source is None:
-        return
-    with contextlib.suppress(OSError):
-        shutil.copymode(source, staged)
 
 
 def _publish_sidecars(stage_dir: Path, staged: Path, final: Path, suffixes: Iterable[str]) -> None:
@@ -616,8 +605,12 @@ def sweep_orphaned_staging_dirs(base_dir: Path, *, dry_run: bool = False) -> lis
     def candidates() -> Iterator[tuple[str, int]]:
         return (
             (str(stage), int(match[1]))
-            for stage in base_dir.glob(".gpio-stage-*")
-            if (match := re.fullmatch(r"\.gpio-stage-(\d+)-[a-z0-9_]{8}", stage.name))
+            for stage in base_dir.glob(f"{_STAGE_PREFIX}*")
+            if (
+                match := re.fullmatch(
+                    rf"{re.escape(_STAGE_PREFIX)}(\d+)-[a-z0-9_]{{8}}", stage.name
+                )
+            )
         )
 
     return sweep_orphaned_dirs(base_dir, candidates, 24 * 60 * 60, dry_run=dry_run)
@@ -651,7 +644,8 @@ def atomic_write(
     replaced, and the link stays a link (#1076). The published file takes the
     destination's mode when it replaces one, else *mode_from*'s when given (a
     footer patch's copy takes its input's), else the umask's -- never a temp
-    file's 0600.
+    file's 0600. Replacing an existing file strictly advances its whole-second
+    modification time, so timestamp-validating readers see the new version.
 
     *sidecar_suffixes* publishes a set of files that share the output's stem (a
     Shapefile's ``.shp``/``.shx``/``.dbf``/``.prj``/...): every file the writer
@@ -663,11 +657,18 @@ def atomic_write(
     ``reclaim_staging`` opts cache writers into age-guarded orphan collection.
     If the parent cannot be locked, the stage uses the legacy, uncollected name.
 
-    A remote destination is yielded as given: there is no local file to rename
-    over, and the writer stages and uploads it (``remote_write_context``).
+    A remote destination is staged locally and uploaded after the block closes
+    its readers. The staging caller scopes credentials with ``uses_aws_profile``.
     """
     if is_remote_url(str(destination)):
-        yield str(destination)
+        from geoparquet_io.core.remote import upload_if_remote
+
+        if sidecar_suffixes is not None:
+            raise GeoParquetError("Remote writes do not support sidecar files.")
+        with scratch_file(suffix=suffix) as local:
+            yield local
+            if Path(local).exists():
+                upload_if_remote(local, str(destination))
         return
     final = Path(os.path.realpath(destination))
     # Only cache stages opt into reclamation; ordinary writes retain their old cost.
@@ -680,7 +681,7 @@ def atomic_write(
                 owned = True
             except OSError:
                 pass  # A writable/searchable directory need not be readable.
-        prefix = f".gpio-stage-{os.getpid()}-" if owned else ".gpio-stage-"
+        prefix = f"{_STAGE_PREFIX}{os.getpid()}-" if owned else _STAGE_PREFIX
         stage_dir = Path(tempfile.mkdtemp(prefix=prefix, dir=final.parent))
         try:
             if owned:
@@ -688,12 +689,29 @@ def atomic_write(
         except BaseException:
             shutil.rmtree(stage_dir, ignore_errors=True)
             raise
+
     staged = stage_dir / f"{final.stem}{suffix}"
     try:
         yield str(staged)
         if not staged.exists():
             return  # the writer decided there was nothing to write
-        _take_mode(staged, final if final.exists() else mode_from)
+        try:
+            previous = final.stat()
+        except FileNotFoundError:
+            previous = None
+        if previous is not None:
+            os.chmod(staged, stat.S_IMODE(previous.st_mode))
+        elif mode_from is not None and not is_remote_url(str(mode_from)):
+            shutil.copymode(mode_from, staged)
+        if previous is not None:
+            staged_stat = staged.stat()
+            previous_second = previous.st_mtime_ns // 1_000_000_000
+            if staged_stat.st_mtime_ns // 1_000_000_000 <= previous_second:
+                # Windows has no file version tag; DuckDB trusts whole-second mtime.
+                os.utime(
+                    staged,
+                    ns=(staged_stat.st_atime_ns, (previous_second + 1) * 1_000_000_000),
+                )
         if sidecar_suffixes is not None:
             _publish_sidecars(stage_dir, staged, final, sidecar_suffixes)
         os.replace(staged, final)
@@ -715,24 +733,29 @@ def scratch_path(suffix: str = ".parquet", *, prefix: str = "gpio_") -> str:
 
 
 @contextlib.contextmanager
-def scratch_file(suffix: str = ".parquet", *, prefix: str = "gpio_") -> Iterator[str]:
+def scratch_file(
+    suffix: str = ".parquet", *, prefix: str = "gpio_", directory: str | None = None
+) -> Iterator[str]:
     """A path for a scratch file that is read back and never published.
 
     The one temp-naming rule for an intermediate copy (a pass between two
     writes, a spooled input, an in-memory table a file-based call reads). The
     path is in a fresh private directory (0700) under the temp directory, so
     the copy of the user's data is no one else's to read, and the file is not
-    created -- the writer makes it. The directory and everything in it are
+    created -- the writer makes it. ``directory`` stages beside a final output
+    when the intermediate must stay on its volume. The directory and everything in it are
     removed when the block exits, whatever the outcome.
     """
-    with scratch_dir(prefix=prefix) as scratch:
+    with scratch_dir(prefix=prefix, directory=directory) as scratch:
         yield str(Path(scratch) / f"scratch{suffix}")
 
 
 @contextlib.contextmanager
 def scratch_dir(*, prefix: str = "gpio_", directory: str | None = None) -> Iterator[str]:
     """A private (0700) scratch directory, removed with its contents on exit."""
-    scratch = Path(tempfile.mkdtemp(prefix=prefix, dir=directory))
+    scratch = Path(
+        tempfile.mkdtemp(prefix=_STAGE_PREFIX if directory is not None else prefix, dir=directory)
+    )
     try:
         yield str(scratch)
     finally:
@@ -816,29 +839,20 @@ def _copy_destination(dest_path: str, dest_is_remote: bool):
     failure path would replace a good object at the destination key with a
     truncated one, so the writer is closed -- committed -- only when the copy
     body ran to completion. On failure the remote writer is dropped
-    un-committed, which leaves the destination exactly as it was, and a partial
-    local file is unlinked. Cleanup exceptions are suppressed so they cannot
-    mask the copy failure itself.
+    un-committed, and local copies publish through ``atomic_write`` only on
+    success, so either destination keeps its previous version.
     """
-    if dest_is_remote:
-        import obstore as obs
+    if not dest_is_remote:
+        with atomic_write(dest_path) as staged, open(staged, "wb") as handle:
+            yield handle
+        return
 
-        store, key = resolve_object_store(dest_path)
-        handle = obs.open_writer(store, key)
-    else:
-        handle = open(dest_path, "wb")
+    import obstore as obs
 
-    committed = False
-    try:
-        yield handle
-        handle.close()
-        committed = True
-    finally:
-        if not committed and not dest_is_remote:
-            with contextlib.suppress(Exception):
-                handle.close()
-            with contextlib.suppress(OSError):
-                os.unlink(dest_path)
+    store, key = resolve_object_store(dest_path)
+    handle = obs.open_writer(store, key)
+    yield handle
+    handle.close()
 
 
 def resolve_object_store(url: str) -> tuple[object, str]:
@@ -918,7 +932,8 @@ def copy_file(source_path: str, dest_path: str, verbose: bool = False) -> None:
     dest_is_remote = is_remote_url(dest_path)
 
     if not source_is_remote and not dest_is_remote:
-        shutil.copyfile(source_path, dest_path)
+        with atomic_write(dest_path) as staged:
+            shutil.copyfile(source_path, staged)
         return
 
     # Both schemes are checked before a byte moves, so an unsupported destination

@@ -35,7 +35,7 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.geoarrow_encoding import native_wkb_type
 from geoparquet_io.core.geometry_detection import create_geometry_view
-from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
+from geoparquet_io.core.logging_config import configure_verbose, debug, progress
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
@@ -182,9 +182,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             with scoped_write_memory_limit(con, memory_limit, verbose):
                 if verbose:
                     debug("Computing bbox and geometry types via SQL...")
-                stats = geometry_stats_of(QuerySource(con, query), geometry_column)
-                bbox, geometry_types = stats.bbox, stats.geometry_types
-
                 final_query = wkb_export_query(con, query, geometry_column)
 
                 copy_options = ["FORMAT PARQUET", *codec.duckdb_copy_options()]
@@ -214,6 +211,9 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                             f"{pf.metadata.num_row_groups} row groups"
                         )
 
+                stats = geometry_stats_of(temp_path, geometry_column)
+                bbox, geometry_types = stats.bbox, stats.geometry_types
+
                 # The composer declares a conventional bbox column the output
                 # carries (and drops a carried covering over an illegal struct)
                 # before the #954 gate, for every column, as every write path does.
@@ -230,9 +230,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
                         crs=input_crs,
                         stats={geometry_column: measured},
                         geometry_info=geometry_info,
-                        measure_missing=lambda block: missing_geometry_types(
-                            QuerySource(con, query), block
-                        ),
+                        measure_missing=lambda block: missing_geometry_types(temp_path, block),
                         verbose=verbose,
                     ),
                 )
@@ -394,10 +392,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             if is_remote:
                 upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
 
-            if verbose:
-                with pq.ParquetFile(local_path) as pf:
-                    success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
-
     def _rewrite_with_metadata(
         self,
         input_path: str,
@@ -477,7 +471,7 @@ class DiskRewriteStrategy(BaseWriteStrategy):
         # The facade's rule, as on every other Arrow-side write: no serialized
         # descriptor of the input's schema, and under parquet-geo-only (no
         # `geo_meta`) no `geo` key either. A built block replaces the carried one
-        # before the merge, so the caller's extras still have the last word.
+        # before the merge; generated geo wins over a caller's explicit geo.
         metadata = dict(schema.metadata or {})
         if geo_meta is not None:
             metadata = with_geo_key(metadata, geo_meta)
@@ -524,7 +518,3 @@ class DiskRewriteStrategy(BaseWriteStrategy):
 
                 for group in regroup(conformed(), row_group_rows):
                     writer.write_table(group, row_group_size=row_group_rows)
-
-        if verbose:
-            with pq.ParquetFile(output_path) as result_pf:
-                success(f"Wrote {result_pf.metadata.num_rows:,} rows to {output_path}")

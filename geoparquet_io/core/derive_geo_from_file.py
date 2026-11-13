@@ -14,7 +14,7 @@ imports is still importable from there. The type-code tables it reads are the
 single copies in ``geo_metadata``.
 """
 
-from typing import Any
+from dataclasses import replace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -31,14 +31,27 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
-from geoparquet_io.core.edges import declares_edges, edges_of, logical_type_edges, set_edges
+from geoparquet_io.core.duckdb_utils import geoarrow_extension
+from geoparquet_io.core.edges import (
+    declares_edges,
+    edges_of,
+    geoarrow_type_edges,
+    is_nonplanar,
+    logical_type_edges,
+    set_edges,
+)
 from geoparquet_io.core.geo_metadata import (
     KEEP_CRS,
     GeoBlockOptions,
+    GeometryStats,
     SchemaSource,
+    _file_footer_stats,
     compose_geo_block,
+    geometry_stats_of,
+    geometry_types_of,
     read_raw_geo,
     row_group_geometry_stats,
+    sanitized_carried_geo,
     sanitized_carried_geo_of_file,
 )
 from geoparquet_io.core.geometry_detection import primary_geometry_column
@@ -59,7 +72,7 @@ def _geography_edges_from_logical(logical: str) -> str | None:
     return logical_type_edges(parse_geometry_logical_type(logical))
 
 
-def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, Any]:
+def _crs_from_geo_logical(logical: str, parquet_file: str) -> tuple[bool, dict | None]:
     """The CRS a native Geometry/Geography logical type declares.
 
     Returns ``(present, crs)``. ``present`` is False when the type names no CRS
@@ -245,9 +258,11 @@ def derive_secondary_geometry_info(
             continue
         if output_columns is not None and name not in output_columns:
             continue
-        logical = native.get(name)
+        native_logical = native.get(name)
         metadata[name] = (
-            _native_secondary_meta(logical, declared.get(name), input_file or "") if logical else {}
+            _native_secondary_meta(native_logical, declared.get(name), input_file or "")
+            if native_logical
+            else {}
         )
 
     if not metadata:
@@ -274,7 +289,11 @@ def _with_primary_column(
     geo = read_raw_geo({b"geo": raw_geo}).block
     if geo is None or not isinstance(geo.get("columns"), dict):
         return None
-    if primary_column not in geo["columns"] or geo.get("primary_column") == primary_column:
+    if (
+        primary_column is None
+        or primary_column not in geo["columns"]
+        or geo.get("primary_column") == primary_column
+    ):
         return None
     return compose_geo_block(
         SchemaSource(schema, {b"geo": raw_geo}),
@@ -287,9 +306,48 @@ def _with_primary_column(
     )
 
 
+def written_geo_block(path: str, metadata: dict | None, options: GeoBlockOptions) -> dict:
+    """Compose output facts from the written file, without re-running the user's query."""
+    schema = pq.read_schema(path)
+    primary = options.geometry_column
+    written = sanitized_carried_geo(schema.metadata)
+    names = {
+        primary,
+        *(written.get("columns") or {}),
+        *((options.geometry_info or {}).get("secondary") or []),
+    }
+    stats = {}
+    for name in sorted(names & set(schema.names)):
+        field = schema.field(name)
+        geographic = is_nonplanar(
+            geoarrow_type_edges(field.type, geoarrow_extension(field)[1])
+        ) or is_nonplanar(edges_of((written.get("columns") or {}).get(name)))
+        measured = (
+            _file_footer_stats(path, name, None, need_bbox=True, geographic=True)
+            if geographic
+            else None
+        )
+        if measured is None:
+            if geographic:
+                # Vertex envelopes cannot bound geodesic edges. Keep types,
+                # but omit the optional bbox without complete spherical stats.
+                measured = GeometryStats(None, geometry_types_of(path, name))
+            else:
+                measured = geometry_stats_of(path, name)
+        stats[name] = {"bbox": measured.bbox, "geometry_types": measured.geometry_types}
+    options = replace(
+        options,
+        stats=stats,
+        encoding=(written.get("columns") or {}).get(primary, {}).get("encoding"),
+    )
+    return compose_geo_block(SchemaSource(schema, metadata), options)
+
+
 def derive_v2_geo_metadata(
     output_path: str,
     primary_column: str | None = None,
+    *,
+    refresh_stats: bool = False,
 ) -> dict | None:
     """The GeoParquet 2.0 ``geo`` block a written file needs, when its own is wrong.
 
@@ -300,7 +358,11 @@ def derive_v2_geo_metadata(
     without it ``geometry_detection.primary_geometry_column`` picks among the
     native columns (a standard geometry name, then the alphabetically first).
 
-    When the file does carry a ``geo`` key, the one thing checked is its
+    ``refresh_stats`` rebuilds a carried block's measured fields from the
+    written file, keeping declarations. Complete native footer statistics avoid
+    a data scan; missing statistics fall back through ``geometry_stats_of``.
+
+    Otherwise, when the file does carry a ``geo`` key, the one thing checked is its
     ``primary_column``. DuckDB's generated block names the FIRST geometry column
     in the schema, so a secondary written before the primary (``centroid``
     before ``geometry``) became the primary. A block that describes
@@ -320,7 +382,17 @@ def derive_v2_geo_metadata(
     try:
         kv = pf.metadata.metadata or {}
         if b"geo" in kv:
-            return _with_primary_column(kv[b"geo"], primary_column, pf.schema_arrow)
+            if not refresh_stats:
+                return _with_primary_column(kv[b"geo"], primary_column, pf.schema_arrow)
+            block = sanitized_carried_geo(kv)
+            if not block:
+                return None
+            primary = primary_column or block["primary_column"]
+            return written_geo_block(
+                output_path,
+                kv,
+                GeoBlockOptions(geometry_column=primary, primary_column=primary, version="2.0"),
+            )
         schema = pf.metadata.schema
         geo_cols: dict[int, tuple[str, str]] = {}
         for i in range(len(schema)):
@@ -348,6 +420,8 @@ def derive_v2_geo_metadata(
         # edges (``column_edges``: a fact, not a request, so no orientation);
         # the secondaries' as their declared metadata. No covering: none is
         # derivable from a logical type.
+        if primary is None:
+            return None
         declared = columns[primary]
         secondary = [name for name in columns if name != primary]
         return compose_geo_block(
@@ -356,7 +430,9 @@ def derive_v2_geo_metadata(
                 geometry_column=primary,
                 version="2.0",
                 covering=None,
-                column_edges={primary: edges_of(declared)} if declares_edges(declared) else None,
+                column_edges={primary: declared_edge}
+                if isinstance(declared_edge := edges_of(declared), str)
+                else None,
                 crs=declared["crs"] if "crs" in declared else KEEP_CRS,
                 stats={primary: {k: declared.get(k) for k in ("bbox", "geometry_types")}},
                 geometry_info={"secondary": secondary, "metadata": columns},

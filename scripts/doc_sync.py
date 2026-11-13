@@ -7,6 +7,7 @@ to prevent drift between code and documentation.
 CLAUDE.md sections:
 - CLI command table from Click introspection
 - Test markers from pyproject.toml
+- Core modules from source files
 
 skill (geoparquet.md) sections:
 - Command reference table
@@ -25,6 +26,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ast
 import re
 import sys
 import tomllib
@@ -108,6 +110,31 @@ def generate_cli_section() -> str:
         lines.append(f"| `gpio {name}` | {subcommands} | {desc} |")
 
     lines.append("<!-- END GENERATED: cli-commands -->")
+    return "\n".join(lines)
+
+
+def generate_core_modules_section(core_dir: Path) -> str:
+    """List every top-level core module in name order."""
+    modules = []
+    for path in core_dir.glob("*.py"):
+        if path.name == "__init__.py":
+            continue
+        source = path.read_text(encoding="utf-8")
+        purpose = ast.get_docstring(ast.parse(source)) or ""
+        first_line = purpose.splitlines()[0] if purpose else ""
+        modules.append((path.name, first_line))
+    modules.sort()
+    lines = [
+        "<!-- BEGIN GENERATED: core-modules -->",
+        "### Core Modules",
+        "",
+        "| Module | Purpose |",
+        "|--------|---------|",
+    ]
+    for name, purpose in modules:
+        purpose = purpose.replace("|", "\\|")
+        lines.append(f"| `{name}` | {purpose} |")
+    lines.append("<!-- END GENERATED: core-modules -->")
     return "\n".join(lines)
 
 
@@ -308,6 +335,7 @@ def sync_claude_md(project_root: Path, update: bool, check: bool) -> tuple[bool,
 
     sections = {
         "cli-commands": generate_cli_section(),
+        "core-modules": generate_core_modules_section(project_root / "geoparquet_io" / "core"),
         "test-markers": generate_markers_section(pyproject),
     }
 

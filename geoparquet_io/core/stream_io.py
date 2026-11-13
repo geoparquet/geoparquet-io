@@ -164,10 +164,16 @@ def _open_file_input(
     created_connection = con is None
     if created_connection:
         if stream_output:
-            from geoparquet_io.core.memory_limits import open_bounded_connection
+            from geoparquet_io.core.memory_limits import (
+                _MATERIALIZED_BYTES_PER_THREAD,
+                open_bounded_connection,
+            )
 
             con = open_bounded_connection(
-                load_spatial=True, load_httpfs=needs_httpfs(path), preserve_insertion_order=True
+                load_spatial=True,
+                load_httpfs=needs_httpfs(path),
+                preserve_insertion_order=True,
+                per_thread=_MATERIALIZED_BYTES_PER_THREAD,
             )
         else:
             con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(path))

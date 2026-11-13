@@ -1872,7 +1872,7 @@ def convert_arcgis_to_geoparquet(
     """
     configure_verbose(verbose)
 
-    handle_output_overwrite(output_file, overwrite, remove=False)
+    handle_output_overwrite(output_file, overwrite)
 
     # Build auth config
     auth = None

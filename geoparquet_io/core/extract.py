@@ -1257,7 +1257,7 @@ def _extract_impl(
 
     # Check if output file exists and handle overwrite (fixes issue #278)
     if output_parquet and not is_streaming and not dry_run:
-        handle_output_overwrite(output_parquet, overwrite, input_parquet, remove=False)
+        handle_output_overwrite(output_parquet, overwrite, input_parquet)
 
     write = WriteOptions.pick(locals())
     if is_streaming and not dry_run:

@@ -278,7 +278,7 @@ def convert_to_geoparquet_cmd(
         else:
             # COPY replaces the output itself, so an existing one survives a
             # conversion that fails before the write.
-            handle_output_overwrite(output_file, overwrite, input_file, remove=False)
+            handle_output_overwrite(output_file, overwrite, input_file)
             convert_to_geoparquet(
                 input_file,
                 output_file,

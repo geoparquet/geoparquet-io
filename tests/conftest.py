@@ -18,6 +18,8 @@ With 4 workers and 2 threads per connection, max threads = 4 × 2 = 8.
 # ---------------------------------------------------------------------------
 import duckdb
 
+from tests.inplace_probe import fix_probe as fix_probe
+
 _DUCKDB_TEST_THREADS = 2  # Threads per DuckDB connection during tests
 _original_duckdb_connect = duckdb.connect
 

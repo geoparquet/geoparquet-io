@@ -66,6 +66,7 @@ def _add_kdtree_column_to_temp(
             force=force,
             sample_size=sample_size,
             auto_target_rows=auto_target_rows,
+            report=False,
         )
         return temp_file
     except InvalidParameterError:
