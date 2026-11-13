@@ -31,9 +31,11 @@ from geoparquet_io.core.duckdb_metadata import (
     parse_geometry_logical_type,
     resolve_crs_reference,
 )
+from geoparquet_io.core.duckdb_utils import geoarrow_extension
 from geoparquet_io.core.edges import (
     declares_edges,
     edges_of,
+    geoarrow_type_edges,
     is_nonplanar,
     logical_type_edges,
     set_edges,
@@ -314,7 +316,10 @@ def written_geo_block(path: str, metadata: dict | None, options: GeoBlockOptions
     }
     stats = {}
     for name in sorted(names & set(schema.names)):
-        geographic = is_nonplanar(edges_of((written.get("columns") or {}).get(name)))
+        field = schema.field(name)
+        geographic = is_nonplanar(
+            geoarrow_type_edges(field.type, geoarrow_extension(field)[1])
+        ) or is_nonplanar(edges_of((written.get("columns") or {}).get(name)))
         measured = (
             _file_footer_stats(path, name, None, need_bbox=True, geographic=True)
             if geographic

@@ -120,6 +120,9 @@ def test_derive_v2_geo_metadata_describes_a_native_geography_column(tmp_path):
     import json
 
     assert block["columns"]["geometry"]["bbox"] == [170, 0, -170, 2]
-    patch_or_rewrite(str(path), {"geo": json.dumps(block)}, rewrite=rewrite_footer_kv)
-    refreshed = derive_v2_geo_metadata(str(path), refresh_stats=True)
-    assert refreshed["columns"]["geometry"]["bbox"] == block["columns"]["geometry"]["bbox"]
+    for declared_edges in (True, False):
+        if not declared_edges:
+            block["columns"]["geometry"].pop("edges")
+        patch_or_rewrite(str(path), {"geo": json.dumps(block)}, rewrite=rewrite_footer_kv)
+        refreshed = derive_v2_geo_metadata(str(path), refresh_stats=True)
+        assert refreshed["columns"]["geometry"]["bbox"] == block["columns"]["geometry"]["bbox"]
