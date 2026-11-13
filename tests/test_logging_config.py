@@ -338,15 +338,19 @@ class TestDynamicStreamHandler:
 
         import io
         from contextlib import redirect_stderr, redirect_stdout
+        from itertools import product
 
         monkeypatch.setattr(logging, "raiseExceptions", True)
-        for msg, args, tty in (
-            ("GET %s %s", ("https://u:SECRET@h/x?token=HIDDEN",), False),
-            ("failed https://u:SECRET@h/café?token=HIDDEN", (), True),
-            ("failed https://u:SECRET@h/café?token=HIDDEN", (), False),
+        for (msg, args, tty), newline in product(
+            (
+                ("GET %s %s", ("https://u:SECRET@h/x?token=HIDDEN",), False),
+                ("failed https://u:SECRET@h/café?token=HIDDEN", (), True),
+                ("failed https://u:SECRET@h/café?token=HIDDEN", (), False),
+            ),
+            ("\n", "\r\n"),
         ):
-            stdout = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
-            stderr = io.TextIOWrapper(io.BytesIO(), encoding="ascii")
+            stdout = io.TextIOWrapper(io.BytesIO(), encoding="ascii", newline=newline)
+            stderr = io.TextIOWrapper(io.BytesIO(), encoding="ascii", newline=newline)
             stdout.isatty = lambda tty=tty: tty
             handler = DynamicStreamHandler()
             handler.setFormatter(CLIFormatter(use_colors=False))
@@ -357,8 +361,9 @@ class TestDynamicStreamHandler:
             stderr.flush()
             output = stdout.buffer.getvalue() + stderr.buffer.getvalue()
             assert b"SECRET" not in output and b"HIDDEN" not in output
-            expected = b"TypeError" if args else b"UnicodeEncodeError"
-            assert stderr.buffer.getvalue() == b"logging error (" + expected + b")\n"
+            expected = "TypeError" if args else "UnicodeEncodeError"
+            stderr.seek(0)
+            assert stderr.read().splitlines() == [f"logging error ({expected})"]
             assert record.msg == msg and record.args == args
             assert logging.raiseExceptions is True
 
@@ -385,7 +390,7 @@ class TestCLIFormatterPlainMessage:
         assert "\033[" not in result
 
 
-def test_every_log_level_sanitizes_url_and_query_credentials(caplog):
+def test_every_log_level_sanitizes_url_and_query_credentials(caplog, tmp_path):
     messages = [
         "api_key\x1b[0m=SORTSECRET",
         "api_key\x00=SORTSECRET",
@@ -409,7 +414,7 @@ def test_every_log_level_sanitizes_url_and_query_credentials(caplog):
 
     for path in (
         ".../key=7/part-?.parquet",
-        "/tmp/year=2024/part-?.parquet",
+        str(tmp_path / "year=2024" / "part-?.parquet"),
         "s3://bucket/out/key=7/part-?.parquet",
         "Sorting by key=value",
     ):

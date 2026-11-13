@@ -901,7 +901,7 @@ class TestStreamIO:
 
         source = tmp_path / "input.parquet"
         pq.write_table(_point_table([(0, 1, 2)]), source)
-        (tmp_path / "-").write_text("keep me")
+        (tmp_path / "-").write_text("keep me", encoding="utf-8")
         for module, function, options in [
             ("sort_by_column", "sort_by_column", ", columns='id'"),
             ("sort_quadkey", "sort_by_quadkey", ""),
@@ -914,7 +914,7 @@ class TestStreamIO:
                 [sys.executable, "-c", script], cwd=tmp_path, capture_output=True, check=True
             )
             assert ipc.open_stream(result.stdout).read_all().num_rows == 1
-        assert (tmp_path / "-").read_text() == "keep me"
+        assert (tmp_path / "-").read_text(encoding="utf-8") == "keep me"
 
     def test_streaming_bbox_native_multipolygon(self, tmp_path, monkeypatch):
         import geoarrow.pyarrow as ga

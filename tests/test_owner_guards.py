@@ -6963,7 +6963,7 @@ def test_raw_parquet_copy_table_and_query_are_guarded(tmp_path, sql):
 def test_all_sort_commands_use_the_sort_owner():
     """Sort leaves may build keys, but cannot grow a second I/O pipeline."""
     for filename in ("hilbert_order.py", "str_order.py", "sort_by_column.py", "sort_quadkey.py"):
-        tree = ast.parse((PACKAGE / "core" / filename).read_text())
+        tree = ast.parse((PACKAGE / "core" / filename).read_text(encoding="utf-8"))
         names = {
             node.func.id
             for node in ast.walk(tree)
@@ -6980,13 +6980,13 @@ def test_all_sort_commands_use_the_sort_owner():
             "validate_profile_for_urls",
         }, filename
 
-    runner = ast.parse((PACKAGE / "core" / "sort_common.py").read_text())
+    runner = ast.parse((PACKAGE / "core" / "sort_common.py").read_text(encoding="utf-8"))
     assert not any(
         isinstance(node, ast.Name) and node.id == "write_parquet_with_metadata"
         for node in ast.walk(runner)
     )
     for filename in ("sort_common.py", "write_strategies/duckdb_kv.py"):
-        tree = ast.parse((PACKAGE / "core" / filename).read_text())
+        tree = ast.parse((PACKAGE / "core" / filename).read_text(encoding="utf-8"))
         assert not any(
             isinstance(node, ast.If)
             and isinstance(node.test, ast.Compare)
@@ -7051,7 +7051,7 @@ def test_extractors_use_sanitizing_report_owners():
     for path in [core / name for name in ("wfs.py", "carto.py", "arcgis.py")] + list(
         core.glob("extract*.py")
     ):
-        assert not _extractor_raw_reports(path.read_text()), path
+        assert not _extractor_raw_reports(path.read_text(encoding="utf-8")), path
     for unsafe in ('logger.debug(f"Fetching {url}")', 'raise ValueError(f"Bad query: {query}")'):
         assert _extractor_raw_reports(unsafe)
     assert not _extractor_raw_reports('debug(f"Fetching {url}")')
