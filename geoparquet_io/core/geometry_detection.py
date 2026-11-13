@@ -699,6 +699,21 @@ def resolve_geometry_read(
     return GeometryRead.for_type(column, _find_described_type(described, column))
 
 
+def _query_with_native_geometry(con, query: str, columns, *, native_output: bool) -> str:
+    """Decode surviving WKB geometry declarations before native output is selected."""
+    if not native_output:
+        return query
+    types = dict(describe_query(con, query))
+    replacements = []
+    for name in sorted(column for column in columns if column in types):
+        read = GeometryRead.for_type(name, types[name])
+        if read.kind == "wkb":
+            replacements.append(f"{read.expr} AS {read.quoted}")
+    if not replacements:
+        return query
+    return f"SELECT * REPLACE ({', '.join(replacements)}) FROM ({query})"
+
+
 def create_geometry_view(con, relation: str, column: str, view: str | None = None) -> str:
     """The relation to read ``column`` from as GEOMETRY: ``relation`` or a new view.
 

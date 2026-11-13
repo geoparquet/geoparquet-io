@@ -813,6 +813,81 @@ class TestStreamIO:
                     assert "Geometry" in logical
                     assert "srid:0" in logical
 
+    def test_projected_survivors_native_types_all_strategies(self, tmp_path):
+        from itertools import product
+
+        import pyarrow.parquet as pq
+        from pyproj import CRS
+
+        wkb = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+        entry = {"encoding": "WKB", "geometry_types": ["Point"]}
+        source = tmp_path / "source.parquet"
+        dest = tmp_path / "projected.parquet"
+        # Two declarations survive: every strategy must type both, with their own CRS.
+        from geoparquet_io.core.crs_utils import crs_equal
+        from geoparquet_io.core.duckdb_metadata import parse_geometry_logical_type
+        from geoparquet_io.core.duckdb_utils import get_duckdb_connection, sql_path
+        from geoparquet_io.core.write_funnels import write_parquet_with_metadata
+
+        table = pa.table({"id": [1], "geometry": [wkb], "secondary": [wkb], "tertiary": [wkb]})
+        columns = {
+            "geometry": entry,
+            "secondary": {**entry, "crs": CRS.from_epsg(3857).to_json_dict()},
+            "tertiary": {**entry, "crs": None},
+        }
+        table = with_geo_block(
+            table, {"version": "1.1.0", "primary_column": "geometry", "columns": columns}
+        )
+        pq.write_table(table, source)
+        projected = table.drop(["geometry"])
+        metadata = with_geo_block(
+            projected,
+            {
+                "version": "1.1.0",
+                "primary_column": "secondary",
+                "columns": {name: columns[name] for name in ("secondary", "tertiary")},
+            },
+        ).schema.metadata
+        for strategy, version, stdin in product(
+            ("duckdb-kv", "in-memory", "streaming", "disk-rewrite"),
+            ("2.0", "parquet-geo-only"),
+            (False, True),
+        ):
+            with get_duckdb_connection(load_httpfs=False) as con:
+                con.register("projected", projected)
+                query = (
+                    "SELECT * FROM projected"
+                    if stdin
+                    else (
+                        f"SELECT id, secondary, tertiary FROM read_parquet({sql_path(str(source))})"
+                    )
+                )
+                write_parquet_with_metadata(
+                    con,
+                    query,
+                    str(dest),
+                    original_metadata=metadata,
+                    input_file=None if stdin else str(source),
+                    geometry_info={"primary": "secondary"},
+                    geoparquet_version=version,
+                    write_strategy=strategy,
+                )
+            pf = pq.ParquetFile(dest)
+            for index, name in enumerate(("secondary", "tertiary"), start=1):
+                logical = parse_geometry_logical_type(str(pf.schema.column(index).logical_type))
+                assert logical is not None, (strategy, version, stdin, name)
+                if name == "secondary":
+                    assert crs_equal(logical["crs"], columns[name]["crs"])
+                else:
+                    assert logical["crs"] == "srid:0"
+            geo = read_raw_geo(pf.schema_arrow.metadata).value
+            if version == "parquet-geo-only":
+                assert geo is None
+            else:
+                assert set(geo["columns"]) == {"secondary", "tertiary"}
+                assert crs_equal(geo["columns"]["secondary"]["crs"], columns["secondary"]["crs"])
+                assert geo["columns"]["tertiary"]["crs"] is None
+
     def test_execute_transform_dry_run(self, tmp_path, sample_geo_table, geo_metadata):
         """Test execute_transform with dry_run=True."""
         import pyarrow.parquet as pq
