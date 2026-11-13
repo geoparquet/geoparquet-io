@@ -482,7 +482,6 @@ def atomic_write(
     *,
     sidecar_suffixes: Iterable[str] | None = None,
     mode_from: str | None = None,
-    profile: str | None = None,
 ) -> Iterator[str]:
     """The path a write goes to, moved over *destination* once the block succeeds.
 
@@ -513,7 +512,7 @@ def atomic_write(
     per file, not as a set.
 
     A remote destination is staged locally and uploaded after the block closes
-    its readers. ``profile`` is forwarded to the object store.
+    its readers. The staging caller scopes credentials with ``uses_aws_profile``.
     """
     if is_remote_url(str(destination)):
         from geoparquet_io.core.remote import remote_write_context, upload_if_remote
@@ -522,7 +521,7 @@ def atomic_write(
             with _success_output_path(local, str(destination)):
                 yield local
             if Path(local).exists():
-                upload_if_remote(local, str(destination), profile=profile)
+                upload_if_remote(local, str(destination))
         return
     final = Path(os.path.realpath(destination))
     stage_dir = Path(tempfile.mkdtemp(prefix=_STAGE_PREFIX, dir=final.parent))

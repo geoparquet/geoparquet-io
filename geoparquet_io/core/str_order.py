@@ -393,9 +393,7 @@ def _str_order_file_based(
     geometry_column = resolve_geometry_column(working_parquet, geometry_column, verbose=verbose)
 
     assert output_parquet is not None  # file mode has a destination
-    with atomic_write(
-        output_parquet, profile=write.remote.profile if write.remote else None
-    ) as staged:
+    with atomic_write(output_parquet) as staged:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
         try:
             geometry_source = create_geometry_view(con, source, geometry_column)

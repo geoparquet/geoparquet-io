@@ -418,7 +418,7 @@ def test_every_strategy_rebuilds_secondary_statistics(tmp_path):
             try:
                 write_parquet_with_metadata(
                     con,
-                    "SELECT id, ST_GeomFromWKB(geometry) AS geometry, other FROM registered_input"
+                    "SELECT id, ST_GeomFromWKB(geometry) AS geometry, other FROM registered_input WHERE id < 30"
                     if registered
                     else f"SELECT * FROM {sql_path(str(source))}",
                     str(output),
@@ -431,8 +431,10 @@ def test_every_strategy_rebuilds_secondary_statistics(tmp_path):
                 con.close()
             other = footer_geo(output)["columns"]["other"]
             assert (other["bbox"], other["geometry_types"]) == (
-                expected.bbox,
-                expected.geometry_types,
+                geometry_stats_of(_mixed_table().slice(0, N_POINTS), "geometry").bbox
+                if registered
+                else expected.bbox,
+                ["Point"] if registered else expected.geometry_types,
             ), strategy
             assert other["epoch"] == 2020.0
 

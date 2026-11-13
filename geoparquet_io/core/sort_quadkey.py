@@ -222,7 +222,7 @@ def sort_by_quadkey(
 
     # Bound before the try: the `finally` below closes it, and a constructor
     # that throws would otherwise be masked by an UnboundLocalError (#867).
-    with atomic_write(output_parquet, profile=profile) as staged:
+    with atomic_write(output_parquet) as staged:
         con = None
         try:
             # Create DuckDB connection

@@ -22,7 +22,6 @@ from geoparquet_io.core.duckdb_utils import (
 from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.file_utils import (
     atomic_write,
-    copy_file,
     is_same_file_path,
     resolve_file_url,
     scratch_file,
@@ -295,7 +294,6 @@ def fix_bbox_column(parquet_file, output_file, verbose=False, profile=None):
     with atomic_write(
         output_file,
         mode_from=parquet_file if not is_remote_url(parquet_file) else None,
-        profile=profile,
     ) as destination:
         add_bbox_column(
             input_parquet=parquet_file,
@@ -427,7 +425,6 @@ def fix_bbox_all(
     with atomic_write(
         output_file,
         mode_from=parquet_file if not is_remote_url(parquet_file) else None,
-        profile=profile,
     ) as destination:
         if needs_column:
             # add_bbox_column writes the covering with the column, so a
@@ -470,7 +467,6 @@ def fix_spatial_ordering(parquet_file, output_file, verbose=False, profile=None)
     with atomic_write(
         output_file,
         mode_from=parquet_file if not is_remote_url(parquet_file) else None,
-        profile=profile,
     ) as destination:
         hilbert_order(
             input_parquet=parquet_file,
@@ -658,7 +654,9 @@ def _fix_bbox_and_spatial_ordering(parquet_file, output_file, verbose, profile, 
         query = computed_column_query(
             f"({ordered})", bbox_name, bbox_struct_sql(read.shape_expr, primary, read)
         )
-        with atomic_write(output_file) as destination:
+        with atomic_write(
+            output_file, mode_from=parquet_file if not is_remote_url(parquet_file) else None
+        ) as destination:
             write_parquet_with_metadata(
                 con,
                 query,
@@ -681,16 +679,11 @@ def _place_result(result_file: str, output_file: str) -> None:
     is copied, never moved: ``--fix-output`` names a path nobody backed up, so
     moving the input away left the user with neither file nor ``.bak`` (#1036),
     and a scratch copy is removed by its owner (``file_utils.scratch_file``).
-    A local destination lands through ``atomic_write``, so an existing one is
-    replaced atomically; a remote one goes through the object store
-    (``copy_file``), whose single PUT replaces the object whole.
+    Every destination lands through ``atomic_write``: a local replacement is
+    atomic, and a remote one uploads only after the staged copy closes.
     """
     if is_same_file_path(result_file, output_file):
         return
-    if is_remote_url(output_file):
-        copy_file(result_file, output_file)
-        return
-
     with atomic_write(output_file) as destination:
         shutil.copy2(result_file, destination)
 

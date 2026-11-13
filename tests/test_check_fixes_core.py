@@ -714,6 +714,14 @@ def test_fresh_fix_outputs_inherit_private_input_mode(places_test_file, tmp_path
                 },
             ),
         ),
+        (
+            "combined",
+            lambda out: apply_all_fixes(
+                str(source),
+                str(out),
+                {"bbox": {"needs_bbox_column": True}, "spatial": {"fix_available": True}},
+            ),
+        ),
         ("bbox", lambda out: fix_bbox_all(str(source), str(out), True, True)),
         ("spatial", lambda out: fix_spatial_ordering(str(source), str(out))),
     ):
@@ -817,14 +825,15 @@ def test_all_fixes_share_one_data_rewrite(tmp_path, monkeypatch):
         uploads = []
         outer_config = get_active_s3_config().copy()
 
-        def resolve_store(url, bucket=bucket, uploads=uploads):
-            assert url == "s3://private/result.parquet"
+        def resolve_store(url, profile, *args, bucket=bucket, uploads=uploads):
+            assert url == "s3://private"
+            assert profile == "prod"
             assert get_active_s3_config().get("profile") == "prod"
-            uploads.append(url)
-            return LocalStore(str(bucket)), "result.parquet"
+            uploads.append(url + "/result.parquet")
+            return LocalStore(str(bucket)), {}
 
         with monkeypatch.context() as patch:
-            patch.setattr("geoparquet_io.core.file_utils.resolve_object_store", resolve_store)
+            patch.setattr("geoparquet_io.core.upload._setup_store_and_kwargs", resolve_store)
             remote_result = check_fixes.apply_all_fixes(
                 str(source), "s3://private/result.parquet", checks, profile="prod"
             )

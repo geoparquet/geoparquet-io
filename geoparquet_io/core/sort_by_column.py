@@ -206,7 +206,7 @@ def sort_by_column(
 
     progress(f"Sorting by {', '.join(column_list)}...")
 
-    with atomic_write(output_parquet, profile=profile) as staged:
+    with atomic_write(output_parquet) as staged:
         try:
             # Use the common write function with metadata preservation
             write_parquet_with_metadata(

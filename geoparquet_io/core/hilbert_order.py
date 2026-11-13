@@ -567,7 +567,7 @@ def _hilbert_order_file_based(
     if verbose:
         debug(f"Using geometry column: {geometry_column}")
 
-    with atomic_write(output_parquet, profile=write.remote.profile) as staged:
+    with atomic_write(output_parquet) as staged:
         con = get_duckdb_connection(load_spatial=True, load_httpfs=needs_httpfs(working_parquet))
 
         # The owner's read expression for the sort key: a GeoArrow coordinate struct
