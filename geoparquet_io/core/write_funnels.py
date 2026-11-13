@@ -127,7 +127,6 @@ from geoparquet_io.core.logging_config import (
     debug,
     info,
     progress,
-    success,
     warn,
 )
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
@@ -739,14 +738,6 @@ def _plain_copy_to(
             refresh_stats=carry_geo_metadata is not None,
         )
 
-    if verbose:
-        import pyarrow.parquet as pq
-
-        # Closed before the caller moves or uploads this file: `--verbose` must
-        # not be the difference between a fix that lands and one that dies on
-        # `Could not move file: Access is denied` (#1023, #1032).
-        with pq.ParquetFile(output_path) as pf:
-            success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
     return pending_v2_geo
 
 

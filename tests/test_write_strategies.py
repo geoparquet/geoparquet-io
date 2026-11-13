@@ -640,12 +640,7 @@ class TestWriteStrategiesNoGeometry:
     def test_disk_rewrite_query_no_geometry_verbose(
         self, duckdb_connection, non_geo_query, output_file, caplog
     ):
-        """The verbose row count on the plain-Parquet path opens the file it just wrote.
-
-        Same shape as the geo path's temp-file peek: the handle has to be closed
-        before the work directory is torn down, which on Windows is the
-        difference between a cleaned-up temp dir and a leaked one.
-        """
+        """An inner writer leaves success reporting to its caller, after publication."""
         strategy = WriteStrategyFactory.get_strategy(WriteStrategy.DISK_REWRITE)
 
         with caplog.at_level(logging.DEBUG, logger="geoparquet_io"):
@@ -664,7 +659,7 @@ class TestWriteStrategiesNoGeometry:
                 verbose=True,
             )
 
-        assert "Wrote 3 rows" in caplog.text
+        assert "[SUCCESS]" not in caplog.text
         self._assert_valid_plain_parquet(output_file)
 
     def test_compression_options_honored_no_geometry(self, non_geo_table, output_file):

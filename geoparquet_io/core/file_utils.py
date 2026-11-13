@@ -20,7 +20,7 @@ from geoparquet_io.core.exceptions import (
     GeoParquetError,
     InvalidParameterError,
 )
-from geoparquet_io.core.logging_config import _success_output_path, debug
+from geoparquet_io.core.logging_config import debug
 from geoparquet_io.core.remote import (
     canonical_store_url,
     is_account_first_azure_url,
@@ -520,8 +520,7 @@ def atomic_write(
         if sidecar_suffixes is not None:
             raise GeoParquetError("Remote writes do not support sidecar files.")
         with scratch_file(suffix=suffix) as local:
-            with _success_output_path(local, str(destination)):
-                yield local
+            yield local
             if Path(local).exists():
                 upload_if_remote(local, str(destination))
         return
@@ -529,8 +528,7 @@ def atomic_write(
     stage_dir = Path(tempfile.mkdtemp(prefix=_STAGE_PREFIX, dir=final.parent))
     staged = stage_dir / f"{final.stem}{suffix}"
     try:
-        with _success_output_path(str(staged), str(destination)):
-            yield str(staged)
+        yield str(staged)
         if not staged.exists():
             return  # the writer decided there was nothing to write
         _take_mode(staged, final if final.exists() else mode_from)

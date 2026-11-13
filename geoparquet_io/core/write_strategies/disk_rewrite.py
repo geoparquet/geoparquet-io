@@ -35,7 +35,7 @@ from geoparquet_io.core.geo_metadata import (
 )
 from geoparquet_io.core.geoarrow_encoding import native_wkb_type
 from geoparquet_io.core.geometry_detection import create_geometry_view
-from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success
+from geoparquet_io.core.logging_config import configure_verbose, debug, progress
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
     apply_output_kv_metadata,
@@ -392,10 +392,6 @@ class DiskRewriteStrategy(BaseWriteStrategy):
             if is_remote:
                 upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
 
-            if verbose:
-                with pq.ParquetFile(local_path) as pf:
-                    success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
-
     def _rewrite_with_metadata(
         self,
         input_path: str,
@@ -522,7 +518,3 @@ class DiskRewriteStrategy(BaseWriteStrategy):
 
                 for group in regroup(conformed(), row_group_rows):
                     writer.write_table(group, row_group_size=row_group_rows)
-
-        if verbose:
-            with pq.ParquetFile(output_path) as result_pf:
-                success(f"Wrote {result_pf.metadata.num_rows:,} rows to {output_path}")

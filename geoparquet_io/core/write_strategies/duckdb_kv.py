@@ -17,7 +17,6 @@ import json
 
 import duckdb
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from geoparquet_io.core.arrow_geo_metadata import (
     _canonicalize_wkb_columns,
@@ -49,7 +48,7 @@ from geoparquet_io.core.geo_metadata import (
     sanitized_carried_geo,
 )
 from geoparquet_io.core.geometry_detection import GeometryRead
-from geoparquet_io.core.logging_config import configure_verbose, debug, success
+from geoparquet_io.core.logging_config import configure_verbose, debug
 from geoparquet_io.core.memory_limits import scoped_write_memory_limit
 from geoparquet_io.core.parquet_writer import (
     output_schema_metadata,
@@ -386,10 +385,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         copy_query = f"COPY ({final_query}) TO {sql_path(local_path)} ({', '.join(copy_options)})"
         con.execute(copy_query)
 
-        if verbose:
-            pf = pq.ParquetFile(local_path)
-            success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
-
     def _write_with_geo_metadata(
         self,
         con: duckdb.DuckDBPyConnection,
@@ -464,10 +459,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
         if verbose:
             debug(f"Writing via DuckDB COPY TO with {codec.name} compression...")
         con.execute(copy_query)
-
-        if verbose:
-            pf = pq.ParquetFile(local_path)
-            success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
 
     def _missing_stats(
         self,
@@ -672,9 +663,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             if is_remote:
                 upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
 
-            if verbose:
-                pf = pq.ParquetFile(local_path)
-                success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
         finally:
             con.close()
             if is_remote:
@@ -721,9 +709,6 @@ class DuckDBKVStrategy(BaseWriteStrategy):
             if is_remote:
                 upload_if_remote(local_path, output_path, is_directory=False, verbose=verbose)
 
-            if verbose:
-                pf = pq.ParquetFile(local_path)
-                success(f"Wrote {pf.metadata.num_rows:,} rows to {output_path}")
         finally:
             if is_remote:
                 unlink_released_file(local_path)

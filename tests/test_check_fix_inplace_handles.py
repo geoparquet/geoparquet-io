@@ -386,12 +386,22 @@ def test_verbose_fix_reports_final_destination(places_test_file, tmp_path, caplo
     output = tmp_path / "fixed.parquet"
     shutil.copy(places_test_file, source)
     with caplog.at_level("DEBUG", logger="geoparquet_io"):
-        write_funnels.rewrite_file_through_funnel(
-            str(source), str(output), f"SELECT * FROM '{source}'", verbose=True, profile=None
+        result = CliRunner().invoke(
+            cli,
+            [
+                "sort",
+                "column",
+                str(source),
+                str(output),
+                pq.read_schema(source).names[0],
+                "--verbose",
+            ],
         )
-    successes = [r.message for r in caplog.records if "Wrote " in r.message]
-    assert successes and any(str(output) in text for text in successes)
-    assert all(".gpio-stage-" not in text for text in successes)
+    assert result.exit_code == 0, result.output
+    successes = [r.message for r in caplog.records if r.message.startswith("[SUCCESS]")]
+    assert len(successes) == 1, successes
+    assert str(output) in successes[0]
+    assert ".gpio-stage-" not in successes[0]
 
 
 def test_permitted_remote_inplace_callers_stage_and_close(places_test_file, tmp_path, monkeypatch):

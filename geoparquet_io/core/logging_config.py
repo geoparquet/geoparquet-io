@@ -22,8 +22,6 @@ Usage in CLI:
 
 import logging
 import sys
-from contextlib import contextmanager
-from contextvars import ContextVar
 
 from geoparquet_io.core.exceptions import clean_error_text
 
@@ -242,27 +240,12 @@ def configure_verbose(verbose: bool) -> None:
 # ============================================================================
 
 
-_SUCCESS_PATHS: ContextVar[tuple[tuple[str, str], ...]] = ContextVar("success_paths", default=())
-
-
-@contextmanager
-def _success_output_path(staged: str, destination: str):
-    """Report a published output's name while its writer uses a private path."""
-    token = _SUCCESS_PATHS.set(((staged, destination), *_SUCCESS_PATHS.get()))
-    try:
-        yield
-    finally:
-        _SUCCESS_PATHS.reset(token)
-
-
 def success(message: str) -> None:
     """
     Log a success message (displayed in green in CLI).
 
     Use for: Completed operations, passed validations, successful writes.
     """
-    for staged, destination in _SUCCESS_PATHS.get():
-        message = message.replace(staged, destination)
     logger.info(f"[SUCCESS]{message}")
 
 
