@@ -1676,6 +1676,20 @@ row_group_result = table.check_row_groups()
 details = result.to_dict()
 ```
 
+`check_spatial()` can withhold its verdict. gpio runs the Portolan spec's
+footer check, which judges files with eight or more row groups. A file with
+fewer row groups, or without row-group statistics, takes the spec's row
+check, which a conformance validator such as rashid runs. `passed()` stays
+`True` there (no failure was found), `judged()` is `False`, the numbers are
+still in `to_dict()` and `warnings()` says why.
+
+```python
+spatial_result = table.check_spatial()
+if not spatial_result.judged():
+    print(spatial_result.warnings())        # why there is no verdict
+print(spatial_result.to_dict()["skip_rate_efficiency"])
+```
+
 `check_bbox()` also compares each row's bbox against its geometry's real
 envelope. A bbox smaller than its geometry fails the check — readers prune on
 the covering, so those rows go missing from spatial query results with no error

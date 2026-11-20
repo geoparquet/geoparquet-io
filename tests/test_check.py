@@ -42,8 +42,10 @@ class TestCheckCommands:
         assert (
             "SNAPPY compression on geometry column 'geometry' (ZSTD recommended)" in result.output
         )
-        # Spatial order: the fixture is hilbert-sorted.
-        assert "Data appears to be spatially ordered" in result.output
+        # Spatial order: one row group, under the footer check's eight, so
+        # gpio withholds the verdict and names the row check (spatial-order.md, Footer check).
+        assert "Spatial ordering not judged" in result.output
+        assert "rashid judges smaller files by their rows" in result.output
         # Spec validation passes.
         assert "checks passed" in result.output
 
@@ -60,7 +62,10 @@ class TestCheckCommands:
         # Geometry is already ZSTD, so no recommendation is drawn.
         assert "ZSTD compression on geometry column 'geometry'" in result.output
         assert "ZSTD recommended" not in result.output
-        assert "Data appears to be spatially ordered" in result.output
+        # No bbox column: the sampling fallback reports its distance ratio as
+        # a statistic and withholds the verdict.
+        assert "Spatial ordering not judged: no row-group statistics" in result.output
+        assert "(sampling method, a statistic, not a verdict)" in result.output
 
     def test_check_all_known_good(self, places_with_covering_file):
         """check all on the canonical 1.1 file draws no warnings at all."""
@@ -70,7 +75,9 @@ class TestCheckCommands:
         assert "Version 1.1.0" in result.output
         assert "Found bbox column 'bbox' with proper metadata covering" in result.output
         assert "ZSTD compression on geometry column 'geometry'" in result.output
-        assert "Data appears to be spatially ordered" in result.output
+        # Tiny canonical fixture: one row group, so the spatial verdict is
+        # withheld, which is not a warning.
+        assert "Spatial ordering not judged" in result.output
         assert "WARNING" not in result.output
 
     def test_check_all_verbose(self, places_test_file, caplog):
@@ -91,21 +98,23 @@ class TestCheckCommands:
         assert "fsq_place_id: string" in combined
 
     def test_check_spatial_places(self, places_test_file):
-        """check spatial says the hilbert-sorted places file is ordered."""
+        """check spatial withholds its verdict on the tiny places file."""
         runner = CliRunner()
         result = runner.invoke(check, ["spatial", places_test_file])
         assert result.exit_code == 0
-        assert "Data appears to be spatially ordered" in result.output
+        assert "Spatial ordering not judged" in result.output
+        assert "this file has 1 row group." in result.output
 
     def test_check_spatial_buildings(self, buildings_test_file):
-        """Without a bbox column check spatial samples, and still finds order."""
+        """Without a bbox column check spatial samples, and reports no verdict."""
         runner = CliRunner()
         result = runner.invoke(check, ["spatial", buildings_test_file])
         assert result.exit_code == 0
         # No bbox column forces the sampling method...
         assert "using slower sampling method" in result.output
-        # ...which still detects the clustered fixture as ordered.
-        assert "Data appears to be spatially ordered" in result.output
+        # ...which reports what it measured as a statistic, not a verdict.
+        assert "Spatial ordering not judged: no row-group statistics" in result.output
+        assert "Consecutive / random feature distance" in result.output
         # Pushdown readiness flags the missing bbox column.
         assert "No geo_bbox column found" in result.output
 
@@ -130,7 +139,7 @@ class TestCheckCommands:
         # bbox-stats method rather than sampling.
         combined = result.output + caplog.text
         assert "Using bbox-stats method (bbox column: bbox)" in combined
-        assert "Data appears to be spatially ordered" in result.output
+        assert "Spatial ordering not judged" in result.output
 
     def test_check_compression_places(self, places_test_file):
         """check compression flags the SNAPPY geometry column."""

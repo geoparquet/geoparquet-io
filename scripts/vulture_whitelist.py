@@ -168,3 +168,5 @@ alias_target  # unused function (geoparquet_io/api/_deprecation.py:77) -- dynami
 
 duckdb_param  # unused variable (geoparquet_io/core/geo_metadata.py:66) -- dynamic: TypedDict registry key read by string lookup in write_funnels and version consumers
 rewrite_metadata  # unused variable (geoparquet_io/core/geo_metadata.py:68) -- dynamic: TypedDict registry key read by string lookup in write_strategies.base
+
+_axis_overlap_share  # unused function (geoparquet_io/core/check_spatial_order.py:644) -- dynamic: the scalar reference form of the vectorized axis overlap, cross-checked by tests/test_check_spatial_pushdown.py

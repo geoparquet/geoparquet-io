@@ -100,8 +100,6 @@ class TestCheckSpatialOrder:
         assert isinstance(result, dict)
         # The fixture carries a bbox column, so the fast path is the one under test.
         assert result["method"] == "bbox_stats"
-        # Bbox-stats method: passed=False when ratio >= 0.3
-        assert result["ratio"] >= 0.3
         assert result["passed"] is False
         assert result["fix_available"] is True
         assert len(result["issues"]) > 0
@@ -218,21 +216,22 @@ class TestCheckSpatialOrderBboxStats:
         assert result["method"] == "bbox_stats"
 
     def test_passing_threshold(self, places_test_file):
-        """Test that ratio < 0.3 means passed=True."""
+        """A tiny single-group file is withheld, never a pass or a failure."""
         result = _row_group_check(places_test_file, verbose=False, return_results=True, quiet=False)
-        if result["ratio"] < 0.3:
-            assert result["passed"] is True
-            assert len(result["issues"]) == 0
-            assert result["fix_available"] is False
-        else:
-            assert result["passed"] is False
-            assert len(result["issues"]) > 0
-            assert result["fix_available"] is True
+        assert result["judged"] is False
+        assert result["passed"] is True, "no failure found"
+        assert result["issues"] == []
+        assert result["fix_available"] is True, "unjudged is not known-ordered"
 
     def test_issues_and_recommendations_when_failed(self, unsorted_test_file):
         """Test that failing check includes proper issues and recommendations."""
-        result = _row_group_check(
-            unsorted_test_file, verbose=False, return_results=True, quiet=False
+        result = check_spatial_order(
+            unsorted_test_file,
+            random_sample_size=50,
+            limit_rows=500,
+            verbose=False,
+            return_results=True,
+            quiet=False,
         )
         assert result["passed"] is False
         assert len(result["issues"]) > 0
@@ -476,8 +475,12 @@ class TestSpatialLocalitySecondaryCheck:
             {"row_group_id": 2, "xmin": 2.0, "ymin": 2.0, "xmax": 98.0, "ymax": 98.0},
             {"row_group_id": 3, "xmin": 1.0, "ymin": 1.0, "xmax": 99.0, "ymax": 99.0},
             {"row_group_id": 4, "xmin": 3.0, "ymin": 3.0, "xmax": 97.0, "ymax": 97.0},
+            {"row_group_id": 5, "xmin": 4.0, "ymin": 1.0, "xmax": 96.0, "ymax": 99.0},
+            {"row_group_id": 6, "xmin": 1.0, "ymin": 4.0, "xmax": 99.0, "ymax": 96.0},
+            {"row_group_id": 7, "xmin": 2.0, "ymin": 3.0, "xmax": 98.0, "ymax": 97.0},
         ]
 
+        # Eight groups: the footer check judges from eight up (spatial-order.md, Footer check).
         result = _check_spatial_order_from_row_group_bboxes(
             row_group_bboxes,
             parquet_file="test_unsorted.parquet",
@@ -491,8 +494,16 @@ class TestSpatialLocalitySecondaryCheck:
             "Should fail because bboxes cover nearly the entire extent"
         )
 
-    def test_two_row_groups_skips_secondary_check(self):
-        """With only 2 row groups, secondary locality check is skipped."""
+    def test_two_row_groups_are_measured_not_skipped(self):
+        """Two row groups get the locality metrics like any other count (#755).
+
+        This used to assert the opposite: the check was gated on >= 3 row groups,
+        so a two-group file whose boxes overlap at all was reported "Poor spatial
+        ordering (overlap ratio: 1.00)" with no metrics computed. These two boxes
+        prune nearly as well as two row groups allow, but two row groups are
+        below the verdict floor, so the verdict is withheld rather than the
+        pass the first version of this fix printed.
+        """
         from geoparquet_io.core.check_spatial_order import (
             _check_spatial_order_from_row_group_bboxes,
         )
@@ -510,19 +521,20 @@ class TestSpatialLocalitySecondaryCheck:
             quiet=True,
         )
 
-        assert result["ratio"] == 1.0, "Both groups overlap"
-        assert result["passed"] is False, "Secondary check not applied with < 3 row groups"
-        # None (not 0.0) signals the metrics were never computed
-        assert result["estimated_skip_rate"] is None
-        assert result["avg_bbox_area_ratio"] is None
+        assert result["ratio"] == 1.0, "Both groups overlap - kept as a statistic"
+        assert result["judged"] is False
+        assert result["skip_rate_efficiency"] == pytest.approx(0.734, abs=0.001)
+        assert result["estimated_skip_rate"] is not None
+        assert result["avg_bbox_area_ratio"] is not None
 
-    def test_hilbert_few_large_row_groups_pass(self):
-        """Hilbert-sorted data with few large row groups must still pass.
+    def test_hilbert_few_large_row_groups_are_not_failed(self):
+        """Hilbert-sorted data with few large row groups must not be failed.
 
         With only ~5 row groups each Hilbert segment legitimately covers a
-        larger share of the extent (roughly 1/N plus bbox slop), so the
-        area-ratio threshold must scale with the group count. Regression test
-        for the removed 80k-120k rows/group heuristic.
+        larger share of the extent (roughly 1/N plus bbox slop): a tiling of
+        five cells is a poor model of a curve sort, so below eight row groups
+        the verdict is withheld rather than measured against it. Regression
+        test for the removed 80k-120k rows/group heuristic.
         """
         from geoparquet_io.core.check_spatial_order import (
             _check_spatial_order_from_row_group_bboxes,
@@ -548,10 +560,10 @@ class TestSpatialLocalitySecondaryCheck:
         )
 
         assert result["ratio"] == 1.0, "All consecutive pairs overlap"
-        assert result["passed"] is True, (
-            "Should pass via the locality check with the count-scaled area threshold"
-        )
-        assert result["fix_available"] is False
+        assert result["judged"] is False, "five row groups: the verdict is withheld"
+        assert result["passed"] is True, "no failure found"
+        assert result["fix_available"] is True, "unjudged is not known-ordered; a fix sorts"
+        assert result["issues"] == []
 
     def test_print_path_reflects_secondary_pass(self, caplog):
         """Standalone print output must match the structured passed verdict."""

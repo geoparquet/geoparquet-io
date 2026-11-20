@@ -163,7 +163,12 @@ _SPEC_PASSED = re.compile(r"(\d+)\s+checks passed")
 # The real summary line may carry a warnings segment between passed and failed
 # ("Summary: 2 passed, 1 warnings, 3 failed"); tolerate it so the failed count
 # is still captured when warnings are present.
-_SUMMARY = re.compile(r"Summary:\s+(\d+)\s+passed(?:,\s*\d+\s+warnings?)?(?:,\s*(\d+)\s+failed)?")
+# "N passed", "N not judged" (a spatial-order verdict withheld below eight row
+# groups: not a pass, not a failure), or both, then the warning and failed counts.
+_SUMMARY = re.compile(
+    r"Summary:\s+(?=\d)(?:(\d+)\s+passed)?(?:,?\s*(\d+)\s+not judged)?"
+    r"(?:,\s*\d+\s+warnings?)?(?:,\s*(\d+)\s+failed)?"
+)
 
 
 def assert_check_all(target: Path, journey: int, *, all_files: bool = False) -> str:
@@ -187,7 +192,7 @@ def assert_check_all(target: Path, journey: int, *, all_files: bool = False) -> 
     if all_files:
         summary = _SUMMARY.search(report)
         assert summary is not None, f"no partition summary in:\n{report}"
-        assert summary.group(2) is None, f"partition files failed the check:\n{report}"
+        assert summary.group(3) is None, f"partition files failed the check:\n{report}"
     else:
         # Deliberately warning-intolerant: the CLI prints the plain "N checks
         # passed" line only when there are zero warnings, so a journey output

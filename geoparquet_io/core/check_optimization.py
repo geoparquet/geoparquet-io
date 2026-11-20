@@ -97,6 +97,9 @@ def _check_spatial_sorting(parquet_file, verbose=False):
         assert isinstance(result, dict)
         ratio = result["ratio"]
         ratio_str = f" (ratio: {ratio:.2f})" if ratio is not None else ""
+        if not result.get("judged", True):
+            # Withheld is not a failure, and not a pass to claim either.
+            return {"passed": True, "detail": f"Spatial order not judged{ratio_str}"}
         if result["passed"]:
             return {"passed": True, "detail": f"Data appears spatially sorted{ratio_str}"}
         return {"passed": False, "detail": f"Data is not spatially sorted{ratio_str}"}

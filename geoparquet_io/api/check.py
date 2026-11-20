@@ -121,6 +121,22 @@ class CheckResult:
         """
         return self.verdict() == "pass"
 
+    def judged(self) -> bool:
+        """
+        Whether every check that ran reached a verdict at all.
+
+        The spatial-order check withholds its verdict where the spec applies
+        its row check, which gpio does not run: fewer than eight row groups,
+        no row-group statistics, or an undefined efficiency. ``passed()``
+        stays True there -- no failure was found -- and
+        this is False, so a caller printing a check mark or counting outcomes
+        can tell the difference.
+
+        Returns:
+            False when any check withheld its verdict, True otherwise
+        """
+        return all(r.get("judged", True) for _, r in self._categories())
+
     def verdict(self) -> str:
         """
         How bad the result is: ``"pass"``, ``"warning"`` or ``"failure"``.
