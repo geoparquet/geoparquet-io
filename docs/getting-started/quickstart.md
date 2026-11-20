@@ -31,7 +31,7 @@ See [Installation Guide](installation.md) for more options.
     # Rows: 1,523,847 | Size: 245.3 MB | CRS: EPSG:4326
 
     # Preview first 5 rows
-    gpio inspect myfile.parquet --head 5
+    gpio inspect head myfile.parquet 5
     ```
 
 === "Python"
