@@ -594,8 +594,9 @@ gpio add quadkey input.parquet output.parquet --resolution 16
 gpio add quadkey input.parquet output.parquet --use-centroid
 ```
 
-`gpio sort quadkey` and `gpio partition quadkey` add this column themselves
-when it is missing.
+`gpio partition quadkey` adds this column itself when it is missing, and so
+does `gpio sort quadkey` for the default `quadkey` name (a missing custom
+`--quadkey-name` column is an error there).
 
 ## KD-Tree Partitions
 
