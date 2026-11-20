@@ -1093,10 +1093,14 @@ def _echo_withheld_spatial_order(result: dict, cost: str, efficiency_text: str) 
             "(sampling method, a statistic, not a verdict)"
         )
     if result.get("num_row_groups"):
-        area_sum = result.get("bbox_area_sum")
-        area_text = "" if area_sum is None else f", area sum {area_sum:.2f}"
         click.echo(f"Row groups: {result['num_row_groups']}")
-        click.echo(f"{cost.capitalize()}(efficiency {efficiency_text}{area_text})")
+        # No measured read share (statistics covering only some row groups)
+        # leaves nothing worth a numbers line under the reason above.
+        if cost:
+            area_sum = result.get("bbox_area_sum")
+            area_text = "" if area_sum is None else f", area sum {area_sum:.2f}"
+            sentence = cost.removesuffix(", ").capitalize()
+            click.echo(f"{sentence} (efficiency {efficiency_text}{area_text})")
 
 
 def _echo_pushdown(pushdown: dict | None) -> None:

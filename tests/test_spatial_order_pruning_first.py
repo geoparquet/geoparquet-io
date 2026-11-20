@@ -430,6 +430,34 @@ class TestClosedForm:
         assert m["bbox_area_sum"] > 3.0
 
 
+class TestMetricScalesToLargeFooters:
+    """The blocked numpy pass keeps footers with thousands of groups fast.
+
+    The pure-Python double loop took 22 s at 2,000 row groups and ran five
+    times per check (review of #774); the whole metric set at 5,000 groups
+    now has to land in seconds even on a loaded CI runner.
+    """
+
+    def test_five_thousand_groups_score_in_seconds(self):
+        import random
+        import time
+
+        rng = random.Random(7)
+        boxes = []
+        for i in range(5000):
+            x, y = rng.random(), rng.random()
+            boxes.append(
+                {"row_group_id": i, "xmin": x, "ymin": y, "xmax": x + 0.02, "ymax": y + 0.02}
+            )
+
+        start = time.perf_counter()
+        metrics = _spatial_locality_metrics(boxes)
+        elapsed = time.perf_counter() - start
+
+        assert metrics["skip_rate_efficiency"] is not None
+        assert elapsed < 10.0, f"metric took {elapsed:.1f}s at 5,000 groups"
+
+
 class TestFullTiling:
     @pytest.mark.parametrize("n", [1, 2, 3, 5, 7, 8, 10, 100])
     def test_n_cells_cover_the_extent_exactly(self, n):
@@ -870,12 +898,14 @@ class TestWithheldVerdictReachesEverySurface:
 
 
 class TestBatchFixLeavesUnjudgedSoundFilesAlone:
-    """``check all --fix`` sorts only what it can defend rewriting.
+    """``check all --fix`` sorts only a judged failure.
 
     An explicit ``check spatial --fix`` sorts on any verdict short of a judged
-    pass. The batch fix earns the rewrite: a judged failure, or a withheld
-    verdict whose measured efficiency sits under the bar. A withheld verdict
-    with unknown or passing efficiency leaves the file untouched.
+    pass. The batch fix earns the rewrite with a judgment: a withheld verdict
+    is not one, and the only withheld case that still measures an efficiency
+    -- two to seven row groups -- is exactly where the spec says the boxes may
+    not judge, so acting on that number re-sorted already-sorted small files
+    on every run (review of #774).
     """
 
     def test_judged_failure_is_sorted(self):
@@ -883,10 +913,10 @@ class TestBatchFixLeavesUnjudgedSoundFilesAlone:
 
         assert _batch_sort_wanted({"judged": True, "passed": False, "fix_available": True})
 
-    def test_withheld_with_low_efficiency_is_sorted(self):
+    def test_withheld_with_low_efficiency_is_not_sorted(self):
         from geoparquet_io.core.check_fixes import _batch_sort_wanted
 
-        assert _batch_sort_wanted({"judged": False, "skip_rate_efficiency": 0.12})
+        assert not _batch_sort_wanted({"judged": False, "skip_rate_efficiency": 0.12})
 
     def test_withheld_with_unknown_or_passing_efficiency_is_not(self):
         from geoparquet_io.core.check_fixes import _batch_sort_wanted
@@ -894,6 +924,20 @@ class TestBatchFixLeavesUnjudgedSoundFilesAlone:
         assert not _batch_sort_wanted({"judged": False, "skip_rate_efficiency": None})
         assert not _batch_sort_wanted({"judged": False})
         assert not _batch_sort_wanted({"judged": False, "skip_rate_efficiency": 0.9})
+
+    def test_a_sorted_two_group_file_is_never_resorted(self, tmp_path):
+        """The review's repro: a Hilbert-sorted two-group file measures an
+        efficiency under the bar (its grid walk scores ~0.56), and the batch
+        fix must still leave it alone -- the verdict is withheld, not failed.
+        """
+        from geoparquet_io.core.check_fixes import _batch_sort_wanted
+
+        path = _write_bbox_file(tmp_path / "two.parquet", 400, 2)
+        r = mod.check_spatial_order(path, 10, 100, verbose=False, return_results=True, quiet=True)
+
+        assert r["judged"] is False
+        assert r["skip_rate_efficiency"] is not None, "two groups still measure a number"
+        assert not _batch_sort_wanted(r)
 
     @pytest.mark.parametrize(
         ("spatial", "combined"),

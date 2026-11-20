@@ -283,7 +283,9 @@ Checks if data is spatially ordered. Spatially ordered data improves:
   on the CLI or API overrides the thresholds. A requested `--fix` still sorts a file
   whose verdict was withheld — not judged is not known-ordered — and only a
   judged pass skips the sort. `check all --fix` sorts only on a judged
-  failure, or on a withheld verdict whose measured efficiency is under 0.65.
+  failure: a withheld verdict is not a judgment, even when it carries a
+  measured number, since the spec does not let the boxes judge a file below
+  eight row groups.
 - **Sampling method**: Compares average distance between consecutive features vs random feature pairs. A lower ratio indicates better spatial clustering. This measures feature adjacency, not row-group pruning, so gpio reports the ratio as a statistic and withholds the verdict. The spec judges such a file by its rows, which a conformance validator such as rashid does.
 
 `--fix` Hilbert-sorts the file and keeps at least as many row groups as it

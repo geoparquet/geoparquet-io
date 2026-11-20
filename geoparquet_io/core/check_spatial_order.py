@@ -38,6 +38,7 @@ from geoparquet_io.core.geometry_detection import (
     resolve_geometry_read,
 )
 from geoparquet_io.core.logging_config import debug, progress, warn
+from geoparquet_io.core.optional_deps import load_module
 from geoparquet_io.core.remote import needs_httpfs
 
 # The Portolan spec's thresholds (portolan-sdi/portolan-spec#188). Both are
@@ -668,34 +669,67 @@ def _weighted_skip_rate(
     scale: one far outlier can neither hide a shuffled file behind a stretched
     extent nor fail a sorted one. Each box then counts by its share of the
     bytes, because what a reader saves is bytes, not a count of row groups.
-    A closed form over the boxes: O(n^2), footer only, no seed, the same
-    number from every implementation (the footer check of spatial-order.md).
+    A closed form over the boxes: footer only, no seed, the same number from
+    every implementation (the footer check of spatial-order.md).
+    """
+    return _weighted_skip_rates(boxes, rows, sizes, (query_fraction,))[0]
+
+
+def _weighted_skip_rates(
+    boxes: list[dict],
+    rows: list[float] | None = None,
+    sizes: list[float] | None = None,
+    fractions: tuple[float, ...] = (_DEFAULT_QUERY_FRACTION,),
+) -> list[float]:
+    """:func:`_weighted_skip_rate` at several window fractions in one pass.
+
+    The n-by-n axis-overlap sum is vectorized with numpy and walked in source
+    blocks, so a footer with thousands of row groups scores in well under a
+    second instead of minutes (review of #774), and the block arrays stay a
+    few megabytes however many groups the footer holds. Only the window
+    half-sizes change between fractions, so every fraction reuses the same
+    block slices. Per source block and fraction, the axis share is the
+    scalar form's algebra: the target grown by half a window, clipped against
+    the source span, with a zero-width source span counting 1 when its point
+    lies inside the grown target.
     """
     if not boxes:
-        return 0.0
-    rows = rows if rows is not None else [1.0] * len(boxes)
-    sizes = sizes if sizes is not None else list(rows)
-    total_rows = float(sum(rows))
-    total_size = float(sum(sizes))
-    read = 0.0
-    for j, target in enumerate(boxes):
-        hit = 0.0
-        for i, source in enumerate(boxes):
-            half_w = query_fraction * (source["xmax"] - source["xmin"]) / 2.0
-            half_h = query_fraction * (source["ymax"] - source["ymin"]) / 2.0
-            fx = _axis_overlap_share(
-                source["xmin"], source["xmax"], target["xmin"], target["xmax"], half_w
-            )
-            fy = _axis_overlap_share(
-                source["ymin"], source["ymax"], target["ymin"], target["ymax"], half_h
-            )
-            hit += rows[i] / total_rows * fx * fy
-        read += sizes[j] / total_size * hit
-    rate = 1.0 - read
-    # Accumulated float dust on an exact 0 or 1 stays an exact 0 or 1.
-    if abs(rate) <= _ZERO_SKIP_TOLERANCE:
-        return 0.0
-    return min(1.0, max(0.0, rate))
+        return [0.0] * len(fractions)
+    np = load_module("numpy")
+    x0, y0, x1, y1 = (
+        np.array([box[key] for box in boxes], dtype=float)
+        for key in ("xmin", "ymin", "xmax", "ymax")
+    )
+    n = len(boxes)
+    row_weights = np.ones(n) if rows is None else np.asarray(rows, dtype=float)
+    size_weights = row_weights if sizes is None else np.asarray(sizes, dtype=float)
+    centre = row_weights / row_weights.sum()
+    byte_share = size_weights / size_weights.sum()
+    span_x, span_y = x1 - x0, y1 - y0
+    reads = [0.0] * len(fractions)
+    block = max(1, (1 << 22) // n)
+    for start in range(0, n, block):
+        rows_slice = slice(start, start + block)
+        sx0, sx1 = x0[rows_slice, None], x1[rows_slice, None]
+        sy0, sy1 = y0[rows_slice, None], y1[rows_slice, None]
+        spx, spy = span_x[rows_slice, None], span_y[rows_slice, None]
+        flat_x, flat_y = spx <= 0, spy <= 0
+        for k, fraction in enumerate(fractions):
+            half_w, half_h = fraction * spx / 2.0, fraction * spy / 2.0
+            gx0, gx1 = x0[None, :] - half_w, x1[None, :] + half_w
+            gy0, gy1 = y0[None, :] - half_h, y1[None, :] + half_h
+            with np.errstate(divide="ignore", invalid="ignore"):
+                fx = np.clip((np.minimum(sx1, gx1) - np.maximum(sx0, gx0)) / spx, 0.0, 1.0)
+                fy = np.clip((np.minimum(sy1, gy1) - np.maximum(sy0, gy0)) / spy, 0.0, 1.0)
+            fx = np.where(flat_x, ((gx0 <= sx0) & (sx0 <= gx1)).astype(float), fx)
+            fy = np.where(flat_y, ((gy0 <= sy0) & (sy0 <= gy1)).astype(float), fy)
+            reads[k] += float(centre[rows_slice] @ (fx * fy) @ byte_share)
+    rates = []
+    for read in reads:
+        rate = 1.0 - read
+        # Accumulated float dust on an exact 0 or 1 stays an exact 0 or 1.
+        rates.append(0.0 if abs(rate) <= _ZERO_SKIP_TOLERANCE else min(1.0, max(0.0, rate)))
+    return rates
 
 
 def _full_tiling_bboxes(extent: dict, num_row_groups: int) -> list[dict]:
@@ -747,7 +781,12 @@ def _spatial_locality_metrics(
     at fault (spatial-order.md, Reporting).
     """
     extent = _compute_data_extent(row_group_bboxes, geographic=geographic)
-    estimated = _weighted_skip_rate(row_group_bboxes, rows, sizes, query_fraction)
+    # One blocked pass scores the estimate and the whole read profile: only
+    # the window half-sizes differ between fractions (review of #774).
+    rates = _weighted_skip_rates(
+        row_group_bboxes, rows, sizes, (query_fraction, *_REPORT_FRACTIONS)
+    )
+    estimated = rates[0]
     ideal_boxes = _full_tiling_bboxes(extent, len(row_group_bboxes))
     ideal = _weighted_skip_rate(ideal_boxes, query_fraction=query_fraction)
     # A reference that skips nothing leaves nothing to fall short of:
@@ -768,10 +807,7 @@ def _spatial_locality_metrics(
         "estimated_skip_rate": estimated,
         "ideal_skip_rate": ideal,
         "skip_rate_efficiency": efficiency,
-        "read_profile": tuple(
-            1.0 - _weighted_skip_rate(row_group_bboxes, rows, sizes, fraction)
-            for fraction in _REPORT_FRACTIONS
-        ),
+        "read_profile": tuple(1.0 - rate for rate in rates[1:]),
         "largest_row_groups": [box.get("row_group_id") for box in ranked],
     }
 

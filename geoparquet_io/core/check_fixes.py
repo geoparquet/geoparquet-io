@@ -631,18 +631,14 @@ def _batch_sort_wanted(spatial_result: dict) -> bool:
     """Whether ``check all --fix`` should Hilbert-sort this file.
 
     An explicit ``check spatial --fix`` sorts on any verdict short of a judged
-    pass, because the user asked for exactly that. The batch fix is quieter: a
-    withheld verdict whose efficiency is unknown, or already at the pass bar,
-    is no reason to rewrite an otherwise sound file -- only a judged failure,
-    or a withheld verdict whose measured efficiency sits under the bar, earns
-    the sort.
+    pass, because the user asked for exactly that. The batch fix sorts only a
+    judged failure. A withheld verdict is not a judgment: the one withheld
+    case that still measures an efficiency -- two to seven row groups -- is
+    exactly where the spec says the boxes may not judge (sorted two-group
+    copies measure as low as 0.56), so acting on that number re-sorted
+    already-sorted small files on every run (review of #774).
     """
-    if spatial_result.get("judged", True):
-        return True
-    from geoparquet_io.core.check_spatial_order import SPATIAL_ORDER_MIN_EFFICIENCY
-
-    efficiency = spatial_result.get("skip_rate_efficiency")
-    return efficiency is not None and efficiency < SPATIAL_ORDER_MIN_EFFICIENCY
+    return spatial_result.get("judged", True)
 
 
 @uses_aws_profile
