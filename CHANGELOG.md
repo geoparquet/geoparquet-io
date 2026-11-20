@@ -6,6 +6,113 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## v1.8.0 (2026-11-20)
+
+The Python API now matches the CLI. Every command has an API twin, and a registry test keeps them in step. `gpio.check_*()` and `gpio.validate()` take a path and reach the same verdict as `gpio check`. One `WriteOptions`, one remote-access object and one check-options object are shared by the CLI and the API, and the package ships `py.typed`. You can preview which row groups, and how many rows and bytes, a bbox read would touch before you read it. `gpio convert geopackage`, `flatgeobuf` and `csv` accept `--bbox`, `--geometry` and `--where`. gpio's code now runs on DuckDB 2.0 as well as 1.5. The install still pins `duckdb<1.6` until the `geography` extension is published for 2.0 (#1346), so S2 keeps working.
+
+Most of this release is a consolidation, led by @nlebovits (#1367, #1372): each decision now has one owner — codec and level, row-group count, the `geo` block, CRS, non-planar edges, staging, overwrite and sizes. This fixed write paths that disagreed. The bbox covering is declared on every write, GeoArrow-native geometry is read correctly on every write path, a secondary column's CRS is kept, and geometry metadata is rebuilt on rewrite. `gpio check spatial` now judges ordering by the share of bytes a spatial query can skip, so it no longer reports Hilbert-sorted files as poorly ordered (#755). CLI startup, admin joins, exports and bounded reads use less time and memory.
+
+Breaking changes, and what to do about them:
+
+- **Python 3.11 or newer** is required. 3.10 is end of life.
+- **Sizes are decimal.** `KB`, `MB` and `GB` are powers of 1,000, and `KiB`, `MiB` and `GiB` are powers of 1,024. A bare number is MB, so `--row-group-size-mb 128` now targets 128,000,000 bytes. Write `128MiB` to keep the old size.
+- **An existing output is refused without `--overwrite`** on `gpio convert`, `gpio check --fix --fix-output` and `gpio publish stac`. Before, these replaced the file silently.
+- **Compression defaults changed, and writes are slower.** The DuckDB write paths (`convert`, `sort`, `add`, `partition`, `Table.write()` and others) now write gpio's documented ZSTD level 15. Before, they ignored it and wrote DuckDB's own level 3. Files come out 4-10% smaller, but writing them takes 2-5 times as long. Pass `--compression-level 9` to keep almost all of the size gain at about a third of the time, or `--compression-level 3` for the 1.7.0 speed. `gpio process` writes level 9, and BROTLI writes quality 11 instead of 6.
+- **Exports refuse non-planar edges.** `gpio convert` to GeoPackage, FlatGeobuf, Shapefile or CSV now refuses a file with spherical edges, as GeoJSON already did, because these formats would silently change what the coordinates mean.
+- **`gpio check spatial` withholds its verdict** for a file with fewer than 8 row groups, partial statistics or no bbox statistics. It reports "not judged", which does not fail under `--strict`. `check_spatial_pushdown_readiness` no longer takes `num_samples` or `seed`.
+- **A CRS label that cannot be resolved is an error.** Before, gpio guessed.
+- **84 internal `geoparquet_io.core` names are deleted.** The public API (`geoparquet_io.api`, `Table`, `ops`) loses no function. If you import from `core` directly, #1372 lists the replacement for each name. From this release, a small set of `core` modules is a declared, semver-tracked embeddable surface (see the embedding guide), and this release is its baseline.
+
+This release has no first-time contributors. Thank you to @SAY-5 for coming back: #1328 makes `--exact` refuse a typed `--approx`, even when its value equals the default. Thanks also to @nlebovits and @cholmes for the consolidation and API work that make up most of this release.
+
+### Breaking
+
+- perf(process)!: write at ZSTD 9 instead of 15, and stop the streaming writer falling back to level 1 by [@cholmes](https://github.com/cholmes) in [#1302](https://github.com/geoparquet/geoparquet-io/pull/1302)
+- fix(core)!: resolve every codec and level through compression.resolve_codec ([#1367](https://github.com/geoparquet/geoparquet-io/issues/1367) T2a) by [@nlebovits](https://github.com/nlebovits) in [#1380](https://github.com/geoparquet/geoparquet-io/pull/1380)
+- fix(core)!: decide every row-group count in parquet_writer and route the raw final writes through the funnels by [@nlebovits](https://github.com/nlebovits) in [#1388](https://github.com/geoparquet/geoparquet-io/pull/1388)
+- fix(core)!: one remote-path rule and one overwrite policy by [@nlebovits](https://github.com/nlebovits) in [#1387](https://github.com/geoparquet/geoparquet-io/pull/1387)
+- refactor(core)!: decode the geo block through one owner and compose it in one place by [@nlebovits](https://github.com/nlebovits) in [#1385](https://github.com/geoparquet/geoparquet-io/pull/1385)
+- refactor(core)!: decide every output GeoParquet version in parquet_writer by [@nlebovits](https://github.com/nlebovits) in [#1389](https://github.com/geoparquet/geoparquet-io/pull/1389)
+- fix(core)!: one geometry stats and bounds owner with one degenerate-geometry policy by [@nlebovits](https://github.com/nlebovits) in [#1390](https://github.com/geoparquet/geoparquet-io/pull/1390)
+- fix(core)!: one owner for the edges field, with cell keys that respect spherical input by [@nlebovits](https://github.com/nlebovits) in [#1391](https://github.com/geoparquet/geoparquet-io/pull/1391)
+- refactor(core)!: one index spec, one write-options object and shared CLI options (T5b+T5c) by [@nlebovits](https://github.com/nlebovits) in [#1384](https://github.com/geoparquet/geoparquet-io/pull/1384)
+- fix(core)!: one patch-else-rewrite decision for every footer write, keeping sidecar keys by [@nlebovits](https://github.com/nlebovits) in [#1393](https://github.com/geoparquet/geoparquet-io/pull/1393)
+- refactor(core)!: one primary-geometry-column resolver and one geometry read expression by [@nlebovits](https://github.com/nlebovits) in [#1392](https://github.com/geoparquet/geoparquet-io/pull/1392)
+- fix(core)!: one geo block composer that declares the bbox covering on every write by [@nlebovits](https://github.com/nlebovits) in [#1394](https://github.com/geoparquet/geoparquet-io/pull/1394)
+- refactor(core)!: one column fold, one unique-name suffixer and one exclusion guard (T5a) by [@nlebovits](https://github.com/nlebovits) in [#1395](https://github.com/geoparquet/geoparquet-io/pull/1395)
+- refactor(core)!: close-out prep — dead names deleted, last copies routed, one guard file (T0e-prep) by [@nlebovits](https://github.com/nlebovits) in [#1396](https://github.com/geoparquet/geoparquet-io/pull/1396)
+- refactor(core)!: one staging owner for every temp-and-replace write, one scratch path, one listing rule (T2f) by [@nlebovits](https://github.com/nlebovits) in [#1397](https://github.com/geoparquet/geoparquet-io/pull/1397)
+- refactor(core)!: one CRS owner — is_geographic, crs_equal, projjson_for_label that fails closed, and crs_of (T4c) by [@nlebovits](https://github.com/nlebovits) in [#1398](https://github.com/geoparquet/geoparquet-io/pull/1398)
+- ci(guards)!: the owner gates block, every track exemption is gone, and the docs name the owners (T0e) by [@nlebovits](https://github.com/nlebovits) in [#1399](https://github.com/geoparquet/geoparquet-io/pull/1399)
+- ci(tests)!: the guard and staging tests hold on Windows, macOS and Python 3.10, the duplicate hook is deterministic, and the canonical dataset is regenerated by [@nlebovits](https://github.com/nlebovits) in [#1401](https://github.com/geoparquet/geoparquet-io/pull/1401)
+- fix(core)!: the final-review fixes — secondary CRS on every strategy, GEOGRAPHY stats after regrouping, no quadkey for a non-finite point, EMPTY geometries in geometry_types by [@nlebovits](https://github.com/nlebovits) in [#1400](https://github.com/geoparquet/geoparquet-io/pull/1400)
+- build!: drop Python 3.10, which is end of life by [@nlebovits](https://github.com/nlebovits) in [#1405](https://github.com/geoparquet/geoparquet-io/pull/1405)
+- refactor(core)!: one owner per concept, with the guards and gates that keep it so by [@nlebovits](https://github.com/nlebovits) in [#1372](https://github.com/geoparquet/geoparquet-io/pull/1372)
+- feat(api)!: bring the Python API to parity with the CLI, with one parity registry and WriteOptions by [@nlebovits](https://github.com/nlebovits) in [#1437](https://github.com/geoparquet/geoparquet-io/pull/1437)
+- fix(convert)!: refuse GeoPackage, FlatGeobuf, Shapefile and CSV exports that would lose non-planar edges by [@cholmes](https://github.com/cholmes) in [#1445](https://github.com/geoparquet/geoparquet-io/pull/1445)
+- fix(check)!: judge spatial order by pruning, not consecutive-pair overlap ([#755](https://github.com/geoparquet/geoparquet-io/issues/755)) by [@cholmes](https://github.com/cholmes) in [#774](https://github.com/geoparquet/geoparquet-io/pull/774)
+
+### Added
+
+- feat(api): preview the row groups and estimated rows/bytes a bbox read would touch, before reading by [@cholmes](https://github.com/cholmes) in [#1312](https://github.com/geoparquet/geoparquet-io/pull/1312)
+- feat(convert): filter geopackage, flatgeobuf and csv output with --bbox, --geometry and --where by [@cholmes](https://github.com/cholmes) in [#1315](https://github.com/geoparquet/geoparquet-io/pull/1315)
+- feat(core): add the bbox preview to the embeddable vendoring surface by [@cholmes](https://github.com/cholmes) in [#1323](https://github.com/geoparquet/geoparquet-io/pull/1323)
+- feat(deps): run on DuckDB 2.0 as well as 1.5 by [@cholmes](https://github.com/cholmes) in [#1355](https://github.com/geoparquet/geoparquet-io/pull/1355)
+- feat(deps): install a5 from the Query.Farm repository on DuckDB 2.0 by [@cholmes](https://github.com/cholmes) in [#1360](https://github.com/geoparquet/geoparquet-io/pull/1360)
+- feat(api): ship py.typed and real type checking for the public Python API by [@cholmes](https://github.com/cholmes) in [#1444](https://github.com/geoparquet/geoparquet-io/pull/1444)
+- feat(api): one remote-access options object, built once by the CLI decorators by [@cholmes](https://github.com/cholmes) in [#1447](https://github.com/geoparquet/geoparquet-io/pull/1447)
+- feat(check): one check-options object shared by check, fix and the API by [@cholmes](https://github.com/cholmes) in [#1449](https://github.com/geoparquet/geoparquet-io/pull/1449)
+
+### Changed
+
+- refactor(core): import geoparquet_io without pulling in click or duckdb by [@cholmes](https://github.com/cholmes) in [#1313](https://github.com/geoparquet/geoparquet-io/pull/1313)
+- perf(simplify): fold stats and scatter output with array kernels instead of per-row Python by [@cholmes](https://github.com/cholmes) in [#1303](https://github.com/geoparquet/geoparquet-io/pull/1303)
+- perf(simplify): feed coverage mode coarsen's WKB kernel when no CRS transform runs by [@cholmes](https://github.com/cholmes) in [#1339](https://github.com/geoparquet/geoparquet-io/pull/1339)
+- perf(inspect): preview and meta skip the spatial extension on DuckDB 2.0 by [@cholmes](https://github.com/cholmes) in [#1357](https://github.com/geoparquet/geoparquet-io/pull/1357)
+- perf(convert): write GeoJSON with DuckDB 2.0's native writer where output is identical by [@cholmes](https://github.com/cholmes) in [#1358](https://github.com/geoparquet/geoparquet-io/pull/1358)
+- refactor(extract): route every HTTP retry through one policy in http_retry ([#1367](https://github.com/geoparquet/geoparquet-io/issues/1367) T4a) by [@nlebovits](https://github.com/nlebovits) in [#1374](https://github.com/geoparquet/geoparquet-io/pull/1374)
+- refactor(core): one owner for DuckDB version differences and one size parser ([#1367](https://github.com/geoparquet/geoparquet-io/issues/1367) T1a, T1b) by [@nlebovits](https://github.com/nlebovits) in [#1375](https://github.com/geoparquet/geoparquet-io/pull/1375)
+- refactor(core): one query-schema probe, one native-geo-type probe, one row-group bbox reader ([#1367](https://github.com/geoparquet/geoparquet-io/issues/1367) T1c) by [@nlebovits](https://github.com/nlebovits) in [#1382](https://github.com/geoparquet/geoparquet-io/pull/1382)
+- refactor(errors): one failure classifier, one status mapping and one sanitizing path in core/exceptions ([#1367](https://github.com/geoparquet/geoparquet-io/issues/1367) T4b) by [@nlebovits](https://github.com/nlebovits) in [#1377](https://github.com/geoparquet/geoparquet-io/pull/1377)
+- refactor(core): one spatial-join builder and one SQL literal escape by [@nlebovits](https://github.com/nlebovits) in [#1386](https://github.com/geoparquet/geoparquet-io/pull/1386)
+- perf(tests): parse the tree once per worker for the owner guards and the result-API guard by [@nlebovits](https://github.com/nlebovits) in [#1408](https://github.com/geoparquet/geoparquet-io/pull/1408)
+- perf(core): load and verify the spatial extension once per process by [@nlebovits](https://github.com/nlebovits) in [#1425](https://github.com/geoparquet/geoparquet-io/pull/1425)
+- perf: fix the [#1368](https://github.com/geoparquet/geoparquet-io/issues/1368) perf costs at their owners by [@nlebovits](https://github.com/nlebovits) in [#1426](https://github.com/geoparquet/geoparquet-io/pull/1426)
+- perf: reduce CLI startup, admin aggregation memory, and export staging by [@nlebovits](https://github.com/nlebovits) in [#1427](https://github.com/geoparquet/geoparquet-io/pull/1427)
+- refactor(core): parse the geo block once and route geometry/CRS detection through their owners by [@nlebovits](https://github.com/nlebovits) in [#1434](https://github.com/geoparquet/geoparquet-io/pull/1434)
+- refactor(api): one canonical name per twin, with every naming exception reasoned in the parity registry by [@cholmes](https://github.com/cholmes) in [#1450](https://github.com/geoparquet/geoparquet-io/pull/1450)
+- perf(admin): bound cold Overture admin joins, resume interrupted cache builds, and stream Arrow in batches across pipes by [@nlebovits](https://github.com/nlebovits) in [#1455](https://github.com/geoparquet/geoparquet-io/pull/1455)
+- refactor(sort): run all four sorts through one pipeline, keep geometry metadata across streams, and redact credentials in diagnostics by [@nlebovits](https://github.com/nlebovits) in [#1456](https://github.com/geoparquet/geoparquet-io/pull/1456)
+- perf(core): reuse the shared DuckDB database for bounded reads, and fix the CI failures left on main by [@nlebovits](https://github.com/nlebovits) in [#1460](https://github.com/geoparquet/geoparquet-io/pull/1460)
+
+### Fixed
+
+- fix(cli): reject --exact with a typed --approx even when it equals the default by [@SAY-5](https://github.com/SAY-5) in [#1328](https://github.com/geoparquet/geoparquet-io/pull/1328)
+- fix(polygonize): repair the self-touching rings the tracer emits at pixel corners by [@cholmes](https://github.com/cholmes) in [#1304](https://github.com/geoparquet/geoparquet-io/pull/1304)
+- fix(core): open DuckDB connections without psutil so embedding hosts can call the surface by [@cholmes](https://github.com/cholmes) in [#1336](https://github.com/geoparquet/geoparquet-io/pull/1336)
+- fix(core): handle VARIANT property columns in extract, sort and inspect previews by [@cholmes](https://github.com/cholmes) in [#1362](https://github.com/geoparquet/geoparquet-io/pull/1362)
+- fix(convert): keep nested columns, honour --layer-name and read BLOB WKB in the GDAL writers ([#1367](https://github.com/geoparquet/geoparquet-io/issues/1367) T5d) by [@nlebovits](https://github.com/nlebovits) in [#1381](https://github.com/geoparquet/geoparquet-io/pull/1381)
+- fix(carto): bound HTTP retries and unblock Windows CI by [@nlebovits](https://github.com/nlebovits) in [#1423](https://github.com/geoparquet/geoparquet-io/pull/1423)
+- fix(docs): keep the Python API page layout intact in the table of contents by [@nlebovits](https://github.com/nlebovits) in [#1431](https://github.com/geoparquet/geoparquet-io/pull/1431)
+- fix(geojson): type the staged FeatureCollection output so mypy passes on Windows by [@nlebovits](https://github.com/nlebovits) in [#1435](https://github.com/geoparquet/geoparquet-io/pull/1435)
+- fix(write): name the VARIANT column DuckDB 1.5 cannot export, instead of raising OSError by [@cholmes](https://github.com/cholmes) in [#1448](https://github.com/geoparquet/geoparquet-io/pull/1448)
+- fix(simplify): never flush a row group holding only null or empty geometries by [@cholmes](https://github.com/cholmes) in [#1443](https://github.com/geoparquet/geoparquet-io/pull/1443)
+- fix(write): read GeoArrow-native geometry as what it is on every write path by [@cholmes](https://github.com/cholmes) in [#1446](https://github.com/geoparquet/geoparquet-io/pull/1446)
+- fix(write): rebuild geometry metadata on rewrite, keep remote partition metadata, and cut export, repair and eager-read memory by [@nlebovits](https://github.com/nlebovits) in [#1457](https://github.com/geoparquet/geoparquet-io/pull/1457)
+
+### Documentation
+
+- docs(embedding): name the call-time dependencies and the Python 3.10 import floor by [@cholmes](https://github.com/cholmes) in [#1337](https://github.com/geoparquet/geoparquet-io/pull/1337)
+- docs(process): record that bounded aggregates spill and complete on DuckDB 1.5 and 2.0 by [@cholmes](https://github.com/cholmes) in [#1363](https://github.com/geoparquet/geoparquet-io/pull/1363)
+- docs: current SECURITY.md policy and a code of conduct by [@cholmes](https://github.com/cholmes) in [#1441](https://github.com/geoparquet/geoparquet-io/pull/1441)
+- docs(extract): make the extract source.coop example work on DuckDB 1.5.6 by [@cholmes](https://github.com/cholmes) in [#1442](https://github.com/geoparquet/geoparquet-io/pull/1442)
+- docs: add conda install, a conda-forge badge and a real quickstart to the README by [@cholmes](https://github.com/cholmes) in [#1440](https://github.com/geoparquet/geoparquet-io/pull/1440)
+- docs: document every CLI option and fix two stale guide examples by [@cayetanobv](https://github.com/cayetanobv) in [#1470](https://github.com/geoparquet/geoparquet-io/pull/1470)
+
+_12 internal changes and 9 dependency updates are not listed here; the full changelog has them._
+
+**Full Changelog**: https://github.com/geoparquet/geoparquet-io/compare/v1.7.0...v1.8.0
+
 ## v1.7.0 (2026-10-16)
 
 The theme of this release is getting data in and out of gpio without losing what it means. Shapefiles in Shift_JIS and other codepages now decode to valid UTF-8, so Japanese and other non-Latin attribute text survives conversion, and gpio refuses to write invalid strings. A CRS with no EPSG code, such as a custom projection, is now reprojected correctly instead of being read as lon/lat, and an unknown CRS stays unknown instead of being guessed, marked `srid:0` on native 2.0 types. Every command reads the primary geometry's CRS, CARTO extracts carry the table's real CRS, and CRS and non-planar edges survive writes, partitions, IPC pipes and Table API aggregation and overviews. Native GEOGRAPHY output now carries geodesic file and row-group bounds, and Table operations accept spherical geometry and warn when they use planar math.
