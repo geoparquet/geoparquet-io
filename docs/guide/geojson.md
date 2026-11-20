@@ -96,6 +96,10 @@ For a simpler PMTiles workflow, use the built-in `gpio pmtiles` command. It prov
 
     # Add layer metadata to the output PMTiles based on the values of column 'owner'
     gpio pmtiles create --layer-by-column owner data.parquet tiles.pmtiles
+
+    # Zoom range and an attribution line for the map
+    gpio pmtiles create buildings.parquet buildings.pmtiles --min-zoom 4 --max-zoom 14 \
+      --attribution '&copy; OpenStreetMap contributors'
     ```
 
     <!-- doctest: skip="filters on 'population', a column the sample data does not have" -->
@@ -163,6 +167,8 @@ The command handles the entire pipeline internally (reprojection → filtering �
 #### Tuning tile generation (dense data)
 
 By default `gpio pmtiles create` runs tippecanoe with `--no-tile-size-limit` and `--drop-densest-as-needed`. This is a max-fidelity setting: nothing is dropped, so tiles can grow without bound. `--drop-densest-as-needed` only drops features to bring a tile back **under the size limit**, so while the limit is off it never fires.
+
+It also passes `--simplify-only-low-zooms` and `--no-simplification-of-shared-nodes`, which keeps the edges that neighbouring polygons share aligned after simplification. Each default has an opposite flag that turns it off: `--no-simplify-only-low-zooms`, `--simplification-of-shared-nodes`, and so on.
 
 For national- or global-overview maps over dense data, re-enable the size limit so feature dropping actually happens. Each flag is individually toggleable; the defaults reproduce the historical behavior.
 
@@ -350,6 +356,12 @@ Levels come from [`gpio process overview`](process-overview.md) — existing `_r
     # Country cells -> region cells -> raw polygons in one archive
     gpio pmtiles pyramid by_region.parquet out.pmtiles \
         --include-features --features-source buildings.parquet --max-zoom 8
+
+    # Start the raw features at zoom 12 (default: one past the base band's
+    # max zoom), with an attribution line
+    gpio pmtiles pyramid by_region.parquet out.pmtiles \
+        --include-features --features-source buildings.parquet --features-min-zoom 12 \
+        --attribution '&copy; OpenStreetMap contributors'
     ```
 
 === "Python"

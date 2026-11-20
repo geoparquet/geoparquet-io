@@ -626,6 +626,8 @@ Partition by balanced spatial partitions:
 **Column behavior:**
 - Similar to H3: excluded by default, included for Hive
 - Use `--keep-kdtree-column` to explicitly keep
+- Use `--kdtree-name` to partition by a KD-tree column with another name
+  (default: `kdtree_cell`), such as one written by `gpio add kdtree --kdtree-name`
 
 If KD-tree column doesn't exist, it's automatically added.
 

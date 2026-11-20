@@ -65,6 +65,16 @@ Sort by quadkey for spatial locality:
 gpio sort quadkey input.parquet output.parquet [OPTIONS]
 ```
 
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--quadkey-name` | quadkey | Quadkey column to sort by. A missing default `quadkey` column is added; a missing custom name is an error |
+| `--resolution` | 13 | Zoom level (0-23) when the column is added |
+| `--use-centroid` | - | Key on the geometry centroid instead of the bbox midpoint when the column is added |
+| `--remove-quadkey-column` | - | Drop the quadkey column from the output after sorting |
+
+It also takes the compression, row-group, GeoParquet version, overwrite,
+verbosity and SQL-display options of `hilbert`.
+
 ### column
 
 Sort by any column(s):

@@ -554,6 +554,49 @@ gpio add a5 input.parquet output.parquet --resolution 12
 gpio add a5 input.parquet output.parquet --row-group-size-mb 256MB
 ```
 
+## Quadkey Tiles
+
+Add [quadkey](https://learn.microsoft.com/en-us/bingmaps/articles/bing-maps-tile-system)
+tile IDs: each tile's x, y and zoom encoded as one string, a compact index for
+tile-based systems. The key uses the bbox column's midpoint when the file has
+one, and the geometry centroid otherwise.
+
+=== "CLI"
+
+    ```bash
+    gpio add quadkey input.parquet output.parquet --resolution 13
+    ```
+
+=== "Python"
+
+    ```python
+    import geoparquet_io as gpio
+
+    gpio.read('input.parquet').add_quadkey(resolution=13).write('output.parquet')
+
+    # Custom column name, keyed on the centroid even when a bbox column exists
+    gpio.read('input.parquet').add_quadkey(
+        column_name='tile', resolution=12, use_centroid=True
+    ).write('output.parquet')
+    ```
+
+**Options:**
+
+<!-- doctest: menu -->
+```bash
+# Custom column name
+gpio add quadkey input.parquet output.parquet --quadkey-name tile
+
+# Different zoom level (0-23, default 13)
+gpio add quadkey input.parquet output.parquet --resolution 16
+
+# Key on the geometry centroid instead of the bbox midpoint
+gpio add quadkey input.parquet output.parquet --use-centroid
+```
+
+`gpio sort quadkey` and `gpio partition quadkey` add this column themselves
+when it is missing.
+
 ## KD-Tree Partitions
 
 Add balanced spatial partition IDs using KD-tree:
@@ -621,6 +664,9 @@ gpio add kdtree input.parquet output.parquet --auto 200000
 
 # Custom sample size for approximate mode
 gpio add kdtree input.parquet output.parquet --approx 200000
+
+# Custom column name (default: kdtree_cell)
+gpio add kdtree input.parquet output.parquet --kdtree-name kd_cell
 
 # Track progress
 gpio add kdtree input.parquet output.parquet --verbose

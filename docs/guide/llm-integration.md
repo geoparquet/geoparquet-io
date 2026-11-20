@@ -13,6 +13,9 @@ gpio skills --show
 
 # Copy skill to current directory
 gpio skills --copy .
+
+# Pick a skill by name (default: geoparquet)
+gpio skills --show --name geoparquet
 ```
 
 ## Using with LLMs

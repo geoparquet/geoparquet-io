@@ -38,6 +38,12 @@ Runs all validation checks:
 - GeoParquet v2.0 upgrade recommendation (for v1.1 files)
 - Spec validation
 
+`--spec-details` prints the full spec validation report instead of its
+summary. `--pmtiles` requires `--fix` and
+[tippecanoe](https://github.com/felt/tippecanoe): after the fixes, it writes a
+PMTiles archive next to the fixed file, with the same name and a `.pmtiles`
+extension.
+
 ## Exit Codes
 
 Every `check` subcommand — `all`, `bbox`, `compression`, `optimization`,
@@ -693,6 +699,9 @@ Reports which columns have bloom filters, coverage percentages, and total bloom 
 
     # JSON output for CI/CD
     gpio check spec data.parquet --json
+
+    # Check the data against the metadata on every row, not a 1,000-row sample
+    gpio check spec data.parquet --sample-size 0
     ```
 
 === "Python"

@@ -14,4 +14,6 @@
 --hive             # Use Hive-style partitioning
 --overwrite        # Overwrite existing files
 --aws-profile NAME # AWS profile for S3 operations
+--any-extension    # Allow an output path without a .parquet extension
+                   # (add, extract, sort, convert geoparquet/reproject)
 ```
