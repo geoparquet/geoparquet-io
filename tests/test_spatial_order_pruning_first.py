@@ -455,7 +455,10 @@ class TestMetricScalesToLargeFooters:
         elapsed = time.perf_counter() - start
 
         assert metrics["skip_rate_efficiency"] is not None
-        assert elapsed < 10.0, f"metric took {elapsed:.1f}s at 5,000 groups"
+        # The pure-Python loop needed ~137 s here; a loaded Windows runner
+        # under xdist measured the numpy pass at 12 s, so the bound sits
+        # between the two with real margin on both sides.
+        assert elapsed < 30.0, f"metric took {elapsed:.1f}s at 5,000 groups"
 
 
 class TestFullTiling:
