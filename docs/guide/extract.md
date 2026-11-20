@@ -578,6 +578,9 @@ Limit the number of rows extracted, useful for testing or sampling:
     ```bash
     # Extract first 1000 matching rows
     gpio extract data.parquet sample.parquet --limit 1000
+
+    # Skip reading the input's total row count (one footer read per file)
+    gpio extract data.parquet sample_nocount.parquet --limit 1000 --skip-count
     ```
 
     <!-- doctest: skip="filters on 'category', a column the sample data does not have" -->
@@ -1607,6 +1610,7 @@ For datasets with 1 million+ features, use parallel pagination to avoid server t
 | `--page-size` | 100000 | Features per WFS request page |
 | `--parallel-layers` | 1 | Concurrent layer extraction for multi-layer requests |
 | `--auto-tile` | enabled | Auto-subdivide bbox when server caps response |
+| `--sort-by` | auto-detected | Attribute that orders the pages, so none repeat or go missing. GeoServer needs it for a layer without a primary key; left unset, it is read from DescribeFeatureType |
 
 !!! tip "Auto-Tiling for Capped Servers"
     Many WFS servers impose maxFeatures limits (e.g., 1M features). When gpio detects a capped response, it automatically subdivides the bbox and fetches all features. Disable with `--no-auto-tile` if you want the capped response.

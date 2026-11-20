@@ -754,8 +754,9 @@ linearized.
 
 Note this **alters the geometry**: arcs become chains of straight segments,
 sampled every 4° of arc by default (GDAL's default; ~0.08% area error on a
-full circle). Earlier gpio versions failed on curved input — opt out with
-`--no-linearize-curves` to keep that strict behavior.
+full circle). Earlier gpio versions failed on curved input — linearizing
+(`--linearize-curves`) is the default, and `--no-linearize-curves` keeps that
+strict behavior.
 
 === "CLI"
 
@@ -1161,6 +1162,10 @@ fail with "No geometry column detected".
 The lat/lon columns are replaced by a single `geometry` column; every other
 column is carried through. A row missing a coordinate keeps its attributes and
 gets NULL geometry.
+
+When auto-detection finds no geometry and no columns are named, the conversion
+fails with "No geometry column detected". Pass `--allow-no-geometry` to write
+the table as plain Parquet instead.
 
 ### What Auto-Detection Looks For
 

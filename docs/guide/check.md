@@ -38,6 +38,12 @@ Runs all validation checks:
 - GeoParquet v2.0 upgrade recommendation (for v1.1 files)
 - Spec validation
 
+`--spec-details` prints the full spec validation report instead of its
+summary. `--pmtiles` requires `--fix` and
+[tippecanoe](https://github.com/felt/tippecanoe): it writes a PMTiles archive
+next to each file it fixed, with the same name and a `.pmtiles` extension. A
+file that needed no fix, or whose fix failed, gets no archive.
+
 ## Exit Codes
 
 Every `check` subcommand — `all`, `bbox`, `compression`, `optimization`,
@@ -647,7 +653,7 @@ The `gpio check spatial` command also reports spatial filter pushdown readiness 
 Shows:
 
 - **Row group count** and bbox coverage
-- **Estimated skip rate** - percentage of row groups that can be skipped for representative spatial queries
+- **Estimated skip rate** - expected share of the file's bytes a spatial query skips. The query window spans 10% of a row group's box in each dimension and lands where the rows are, and each row group counts by its compressed size
 - **Avg bbox area ratio** - how tight the row group bounding boxes are
 
 It counts toward the verdict where it is advice: low pushdown efficiency on a
@@ -693,6 +699,9 @@ Reports which columns have bloom filters, coverage percentages, and total bloom 
 
     # JSON output for CI/CD
     gpio check spec data.parquet --json
+
+    # Check the data against the metadata on every row, not a 1,000-row sample
+    gpio check spec data.parquet --sample-size 0
     ```
 
 === "Python"
