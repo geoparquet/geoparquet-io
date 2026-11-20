@@ -71,6 +71,7 @@ gpio sort quadkey input.parquet output.parquet [OPTIONS]
 | `--resolution` | 13 | Zoom level (0-23) when the column is added |
 | `--use-centroid` | - | Key on the geometry centroid instead of the bbox midpoint when the column is added |
 | `--remove-quadkey-column` | - | Drop the quadkey column from the output after sorting |
+| `--allow-schema-diff` | - | Combine input files with different schemas, filling NULL for missing columns |
 
 It also takes the compression, row-group, GeoParquet version, overwrite,
 verbosity and SQL-display options of `hilbert`.

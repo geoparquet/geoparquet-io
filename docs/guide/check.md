@@ -40,9 +40,9 @@ Runs all validation checks:
 
 `--spec-details` prints the full spec validation report instead of its
 summary. `--pmtiles` requires `--fix` and
-[tippecanoe](https://github.com/felt/tippecanoe): after the fixes, it writes a
-PMTiles archive next to the fixed file, with the same name and a `.pmtiles`
-extension.
+[tippecanoe](https://github.com/felt/tippecanoe): it writes a PMTiles archive
+next to each file it fixed, with the same name and a `.pmtiles` extension. A
+file that needed no fix, or whose fix failed, gets no archive.
 
 ## Exit Codes
 
