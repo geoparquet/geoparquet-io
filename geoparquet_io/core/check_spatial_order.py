@@ -641,20 +641,6 @@ def _compute_data_extent(row_group_bboxes: list[dict], *, geographic: bool = Fal
     return dict(zip(("xmin", "ymin", "xmax", "ymax"), bbox_xy(bbox), strict=True))
 
 
-def _axis_overlap_share(a0: float, a1: float, g0: float, g1: float, half: float) -> float:
-    """Chance a centre coordinate drawn uniformly on ``[a0, a1]`` lands in the
-    target ``[g0, g1]`` grown by ``half`` on each side.
-
-    A span with no width puts all its probability on ``a0`` (the spec's
-    single-coordinate rule), which is also what makes a zero-size axis judge
-    on the other axis alone.
-    """
-    g0, g1 = g0 - half, g1 + half
-    if a1 <= a0:
-        return 1.0 if g0 <= a0 <= g1 else 0.0
-    return min(1.0, max(0.0, (min(a1, g1) - max(a0, g0)) / (a1 - a0)))
-
-
 def _weighted_skip_rate(
     boxes: list[dict],
     rows: list[float] | None = None,
@@ -684,14 +670,17 @@ def _weighted_skip_rates(
     """:func:`_weighted_skip_rate` at several window fractions in one pass.
 
     The n-by-n axis-overlap sum is vectorized with numpy and walked in source
-    blocks, so a footer with thousands of row groups scores in well under a
-    second instead of minutes (review of #774), and the block arrays stay a
-    few megabytes however many groups the footer holds. Only the window
-    half-sizes change between fractions, so every fraction reuses the same
-    block slices. Per source block and fraction, the axis share is the
-    scalar form's algebra: the target grown by half a window, clipped against
-    the source span, with a zero-width source span counting 1 when its point
-    lies inside the grown target.
+    blocks, so a footer with thousands of row groups scores in seconds
+    instead of minutes (review of #774). A block holds up to a million
+    float64 elements -- 8 MB per array, with roughly ten such temporaries
+    live at once, so peak extra memory stays near 80 MB however many groups
+    the footer holds (the review measured 325 MB at the earlier four-million
+    block).
+    Only the window half-sizes change between fractions, so every fraction
+    reuses the same block slices. Per source block and fraction, the axis
+    share is the scalar form's algebra: the target grown by half a window,
+    clipped against the source span, with a zero-width source span counting
+    1 when its point lies inside the grown target.
     """
     if not boxes:
         return [0.0] * len(fractions)
@@ -707,7 +696,7 @@ def _weighted_skip_rates(
     byte_share = size_weights / size_weights.sum()
     span_x, span_y = x1 - x0, y1 - y0
     reads = [0.0] * len(fractions)
-    block = max(1, (1 << 22) // n)
+    block = max(1, 1_000_000 // n)
     for start in range(0, n, block):
         rows_slice = slice(start, start + block)
         sx0, sx1 = x0[rows_slice, None], x1[rows_slice, None]

@@ -3,11 +3,26 @@
 import pytest
 
 from geoparquet_io.core.check_spatial_order import (
-    _axis_overlap_share,
     _compute_data_extent,
     _weighted_skip_rate,
     check_spatial_pushdown_readiness,
 )
+
+
+def _axis_overlap_share(a0: float, a1: float, g0: float, g1: float, half: float) -> float:
+    """The scalar reference form of the vectorized axis overlap.
+
+    The chance a centre coordinate drawn uniformly on ``[a0, a1]`` lands in
+    the target ``[g0, g1]`` grown by ``half`` on each side; a span with no
+    width puts all its probability on ``a0`` (the spec's single-coordinate
+    rule). ``_weighted_skip_rates`` computes exactly this algebra over numpy
+    blocks, so this module pins the definition here and cross-checks the
+    vectorized path against it (review of #774).
+    """
+    g0, g1 = g0 - half, g1 + half
+    if a1 <= a0:
+        return 1.0 if g0 <= a0 <= g1 else 0.0
+    return min(1.0, max(0.0, (min(a1, g1) - max(a0, g0)) / (a1 - a0)))
 
 
 class TestComputeDataExtent:
