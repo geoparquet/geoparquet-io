@@ -109,7 +109,11 @@
 # +3 (#1149): isolate requested-level retry from housekeeping, pin failed
 # default COPY publication, and count HTTP bytes for cold bounded admin joins.
 # +2: the combined bbox and sort fix asks the batch rule (judged and withheld).
-max_collected = 15069
+# +5 (#1473): replace one skipped missing-layer test with four real-file API
+# cases (two readers x GeoPackage/FileGDB), plus two CLI refusal cases.
+# +11: eight adversarial membership/positive FileGDB controls, plus three
+# FileGDB 9.2/9.3 and raster-only compatibility controls.
+max_collected = 15085
 max_timeout_marks = 1
 slow_mark_sites = [
   "docs_examples/collector.py::DocExampleItem._apply_marks",

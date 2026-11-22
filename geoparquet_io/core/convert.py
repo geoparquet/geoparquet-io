@@ -87,6 +87,7 @@ from geoparquet_io.core.geometry_repair import (
     repair_arrow_table_geometry,
     repair_query_geometry,
 )
+from geoparquet_io.core.layers import _spatial_layer_metadata
 from geoparquet_io.core.logging_config import configure_verbose, debug, progress, success, warn
 from geoparquet_io.core.memory_limits import _EAGER_BYTES_PER_THREAD, scoped_bounded_connection
 from geoparquet_io.core.parquet_writer import resolve_output_geoparquet_version, version_to_describe
@@ -385,27 +386,31 @@ def _duplicate_column_error(error: Exception) -> bool:
     return isinstance(error, duckdb.BinderException) and "duplicate column name" in str(error)
 
 
-def _st_read_layer_meta(con, input_path: str, layer: str | None) -> tuple[str, list[str]] | None:
+def _st_read_layer_meta(
+    con, input_path: str, layer: str | None, *, required: bool = False
+) -> tuple[str, list[str]] | None:
     """``(driver, column names)`` for the layer ``ST_Read`` would read.
 
     ``ST_Read_Meta`` binds even when ``ST_Read`` itself does not, which is what
     makes the collision recoverable at all: it is the only way to learn the
     column names of a file whose names the binder refuses.
+
+    A required layer must exist before binding ``ST_Read``: a missing layer
+    can crash the native reader instead of raising a Python exception.
     """
-    row = fetch_one(
-        con.execute(f"SELECT driver_short_name, layers FROM ST_Read_Meta({sql_path(input_path)})")
-    )
-    if not row or not row[1]:
+    row = _spatial_layer_metadata(con, input_path)
+    layers = row[1] if row else []
+    chosen = next((entry for entry in layers if not layer or entry["name"] == layer), None)
+    if chosen is None:
+        if required:
+            available = ", ".join(entry["name"] for entry in layers) or "(none)"
+            raise InvalidParameterError(
+                "layer", f"Layer {layer!r} not found in {input_path}. Available layers: {available}"
+            )
         return None
-    driver, layers = row[0], row[1]
-    chosen = layers[0]
-    if layer:
-        chosen = next((entry for entry in layers if entry["name"] == layer), None)
-        if chosen is None:
-            return None
     fields = [field["name"] for field in chosen["fields"]]
     geometries = [geom["name"] for geom in chosen["geometry_fields"]]
-    return driver, fields + geometries
+    return row[0], fields + geometries
 
 
 def _st_read_column_count(
@@ -529,6 +534,9 @@ def _detect_geometry_column(
 
     if verbose:
         debug("Detecting geometry column from input...")
+
+    if layer:
+        _st_read_layer_meta(con, input_file, layer, required=True)
 
     table_expr = _build_st_read_expr(
         input_file, layer, open_options=open_options, column_aliases=column_aliases

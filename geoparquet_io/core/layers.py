@@ -120,26 +120,8 @@ def _list_geopackage_layers(path: str) -> list[str] | None:
 
 
 def _list_filegdb_layers(path: str) -> list[str] | None:
-    """
-    List layers in a FileGDB directory using DuckDB's OpenFileGDB driver.
-
-    First attempts to read the GDB_Items catalog table (a00000004.gdbtable),
-    falling back to iterating .gdbtable files if that fails.
-
-    Args:
-        path: Path to the FileGDB directory (.gdb)
-
-    Returns:
-        List of layer names if 2+ layers, None otherwise
-
-    Raises:
-        FileNotFoundError: If directory doesn't exist
-        RuntimeError: If DuckDB can't read the FileGDB
-    """
-    # Normalize path
+    """List real layer names without assuming a fixed FileGDB catalog ID."""
     path = os.path.normpath(path)
-    debug(f"Listing layers in FileGDB: {path}")
-
     if not os.path.isdir(path):
         raise FileNotFoundError(f"FileGDB directory not found: {path}")
 
@@ -147,126 +129,95 @@ def _list_filegdb_layers(path: str) -> list[str] | None:
 
     con = get_duckdb_connection(load_spatial=True)
     try:
-        layers = _list_filegdb_via_catalog(path, con)
-    except (FileNotFoundError, ValueError, RuntimeError) as e:
-        debug(f"Catalog approach failed ({e}), trying fallback method")
-        try:
-            layers = _list_filegdb_layers_fallback(path, con)
-        except RuntimeError:
-            raise  # Re-raise if fallback also fails
+        metadata = _spatial_layer_metadata(con, path)
+        layers = sorted({layer["name"] for layer in metadata[1]}) if metadata else []
+    except Exception as error:
+        raise RuntimeError(f"Failed to enumerate FileGDB layers: {path}. Error: {error}") from error
     finally:
         con.close()
-
-    # Return None for 0 or 1 layers
-    if len(layers) <= 1:
-        debug(f"FileGDB has {len(layers)} layer(s), returning None")
-        return None
-
-    return layers
+    return layers if len(layers) > 1 else None
 
 
-def _list_filegdb_via_catalog(path: str, con) -> list[str]:
-    """
-    List FileGDB layers by querying the GDB_Items catalog table.
-
-    The a00000004.gdbtable file contains the catalog of all items in the GDB.
-    This is faster than iterating through all .gdbtable files.
-
-    Args:
-        path: Path to the FileGDB directory
-        con: DuckDB connection with spatial extension loaded
-
-    Returns:
-        List of layer names (may be empty)
-
-    Raises:
-        FileNotFoundError: If catalog table doesn't exist
-        RuntimeError: If query fails
-    """
-    # The catalog table is at a fixed location in FileGDB structure
-    # This is part of the ESRI FileGDB specification
-    gdb_items_path = os.path.join(path, "a00000004.gdbtable")
-
-    if not os.path.exists(gdb_items_path):
-        raise FileNotFoundError(f"FileGDB catalog table not found: {gdb_items_path}")
-
-    try:
-        result = con.execute(
-            f"""
-            SELECT DISTINCT Name
-            FROM ST_Read({sql_path(gdb_items_path)})
-            WHERE Name IS NOT NULL
-              AND Name NOT LIKE 'GDB_%'
-              AND PhysicalName IS NOT NULL
-            ORDER BY Name
-            """
-        ).fetchall()
-
-        layers = [row[0] for row in result]
-        debug(f"Found {len(layers)} layer(s) via catalog table")
-        return layers
-
-    except Exception as e:
-        raise RuntimeError(f"Failed to query FileGDB catalog: {gdb_items_path}. Error: {e}") from e
-
-
-def _list_filegdb_layers_fallback(path: str, con) -> list[str]:
-    """
-    Fallback method: enumerate layers by trying ST_Read_Meta on each .gdbtable file.
-
-    This is slower but more robust when the catalog table approach fails
-    (e.g., for older or non-standard FileGDB structures).
-
-    Args:
-        path: Path to the FileGDB directory
-        con: DuckDB connection with spatial extension loaded
-
-    Returns:
-        List of layer names (may be empty)
-
-    Raises:
-        RuntimeError: If no layers can be read
-    """
-    debug(f"Using fallback method to enumerate FileGDB layers: {path}")
-
-    gdbtable_files = sorted(
-        [f for f in os.listdir(path) if f.endswith(".gdbtable")],
-        reverse=True,  # Higher-numbered files are typically user tables
-    )
-
-    if not gdbtable_files:
-        raise RuntimeError(f"No .gdbtable files found in FileGDB: {path}")
-
-    layers = []
-    errors = []
-
-    for table_file in gdbtable_files:
-        table_path = os.path.join(path, table_file)
-        try:
-            result = fetch_one(con.execute(f"SELECT * FROM ST_Read_Meta({sql_path(table_path)})"))
-
-            if result and result[0]:  # layer_name is first column
-                layer_name = result[0]
-                # Skip internal GDB tables
-                if not layer_name.startswith("GDB_"):
-                    layers.append(layer_name)
-                    debug(f"Found layer: {layer_name}")
-
-        except Exception as e:
-            # Track errors but continue - some .gdbtable files are not spatial
-            errors.append(f"{table_file}: {e}")
-            continue
-
-    if not layers and errors:
-        # All .gdbtable reads failed - this indicates corruption, not empty GDB
-        error_summary = "; ".join(errors[:3])
-        if len(errors) > 3:
-            error_summary += f" (and {len(errors) - 3} more)"
-        raise RuntimeError(
-            f"Failed to read any layers from FileGDB: {path}. Errors: {error_summary}"
+def _filegdb_raster_names(con, tables: dict[str, str]) -> set[str]:
+    """Raster datasets and their backing tables are not vector layers in GDAL."""
+    if "GDB_Items" in tables:
+        query = (
+            f"SELECT items.Name FROM ST_Read({sql_path(tables['GDB_Items'])}) items "
+            f"JOIN ST_Read({sql_path(tables['GDB_ItemTypes'])}) types ON items.Type = types.UUID "
+            "WHERE types.Name = 'Raster Dataset'"
         )
+    elif "GDB_FeatureClasses" in tables and "GDB_ObjectClasses" in tables:
+        query = (
+            f"SELECT objects.Name FROM ST_Read({sql_path(tables['GDB_FeatureClasses'])}) features "
+            f"JOIN ST_Read({sql_path(tables['GDB_ObjectClasses'])}) objects "
+            "ON features.ObjectClassID = objects.ID WHERE features.FeatureType = 14"
+        )
+    else:
+        raise RuntimeError("FileGDB has no recognized dataset catalog")
+    rasters = {row[0].casefold() for row in con.execute(query).fetchall()}
+    return {
+        prefix + name
+        for name in rasters
+        for prefix in ("", "fras_ras_", "fras_aux_", "fras_bnd_", "fras_blk_")
+    }
 
-    return sorted(set(layers))
+
+def _filegdb_layer_metadata(con, path: str) -> tuple[str, list[dict]]:
+    """Read only tables registered in the FileGDB's system catalog.
+
+    A loose physical table is not necessarily a selectable dataset layer.
+    GDB_SystemCatalog maps its row IDs to the physical hexadecimal file IDs;
+    unlike GDB_Items, its location is fixed by the FileGDB format.
+    """
+    catalog = os.path.join(path, "a00000001.gdbtable")
+    catalog_meta = _spatial_layer_metadata(con, catalog)
+    if not catalog_meta or catalog_meta[0] != "OpenFileGDB":
+        raise RuntimeError(f"Cannot read FileGDB system catalog: {path}")
+    entries = con.execute(
+        f"SELECT ID, Name, FileFormat FROM ST_Read({sql_path(catalog)})"
+    ).fetchall()
+    tables = {
+        name: os.path.join(path, f"a{table_id:08x}.gdbtable")
+        for table_id, name, file_format in entries
+        if file_format == 0 and name
+    }
+    rasters = _filegdb_raster_names(con, tables)
+    registered = {
+        name: filename
+        for name, filename in tables.items()
+        if not name.casefold().startswith(("gdb_", "vat_")) and name.casefold() not in rasters
+    }
+    if not registered:
+        return "OpenFileGDB", []
+    sources = ", ".join(sql_path(filename) for filename in registered.values())
+    rows = con.execute(
+        f"SELECT driver_short_name, layers FROM ST_Read_Meta([{sources}])"
+    ).fetchall()
+    names = {name.casefold() for name in registered}
+    layers = [
+        layer
+        for driver, entries in rows
+        for layer in entries
+        if driver == "OpenFileGDB" and layer["name"].casefold() in names
+    ]
+    if not layers:
+        raise RuntimeError(f"Cannot read registered FileGDB layers: {path}")
+    return "OpenFileGDB", layers
+
+
+def _spatial_layer_metadata(con, path: str) -> tuple[str, list[dict]] | None:
+    """GDAL's driver and actual layer records, including single layers.
+
+    DuckDB's file glob skips FileGDB directories, so those use their catalog.
+    The nested ``layers`` records name layers; the first column of
+    ``ST_Read_Meta`` is only the input file path.
+    """
+    if _is_filegdb(path):
+        return _filegdb_layer_metadata(con, path)
+    row = fetch_one(
+        con.execute(f"SELECT driver_short_name, layers FROM ST_Read_Meta({sql_path(path)})")
+    )
+    return (row[0], row[1]) if row else None
 
 
 def list_layers(path: str | os.PathLike) -> list[str] | None:
