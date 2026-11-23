@@ -373,8 +373,8 @@ GeoPackage and FileGDB files can contain multiple layers. By default, the first 
     gpio.convert('multilayer.gpkg').write('output.parquet')
     ```
 
-!!! warning "Invalid Layer Names"
-    Due to an upstream bug in DuckDB's spatial extension, specifying a non-existent layer name may cause a crash instead of raising an error. Ensure layer names are valid before conversion. You can inspect available layers using tools like `ogrinfo`:
+!!! note "Invalid Layer Names"
+    A requested layer is checked against the dataset's layer metadata before reading. A missing layer raises `InvalidParameterError` in Python; the CLI reports a usage error (exit code 2). The message names the missing layer and lists the available layers, rather than passing an invalid name to DuckDB's native reader. Layer names must match the spelling in the dataset. You can also inspect available layers using tools like `ogrinfo`:
 
     <!-- doctest: skip="needs a multi-layer GeoPackage and the GDAL command line" -->
     ```bash

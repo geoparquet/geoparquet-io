@@ -31,6 +31,7 @@ from click.testing import CliRunner
 
 from geoparquet_io.api.table import convert
 from geoparquet_io.core.convert import _validate_layer_name, read_spatial_to_arrow
+from geoparquet_io.core.exceptions import GeoParquetError
 from geoparquet_io.core.layers import list_layers
 
 
@@ -92,19 +93,18 @@ class TestConvertLayerAPI:
         assert arrow_table.num_rows == 42
         assert "geometry" in arrow_table.column_names
 
-    @pytest.mark.skip(reason="DuckDB segfaults on invalid layer names - upstream bug")
-    def test_convert_geopackage_invalid_layer_raises(self, multilayer_gpkg):
-        """Converting with non-existent layer should raise an error.
+    @pytest.mark.parametrize("reader", [convert, read_spatial_to_arrow])
+    @pytest.mark.parametrize("filename", ["multilayer_test.gpkg", "testopenfilegdb.gdb"])
+    def test_missing_layer_raises(self, reader, filename, test_data_dir):
+        """A missing layer must raise, not crash or silently read the first layer."""
+        with pytest.raises(GeoParquetError) as exc_info:
+            reader(str(test_data_dir / filename), layer="nonexistent_layer")
 
-        Note: Currently skipped because DuckDB's ST_Read segfaults when given
-        an invalid layer name instead of raising a proper exception.
-        """
-        with pytest.raises(Exception) as exc_info:
-            convert(multilayer_gpkg, layer="nonexistent_layer")
-
-        # Should mention the layer name or that layer doesn't exist
-        error_msg = str(exc_info.value).lower()
-        assert "nonexistent" in error_msg or "layer" in error_msg or "not found" in error_msg
+        message = str(exc_info.value)
+        assert "nonexistent_layer" in message
+        assert "not found" in message
+        assert "Available layers:" in message
+        assert ("buildings, roads" if filename.endswith(".gpkg") else "point") in message
 
     def test_convert_layer_write_roundtrip(self, multilayer_gpkg, tmp_path):
         """Layer selection should work through full write roundtrip."""
@@ -236,6 +236,29 @@ class TestLayerValidation:
 
 class TestConvertLayerCLI:
     """CLI integration tests for the --layer option."""
+
+    @pytest.mark.parametrize("filename", ["multilayer_test.gpkg", "testopenfilegdb.gdb"])
+    def test_missing_layer_leaves_no_output(self, filename, test_data_dir, tmp_path):
+        """The streaming CLI must refuse a bad layer without publishing an output."""
+        from geoparquet_io.cli.main import cli
+
+        output = tmp_path / "missing.parquet"
+        result = CliRunner().invoke(
+            cli,
+            [
+                "convert",
+                "geoparquet",
+                str(test_data_dir / filename),
+                str(output),
+                "--layer",
+                "nonexistent_layer",
+                "--skip-hilbert",
+            ],
+        )
+        assert result.exit_code == 2
+        assert "nonexistent_layer" in result.output
+        assert "Available layers:" in result.output
+        assert not output.exists()
 
     def test_cli_convert_geoparquet_help_shows_layer(self):
         """CLI help should show the --layer option."""

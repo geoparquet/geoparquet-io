@@ -179,6 +179,9 @@ class TestListLayersFileGDB:
         # GDAL test FileGDB should have these layers
         assert "point" in layers
         assert "polygon" in layers
+        assert "" not in layers
+        assert "Workspace" not in layers
+        assert all(not name.endswith(".gdbtable") for name in layers)
 
     def test_filegdb_not_directory_raises(self, tmp_path):
         """Non-existent .gdb directory should raise FileNotFoundError."""
